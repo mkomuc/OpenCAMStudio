@@ -17,6 +17,7 @@ mod document;
 mod history;
 pub mod migrate;
 mod reconcile;
+mod validate;
 
 pub use cam_cldata::Point3;
 pub use document::{
@@ -26,6 +27,7 @@ pub use document::{
 };
 pub use history::History;
 pub use reconcile::{reconcile_tool_numbers, ReconcileReport, ToolIdentity};
+pub use validate::MachineValidationError;
 
 /// An axis-aligned working volume, in millimetres, in the machine/WCS frame.
 ///

@@ -66,6 +66,19 @@ a completed result does not change it. This contract is independent of the futur
 background-job scheduler. See `docs/job-completion-export.md` for migration and
 regression coverage.
 
+### Motion and machine validation
+
+`Program::validate()` in `cam-cldata` checks controller-neutral numeric motion,
+cycle semantics and arc anchors/radii, returning source-tagged errors and analytic
+swept bounds. `Machine::validate()` in `cam-model` checks finite physical limits.
+The planner fails invalid IR; the application avoids rendering/simulating it.
+
+Every built-in post performs shared preflight on original and formatted numeric
+motion before emission, including rounded incremental arc centres, rates and
+travel. Travel remains a work-coordinate span check; resolved machine placement,
+controller state and full physical verification remain later contracts. See
+`docs/motion-validation-and-arc-bounds.md` for scope and regression evidence.
+
 ## Crate layout (Cargo workspace)
 
 | Crate | Responsibility | Depends on kernel? |

@@ -12,6 +12,7 @@ The 2026-10-13 review is pinned to source revision `5c510b504fe39f4e40700ff3b1e3
 ## Existing project references
 
 - [Adaptive-clearing baseline fix](adaptive-clearing-fix.md): root cause, conservative restart change, measurements and regression validation on the fork.
+- [Motion validation and arc bounds](motion-validation-and-arc-bounds.md): shared IR/machine validation, rounded NC checks, analytic arc bounds and remaining verification scope.
 - [Completion-aware job export](job-completion-export.md): explicit job states, cancelled/incomplete export gates, API migration and regression coverage.
 
 - [Root architecture reference](../ARCHITECTURE.md)

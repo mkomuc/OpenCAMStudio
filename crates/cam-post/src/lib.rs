@@ -16,6 +16,7 @@ mod dialect;
 mod fanuc;
 mod grbl;
 mod okuma;
+mod validate;
 mod words;
 mod writer;
 
@@ -25,8 +26,8 @@ pub use okuma::OkumaPost;
 
 use core::fmt;
 
-use cam_cldata::{Point3, Program, Step};
-use cam_model::Machine;
+use cam_cldata::{Program, ValidationError};
+use cam_model::{Machine, MachineValidationError};
 
 /// A selectable post/controller dialect, for the export picker. Each maps to a
 /// [`dialect::Dialect`] that drives emission.
@@ -314,6 +315,16 @@ pub enum PostError {
     FeedOutOfRange(f64),
     /// An arc was encountered with no known current position to anchor `I`/`J`.
     ArcWithoutStart,
+    /// Controller-neutral CL-data is malformed.
+    InvalidProgram(ValidationError),
+    /// Physical machine limits are malformed.
+    InvalidMachine(MachineValidationError),
+    /// Output precision must be between zero and nine decimal places.
+    InvalidPrecision(usize),
+    /// Rounding numeric NC words makes the motion invalid.
+    InvalidOutput(ValidationError),
+    /// Rounding changes the intended arc into a different sweep.
+    UnsafeRounding { step: usize, op: u32 },
 }
 
 impl fmt::Display for PostError {
@@ -332,6 +343,12 @@ impl fmt::Display for PostError {
             PostError::FeedOutOfRange(feed) => {
                 write!(f, "feed {feed} mm/min exceeds the machine maximum")
             }
+            PostError::InvalidProgram(err) => write!(f, "invalid program: {err}"),
+            PostError::InvalidMachine(err) => write!(f, "{err}"),
+            PostError::InvalidPrecision(precision) => write!(f, "output precision {precision} exceeds nine decimal places"),
+            PostError::InvalidOutput(err) => write!(f, "invalid motion after NC rounding: {err}"),
+            PostError::UnsafeRounding { step, op } => write!(f,
+                "step {} (operation {op}): NC rounding changes the arc sweep; increase output precision", step + 1),
             PostError::ArcWithoutStart => {
                 write!(f, "arc move has no preceding position to anchor I/J")
             }
@@ -340,66 +357,6 @@ impl fmt::Display for PostError {
 }
 
 impl std::error::Error for PostError {}
-
-/// Grow `min`/`max` to include `p`.
-fn expand(min: &mut Point3, max: &mut Point3, p: Point3) {
-    min.x = min.x.min(p.x);
-    min.y = min.y.min(p.y);
-    min.z = min.z.min(p.z);
-    max.x = max.x.max(p.x);
-    max.y = max.y.max(p.y);
-    max.z = max.z.max(p.z);
-}
-
-/// The XYZ bounding box of every tool position in the program, or `None` if it has
-/// no moves.
-fn program_bounds(program: &Program) -> Option<(Point3, Point3)> {
-    let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
-    let mut any = false;
-    for step in program.steps() {
-        match step {
-            Step::Rapid { to, .. } | Step::Linear { to, .. } => {
-                expand(&mut min, &mut max, *to);
-                any = true;
-            }
-            Step::Arc { end, .. } => {
-                expand(&mut min, &mut max, *end);
-                any = true;
-            }
-            Step::Drill(c) => {
-                for pt in &c.points {
-                    expand(&mut min, &mut max, Point3::new(pt[0], pt[1], c.retract));
-                    expand(&mut min, &mut max, Point3::new(pt[0], pt[1], c.depth));
-                    any = true;
-                }
-            }
-            _ => {}
-        }
-    }
-    any.then_some((min, max))
-}
-
-/// Verify the toolpath fits within the machine's **travel** on every axis — its
-/// span, not its absolute position (the operator's work offset places the datum
-/// within travel, so a program in work coordinates only needs to fit by size).
-pub(crate) fn check_travel(program: &Program, machine: &Machine) -> Result<(), PostError> {
-    let Some((min, max)) = program_bounds(program) else {
-        return Ok(());
-    };
-    let (ex, ey, ez) = machine.envelope.extent();
-    const EPS: f64 = 1e-6;
-    for (axis, span, travel) in [
-        ('X', max.x - min.x, ex),
-        ('Y', max.y - min.y, ey),
-        ('Z', max.z - min.z, ez),
-    ] {
-        if span > travel + EPS {
-            return Err(PostError::TravelExceeded { axis, span, travel });
-        }
-    }
-    Ok(())
-}
 
 /// A post-processor: a controller dialect that lowers CL-data to G-code text.
 pub trait Post {

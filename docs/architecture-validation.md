@@ -2,7 +2,17 @@
 
 Review date: **2026-10-13**. Audited source: [`5c510b504fe39f4e40700ff3b1e331d0309fcad3`](https://github.com/pr0m1th3as/OpenCAMStudio/tree/5c510b504fe39f4e40700ff3b1e331d0309fcad3). Companion [analysis](architecture-analysis.md) and [implementation plan](implementation-plan.md).
 
-This appendix records observations, not fixes. Application source was not modified during the review. The standalone [probe](architecture-validation-probe.rs) is outside the Cargo crate source/test tree.
+The original audit sections below record observations before fixes. Application source was not modified during that review. The standalone [probe](architecture-validation-probe.rs) is outside the Cargo crate source/test tree.
+
+## Fork implementation update (2026-10-13)
+
+The clearing and completion/export packages have landed on development branches.
+The subsequent [motion-validation package](motion-validation-and-arc-bounds.md)
+now makes the full-circle, invalid-numeric and pre-cancelled export probes report
+`export accepted = false`. The drill-followed-by-rapid probe still reports zero
+collisions; fixing that verification gap is the next M0 package. Current suite:
+707 headless tests passed, 23 ignored; 184 GUI-feature tests passed. Original
+audit evidence below is retained to distinguish baseline defects from fixes.
 
 ## Environment and test outcome
 

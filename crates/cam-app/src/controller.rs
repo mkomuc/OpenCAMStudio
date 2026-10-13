@@ -2086,19 +2086,30 @@ impl AppController {
         let tool_change_height = document
             .setup
             .resolved_tool_change_height(self.machine.envelope.max.z);
-        let job = build_job(
-            &document,
-            self.defaults.spindle_rpm,
-            SpindleDir::Cw,
-            stock,
-            tool_change_height,
-            cancel,
-        );
+        let job = match self.machine.validate() {
+            Ok(()) => build_job(
+                &document,
+                self.defaults.spindle_rpm,
+                SpindleDir::Cw,
+                stock,
+                tool_change_height,
+                cancel,
+            ),
+            Err(error) => cam_toolpath::JobResult {
+                program: Program::new(),
+                diagnostics: vec![Diagnostic::error(error.to_string())],
+                completion: JobCompletion::Failed,
+            },
+        };
         let program = job.program;
         let diagnostics = job.diagnostics;
         let mut completion = job.completion;
 
-        let mut scene = Scene::from_program(&program);
+        let mut scene = if program.validate().is_ok() {
+            Scene::from_program(&program)
+        } else {
+            Scene::new()
+        };
         for region in &self.regions {
             scene.add_region(region, PART);
         }
@@ -3561,6 +3572,20 @@ mod tests {
         assert_eq!(app.selection(), Selection::Setup);
         app.select(Selection::Tool(0));
         assert_eq!(app.selection(), Selection::Tool(0));
+    }
+
+    #[test]
+    fn invalid_machine_prevents_planning_simulation_and_export() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        app.machine.max_feed = f64::NAN;
+        let outcome = app.run(&CancelToken::new());
+        assert_eq!(outcome.completion, JobCompletion::Failed);
+        assert!(outcome.program.is_empty());
+        assert!(outcome.stock_vertices.is_empty());
+        assert!(outcome.has_errors());
+        assert!(outcome.diagnostics[0].message.contains("maximum feed"));
+        assert_eq!(app.export_nc(), Err(ExportError::HasErrors));
     }
 
     #[test]

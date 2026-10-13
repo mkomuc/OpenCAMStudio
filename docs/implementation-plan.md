@@ -1,15 +1,23 @@
 # Implementation plan: qualified milling and industrial CAM evolution
 
-Date: **2026-10-13**. Baseline: [`5c510b504fe39f4e40700ff3b1e331d0309fcad3`](https://github.com/pr0m1th3as/OpenCAMStudio/tree/5c510b504fe39f4e40700ff3b1e331d0309fcad3). Read the [architecture assessment](architecture-analysis.md) and [validation evidence](architecture-validation.md) first. Everything described below is proposed work, except explicitly identified reusable components.
+Date: **2026-10-13**. Baseline: [`5c510b504fe39f4e40700ff3b1e331d0309fcad3`](https://github.com/pr0m1th3as/OpenCAMStudio/tree/5c510b504fe39f4e40700ff3b1e331d0309fcad3). Read the [architecture assessment](architecture-analysis.md) and [validation evidence](architecture-validation.md) first. Work below is proposed except the explicitly reported completed packages and reusable components.
 
 **Progress on the fork (2026-10-13):** the four clearing regressions have been diagnosed and fixed on `codex/fix-adaptive-clearing`; the headless suite reports 677 passed and no failures, and clippy passes with warnings denied. See the [fix report](adaptive-clearing-fix.md).
 
-The next package on `codex/block-incomplete-job-export` addresses A01: explicit
+The completed package on `codex/block-incomplete-job-export` addresses A01: explicit
 job completion now propagates through planning, controller and GUI, and cancelled,
 incomplete or failed runs cannot be exported. Validation: 688 passing headless
 tests (23 ignored), 183 passing GUI-feature tests and both clippy configurations.
-See [completion-aware export](job-completion-export.md). Continue with central IR
-validation and full arc travel bounds, followed by drill-cycle verification.
+See [completion-aware export](job-completion-export.md).
+
+The completed package on `codex/validate-motion-and-arc-bounds` corrects A02 and
+malformed-motion A04: controller-neutral IR/machine validation, rounded NC
+preflight and analytic full/partial/helical arc bounds. Validation: 707 passing
+headless tests (23 ignored), 184 passing GUI-feature tests and both clippy
+configurations. See [motion validation and arc bounds](motion-validation-and-arc-bounds.md).
+Continue with shared drill-cycle traversal and verification (A03), then controller
+tool-change/TLO policy. Tool/register reference resolution and broader document
+input validation remain open parts of M0 item 2.
 
 ## 1. Product scope and sequencing
 
