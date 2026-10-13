@@ -96,7 +96,7 @@ pub(crate) fn emit(
     options: &PostOptions,
     dialect: &Dialect,
 ) -> Result<String, PostError> {
-    crate::check_travel(program, machine)?;
+    crate::validate::preflight(program, machine, options)?;
     let mut w = Writer::new(machine, options.precision);
 
     // Header: `%` + O-number for Fanuc/Haas, else a plain name comment.
@@ -265,7 +265,18 @@ pub(crate) fn emit(
 /// follows `G83` semantics: full retract after each peck to clear chips, then a
 /// rapid back down to just above the last depth.
 fn expanded_drill(w: &mut Writer, c: &DrillCycle) -> Result<(), PostError> {
+    // Canned cycles stay compact. Explicit expansion must be bounded even for
+    // otherwise valid tiny pecks, so posting cannot allocate an unbounded file.
+    if let Some(peck) = c.peck {
+        let pecks = ((c.z_top - c.depth) / peck).ceil() * c.points.len() as f64;
+        if pecks > 100_000.0 {
+            return Err(PostError::Unsupported(
+                "drill cycle exceeds 100000 expanded pecks; increase peck depth or select a canned-cycle post".into(),
+            ));
+        }
+    }
     w.check_feed(c.feed)?;
+    let mut expanded_pecks = 0;
     for &[x, y] in &c.points {
         w.rapid(Point3::new(x, y, c.retract))?;
         w.rapid(Point3::new(x, y, c.z_top))?;
@@ -282,7 +293,18 @@ fn expanded_drill(w: &mut Writer, c: &DrillCycle) -> Result<(), PostError> {
                 let mut top = c.z_top;
                 let mut first = true;
                 loop {
+                    expanded_pecks += 1;
+                    if expanded_pecks > 100_000 {
+                        return Err(PostError::Unsupported(
+                            "drill cycle exceeds 100000 expanded pecks".into(),
+                        ));
+                    }
                     let target = (top - peck).max(c.depth);
+                    if target >= top {
+                        return Err(PostError::Unsupported(
+                            "drill peck cannot advance at this depth".into(),
+                        ));
+                    }
                     if !first {
                         let resume = (top + PECK_CLEARANCE).min(c.z_top);
                         w.rapid(Point3::new(x, y, resume))?;

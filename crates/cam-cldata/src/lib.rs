@@ -33,8 +33,13 @@
 //! backplot colouring and correctness checks such as "no rapid through stock".
 
 mod builder;
+mod validate;
 
 pub use builder::ProgramBuilder;
+pub use validate::{
+    arc_sweep, validate_program, MotionBounds, ValidationError, ValidationKind,
+    ARC_RADIUS_TOLERANCE_MM,
+};
 
 /// A point in 3-D space, millimetres, in the part/WCS frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -218,6 +223,10 @@ pub struct Program {
 }
 
 impl Program {
+    /// Validate controller-neutral motion and return its swept work-coordinate bounds.
+    pub fn validate(&self) -> Result<Option<MotionBounds>, ValidationError> {
+        validate_program(self)
+    }
     /// An empty program.
     pub fn new() -> Self {
         Self::default()

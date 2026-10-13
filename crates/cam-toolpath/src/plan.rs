@@ -201,6 +201,16 @@ fn build_job_with_compute(
     if cancel.is_cancelled() {
         completion = JobCompletion::Cancelled;
     }
+    if let Err(error) = program.validate() {
+        let mut diagnostic = Diagnostic::error(error.to_string());
+        if let Some(op) = error.op {
+            diagnostic = diagnostic.for_op(op);
+        }
+        diagnostics.push(diagnostic);
+        if completion != JobCompletion::Cancelled {
+            completion = JobCompletion::Failed;
+        }
+    }
     JobResult { program, diagnostics, completion }
 }
 
@@ -452,6 +462,29 @@ mod tests {
             matches!(step, Step::Linear { tag, .. }
                 if tag.op_id == op && tag.kind == MoveKind::Cutting)
         })
+    }
+
+    #[test]
+    fn invalid_motion_from_a_strategy_fails_the_job_with_operation_provenance() {
+        let job = build_job_with_compute(
+            &document(1),
+            1000.0,
+            SpindleDir::Cw,
+            None,
+            50.0,
+            &CancelToken::new(),
+            |op, _, _| {
+                let mut result = fragment(op);
+                if let Step::Linear { feed, .. } = &mut result.program.steps[1] {
+                    *feed = f64::NAN;
+                }
+                result
+            },
+        );
+        assert_eq!(job.completion, JobCompletion::Failed);
+        assert_eq!(job.diagnostics.len(), 1);
+        assert_eq!(job.diagnostics[0].op, Some(0));
+        assert!(job.diagnostics[0].message.contains("feed must be finite"));
     }
 
     #[test]

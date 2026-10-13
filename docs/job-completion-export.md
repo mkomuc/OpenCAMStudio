@@ -69,3 +69,5 @@ The documented standalone reproduction, local documentation links and
 ## Limits and next package
 
 This package prevents incomplete-job export. It does not introduce background jobs or fully cooperative cancellation inside stock simulation and mesh preparation; those routines currently finish their work before the controller's final cancellation check. General motion validation, full swept-arc travel bounds and drill-cycle verification are the next M0 packages. Simulation coverage remains the current heightfield/cutter model.
+
+The subsequent [motion-validation and arc-bounds package](motion-validation-and-arc-bounds.md) now addresses general motion preflight and swept travel bounds. Drill-cycle verification remains next.

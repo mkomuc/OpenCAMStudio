@@ -72,7 +72,7 @@ pub(crate) fn emit(
     machine: &Machine,
     options: &PostOptions,
 ) -> Result<String, PostError> {
-    crate::check_travel(program, machine)?;
+    crate::validate::preflight(program, machine, options)?;
     let mut w = Writer::new(machine, options.precision);
 
     // No `%`/O-number wrapper: on OSP the file name *is* the program name. Emit the
