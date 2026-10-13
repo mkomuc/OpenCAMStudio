@@ -262,7 +262,7 @@ fn icon_svg(icon: Icon, size: f32) -> Element<'static, Message> {
 }
 use cam_cldata::{Program, Step};
 use cam_render::{MeshVertex, OrbitCamera, Scene, Vertex, ENVELOPE, ENVELOPE_OVER, PART};
-use cam_toolpath::{CancelToken, Severity};
+use cam_toolpath::{CancelToken, JobCompletion, Severity};
 
 use crate::{
     op_accepts_open_paths, op_selects_circles, op_takes_islands, AppController, CuttingData,
@@ -4721,10 +4721,11 @@ impl App {
             .iter()
             .filter(|d| d.severity == Severity::Error)
             .count();
-        self.status = if errors > 0 {
-            format!("{errors} error(s) — see Output.")
-        } else {
-            "Toolpath ready. Export when you like.".to_string()
+        self.status = match outcome.completion {
+            JobCompletion::Complete => "Toolpath ready. Export when you like.".to_string(),
+            JobCompletion::Failed => format!("{errors} error(s) — see Output."),
+            JobCompletion::Cancelled => "Run cancelled. Run the job again before exporting.".to_string(),
+            JobCompletion::Incomplete => "Run incomplete. Run the job again before exporting.".to_string(),
         };
     }
 

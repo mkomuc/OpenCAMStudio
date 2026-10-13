@@ -84,7 +84,7 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
 }
 
 fn post(doc: &Document, name: &str) -> (Program, String) {
-    let (program, diags) = build_job(
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         doc,
         1000.0,
         SpindleDir::Cw,
@@ -291,7 +291,7 @@ fn a_ramped_clearing_entry_never_drops_vertically_and_re_machines_its_ramp() {
     if let cam_model::Operation::Pocket(p) = &mut d.setup.operations[0] {
         p.clear.plunge = Plunge::Ramp { angle_deg: 5.0 };
     }
-    let (program, diags) = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
     assert!(
         diags.iter().all(|x| x.severity != cam_toolpath::Severity::Error),
         "{diags:?}"
@@ -469,7 +469,7 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
     op.clear.clearing = Clearing { engagement: 2.0, climb: true };
     let doc = setup(vec![Operation::Pocket(op)], vec![end_mill(1, 6.0)]);
 
-    let (program, diags) = build_job(
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         &doc,
         1000.0,
         SpindleDir::Cw,
@@ -516,7 +516,7 @@ fn a_steered_clear_traverses_the_stock_it_has_already_removed() {
     };
     op.clear.clearing = Clearing { engagement: 2.0, climb: true };
     let doc = setup(vec![Operation::Pocket(op)], vec![end_mill(1, 6.0)]);
-    let (program, _) = build_job(
+    let cam_toolpath::JobResult { program, .. } = build_job(
         &doc,
         1000.0,
         SpindleDir::Cw,
@@ -588,7 +588,7 @@ fn a_ramped_entry_flies_its_arc_lead_in_as_one_arc() {
         p.clear.lead_in = Lead::Arc { radius: 3.0 };
         p.clear.lead_out = Lead::Arc { radius: 3.0 };
     }
-    let (program, _) = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
 
     // The first thing the entry does is a *descending arc* — the lead, flown in air.
     let first_plunge = program

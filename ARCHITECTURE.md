@@ -51,6 +51,21 @@ intent to explicit G0/G1 pecks. This is the capabilities model doing real work.
 lead-in/cutting/link/retract) — costs nothing, drives backplot coloring and
 correctness checks like "no rapid passes through stock".
 
+### Job completion and export
+
+`cam-toolpath::build_job` returns `JobResult { program, diagnostics, completion }`.
+`JobCompletion` is `Incomplete` (the default), `Complete`, `Cancelled`, or `Failed`.
+Only complete jobs are eligible for application export; existing diagnostics,
+rapid-stock and controller checks still apply. Cancelled/failed fragments are
+omitted, and retained completed fragments are inspection data rather than an
+exportable job. An intentionally empty job may complete normally.
+
+The controller clears prior outcomes/NC when starting a run, propagates completion
+through preparation, and gates both in-memory and file export. Cancellation after
+a completed result does not change it. This contract is independent of the future
+background-job scheduler. See `docs/job-completion-export.md` for migration and
+regression coverage.
+
 ## Crate layout (Cargo workspace)
 
 | Crate | Responsibility | Depends on kernel? |

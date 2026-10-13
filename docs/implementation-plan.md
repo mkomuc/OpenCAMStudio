@@ -2,7 +2,14 @@
 
 Date: **2026-10-13**. Baseline: [`5c510b504fe39f4e40700ff3b1e331d0309fcad3`](https://github.com/pr0m1th3as/OpenCAMStudio/tree/5c510b504fe39f4e40700ff3b1e331d0309fcad3). Read the [architecture assessment](architecture-analysis.md) and [validation evidence](architecture-validation.md) first. Everything described below is proposed work, except explicitly identified reusable components.
 
-**Progress on the fork (2026-10-13):** the four clearing regressions have been diagnosed and fixed on `codex/fix-adaptive-clearing`; the headless suite reports 677 passed and no failures, and clippy passes with warnings denied. See the [fix report](adaptive-clearing-fix.md). The other M0 export/verification findings remain open.
+**Progress on the fork (2026-10-13):** the four clearing regressions have been diagnosed and fixed on `codex/fix-adaptive-clearing`; the headless suite reports 677 passed and no failures, and clippy passes with warnings denied. See the [fix report](adaptive-clearing-fix.md).
+
+The next package on `codex/block-incomplete-job-export` addresses A01: explicit
+job completion now propagates through planning, controller and GUI, and cancelled,
+incomplete or failed runs cannot be exported. Validation: 688 passing headless
+tests (23 ignored), 183 passing GUI-feature tests and both clippy configurations.
+See [completion-aware export](job-completion-export.md). Continue with central IR
+validation and full arc travel bounds, followed by drill-cycle verification.
 
 ## 1. Product scope and sequencing
 

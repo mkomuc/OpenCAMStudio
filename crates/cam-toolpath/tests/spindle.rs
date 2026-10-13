@@ -70,7 +70,7 @@ fn doc(ops: Vec<Operation>) -> Document {
 
 /// The RPMs of every `Step::Spindle` the job emits, in order.
 fn spindle_rpms(doc: &Document) -> Vec<f64> {
-    let (program, _) = build_job(doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
     program
         .steps()
         .iter()

@@ -14,6 +14,32 @@ use crate::{
     ThreadStrategy,
 };
 
+/// Whether all requested operations finished successfully. A default result is
+/// incomplete until the planner has established otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JobCompletion {
+    /// No completed result has been established yet.
+    #[default]
+    Incomplete,
+    /// All requested operations finished without error diagnostics.
+    Complete,
+    /// A cancellation request or strategy cancellation stopped the job.
+    Cancelled,
+    /// At least one operation reported an error.
+    Failed,
+}
+
+/// A planned job, including the completion state required before export.
+/// Cancelled/failed jobs may retain completed operations for inspection; their
+/// program is not a complete manufacturing job and must not be posted.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[must_use = "check job completion before posting the program"]
+pub struct JobResult {
+    pub program: Program,
+    pub diagnostics: Vec<Diagnostic>,
+    pub completion: JobCompletion,
+}
+
 /// Assemble a whole-job [`Program`] from a [`Document`].
 ///
 /// Each operation is turned into its strategy, computed against the setup's
@@ -23,7 +49,9 @@ use crate::{
 ///
 /// Diagnostics from every operation are collected; if any operation errors, its
 /// motions are omitted but planning continues so the caller sees all problems at
-/// once. Returns the program and the combined diagnostics.
+/// once. Returns the program, combined diagnostics and explicit completion state.
+/// Only [`JobCompletion::Complete`] is eligible for export. An intentionally
+/// empty job can be complete; cancellation is never inferred from program size.
 pub fn build_job(
     doc: &Document,
     spindle_rpm: f64,
@@ -31,7 +59,19 @@ pub fn build_job(
     stock: Option<([f64; 2], [f64; 2])>,
     tool_change_height: f64,
     cancel: &CancelToken,
-) -> (Program, Vec<Diagnostic>) {
+) -> JobResult {
+    build_job_with_compute(doc, spindle_rpm, dir, stock, tool_change_height, cancel, compute)
+}
+
+fn build_job_with_compute(
+    doc: &Document,
+    spindle_rpm: f64,
+    dir: SpindleDir,
+    stock: Option<([f64; 2], [f64; 2])>,
+    tool_change_height: f64,
+    cancel: &CancelToken,
+    mut compute: impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
+) -> JobResult {
     let setup = &doc.setup;
     let env = JobEnv {
         heights: setup.heights,
@@ -44,6 +84,7 @@ pub fn build_job(
 
     let mut program = Program::new();
     let mut diagnostics = Vec::new();
+    let mut completion = JobCompletion::Complete;
 
     // Every use of this value assumes it is *above* the work: `lift_to_tool_change`
     // is named for what it is supposed to do, and the cross that follows travels at
@@ -70,9 +111,12 @@ pub fn build_job(
     let mut planned: Vec<Planned> = Vec::new();
     for operation in &setup.operations {
         if cancel.is_cancelled() {
+            completion = JobCompletion::Cancelled;
             break;
         }
         let result = compute(operation, &env, cancel);
+        let failed = result.has_errors();
+        let cancelled = result.cancelled || cancel.is_cancelled();
         // Stamp ownership here: the planner knows which operation produced these,
         // the strategy does not need to.
         diagnostics.extend(
@@ -81,6 +125,16 @@ pub fn build_job(
                 .into_iter()
                 .map(|d| d.for_op(operation.id())),
         );
+        if cancelled {
+            // Discard the unfinished fragment, including cancellation in the last
+            // operation where there is no next loop iteration to observe the token.
+            completion = JobCompletion::Cancelled;
+            break;
+        }
+        if failed {
+            completion = JobCompletion::Failed;
+            continue;
+        }
         if result.program.is_empty() {
             continue;
         }
@@ -143,7 +197,11 @@ pub fn build_job(
         shut_down(&mut program, tool_change_height, last_op);
     }
 
-    (program, diagnostics)
+    // Covers cancellation during assembly and deliberately empty documents too.
+    if cancel.is_cancelled() {
+        completion = JobCompletion::Cancelled;
+    }
+    JobResult { program, diagnostics, completion }
 }
 
 /// One operation, computed and ready to be emitted. The fragment's coordinates are in
@@ -346,4 +404,147 @@ fn last_tool_change(fragment: &Program) -> Option<u32> {
         Step::ToolChange { tool } => Some(*tool),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cam_model::{DrillOp, Heights, Setup, Stock, Tool, ToolKind};
+
+    fn document(operations: u32) -> Document {
+        Document::new(Setup {
+            name: "completion test".into(),
+            heights: Heights::new(5.0, 2.0, 0.0),
+            stock: Stock::BoundingBox {
+                x_offset: 0.0, y_offset: 0.0, top: 0.0, thickness: 10.0,
+            },
+            tools: vec![Tool {
+                number: 1, diameter: 3.0, length: 30.0,
+                kind: ToolKind::Drill { point_angle_deg: 118.0 },
+                ..Default::default()
+            }],
+            operations: (0..operations).map(|id| Operation::Drill(DrillOp {
+                id, tool: 1, points: vec![[10.0 + id as f64, 10.0]],
+                depth: 1.0, start_offset: 0.0, peck: None, dwell: None,
+                spindle_rpm: 1000.0, work_offset: 1, feed: 100.0,
+            })).collect(),
+            origin: [0.0; 3], extra_origins: Vec::new(), origin_index: 1,
+            tool_change_height: None,
+        })
+    }
+
+    fn fragment(operation: &Operation) -> StrategyResult {
+        let mut program = Program::new();
+        program.push(Step::Rapid {
+            to: Point3::new(10.0 + operation.id() as f64, 10.0, 5.0),
+            tag: Tag::new(operation.id(), MoveKind::Link),
+        });
+        program.push(Step::Linear {
+            to: Point3::new(10.0 + operation.id() as f64, 10.0, -1.0),
+            feed: 100.0,
+            tag: Tag::new(operation.id(), MoveKind::Cutting),
+        });
+        StrategyResult { program, ..Default::default() }
+    }
+
+    fn contains_cut(job: &JobResult, op: u32) -> bool {
+        job.program.steps().iter().any(|step| {
+            matches!(step, Step::Linear { tag, .. }
+                if tag.op_id == op && tag.kind == MoveKind::Cutting)
+        })
+    }
+
+    #[test]
+    fn pre_cancelled_jobs_never_compute_an_operation() {
+        let token = CancelToken::new();
+        token.cancel();
+        let job = build_job_with_compute(
+            &document(1), 1000.0, SpindleDir::Cw, None, 50.0, &token,
+            |_, _, _| panic!("cancelled work must not begin"),
+        );
+        assert_eq!(job.completion, JobCompletion::Cancelled);
+        assert!(!contains_cut(&job, 0));
+    }
+
+    #[test]
+    fn strategy_cancellation_discards_its_fragment_and_stops_later_operations() {
+        let token = CancelToken::new();
+        let mut called = Vec::new();
+        let job = build_job_with_compute(
+            &document(2), 1000.0, SpindleDir::Cw, None, 50.0, &token,
+            |op, _, _| {
+                called.push(op.id());
+                StrategyResult { cancelled: true, ..fragment(op) }
+            },
+        );
+        assert!(!token.is_cancelled(), "the strategy's own flag must propagate");
+        assert_eq!(called, [0]);
+        assert_eq!(job.completion, JobCompletion::Cancelled);
+        assert!(!contains_cut(&job, 0));
+        assert!(!contains_cut(&job, 1));
+    }
+
+    #[test]
+    fn cancellation_during_the_last_operation_retains_only_completed_fragments() {
+        let token = CancelToken::new();
+        let job = build_job_with_compute(
+            &document(2), 1000.0, SpindleDir::Cw, None, 50.0, &token,
+            |op, _, token| {
+                if op.id() == 1 {
+                    token.cancel();
+                }
+                // The planner must observe the token even if a strategy misses it.
+                fragment(op)
+            },
+        );
+        assert_eq!(job.completion, JobCompletion::Cancelled);
+        assert!(contains_cut(&job, 0));
+        assert!(!contains_cut(&job, 1));
+    }
+
+    #[test]
+    fn failed_fragments_are_omitted_while_diagnostics_and_other_operations_continue() {
+        let mut called = Vec::new();
+        let job = build_job_with_compute(
+            &document(2), 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new(),
+            |op, _, _| {
+                called.push(op.id());
+                let mut result = fragment(op);
+                if op.id() == 0 {
+                    result.diagnostics.push(Diagnostic::error("cannot finish this operation"));
+                }
+                result
+            },
+        );
+        assert_eq!(called, [0, 1]);
+        assert_eq!(job.completion, JobCompletion::Failed);
+        assert!(!contains_cut(&job, 0));
+        assert!(contains_cut(&job, 1));
+        assert_eq!(job.diagnostics[0].op, Some(0));
+    }
+
+    #[test]
+    fn warnings_do_not_make_successful_empty_operations_incomplete() {
+        let job = build_job_with_compute(
+            &document(1), 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new(),
+            |_, _, _| StrategyResult {
+                diagnostics: vec![Diagnostic::warning("nothing to cut")],
+                ..Default::default()
+            },
+        );
+        assert_eq!(job.completion, JobCompletion::Complete);
+        assert!(!contains_cut(&job, 0));
+        assert_eq!(job.diagnostics[0].op, Some(0));
+    }
+
+    #[test]
+    fn empty_jobs_are_complete_unless_cancelled() {
+        let token = CancelToken::new();
+        let empty = document(0);
+        let job = build_job(&empty, 1000.0, SpindleDir::Cw, None, 50.0, &token);
+        assert_eq!(job.completion, JobCompletion::Complete);
+        token.cancel();
+        let job = build_job(&empty, 1000.0, SpindleDir::Cw, None, 50.0, &token);
+        assert_eq!(job.completion, JobCompletion::Cancelled);
+    }
 }

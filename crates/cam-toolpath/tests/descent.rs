@@ -79,7 +79,7 @@ fn assert_no_rapid_lands_on_a_cut_floor(steps: &[Step], what: &str) {
 }
 
 fn steps_of(d: &Document) -> Vec<Step> {
-    let (program, diags) = build_job(
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         d,
         1000.0,
         cam_cldata::SpindleDir::Cw,

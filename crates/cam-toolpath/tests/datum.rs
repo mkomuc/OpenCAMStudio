@@ -49,7 +49,7 @@ fn two_origin_doc() -> Document {
 /// The export path exactly as the app wires it (`controller.rs`): plan, re-reference
 /// each group to its own origin, then post through `kind`.
 fn nc(d: &Document, kind: PostKind) -> String {
-    let (program, _) = build_job(
+    let cam_toolpath::JobResult { program, .. } = build_job(
         d,
         1000.0,
         SpindleDir::Cw,
@@ -94,7 +94,7 @@ fn every_shutdown_stops_the_spindle_first_then_coolant_then_lifts() {
         index: 2,
         position: [0.0, 0.0, 0.0],
     }];
-    let (program, _) = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
     let s = program.steps();
 
     // Each shutdown: SpindleOff, Coolant(Off), then the Traverse lift to 42.
@@ -132,7 +132,7 @@ fn a_tool_change_height_below_clearance_is_raised_and_reported() {
     ]);
     let clearance = d.setup.heights.clearance;
     // Well below the clearance plane.
-    let (program, diags) = build_job(
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         &d,
         1000.0,
         SpindleDir::Cw,
@@ -177,7 +177,7 @@ fn a_same_datum_tool_change_is_a_full_planner_owned_transition() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 2, 1),
     ]);
-    let (program, _) = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
     let s = program.steps();
     let tc = s
         .iter()
@@ -230,7 +230,7 @@ fn same_tool_consecutive_ops_get_no_transition() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 1, 1),
     ]);
-    let (program, _) = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
     let traverse_ops: Vec<u32> = program
         .steps()
         .iter()
@@ -360,7 +360,7 @@ fn doc(ops: Vec<Operation>) -> Document {
 }
 
 fn steps(doc: &Document) -> Vec<Step> {
-    let (program, _) = build_job(
+    let cam_toolpath::JobResult { program, .. } = build_job(
         doc,
         1000.0,
         SpindleDir::Cw,
