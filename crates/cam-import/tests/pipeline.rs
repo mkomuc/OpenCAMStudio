@@ -89,7 +89,7 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
         tool_change_height: None,
     });
 
-    let (program, diags) = build_job(
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         &doc,
         1000.0,
         SpindleDir::Cw,

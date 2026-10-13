@@ -46,7 +46,7 @@ pub use chamfer::ChamferStrategy;
 pub use engrave::EngraveStrategy;
 pub use drill::DrillStrategy;
 pub use face::FaceStrategy;
-pub use plan::build_job;
+pub use plan::{build_job, JobCompletion, JobResult};
 pub use pocket::PocketStrategy;
 pub use profile::ProfileStrategy;
 pub use thread::ThreadStrategy;

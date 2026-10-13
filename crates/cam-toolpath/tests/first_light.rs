@@ -111,7 +111,7 @@ fn document() -> Document {
 
 fn plan_and_post() -> (Program, String, Vec<cam_toolpath::Diagnostic>) {
     let doc = document();
-    let (program, diags) = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
     let opts = PostOptions {
         program_name: Some("first_light".into()),
         ..Default::default()
@@ -746,7 +746,7 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         tool_change_height: None,
     });
 
-    let (program, diags) = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
     assert!(
         !diags
             .iter()
@@ -883,7 +883,7 @@ fn a_two_tool_operation_loads_its_first_tool_then_changes_itself() {
     // `tools()[0]` is what has to be in the spindle when the fragment starts. The
     // change to the V-bit belongs to the strategy, which alone knows the order.
     let doc = carve_document(Some(2), None);
-    let (program, diags) = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
     assert!(
         !diags
             .iter()
@@ -900,7 +900,7 @@ fn the_planner_resyncs_the_spindle_tool_after_a_multi_tool_fragment() {
     // next operation — while the machine actually holds the V-bit. The carve would be
     // followed by a profile cut with the wrong cutter.
     let doc = carve_document(Some(2), Some(2));
-    let (program, _) = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
     // Clearing tool, hand-back to the V-bit, then genuinely back to tool 2 for the
     // profile — the last change is NOT elided.
     assert_eq!(tool_changes(&program), vec![2, 1, 2]);
@@ -911,14 +911,14 @@ fn a_following_operation_on_the_carving_tool_needs_no_change() {
     // The other direction: the fragment really did leave tool 1 loaded, so an operation
     // that wants tool 1 must not be given a redundant change.
     let doc = carve_document(Some(2), Some(1));
-    let (program, _) = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
     assert_eq!(tool_changes(&program), vec![2, 1]);
 }
 
 #[test]
 fn a_single_tool_carve_behaves_like_every_other_operation() {
     let doc = carve_document(None, Some(2));
-    let (program, _) = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
     assert_eq!(tool_changes(&program), vec![1, 2]);
 }
 

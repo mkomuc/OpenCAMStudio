@@ -41,6 +41,7 @@ pub use settings::{
     SNAP_CATCH_MULTIPLE,
 };
 pub use tool_library::{families_for, LibraryLoad, ToolKindPick, ToolLibrary, LIBRARY_VERSION};
+pub use cam_toolpath::JobCompletion;
 
 /// The human-facing version string, including git provenance on a dev build.
 ///

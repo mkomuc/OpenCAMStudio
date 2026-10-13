@@ -25,7 +25,7 @@ use cam_render::{mesh_vertices, MeshVertex, Scene, PART};
 use cam_sim::{simulate, Collision, CollisionKind, ProfileShape, SimOptions, SimTool, ToolProfile};
 
 use cam_cldata::{Program, SpindleDir};
-use cam_toolpath::{build_job, CancelToken, Diagnostic, Severity};
+use cam_toolpath::{build_job, CancelToken, Diagnostic, JobCompletion, Severity};
 
 /// Seed defaults for a freshly-imported document: the values every generated
 /// operation and the setup's heights start from. Once a document exists, editing
@@ -107,6 +107,8 @@ pub enum Selection {
 /// left after the toolpath cuts), ready for [`cam_render::MeshRenderer`].
 #[derive(Clone, Debug, Default)]
 pub struct RunOutcome {
+    /// Only a fully completed job is eligible for export.
+    pub completion: JobCompletion,
     pub program: Program,
     pub diagnostics: Vec<Diagnostic>,
     pub scene: Scene,
@@ -133,6 +135,10 @@ impl RunOutcome {
 pub enum ExportError {
     /// Nothing has been run yet.
     NothingToExport,
+    /// Planning was cancelled; any retained motions are only a partial preview.
+    Cancelled,
+    /// Planning has not established a completed result.
+    Incomplete,
     /// The last run produced errors, so its G-code is unsafe to emit.
     HasErrors,
     /// The simulation found `n` rapid(s) plowing through remaining stock — a
@@ -155,6 +161,12 @@ impl std::fmt::Display for ExportError {
             ExportError::NothingToExport => {
                 write!(f, "there is no toolpath yet — run the job first (Home ▸ Run).")
             }
+            ExportError::Cancelled => write!(
+                f, "the last run was cancelled. Run the job again before exporting."
+            ),
+            ExportError::Incomplete => write!(
+                f, "the last run is incomplete. Run the job again before exporting."
+            ),
             ExportError::HasErrors => write!(
                 f,
                 "the last run reported errors. Fix the operations marked ⚠ in the project                  tree, then run again."
@@ -2051,6 +2063,8 @@ impl AppController {
     /// diagnostics, viewport scene, and simulated stock. Returns a reference to
     /// the outcome. `cancel` allows a long run to be aborted.
     pub fn run(&mut self, cancel: &CancelToken) -> &RunOutcome {
+        self.nc = None;
+        self.outcome = None;
         // Excluded operations, and operations under a frozen origin, are dropped from
         // the job (kept in the tree, just not machined) by running a filtered copy.
         let base = self.document.current();
@@ -2072,7 +2086,7 @@ impl AppController {
         let tool_change_height = document
             .setup
             .resolved_tool_change_height(self.machine.envelope.max.z);
-        let (program, diagnostics) = build_job(
+        let job = build_job(
             &document,
             self.defaults.spindle_rpm,
             SpindleDir::Cw,
@@ -2080,6 +2094,9 @@ impl AppController {
             tool_change_height,
             cancel,
         );
+        let program = job.program;
+        let diagnostics = job.diagnostics;
+        let mut completion = job.completion;
 
         let mut scene = Scene::from_program(&program);
         for region in &self.regions {
@@ -2089,10 +2106,22 @@ impl AppController {
             scene.add_open_path(path.points(), PART);
         }
 
-        let (stock_vertices, stock_indices, collisions) = self.simulate_stock(&program);
+        if cancel.is_cancelled() {
+            completion = JobCompletion::Cancelled;
+        }
+        let (stock_vertices, stock_indices, collisions) = if completion == JobCompletion::Complete {
+            self.simulate_stock(&program)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        // A token may be cancelled while scene/stock preparation is running.
+        if cancel.is_cancelled() {
+            completion = JobCompletion::Cancelled;
+        }
 
         self.nc = None;
         self.outcome = Some(RunOutcome {
+            completion,
             program,
             diagnostics,
             scene,
@@ -2103,10 +2132,16 @@ impl AppController {
         self.outcome.as_ref().unwrap()
     }
 
-    /// Post the most recent run to grbl G-code, caching and returning it. Fails
-    /// if nothing has run or the run had errors.
+    /// Post the most recent complete run to the selected controller, caching and
+    /// returning it. Cancelled, incomplete or failed runs cannot be exported.
     pub fn export_nc(&mut self) -> Result<&str, ExportError> {
         let outcome = self.outcome.as_ref().ok_or(ExportError::NothingToExport)?;
+        match outcome.completion {
+            JobCompletion::Complete => {}
+            JobCompletion::Cancelled => return Err(ExportError::Cancelled),
+            JobCompletion::Incomplete => return Err(ExportError::Incomplete),
+            JobCompletion::Failed => return Err(ExportError::HasErrors),
+        }
         if outcome.has_errors() {
             return Err(ExportError::HasErrors);
         }
@@ -3536,6 +3571,90 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_runs_cannot_export_or_reuse_the_previous_cached_program() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        assert_eq!(app.run(&CancelToken::new()).completion, JobCompletion::Complete);
+        let original = app.export_nc().unwrap().to_string();
+        assert!(app.exported_nc().is_some());
+
+        let token = CancelToken::new();
+        token.cancel();
+        let outcome = app.run(&token);
+        assert_eq!(outcome.completion, JobCompletion::Cancelled);
+        assert!(!outcome.has_errors(), "cancellation is separate from diagnostic errors");
+        assert!(app.exported_nc().is_none());
+        assert_eq!(app.export_nc(), Err(ExportError::Cancelled));
+
+        assert_eq!(app.run(&CancelToken::new()).completion, JobCompletion::Complete);
+        assert_eq!(app.export_nc().unwrap(), original);
+    }
+
+    #[test]
+    fn cancelled_file_export_neither_creates_nor_overwrites_a_program() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let token = CancelToken::new();
+        token.cancel();
+        app.run(&token);
+        let path = temp_path("cancelled.nc");
+        assert!(matches!(app.export_nc_to(&path),
+            Err(ExportToError::Export(ExportError::Cancelled))));
+        assert!(!path.exists());
+
+        std::fs::write(&path, "previous verified program").unwrap();
+        assert!(matches!(app.export_nc_to(&path),
+            Err(ExportToError::Export(ExportError::Cancelled))));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous verified program");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn non_complete_previews_cannot_export_even_without_error_diagnostics() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let complete = app.run(&CancelToken::new()).clone();
+        assert!(!complete.has_errors());
+        let path = temp_path("incomplete.nc");
+        std::fs::write(&path, "previous verified program").unwrap();
+
+        for (completion, expected) in [
+            (JobCompletion::Incomplete, ExportError::Incomplete),
+            (JobCompletion::Cancelled, ExportError::Cancelled),
+            (JobCompletion::Failed, ExportError::HasErrors),
+        ] {
+            // A full-looking preview is not proof of successful completion.
+            app.outcome = Some(RunOutcome { completion, ..complete.clone() });
+            assert_eq!(app.export_nc(), Err(expected));
+            assert!(matches!(app.export_nc_to(&path), Err(ExportToError::Export(_))));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous verified program");
+        }
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(RunOutcome::default().completion, JobCompletion::Incomplete);
+    }
+
+    #[test]
+    fn a_completed_empty_job_is_distinct_from_a_cancelled_empty_job() {
+        let mut app = AppController::new(machine());
+        assert_eq!(app.run(&CancelToken::new()).completion, JobCompletion::Complete);
+        assert!(app.export_nc().is_ok());
+        let token = CancelToken::new();
+        token.cancel();
+        assert_eq!(app.run(&token).completion, JobCompletion::Cancelled);
+        assert_eq!(app.export_nc(), Err(ExportError::Cancelled));
+    }
+
+    #[test]
+    fn cancellation_after_a_completed_run_does_not_reclassify_its_result() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let token = CancelToken::new();
+        assert_eq!(app.run(&token).completion, JobCompletion::Complete);
+        token.cancel();
+        assert!(app.export_nc().is_ok(), "completed results do not retain a live token");
+    }
+
+    #[test]
     fn unsafe_heights_surface_a_rapid_collision() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
@@ -3567,6 +3686,7 @@ mod tests {
         app.edit_tool(0, |t| t.diameter = 12.0);
         let outcome = app.run(&CancelToken::new());
         assert!(outcome.has_errors());
+        assert_eq!(outcome.completion, JobCompletion::Failed);
         assert_eq!(app.export_nc(), Err(ExportError::HasErrors));
     }
 
@@ -3770,6 +3890,8 @@ mod tests {
         use cam_post::PostError;
         let cases = [
             (ExportError::NothingToExport, "run the job"),
+            (ExportError::Cancelled, "cancelled"),
+            (ExportError::Incomplete, "incomplete"),
             (ExportError::HasErrors, "⚠"),
             (ExportError::RapidThroughStock(3), "crash hazard"),
             (
