@@ -182,7 +182,7 @@ pub(crate) struct SteerRun {
     pub(crate) path: Vec<(Point, bool)>,
     /// How many times a dead front was resumed elsewhere.
     pub(crate) resumes: usize,
-    /// How many steps ended up over the target because no turn could avoid it.
+    /// Overloaded step proposals rejected before cutting, requiring a new front.
     pub(crate) buried_steps: usize,
     /// Steps spent hunting rather than cutting at target.
     pub(crate) starved_steps: usize,
@@ -375,8 +375,15 @@ pub(crate) fn steer_path(
         } else {
             starved = starved.saturating_sub(2);
         }
+        if step.buried {
+            buried_steps += 1;
+        }
         {
-            if force_reseed || (step.starving && starved >= STARVE_LIMIT) {
+            // No feasible turn holds the target: retire this front before committing
+            // the overloaded move. Seed lookahead cannot guarantee an entire front's
+            // future; continuing beyond it can bury the tool and reject an otherwise
+            // clearable region at certification.
+            if force_reseed || step.buried || (step.starving && starved >= STARVE_LIMIT) {
                 let Some((c, dd)) = find_seed(&mut model, &tc, r, h, target, p, &tried) else {
                     stopped = "region clear";
                     break;
@@ -398,10 +405,6 @@ pub(crate) fn steer_path(
                 continue;
             }
         }
-        if step.buried {
-            buried_steps += 1;
-        }
-
         let best_t = step.turn;
 
         let dd = rotate(d, best_t);
@@ -1300,6 +1303,54 @@ mod tests {
         assert_eq!(run.stopped, "region clear", "must terminate by finishing the region");
     }
 
+    /// A long front can become overloaded after its seed's lookahead ends. Retiring
+    /// that front must still cover the target, without loosening the certifier's bound.
+    #[test]
+    fn an_overloaded_front_restarts_without_losing_coverage() {
+        let (r, e) = (3.0, 2.0);
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 60.0, 60.0),
+            vec![rect(20.0, 20.0, 40.0, 40.0)],
+        ).unwrap();
+        let run = steer_region(&region, r, 0.0, e, None, &CancelToken::new())
+            .expect("a steered path");
+        let verdict = crate::clearsim::certify_moves(&run.path, r, &region);
+        let reach: f64 = crate::clearsim::reachable(&region, r)
+            .iter().map(Polygon::area).sum();
+        let tolerance = 0.02 * reach + 1.0;
+        let bound = crate::frontadvance::engagement_bound(e, r);
+
+        assert!(
+            verdict.max_engagement <= bound,
+            "a continuing front must not overload the cutter: {} > {bound}",
+            verdict.max_engagement,
+        );
+        assert!(
+            verdict.uncut_area <= tolerance,
+            "restarting must retain coverage: {} > {tolerance}",
+            verdict.uncut_area,
+        );
+        assert!(
+            verdict.gouge_area <= tolerance,
+            "restarting must not gouge: {} > {tolerance}",
+            verdict.gouge_area,
+        );
+    }
+
+    /// Restarting more conservatively must not certify an incomplete path where
+    /// an island leaves a channel exactly as wide as the cutter.
+    #[test]
+    fn a_tool_width_channel_still_requires_fallback() {
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 40.0, 40.0),
+            vec![rect(22.0, 14.0, 34.0, 26.0)],
+        ).unwrap();
+        assert!(
+            steer_certified(&region, 3.0, 0.0, 2.0, None, &CancelToken::new()).is_none(),
+            "a full-width channel must not be accepted as a certified adaptive path",
+        );
+    }
+
     /// **Is the offset-island failure geometry or generator?** That shape leaves a strip
     /// between the island (x ≤ 34) and the wall (x = 40) exactly **6 mm** wide — the full
     /// diameter of the Ø6 tool. A tool can only clear a slot its own width at full width, so
@@ -1356,7 +1407,7 @@ mod tests {
         // Seed in the middle of the band on the left, heading "up" along it.
         let start = Point::new(7.0, 20.0);
         let reach: f64 = crate::clearsim::reachable(&region, r).iter().map(|p| p.area()).sum();
-        println!("\n| regime | moves | stopped | buried | starved | resumes | a_e | uncut/tol | gouge | verdict |");
+        println!("\n| regime | moves | stopped | overloads rejected | starved | resumes | a_e | uncut/tol | gouge | verdict |");
         println!("|---|---|---|---|---|---|---|---|---|---|");
         for (label, budget) in [("one front", 0usize), ("with resumption", 400)] {
             let seed = Seed {
