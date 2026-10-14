@@ -11,17 +11,21 @@
 //!   stack, so they are compiled by CI and on the desktop, not exercised in
 //!   headless unit tests.
 
+mod cad;
 mod camera;
 mod gizmo;
 mod mesh;
 mod scene;
 
-pub use camera::{orientation, top_view, OrbitCamera, IDENTITY};
+pub use cad::{CadScene, PickCandidate};
+pub use camera::{orientation, top_view, OrbitCamera, Ray, IDENTITY};
 #[cfg(feature = "gpu")]
 pub use gizmo::label_atlas;
 pub use gizmo::{pick_face, unit_cube, GizmoVertex};
 pub use mesh::{mesh_vertices, MeshVertex};
-pub use scene::{CUT, Color, ENVELOPE, ENVELOPE_OVER, LineStrip, PART, PLUNGE, RAPID, Scene, Vertex};
+pub use scene::{
+    Color, LineStrip, Scene, Vertex, CUT, ENVELOPE, ENVELOPE_OVER, PART, PLUNGE, RAPID,
+};
 
 #[cfg(feature = "gpu")]
 mod gpu;

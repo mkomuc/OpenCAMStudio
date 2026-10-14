@@ -288,6 +288,11 @@ fn tool(number: u32, kind: ToolKind) -> Tool {
 
 fn doc(ops: Vec<Operation>) -> Document {
     Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "descent".into(),
         heights: heights(),
         stock: Stock::BoundingBox {

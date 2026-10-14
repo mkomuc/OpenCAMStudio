@@ -200,8 +200,39 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         // those carves were cut with, since the V-bit had no entry style at all. Additive;
         // the identity is the whole step.
         12 => Ok(()),
+        // v13→v14 adds an empty CAD asset/binding store by default. Embedded
+        // operation contours remain explicit; associations are never guessed.
+        13 => Ok(()),
+        14 => v14_to_v15(doc),
         _ => Err(MigrationError::MissingStep { from }),
     }
+}
+
+/// v14→v15 wraps the legacy setup unchanged as the first physical setup. Keeping
+/// the object intact preserves legacy operation order and extra work offsets.
+fn v14_to_v15(doc: &mut Value) -> Result<(), MigrationError> {
+    let obj = doc.as_object_mut().ok_or_else(|| MigrationError::Malformed { step: 14, detail: "document must be an object".into() })?;
+    if obj.contains_key("setups") { return Err(MigrationError::Malformed { step: 14, detail: "legacy document unexpectedly already has setups".into() }); }
+    let mut setup = obj.remove("setup").ok_or_else(|| MigrationError::Malformed { step: 14, detail: "legacy document has no setup".into() })?;
+    let setup_obj = setup.as_object_mut().ok_or_else(|| MigrationError::Malformed { step: 14, detail: "legacy setup must be an object".into() })?;
+    setup_obj.insert("id".into(), Value::from(1));
+    setup_obj.insert("frame".into(), serde_json::json!({"world_from_setup":{"rotation":[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],"translation":[0.0,0.0,0.0]},"references":{"x":null,"y":null,"z":null,"origin":"ModelOrigin"}}));
+    setup_obj.entry("material").or_insert_with(|| Value::String(String::new()));
+    setup_obj.entry("model_instances").or_insert_with(|| Value::Array(Vec::new()));
+    setup_obj.entry("program_name").or_insert_with(|| Value::String(String::new()));
+    let mut linked = std::collections::BTreeSet::new();
+    if let Some(geometry) = obj.get("geometry") {
+        if let Some(bindings) = geometry.get("bindings") {
+            let bindings = bindings.as_object().ok_or_else(|| MigrationError::Malformed { step: 14, detail: "geometry bindings must be an object".into() })?;
+            for key in bindings.keys() {
+                let id = key.parse::<u32>().map_err(|_| MigrationError::Malformed { step: 14, detail: format!("invalid operation binding ID `{key}`") })?;
+                linked.insert(id);
+            }
+        }
+    }
+    obj.insert("cad_linked_operations".into(), Value::Array(linked.into_iter().map(Value::from).collect()));
+    obj.insert("setups".into(), Value::Array(vec![setup]));
+    Ok(())
 }
 
 /// The clearing parameters that moved off `PocketOp` and into its nested `clear` object
@@ -334,7 +365,7 @@ mod tests {
     }
 
     fn pocket_of(doc: &Value) -> &Map<String, Value> {
-        doc["setup"]["operations"][0]["Pocket"]
+        doc["setups"][0]["operations"][0]["Pocket"]
             .as_object()
             .expect("the fixture has one pocket")
     }
@@ -379,7 +410,10 @@ mod tests {
         assert_eq!(pocket["tool"], 1);
         assert_eq!(pocket["depth"], 3.0);
         assert_eq!(pocket["spindle_rpm"], 9000.0);
-        assert_eq!(pocket["work_offset"], 2, "work_offset is not a clearing field");
+        assert_eq!(
+            pocket["work_offset"], 2,
+            "work_offset is not a clearing field"
+        );
         assert_eq!(pocket["start"], serde_json::json!([5.0, 5.0]));
         assert!(pocket.contains_key("boundary"));
     }
@@ -392,9 +426,17 @@ mod tests {
         let mut doc = v9_document_with_a_pocket();
         document(&mut doc, 9).expect("migrates");
 
-        let parsed: Document = serde_json::from_value(doc).expect("v10 document parses");
+        let mut parsed: Document = serde_json::from_value(doc).expect("migrated document parses");
         assert_eq!(parsed.schema_version, SCHEMA_VERSION);
-        let crate::Operation::Pocket(p) = &parsed.setup.operations[0] else {
+        assert!(parsed.cad_linked_operations.is_empty());
+        assert_eq!(parsed.setups.len(), 1);
+        assert_eq!(parsed.setups[0].id, 1);
+        parsed.active_setup_id = 99;
+        let roundtrip: Document = serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
+        assert_eq!(roundtrip.active_setup_id, 0, "active setup is view-only");
+        assert_eq!(roundtrip.setup().id, 1, "accessor falls back to the first setup");
+        assert_eq!(parsed.geometry, crate::GeometryState::default());
+        let crate::Operation::Pocket(p) = &parsed.setup().operations[0] else {
             panic!("expected a pocket");
         };
         assert_eq!(p.depth, 3.0);
@@ -408,6 +450,62 @@ mod tests {
         assert_eq!(p.clear.clearing.engagement, 2.0);
         assert!(p.clear.clearing.climb);
         assert_eq!(p.start, Some([5.0, 5.0]));
+        assert_eq!(
+            parsed.setup().operations[0].legacy_cutting_heights(&parsed.setup().heights),
+            Some(crate::CuttingHeights {
+                top: 0.0,
+                bottom: -3.0
+            })
+        );
+    }
+
+    #[test]
+    fn v14_migration_marks_every_existing_binding_as_linked() {
+        let mut value = serde_json::json!({
+            "schema_version": 14,
+            "setup": {"operations": []},
+            "geometry": {"bindings": {"2": {}, "19": {}}}
+        });
+        v14_to_v15(&mut value).unwrap();
+        assert_eq!(value["cad_linked_operations"], serde_json::json!([2, 19]));
+        assert_eq!(value["setups"].as_array().unwrap().len(), 1);
+
+        let mut no_geometry = serde_json::json!({ "setup": {"operations": []} });
+        v14_to_v15(&mut no_geometry).unwrap();
+        assert_eq!(no_geometry["cad_linked_operations"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn linked_operation_marker_round_trips_and_participates_in_equality() {
+        let mut value = v9_document_with_a_pocket();
+        document(&mut value, 9).unwrap();
+        let mut doc: Document = serde_json::from_value(value).unwrap();
+        doc.cad_linked_operations.insert(1);
+        let encoded = serde_json::to_value(&doc).unwrap();
+        assert_eq!(encoded["cad_linked_operations"], serde_json::json!([1]));
+        let decoded: Document = serde_json::from_value(encoded).unwrap();
+        assert_eq!(doc, decoded);
+        let mut different = decoded.clone();
+        different.cad_linked_operations.clear();
+        assert_ne!(doc, different);
+    }
+
+    #[test]
+    fn legacy_documents_do_not_gain_guessed_cad_associations() {
+        let mut value = v9_document_with_a_pocket();
+        document(&mut value, 9).unwrap();
+        let mut parsed: Document = serde_json::from_value(value).unwrap();
+        parsed.schema_version = 15;
+        let mut value = serde_json::to_value(&parsed).unwrap();
+        value.as_object_mut().unwrap().remove("geometry");
+        document(&mut value, 15).unwrap();
+        let loaded: Document = serde_json::from_value(value).unwrap();
+        assert!(loaded.geometry.assets.is_empty());
+        assert!(loaded.geometry.bindings.is_empty());
+        assert_eq!(loaded.setup().operations, parsed.setup().operations);
+        let roundtrip: Document =
+            serde_json::from_value(serde_json::to_value(&loaded).unwrap()).unwrap();
+        assert_eq!(loaded, roundtrip);
     }
 
     #[test]
@@ -439,7 +537,10 @@ mod tests {
             .unwrap()
             .remove("stepdown");
         assert!(document(&mut doc, 9).is_err());
-        assert_eq!(doc["schema_version"], 9, "the stamp still matches the content");
+        assert_eq!(
+            doc["schema_version"], 9,
+            "the stamp still matches the content"
+        );
     }
 
     #[test]
@@ -459,7 +560,7 @@ mod tests {
 
         document(&mut doc, 9).expect("migrates");
         assert_eq!(
-            doc["setup"]["operations"][1], carve,
+            doc["setups"][0]["operations"][1], carve,
             "a non-pocket operation was modified"
         );
     }

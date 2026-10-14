@@ -46,6 +46,10 @@ impl<T: Clone> History<T> {
         self.future.clear();
     }
 
+    /// Mutate session-only view state without creating an undo checkpoint or
+    /// changing the redo stack.
+    pub fn update_view(&mut self, f: impl FnOnce(&mut T)) { f(&mut self.present); }
+
     /// Whether there is a prior state to return to.
     pub fn can_undo(&self) -> bool {
         !self.past.is_empty()

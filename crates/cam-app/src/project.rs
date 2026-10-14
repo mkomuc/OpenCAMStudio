@@ -102,6 +102,9 @@ pub enum OcamFile {
 impl OcamFile {
     /// Serialize to pretty JSON (tagged).
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        if let OcamFile::Project(project) = self {
+            project.validate().map_err(serde::ser::Error::custom)?;
+        }
         serde_json::to_string_pretty(self)
     }
 
@@ -135,14 +138,18 @@ impl OcamFile {
             }
             Some("project") => {
                 migrate_project(&mut value)?;
-                Ok(serde_json::from_value(value)?)
+                let project: Project = serde_json::from_value(value)?;
+                project.validate().map_err(LoadError::Json)?;
+                Ok(OcamFile::Project(project))
             }
             // Untagged. A pre-tag file is a bare `Project`, which is the only untagged
             // shape ever written; migrate it and wrap it. Anything else fails in serde
             // below, as it did before.
             _ => {
                 migrate_project(&mut value)?;
-                Ok(OcamFile::Project(serde_json::from_value(value)?))
+                let project: Project = serde_json::from_value(value)?;
+                project.validate().map_err(LoadError::Json)?;
+                Ok(OcamFile::Project(project))
             }
         }
     }
@@ -187,6 +194,7 @@ pub struct Project {
 impl Project {
     /// Serialize to pretty JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
         serde_json::to_string_pretty(self)
     }
 
@@ -194,8 +202,189 @@ impl Project {
     pub fn from_json(text: &str) -> Result<Self, LoadError> {
         let mut value: serde_json::Value = serde_json::from_str(text)?;
         migrate_project(&mut value)?;
-        Ok(serde_json::from_value(value)?)
+        let project: Self = serde_json::from_value(value)?;
+        project.validate().map_err(LoadError::Json)?;
+        Ok(project)
     }
+
+    /// Validate the complete persisted project before it is accepted or written.
+    /// Operation identities are document-wide because CAD bindings are keyed by
+    /// operation ID, even though operation lists live under individual setups.
+    pub fn validate(&self) -> Result<(), String> {
+        use std::collections::BTreeSet;
+
+        if self.document.setups.is_empty() {
+            return Err("project must contain at least one setup".into());
+        }
+        let mut setup_ids = BTreeSet::new();
+        let mut operation_ids = BTreeSet::new();
+        for setup in &self.document.setups {
+            if setup.id == 0 || !setup_ids.insert(setup.id) {
+                return Err("setup IDs must be nonzero and unique".into());
+            }
+            setup
+                .frame
+                .validate()
+                .map_err(|e| format!("setup {}: {e}", setup.name))?;
+            if !setup.heights.clearance.is_finite()
+                || !setup.heights.retract.is_finite()
+                || !setup.heights.top_of_stock.is_finite()
+                || setup.origin.iter().any(|v| !v.is_finite())
+            {
+                return Err(format!(
+                    "setup {} contains non-finite coordinates or heights",
+                    setup.name
+                ));
+            }
+            if setup.heights.clearance < setup.heights.retract
+                || setup.heights.retract < setup.heights.top_of_stock
+            {
+                return Err(format!(
+                    "setup {} has invalid safety height ordering",
+                    setup.name
+                ));
+            }
+            let mut offsets = BTreeSet::new();
+            if setup.origin_index == 0 || !offsets.insert(setup.origin_index) {
+                return Err(format!(
+                    "setup {} has an invalid base work offset",
+                    setup.name
+                ));
+            }
+            for origin in &setup.extra_origins {
+                if origin.index == 0
+                    || !offsets.insert(origin.index)
+                    || origin.position.iter().any(|v| !v.is_finite())
+                {
+                    return Err(format!(
+                        "setup {} has an invalid or duplicate extra work offset",
+                        setup.name
+                    ));
+                }
+            }
+            if let cam_model::Stock::FixedBox {
+                size,
+                model_position,
+            } = setup.stock
+            {
+                if size.iter().any(|v| !v.is_finite() || *v <= 0.0)
+                    || model_position
+                        .iter()
+                        .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+                {
+                    return Err(format!(
+                        "setup {} has invalid fixed box stock dimensions",
+                        setup.name
+                    ));
+                }
+            }
+            let mut selected_instances = BTreeSet::new();
+            for instance_id in &setup.model_instances {
+                if !selected_instances.insert(*instance_id) {
+                    return Err(format!(
+                        "setup {} lists model instance {instance_id} more than once",
+                        setup.name
+                    ));
+                }
+                if self.document.geometry.instance(*instance_id).is_none() {
+                    return Err(format!(
+                        "setup {} refers to missing model instance {instance_id}",
+                        setup.name
+                    ));
+                }
+            }
+            for operation in &setup.operations {
+                if !operation_ids.insert(operation.id()) {
+                    return Err(format!(
+                        "operation ID {} is used by more than one setup",
+                        operation.id()
+                    ));
+                }
+            }
+        }
+        for id in &self.document.cad_linked_operations {
+            if !operation_ids.contains(id) {
+                return Err(format!(
+                    "CAD-linked marker refers to missing operation {id}"
+                ));
+            }
+            if !self.document.geometry.bindings.contains_key(id) {
+                return Err(format!(
+                    "CAD-linked operation {id} is missing its geometry binding"
+                ));
+            }
+        }
+        self.document.geometry.validate()?;
+        for (id, binding) in &self.document.geometry.bindings {
+            if !operation_ids.contains(id) {
+                return Err(format!("CAD binding refers to missing operation {id}"));
+            }
+            if !self.document.cad_linked_operations.contains(id) {
+                return Err(format!(
+                    "CAD binding for operation {id} is not marked as CAD-linked"
+                ));
+            }
+            let owner = self
+                .document
+                .setups
+                .iter()
+                .find(|setup| setup.operations.iter().any(|op| op.id() == *id))
+                .unwrap();
+            if matches!(&binding.status, cam_model::ResolutionStatus::Resolved)
+                && !owner.model_instances.is_empty()
+                && binding
+                    .selected
+                    .iter()
+                    .any(|entity| !owner.model_instances.contains(&entity.instance_id))
+            {
+                return Err(format!(
+                    "CAD binding for operation {id} refers to a model outside setup {}",
+                    owner.name
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Write a validated self-contained snapshot without exposing a half-written project.
+pub(crate) fn atomic_save(path: &std::path::Path, json: &str) -> Result<(), String> {
+    use std::io::Write;
+    OcamFile::from_json(json).map_err(|e| e.to_string())?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    static NEXT_SAVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT_SAVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = parent.join(format!(
+        ".ocam-save-{}-{stamp}-{serial}.tmp",
+        std::process::id()
+    ));
+    let mut owned = false;
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| e.to_string())?;
+        owned = true;
+        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        let check = std::fs::read_to_string(&temp).map_err(|e| e.to_string())?;
+        OcamFile::from_json(&check).map_err(|e| e.to_string())?;
+        std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if result.is_err() && owned {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -289,7 +478,7 @@ mod tests {
             panic!("expected a project");
         };
         assert_eq!(p.document.schema_version, cam_model::SCHEMA_VERSION);
-        let cam_model::Operation::Pocket(op) = &p.document.setup.operations[0] else {
+        let cam_model::Operation::Pocket(op) = &p.document.setup().operations[0] else {
             panic!("expected a pocket");
         };
         assert_eq!(op.depth, 4.0);
@@ -317,10 +506,13 @@ mod tests {
         else {
             panic!("expected a project");
         };
-        let cam_model::Operation::Pocket(op) = &p.document.setup.operations[0] else {
+        let cam_model::Operation::Pocket(op) = &p.document.setup().operations[0] else {
             panic!("expected a pocket");
         };
-        assert_eq!(op.clear.feed, 750.0, "the legacy path skipped the migration");
+        assert_eq!(
+            op.clear.feed, 750.0,
+            "the legacy path skipped the migration"
+        );
     }
 
     #[test]
@@ -329,8 +521,7 @@ mod tests {
         // user would be told their file is damaged when it is perfectly good and their
         // application is simply too old — and the advice that follows is the opposite.
         let mut v: serde_json::Value = serde_json::from_str(&v9_project_json()).unwrap();
-        v["document"]["schema_version"] =
-            serde_json::json!(cam_model::SCHEMA_VERSION + 1);
+        v["document"]["schema_version"] = serde_json::json!(cam_model::SCHEMA_VERSION + 1);
         assert!(matches!(
             OcamFile::from_json(&v.to_string()),
             Err(LoadError::Migration(
@@ -346,8 +537,8 @@ mod tests {
         // fails there. Were it defaulted, this file would load as a pocket with zero feed
         // and zero stepdown — a silently broken operation, discovered at the machine.
         let v: serde_json::Value = serde_json::from_str(&v9_project_json()).unwrap();
-        let err = serde_json::from_value::<Document>(v["document"].clone())
-            .expect_err("a v9 document must not parse as v10");
+        let err = serde_json::from_value::<cam_model::Setup>(v["document"]["setup"].clone())
+            .expect_err("a v9 setup must not parse before its operation fields migrate");
         assert!(
             err.to_string().contains("clear"),
             "the error should name the missing field, got: {err}"
@@ -366,5 +557,113 @@ mod tests {
             panic!("expected a project");
         };
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn the_v14_single_setup_migrates_to_setup_one_without_changing_its_operation() {
+        let OcamFile::Project(project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+            panic!("expected project");
+        };
+        assert_eq!(project.document.setups.len(), 1);
+        assert_eq!(project.document.setups[0].id, 1);
+        assert_eq!(project.document.setups[0].name, "bracket");
+        assert_eq!(project.document.setups[0].operations[0].id(), 1);
+        assert_eq!(
+            project.document.active_setup_id, 0,
+            "active setup is session state"
+        );
+        assert_eq!(
+            project.document.setup().id,
+            1,
+            "the first setup is the fallback"
+        );
+    }
+
+    #[test]
+    fn project_loader_rejects_no_setups_duplicate_global_operation_ids_and_orphan_bindings() {
+        let OcamFile::Project(project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+            panic!("expected project");
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_str(&OcamFile::Project(project.clone()).to_json().unwrap()).unwrap();
+
+        value["document"]["setups"] = serde_json::json!([]);
+        assert!(OcamFile::from_json(&value.to_string())
+            .unwrap_err()
+            .to_string()
+            .contains("at least one setup"));
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&OcamFile::Project(project.clone()).to_json().unwrap()).unwrap();
+        let mut second = value["document"]["setups"][0].clone();
+        second["id"] = serde_json::json!(2);
+        value["document"]["setups"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        assert!(OcamFile::from_json(&value.to_string())
+            .unwrap_err()
+            .to_string()
+            .contains("more than one setup"));
+
+        let mut missing_binding = project.clone();
+        missing_binding.document.cad_linked_operations.insert(1);
+        assert!(missing_binding
+            .validate()
+            .unwrap_err()
+            .contains("missing its geometry binding"));
+
+        let mut stale_marker = project.clone();
+        stale_marker.document.cad_linked_operations.insert(99);
+        assert!(stale_marker
+            .validate()
+            .unwrap_err()
+            .contains("missing operation 99"));
+
+        let mut orphan_binding = project;
+        orphan_binding.document.cad_linked_operations.insert(99);
+        orphan_binding.document.geometry.bindings.insert(
+            99,
+            cam_model::GeometryBinding {
+                selected: vec![cam_model::EntityRef {
+                    asset_id: 1,
+                    revision: 1,
+                    instance_id: 1,
+                    body_id: 1,
+                    kind: cam_model::EntityKind::Body,
+                    id: 1,
+                }],
+                recipe: cam_model::ExtractionRecipe::FaceRegion,
+                heights: cam_model::CuttingHeights {
+                    top: 0.0,
+                    bottom: -1.0,
+                },
+                overrides: cam_model::GeometryOverrides::default(),
+                status: cam_model::ResolutionStatus::NeedsReselection {
+                    reason: "legacy".into(),
+                },
+                resolved_fingerprint: None,
+            },
+        );
+        assert!(orphan_binding
+            .validate()
+            .unwrap_err()
+            .contains("missing operation 99"));
+    }
+
+    #[test]
+    fn validation_checks_secondary_setup_frames_too() {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
+        else {
+            panic!("expected project");
+        };
+        let mut second = project.document.setups[0].clone();
+        second.id = 2;
+        second.frame.world_from_setup.rotation[0][0] = 2.0;
+        project.document.setups.push(second);
+        assert!(project
+            .validate()
+            .unwrap_err()
+            .contains("right-handed orthonormal frame"));
     }
 }

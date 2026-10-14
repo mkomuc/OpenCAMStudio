@@ -16,6 +16,7 @@ default = []
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:ab_glyph"]
 
 [dependencies]
+cam-model = { path = "../cam-model" }
 cam-geo = { path = "../cam-geo" }
 cam-cldata = { path = "../cam-cldata" }
 # Pinned to iced 0.14's wgpu so cam-render's renderer can share types with the

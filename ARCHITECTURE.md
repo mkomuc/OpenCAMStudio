@@ -85,7 +85,8 @@ controller state and full physical verification remain later contracts. See
 |-------|----------------|--------------------|
 | `cam-geo` | 2D toolpath geometry: polygons, **robust offset**, boolean, Z-slicing. On `geo`/`i_overlay`. The CAM heart. Also the **tool revolve generatrix** (`Profile2D`/`ProfileSeg`, line/arc segments tagged cutting/non-cutting; `BottomShape`), the derived cutting-surface properties the operation guards read, and V-groove geometry. | **No** |
 | `cam-import` | DXF/DWG read (via `acadrust`) → contour chaining + hole nesting → `cam-geo` regions, **plus the open chains that would not close** (engravable strokes). Also exposes a raw entity-inventory read path (for the deferred custom-tool importer). | No |
-| `cam-kernel` | `Kernel` trait + a `truck`-backed impl. Import (STEP/mesh), B-rep hold, booleans for stock. Swappable → OCCT (C++ FFI) later. | is the kernel |
+| `cam-kernel` | Optional owned OCCT 7.9.3 STEP bridge: exact analytic topology, units, placements and semantic tessellation. Native handles remain within serialized service calls; default builds report backend unavailable. | is the kernel |
+| `cam-geometry3d` | Conservative fixed-axis feature resolution from immutable topology and placements; regions/holes, explicit heights and dependency fingerprints. Display meshes never drive machining. | No (snapshot only) |
 | `cam-model` | Document model: `Project → Setup → Stock → Operation → Tool`. Serde. The save-file format. | No (holds refs) |
 | `cam-toolpath` | `Strategy` trait + 2.5D strategies. Consumes `cam-geo`, emits CL-data. | No |
 | `cam-cldata` | The CL-data IR: rapid/feed/arc/dwell/toolchange, neutral units. | No |
@@ -112,7 +113,7 @@ implements its own toolpath geometry. So:
 ## Data model (2.5D scope)
 
 ```
-Document { schema_version, Setup }   (Machine is app state, not saved)
+Document { schema_version, Setup, GeometryState }   (Machine is app state, not saved)
  └─ Setup            { heights, stock, tools, operations, origin, start_offset }
      ├─ Origin       { part XY/Z datum → G-code (0,0,0); post applies −origin }
      ├─ Stock        { part bbox + per-axis XY offsets, top + thickness }
@@ -220,3 +221,18 @@ members of a family are byte-identical for milling by design — routing between
 3D surface machining, 4/5-axis, turning, mill-turn, feature recognition. All have
 a designated seam (a new `Strategy`, a new `Kernel` capability, a new post
 capability) so they land as additions, not rewrites. See `ROADMAP.md`.
+
+## CAD-linked machining (schema 14)
+
+Geometry assets, instance placements and committed operation bindings live in
+`History<Document>`. Source bytes and topology are immutable shared snapshots;
+hover, selection and hide/isolate remain view state. Legacy operations keep their
+embedded contours and historical cutting planes without guessed associations.
+
+`cam-app::cad_operations` resolves linked geometry before planning, replacing
+strategy inputs and stamping a matching dependency fingerprint. The planner uses
+absolute cutting intervals and rejects missing/stale snapshots. Pocket/Profile
+adapt their local Z strategy frame back to world coordinates; posts continue to
+apply the work datum once. `cam-app::import_jobs` discards cancelled or obsolete
+worker results before an explicit preview commit. Replacement invalidates links
+until reselection. See [CAD implementation and qualification](docs/cad-import-implementation.md).

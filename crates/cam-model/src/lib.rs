@@ -14,6 +14,7 @@
 //! design rule (see `ARCHITECTURE.md`).
 
 mod document;
+mod geometry;
 mod history;
 pub mod migrate;
 mod reconcile;
@@ -22,9 +23,10 @@ mod validate;
 pub use cam_cldata::Point3;
 pub use document::{
     Axis, CarveClearing, CarveOp, ChamferOp, ClearParams, Clearing, Comp, Document, DrillOp,
-    EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp, ProfileOp,
-    Setup, Side, Stock, ThreadOp, SCHEMA_VERSION,
+    EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp, ProfileOp, Setup,
+    Side, Stock, ThreadOp, SCHEMA_VERSION,
 };
+pub use geometry::*;
 pub use history::History;
 pub use reconcile::{reconcile_tool_numbers, ReconcileReport, ToolIdentity};
 pub use validate::MachineValidationError;
@@ -636,8 +638,16 @@ mod tests {
             kind: ToolKind::EndMill,
             ..Default::default()
         };
-        assert_eq!(bare.flute_len(), 40.0, "unspecified flute length ⇒ overall length");
-        assert_eq!(bare.shank_dia(), 6.0, "unspecified shank ⇒ cutting diameter");
+        assert_eq!(
+            bare.flute_len(),
+            40.0,
+            "unspecified flute length ⇒ overall length"
+        );
+        assert_eq!(
+            bare.shank_dia(),
+            6.0,
+            "unspecified shank ⇒ cutting diameter"
+        );
         assert_eq!(bare.neck_dia(), 6.0, "unspecified neck ⇒ cutting diameter");
 
         // Explicit values win.
@@ -707,9 +717,17 @@ mod tests {
         // The cone flares exactly to the shaft (⌀8 → r4); no arrow, and the shaft above
         // the flank is non-cutting.
         assert_eq!(cham.max_radius(), 4.0);
-        assert!(cham.segs.iter().filter(|s| s.cutting).all(|s| s.end.x <= 4.0 + 1e-9));
+        assert!(cham
+            .segs
+            .iter()
+            .filter(|s| s.cutting)
+            .all(|s| s.end.x <= 4.0 + 1e-9));
         // Flute split honoured: nothing above z=20 cuts.
-        assert!(em.segs.iter().filter(|s| s.cutting).all(|s| s.end.y <= 20.0 + 1e-9));
+        assert!(em
+            .segs
+            .iter()
+            .filter(|s| s.cutting)
+            .all(|s| s.end.y <= 20.0 + 1e-9));
     }
 
     #[test]

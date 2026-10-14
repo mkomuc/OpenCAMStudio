@@ -11,14 +11,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use cam_geo::{Contour, Point, Polygon, Polyline};
-use cam_import::{read_cad_file, read_dxf_str, ImportError, ImportOptions};
+use cam_import::{read_dxf_str, ImportError, ImportOptions};
 
 use crate::project::{OcamFile, Project};
 use cam_model::{
-    CarveOp, EngraveOp,
-    reconcile_tool_numbers, Axis, ChamferOp, ClearParams, Comp, Document, DrillOp, FaceOp, Hand,
-    Heights, History, Lead, Machine, Operation, Origin, Plunge, PocketOp, ProfileOp,
-    ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
+    reconcile_tool_numbers, Axis, CarveOp, ChamferOp, ClearParams, Comp, Document, DrillOp,
+    EngraveOp, FaceOp, Hand, Heights, History, Lead, Machine, Operation, Origin, Plunge, PocketOp,
+    ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
 };
 use cam_post::{PostError, PostKind, PostOptions};
 use cam_render::{mesh_vertices, MeshVertex, Scene, PART};
@@ -26,6 +25,9 @@ use cam_sim::{simulate, Collision, CollisionKind, ProfileShape, SimOptions, SimT
 
 use cam_cldata::{Program, SpindleDir};
 use cam_toolpath::{build_job, CancelToken, Diagnostic, JobCompletion, Severity};
+
+#[path = "setups.rs"]
+mod setups;
 
 /// Seed defaults for a freshly-imported document: the values every generated
 /// operation and the setup's heights start from. Once a document exists, editing
@@ -208,6 +210,8 @@ pub struct AppController {
     /// The origin new operations are assigned to, and the one the origin inspector /
     /// pick flow edits. Defaults to the base origin (index 1).
     active_origin: u32,
+    /// Active physical setup is view state, separate from the undoable definitions.
+    active_setup_id: u64,
     /// Origin indices whose operations are frozen out of the run (kept in the tree) —
     /// the group-level analogue of [`excluded`], for working one orientation at a time.
     disabled_origins: BTreeSet<u32>,
@@ -218,6 +222,11 @@ pub struct AppController {
     pending_op: Option<PendingOp>,
     outcome: Option<RunOutcome>,
     nc: Option<String>,
+    cad_selection: Vec<cam_model::EntityRef>,
+    import_jobs: crate::import_jobs::ImportJobs<crate::cad_operations::PreparedImport>,
+    document_epoch: u64,
+    import_preview: Option<(u64, crate::cad_operations::PreparedImport)>,
+    import_replacement: Option<u64>,
 }
 
 /// Which closed loop of an imported region a pick refers to.
@@ -318,9 +327,7 @@ pub struct PendingOp {
 /// A viewport object-snap: which kind of point on the geometry the cursor
 /// resolves to during an operation pick. Priority runs End → Mid → Quadrant →
 /// Nearest (Nearest is the always-catches fallback when enabled).
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SnapKind {
     /// A real corner (segment endpoint at an angle).
     End,
@@ -492,12 +499,18 @@ impl AppController {
             selection: Selection::default(),
             excluded: BTreeSet::new(),
             active_origin: 1,
+            active_setup_id: 1,
             disabled_origins: BTreeSet::new(),
             source_name: String::new(),
             current_path: None,
             pending_op: None,
             outcome: None,
             nc: None,
+            cad_selection: Vec::new(),
+            import_jobs: Default::default(),
+            document_epoch: 0,
+            import_preview: None,
+            import_replacement: None,
         }
     }
 
@@ -559,9 +572,9 @@ impl AppController {
         self.document.current()
     }
 
-    /// The current setup (shorthand for `document().setup`).
+    /// The current setup (shorthand for `document().setup()`).
     fn setup(&self) -> &Setup {
-        &self.document.current().setup
+        &self.document.current().setup()
     }
 
     /// The seed defaults used when a document is generated on import.
@@ -577,14 +590,36 @@ impl AppController {
     /// Select a node. Clamped to a valid target: an out-of-range tool or a
     /// missing operation falls back to the setup.
     pub fn select(&mut self, selection: Selection) {
+        if let Selection::Operation(id) = selection {
+            if let Some(owner) = self
+                .document()
+                .setups
+                .iter()
+                .find(|setup| setup.operations.iter().any(|op| op.id() == id))
+                .map(|s| s.id)
+            {
+                if owner != self.active_setup_id {
+                    let _ = self.activate_setup(owner);
+                }
+            }
+        }
         self.selection = match selection {
-            Selection::Tool(i) if i < self.document.current().setup.tools.len() => selection,
+            Selection::Tool(i) if i < self.document.current().setup().tools.len() => selection,
             Selection::Operation(id) if self.operation(id).is_some() => selection,
             Selection::Setup | Selection::Origin | Selection::Stock | Selection::Machine => {
                 selection
             }
             _ => Selection::Setup,
         };
+        if let Selection::Operation(id) = self.selection {
+            self.cad_selection = self
+                .document()
+                .geometry
+                .bindings
+                .get(&id)
+                .map(|b| b.selected.clone())
+                .unwrap_or_default();
+        }
     }
 
     /// The imported regions.
@@ -605,7 +640,9 @@ impl AppController {
     /// treating those as "no geometry" hides them from the viewport and blocks
     /// operation creation.
     pub fn has_geometry(&self) -> bool {
-        !self.regions.is_empty() || !self.open_paths.is_empty()
+        !self.regions.is_empty()
+            || !self.open_paths.is_empty()
+            || !self.document().geometry.instances.is_empty()
     }
 
     /// The name of the loaded drawing.
@@ -627,7 +664,7 @@ impl AppController {
     pub fn operation(&self, id: u32) -> Option<&Operation> {
         self.document
             .current()
-            .setup
+            .setup()
             .operations
             .iter()
             .find(|o| o.id() == id)
@@ -655,15 +692,418 @@ impl AppController {
     /// does not set the project path — an imported drawing is saved as a new
     /// `.ocam` project.
     pub fn import_cad(&mut self, path: impl AsRef<Path>) -> Result<usize, ImportError> {
-        let path = path.as_ref();
-        let import = read_cad_file(path, &ImportOptions::default())?;
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("imported")
-            .to_string();
-        self.install_import(import.regions, import.open_chains, name, false);
-        Ok(self.regions.len())
+        let prepared =
+            crate::cad_operations::prepare_import(path.as_ref()).map_err(ImportError::Io)?;
+        self.commit_cad_import(prepared).map_err(ImportError::Io)
+    }
+
+    /// Persistent imported models and operation links.
+    pub fn geometry_state(&self) -> &cam_model::GeometryState {
+        &self.document().geometry
+    }
+    pub fn cad_selection(&self) -> &[cam_model::EntityRef] {
+        &self.cad_selection
+    }
+    pub fn set_cad_selection(&mut self, entities: Vec<cam_model::EntityRef>) {
+        self.cad_selection = entities
+            .into_iter()
+            .filter(|r| self.document().geometry.entity_exists(r))
+            .collect();
+    }
+    pub fn start_cad_import(&mut self, path: PathBuf) -> u64 {
+        self.import_preview = None;
+        self.import_replacement = None;
+        self.import_jobs.start(self.document_epoch, move || {
+            crate::cad_operations::prepare_import(&path)
+        })
+    }
+    pub fn start_cad_replacement(&mut self, asset_id: u64, path: PathBuf) -> Result<u64, String> {
+        if self.geometry_state().asset(asset_id).is_none() {
+            return Err("Missing CAD asset".into());
+        }
+        let request = self.start_cad_import(path);
+        self.import_replacement = Some(asset_id);
+        Ok(request)
+    }
+    pub fn cad_import_replacement(&self) -> Option<u64> {
+        self.import_replacement
+    }
+    pub fn cad_import_pending(&self) -> bool {
+        self.import_jobs.pending()
+    }
+    pub fn cancel_cad_import(&mut self) {
+        self.import_jobs.cancel();
+        self.import_preview = None;
+        self.import_replacement = None;
+    }
+    pub fn poll_cad_import(&mut self) -> Option<Result<usize, String>> {
+        self.import_jobs.poll(self.document_epoch).map(|result| {
+            result.map(|p| {
+                let count = p.preview().items;
+                self.import_preview = Some((self.document_epoch, p));
+                count
+            })
+        })
+    }
+    pub fn cad_import_preview(&self) -> Option<crate::CadImportPreview> {
+        self.import_preview.as_ref().map(|(_, p)| p.preview())
+    }
+    pub fn commit_cad_preview(&mut self) -> Result<usize, String> {
+        let (epoch, prepared) = self.import_preview.take().ok_or("No import preview")?;
+        if epoch != self.document_epoch {
+            return Err("Project changed after preview; import again".into());
+        }
+        if let Some(id) = self.import_replacement.take() {
+            match prepared {
+                crate::cad_operations::PreparedImport::Solid { asset, instances } => {
+                    let existing: Vec<_> = self
+                        .geometry_state()
+                        .instances
+                        .iter()
+                        .filter(|i| i.asset_id == id)
+                        .collect();
+                    if instances.len() != existing.len()
+                        || instances
+                            .iter()
+                            .any(|i| !existing.iter().any(|old| old.body_id == i.body_id))
+                    {
+                        return Err("Replacement changes body instances; add it as a new asset and review its geometry".into());
+                    }
+                    let count = instances.len();
+                    self.replace_cad_asset(id, asset)?;
+                    Ok(count)
+                }
+                _ => Err("Replace model requires a STEP solid, not a planar drawing".into()),
+            }
+        } else {
+            self.commit_cad_import(prepared)
+        }
+    }
+    /// Add an immutable imported asset and its placements after preview validation.
+    pub fn add_cad_asset(
+        &mut self,
+        asset: cam_model::GeometryAsset,
+        instances: Vec<cam_model::GeometryInstance>,
+    ) -> Result<usize, String> {
+        self.commit_cad_import(crate::cad_operations::PreparedImport::Solid { asset, instances })
+    }
+    fn commit_cad_import(
+        &mut self,
+        prepared: crate::cad_operations::PreparedImport,
+    ) -> Result<usize, String> {
+        match prepared {
+            crate::cad_operations::PreparedImport::Drawing { import, name } => {
+                let count = import.regions.len() + import.open_chains.len();
+                if self.source_name.is_empty() {
+                    self.source_name = name;
+                }
+                self.document.edit(move |doc| {
+                    doc.geometry.drawing_regions.extend(import.regions);
+                    doc.geometry.drawing_paths.extend(import.open_chains);
+                });
+                self.sync_drawing_geometry();
+                self.pending_op = None;
+                self.cad_selection.clear();
+                self.invalidate();
+                Ok(count)
+            }
+            crate::cad_operations::PreparedImport::Solid {
+                mut asset,
+                mut instances,
+            } => {
+                let state = self.geometry_state();
+                asset.id = state.assets.iter().map(|a| a.id).max().unwrap_or(0) + 1;
+                asset.revision = 1;
+                let next_instance = state.instances.iter().map(|i| i.id).max().unwrap_or(0) + 1;
+                for (index, instance) in instances.iter_mut().enumerate() {
+                    instance.id = next_instance + index as u64;
+                    instance.asset_id = asset.id;
+                }
+                let count = instances.len();
+                let mut preview = state.clone();
+                preview.assets.push(asset.clone());
+                preview.instances.extend(instances.clone());
+                preview.validate()?;
+                if self.source_name.is_empty() {
+                    self.source_name = asset.name.clone();
+                }
+                self.document.edit(move |doc| {
+                    doc.geometry.assets.push(asset);
+                    doc.geometry.instances.extend(instances);
+                });
+                self.selection = Selection::Setup;
+                self.cad_selection.clear();
+                self.invalidate();
+                Ok(count)
+            }
+        }
+    }
+    pub fn preview_cad_operation(
+        &self,
+        kind: OpKind,
+        entities: &[cam_model::EntityRef],
+    ) -> Result<cam_geometry3d::ResolvedInput, String> {
+        let geometry = self.setup_geometry_state()?;
+        let binding = cam_geometry3d::resolve_selection(
+            &geometry,
+            entities,
+            crate::cad_operations::recipe(kind)?,
+            self.stock_box().1[2],
+        )?;
+        cam_geometry3d::resolve_binding(&geometry, &binding)
+    }
+    /// Align a selected planar face with the fixed machining XY plane at Z0.
+    /// The longest straight boundary edge sets X; the chosen face origin is datum.
+    pub fn align_cad_top_face(&mut self, reference: cam_model::EntityRef) -> Result<(), String> {
+        use cam_model::{CadCurve, CadSurface, EntityKind, RigidTransform};
+        if reference.kind != EntityKind::Face || !self.geometry_state().entity_exists(&reference) {
+            return Err("Select one planar top face".into());
+        }
+        let asset = self.geometry_state().asset(reference.asset_id).unwrap();
+        let face = asset
+            .topology
+            .faces
+            .iter()
+            .find(|f| f.id == reference.id)
+            .unwrap();
+        let CadSurface::Plane { origin, normal } = face.surface else {
+            return Err("Machining top must be planar".into());
+        };
+        let normalize = |v: [f64; 3]| {
+            let length = v.iter().map(|n| n * n).sum::<f64>().sqrt();
+            v.map(|n| n / length)
+        };
+        let normal = normalize(normal);
+        let mut candidates = Vec::new();
+        for wire in asset
+            .topology
+            .loops
+            .iter()
+            .filter(|w| w.face_id == face.id && w.is_outer)
+        {
+            for u in &wire.edge_uses {
+                if let Some(edge) = asset.topology.edges.iter().find(|e| e.id == u.edge_id) {
+                    if let CadCurve::Line { start, end } = edge.curve {
+                        let v = std::array::from_fn::<_, 3, _>(|i| end[i] - start[i]);
+                        let d = v.iter().zip(normal).map(|(a, b)| a * b).sum::<f64>();
+                        let projected = std::array::from_fn::<_, 3, _>(|i| v[i] - d * normal[i]);
+                        let length = projected.iter().map(|n| n * n).sum::<f64>();
+                        if length > 1e-12 {
+                            candidates.push((length, projected));
+                        }
+                    }
+                }
+            }
+        }
+        let x = if let Some((_, v)) = candidates.into_iter().max_by(|a, b| a.0.total_cmp(&b.0)) {
+            normalize(v)
+        } else {
+            let seed = if normal[0].abs() < 0.9 {
+                [1., 0., 0.]
+            } else {
+                [0., 1., 0.]
+            };
+            let d = seed.iter().zip(normal).map(|(a, b)| a * b).sum::<f64>();
+            normalize(std::array::from_fn(|i| seed[i] - d * normal[i]))
+        };
+        let y = [
+            normal[1] * x[2] - normal[2] * x[1],
+            normal[2] * x[0] - normal[0] * x[2],
+            normal[0] * x[1] - normal[1] * x[0],
+        ];
+        let rotation = [x, y, normal];
+        let translation =
+            rotation.map(|row| -row.iter().zip(origin).map(|(a, b)| a * b).sum::<f64>());
+        self.place_cad_instance(
+            reference.instance_id,
+            RigidTransform {
+                rotation,
+                translation,
+            },
+        )
+    }
+    /// Resolve and commit selected CAD geometry as a single undoable operation.
+    pub fn create_cad_operation(
+        &mut self,
+        kind: OpKind,
+        entities: Vec<cam_model::EntityRef>,
+    ) -> Result<u32, String> {
+        self.create_cad_operation_with_tool(kind, entities, self.first_tool_number())
+    }
+    pub fn create_cad_operation_with_tool(
+        &mut self,
+        kind: OpKind,
+        entities: Vec<cam_model::EntityRef>,
+        tool: u32,
+    ) -> Result<u32, String> {
+        let id = self.next_op_id();
+        let (op, binding) = crate::cad_operations::create_operation(
+            self.document(),
+            kind,
+            entities,
+            id,
+            tool,
+            self.active_origin,
+            self.defaults,
+        )?;
+        if !self.setup().tools.iter().any(|t| t.number == op.tool()) {
+            return Err(
+                "Choose a tool from the tool library before creating the CAD operation".into(),
+            );
+        }
+        let mut preview = self.document().clone();
+        preview.setup_mut().operations.push(op);
+        preview.geometry.bindings.insert(id, binding);
+        preview.cad_linked_operations.insert(id);
+        crate::cad_operations::validate_binding_edit(&mut preview, id)?;
+        self.document.edit(move |doc| *doc = preview);
+        self.select(Selection::Operation(id));
+        self.invalidate();
+        Ok(id)
+    }
+    pub fn edit_cad_geometry(
+        &mut self,
+        id: u32,
+        entities: Vec<cam_model::EntityRef>,
+    ) -> Result<(), String> {
+        let mut doc = self.document().clone();
+        let binding = doc
+            .geometry
+            .bindings
+            .get_mut(&id)
+            .ok_or("Operation has explicit geometry")?;
+        binding.selected = entities;
+        binding.status = cam_model::ResolutionStatus::Resolved;
+        crate::cad_operations::validate_binding_edit(&mut doc, id)?;
+        self.document.edit(move |current| *current = doc);
+        self.select(Selection::Operation(id));
+        self.invalidate();
+        Ok(())
+    }
+    pub fn override_cad_heights(
+        &mut self,
+        id: u32,
+        top: Option<f64>,
+        bottom: Option<f64>,
+    ) -> Result<(), String> {
+        let mut doc = self.document().clone();
+        let binding = doc
+            .geometry
+            .bindings
+            .get_mut(&id)
+            .ok_or("Operation has explicit geometry")?;
+        binding.overrides = cam_model::GeometryOverrides { top, bottom };
+        crate::cad_operations::validate_binding_edit(&mut doc, id)?;
+        self.document.edit(move |current| *current = doc);
+        self.invalidate();
+        Ok(())
+    }
+    pub fn place_cad_instance(
+        &mut self,
+        id: u64,
+        placement: cam_model::RigidTransform,
+    ) -> Result<(), String> {
+        if !placement.is_rigid() {
+            return Err("Placement must be a finite rigid transform".into());
+        }
+        if self.geometry_state().instance(id).is_none() {
+            return Err("Missing CAD instance".into());
+        }
+        self.document.edit(move |doc| {
+            if let Some(instance) = doc.geometry.instances.iter_mut().find(|i| i.id == id) {
+                instance.placement = placement;
+            }
+            let geometry = doc.geometry.clone();
+            for setup in &mut doc.setups {
+                let refs = &setup.frame.references;
+                if refs.model_instance == Some(id)
+                    && refs.x.is_none()
+                    && refs.y.is_none()
+                    && refs.z.is_none()
+                {
+                    if let Ok(mut frame) = cam_model::SetupFrame::from_model_instance(&geometry, id)
+                    {
+                        frame.references.origin = refs.origin.clone();
+                        if matches!(refs.origin, cam_model::FrameOrigin::ModelOrigin) {
+                            setup.origin = frame.to_setup_vector(placement.translation);
+                        }
+                        setup.frame = frame;
+                    }
+                }
+            }
+            crate::cad_operations::refresh_binding_heights(doc);
+        });
+        self.invalidate();
+        Ok(())
+    }
+    /// Replacement never guesses entity identity across exports. Existing bindings
+    /// retain their source selection and overrides until the user reviews a new one.
+    pub fn replace_cad_asset(
+        &mut self,
+        id: u64,
+        mut replacement: cam_model::GeometryAsset,
+    ) -> Result<(), String> {
+        let old = self.geometry_state().asset(id).ok_or("Missing CAD asset")?;
+        replacement.id = id;
+        replacement.revision = old.revision + 1;
+        replacement.topology.validate()?;
+        if self
+            .geometry_state()
+            .instances
+            .iter()
+            .filter(|i| i.asset_id == id)
+            .any(|i| {
+                !replacement
+                    .topology
+                    .bodies
+                    .iter()
+                    .any(|b| b.id == i.body_id)
+            })
+        {
+            return Err(
+                "Replacement changes body identities; remove and import it as a new asset".into(),
+            );
+        }
+        let mut preview = self.geometry_state().clone();
+        if let Some(asset) = preview.assets.iter_mut().find(|a| a.id == id) {
+            *asset = replacement;
+        }
+        for binding in preview
+            .bindings
+            .values_mut()
+            .filter(|b| b.selected.iter().any(|r| r.asset_id == id))
+        {
+            binding.status = cam_model::ResolutionStatus::NeedsReselection {
+                reason: "Model replaced; review and reselect its geometry".into(),
+            };
+        }
+        preview.validate()?;
+        self.document.edit(move |doc| doc.geometry = preview);
+        self.cad_selection.clear();
+        self.invalidate();
+        Ok(())
+    }
+    pub fn remove_cad_asset(&mut self, id: u64) -> bool {
+        if self.geometry_state().asset(id).is_none() {
+            return false;
+        }
+        self.document.edit(move |doc| {
+            doc.geometry.assets.retain(|a| a.id != id);
+            doc.geometry.instances.retain(|i| i.asset_id != id);
+            for binding in doc
+                .geometry
+                .bindings
+                .values_mut()
+                .filter(|b| b.selected.iter().any(|r| r.asset_id == id))
+            {
+                binding.status = cam_model::ResolutionStatus::NeedsReselection {
+                    reason: "Source model removed".into(),
+                };
+            }
+        });
+        self.cad_selection.clear();
+        self.invalidate();
+        true
     }
 
     /// Install freshly imported regions: generate a document, select the first
@@ -680,17 +1120,21 @@ impl AppController {
         self.regions = regions;
         self.open_paths = open_paths;
         self.source_name = name;
-        let document = self.generate_document(seed_ops);
+        let mut document = self.generate_document(seed_ops);
+        document.geometry.drawing_regions = self.regions.clone();
+        document.geometry.drawing_paths = self.open_paths.clone();
         self.document = History::new(document);
+        self.active_setup_id = self.document.current().setup().id;
+        self.cad_selection.clear();
         self.excluded.clear();
         self.disabled_origins.clear();
-        self.active_origin = self.document.current().setup.origin_index;
+        self.active_origin = self.document.current().setup().origin_index;
         self.pending_op = None;
         self.current_path = None;
         self.selection = self
             .document
             .current()
-            .setup
+            .setup()
             .operations
             .first()
             .map(|op| Selection::Operation(op.id()))
@@ -700,13 +1144,16 @@ impl AppController {
 
     /// Reset to a fresh, empty "Untitled" project.
     pub fn new_project(&mut self) {
+        self.cancel_cad_import();
+        self.cad_selection.clear();
         self.provenance = Provenance::default();
         self.regions.clear();
         self.open_paths.clear();
         self.document = History::new(empty_document(&self.defaults));
+        self.active_setup_id = self.document.current().setup().id;
         self.excluded.clear();
         self.disabled_origins.clear();
-        self.active_origin = self.document.current().setup.origin_index;
+        self.active_origin = self.document.current().setup().origin_index;
         self.source_name.clear();
         self.current_path = None;
         self.pending_op = None;
@@ -748,7 +1195,11 @@ impl AppController {
             .to_json()
             .map_err(|e| ProjectError::Json(e.to_string()))?;
         let path = path.as_ref();
-        std::fs::write(path, json).map_err(|e| ProjectError::Io(e.to_string()))?;
+        self.document()
+            .geometry
+            .validate()
+            .map_err(ProjectError::Json)?;
+        crate::project::atomic_save(path, &json).map_err(ProjectError::Io)?;
         self.current_path = Some(path.to_path_buf());
         Ok(())
     }
@@ -763,6 +1214,22 @@ impl AppController {
             OcamFile::Project(p) => p,
             OcamFile::Library(_) => return Err(ProjectError::NotAProject),
         };
+        let mut project = project;
+        crate::cad_operations::mark_missing_bindings(&mut project.document.geometry);
+        project
+            .document
+            .geometry
+            .validate()
+            .map_err(ProjectError::Json)?;
+        // Legacy wrapper geometry becomes undoable document state on first load.
+        if project.document.geometry.drawing_regions.is_empty()
+            && project.document.geometry.drawing_paths.is_empty()
+        {
+            project.document.geometry.drawing_regions = project.regions.clone();
+            project.document.geometry.drawing_paths = project.open_paths.clone();
+        }
+        self.cancel_cad_import();
+        self.cad_selection.clear();
         self.regions = project.regions;
         self.open_paths = project.open_paths;
         self.defaults = project.defaults;
@@ -790,9 +1257,10 @@ impl AppController {
             post: project.post,
         };
         self.document = History::new(project.document);
+        self.active_setup_id = self.document.current().setup().id;
         self.excluded.clear();
         self.disabled_origins.clear();
-        self.active_origin = self.document.current().setup.origin_index;
+        self.active_origin = self.document.current().setup().origin_index;
         self.pending_op = None;
         self.current_path = Some(path.to_path_buf());
         self.selection = Selection::Setup;
@@ -811,13 +1279,13 @@ impl AppController {
 
     /// Edit the setup's heights as one undoable change.
     pub fn edit_heights(&mut self, f: impl FnOnce(&mut Heights)) {
-        self.document.edit(|doc| f(&mut doc.setup.heights));
+        self.document.edit(|doc| f(&mut doc.setup_mut().heights));
         self.invalidate();
     }
 
     /// Edit setup-level fields beyond [`Heights`] — e.g. the tool-change height.
     pub fn edit_setup(&mut self, f: impl FnOnce(&mut cam_model::Setup)) {
-        self.document.edit(|doc| f(&mut doc.setup));
+        self.document.edit(|doc| f(doc.setup_mut()));
         self.invalidate();
     }
 
@@ -825,7 +1293,7 @@ impl AppController {
     /// posted G-code; the design/sim frame is unaffected, so no re-run is needed —
     /// but `invalidate` keeps the pipeline honest.
     pub fn edit_origin(&mut self, f: impl FnOnce(&mut [f64; 3])) {
-        self.document.edit(|doc| f(&mut doc.setup.origin));
+        self.document.edit(|doc| f(&mut doc.setup_mut().origin));
         self.invalidate();
     }
 
@@ -868,9 +1336,14 @@ impl AppController {
     pub fn edit_active_origin(&mut self, f: impl FnOnce(&mut [f64; 3])) {
         let index = self.active_origin;
         self.document.edit(|doc| {
-            if doc.setup.origin_index == index {
-                f(&mut doc.setup.origin);
-            } else if let Some(o) = doc.setup.extra_origins.iter_mut().find(|o| o.index == index) {
+            if doc.setup_mut().origin_index == index {
+                f(&mut doc.setup_mut().origin);
+            } else if let Some(o) = doc
+                .setup_mut()
+                .extra_origins
+                .iter_mut()
+                .find(|o| o.index == index)
+            {
                 f(&mut o.position);
             }
         });
@@ -883,7 +1356,9 @@ impl AppController {
         let index = self.setup().next_origin_index();
         let position = self.setup().origin;
         self.document.edit(move |doc| {
-            doc.setup.extra_origins.push(Origin { index, position })
+            doc.setup_mut()
+                .extra_origins
+                .push(Origin { index, position })
         });
         self.active_origin = index;
         self.selection = Selection::Origin;
@@ -899,8 +1374,8 @@ impl AppController {
             return;
         }
         self.document.edit(move |doc| {
-            doc.setup.extra_origins.retain(|o| o.index != index);
-            for op in &mut doc.setup.operations {
+            doc.setup_mut().extra_origins.retain(|o| o.index != index);
+            for op in &mut doc.setup_mut().operations {
                 if op.work_offset() == index {
                     op.set_work_offset(base);
                 }
@@ -924,7 +1399,7 @@ impl AppController {
         }
         let swap = self.setup().origin_indices().contains(&new_index);
         self.document.edit(move |doc| {
-            let s = &mut doc.setup;
+            let s = doc.setup_mut();
             if swap {
                 // Park the other origin at a temporary index so the two reindexes
                 // don't collide, then move old→new and parked→old.
@@ -959,7 +1434,7 @@ impl AppController {
     /// Reassign operation `id` to origin `index` (its group), as one undoable change.
     pub fn set_operation_origin(&mut self, id: u32, index: u32) {
         self.document.edit(move |doc| {
-            if let Some(op) = doc.setup.operations.iter_mut().find(|o| o.id() == id) {
+            if let Some(op) = doc.setup_mut().operations.iter_mut().find(|o| o.id() == id) {
                 op.set_work_offset(index);
             }
         });
@@ -990,7 +1465,7 @@ impl AppController {
     /// this way). Returns the report so the shell can surface a summary.
     pub fn reconcile_tools(&mut self, shop: &[Tool]) -> ReconcileReport {
         let mut doc = self.document.current().clone();
-        let report = reconcile_tool_numbers(&mut doc.setup, shop);
+        let report = reconcile_tool_numbers(doc.setup_mut(), shop);
         if report.changed() {
             self.document = History::new(doc);
             self.reconcile_selection();
@@ -1001,11 +1476,12 @@ impl AppController {
 
     /// Edit a tool as one undoable change. A no-op if the index is out of range.
     pub fn edit_tool(&mut self, index: usize, f: impl FnOnce(&mut Tool)) {
-        let in_range = index < self.document.current().setup.tools.len();
+        let in_range = index < self.document.current().setup().tools.len();
         if !in_range {
             return;
         }
-        self.document.edit(|doc| f(&mut doc.setup.tools[index]));
+        self.document
+            .edit(|doc| f(&mut doc.setup_mut().tools[index]));
         self.invalidate();
     }
 
@@ -1015,7 +1491,7 @@ impl AppController {
         let number = self
             .document
             .current()
-            .setup
+            .setup()
             .tools
             .iter()
             .map(|t| t.number)
@@ -1030,8 +1506,9 @@ impl AppController {
             kind: ToolKind::EndMill,
             ..Default::default()
         };
-        self.document.edit(move |doc| doc.setup.tools.push(tool));
-        let index = self.document.current().setup.tools.len() - 1;
+        self.document
+            .edit(move |doc| doc.setup_mut().tools.push(tool));
+        let index = self.document.current().setup().tools.len() - 1;
         self.selection = Selection::Tool(index);
         self.invalidate();
     }
@@ -1041,12 +1518,12 @@ impl AppController {
     /// tool's number are left as-is — they surface a "references tool N which is
     /// not in the setup" diagnostic on the next run rather than being rewritten.
     pub fn delete_tool(&mut self, index: usize) {
-        let count = self.document.current().setup.tools.len();
+        let count = self.document.current().setup().tools.len();
         if index >= count {
             return;
         }
         self.document.edit(move |doc| {
-            doc.setup.tools.remove(index);
+            doc.setup_mut().tools.remove(index);
         });
         self.selection = match count - 1 {
             0 => Selection::Setup,
@@ -1064,7 +1541,7 @@ impl AppController {
         if let Some(existing) = self
             .document
             .current()
-            .setup
+            .setup()
             .tools
             .iter()
             .find(|t| same_tool_geometry(t, &tool))
@@ -1074,7 +1551,7 @@ impl AppController {
         let number = self
             .document
             .current()
-            .setup
+            .setup()
             .tools
             .iter()
             .map(|t| t.number)
@@ -1082,7 +1559,7 @@ impl AppController {
             .map_or(1, |m| m + 1);
         let embedded = Tool { number, ..tool };
         self.document
-            .edit(move |doc| doc.setup.tools.push(embedded));
+            .edit(move |doc| doc.setup_mut().tools.push(embedded));
         self.invalidate();
         number
     }
@@ -1090,7 +1567,7 @@ impl AppController {
     /// The tools actually referenced by at least one operation, in setup order.
     /// This is what the read-only Project→Tools view shows.
     pub fn used_tools(&self) -> Vec<&Tool> {
-        let setup = &self.document.current().setup;
+        let setup = &self.document.current().setup();
         // Every tool an operation uses, not just its defining one — a carve's clearing
         // end mill is on the setup sheet and in the changer, so it belongs here.
         let used: BTreeSet<u32> = setup.operations.iter().flat_map(Operation::tools).collect();
@@ -1111,7 +1588,7 @@ impl AppController {
         let used: BTreeSet<u32> = self
             .document
             .current()
-            .setup
+            .setup()
             .operations
             .iter()
             .flat_map(Operation::tools)
@@ -1119,7 +1596,7 @@ impl AppController {
         let has_unused = self
             .document
             .current()
-            .setup
+            .setup()
             .tools
             .iter()
             .any(|t| !used.contains(&t.number));
@@ -1127,7 +1604,7 @@ impl AppController {
             return;
         }
         self.document
-            .edit(move |doc| doc.setup.tools.retain(|t| used.contains(&t.number)));
+            .edit(move |doc| doc.setup_mut().tools.retain(|t| used.contains(&t.number)));
         self.invalidate();
     }
 
@@ -1139,9 +1616,21 @@ impl AppController {
     pub fn edit_operation(&mut self, id: u32, f: impl FnOnce(&mut Operation)) {
         let mut edited = false;
         self.document.edit(|doc| {
-            if let Some(op) = doc.setup.operations.iter_mut().find(|o| o.id() == id) {
+            let heights = doc.setup().heights;
+            let mut binding = doc.geometry.bindings.remove(&id);
+            if let Some(op) = doc.setup_mut().operations.iter_mut().find(|o| o.id() == id) {
+                let before = op.legacy_cutting_heights(&heights);
                 f(op);
+                crate::cad_operations::capture_height_override(
+                    binding.as_mut(),
+                    before,
+                    op,
+                    &heights,
+                );
                 edited = true;
+            }
+            if let Some(binding) = binding {
+                doc.geometry.bindings.insert(id, binding);
             }
         });
         if edited {
@@ -1153,25 +1642,16 @@ impl AppController {
         let Selection::Operation(id) = self.selection else {
             return;
         };
-        let mut edited = false;
-        self.document.edit(|doc| {
-            if let Some(op) = doc.setup.operations.iter_mut().find(|o| o.id() == id) {
-                f(op);
-                edited = true;
-            }
-        });
-        if edited {
-            self.invalidate();
-        }
+        self.edit_operation(id, f);
     }
 
     /// The next free operation id (max existing + 1).
     fn next_op_id(&self) -> u32 {
         self.document
             .current()
-            .setup
-            .operations
+            .setups
             .iter()
+            .flat_map(|setup| &setup.operations)
             .map(|o| o.id())
             .max()
             .map_or(0, |m| m + 1)
@@ -1184,7 +1664,8 @@ impl AppController {
         set_op_id(&mut op, id);
         // A new operation joins the active origin's group (H<n>).
         op.set_work_offset(self.active_origin);
-        self.document.edit(move |doc| doc.setup.operations.push(op));
+        self.document
+            .edit(move |doc| doc.setup_mut().operations.push(op));
         self.selection = Selection::Operation(id);
         self.invalidate();
     }
@@ -1201,7 +1682,7 @@ impl AppController {
         set_op_id(&mut op, replaced);
         self.document.edit(move |doc| {
             if let Some(slot) = doc
-                .setup
+                .setup_mut()
                 .operations
                 .iter_mut()
                 .find(|o| o.id() == replaced)
@@ -1225,13 +1706,19 @@ impl AppController {
         let new_id = self.next_op_id();
         set_op_id(&mut copy, new_id);
         self.document.edit(move |doc| {
+            if let Some(binding) = doc.geometry.bindings.get(&sel).cloned() {
+                doc.geometry.bindings.insert(new_id, binding);
+            }
+            if doc.cad_linked_operations.contains(&sel) {
+                doc.cad_linked_operations.insert(new_id);
+            }
             let at = doc
-                .setup
+                .setup_mut()
                 .operations
                 .iter()
                 .position(|o| o.id() == sel)
-                .map_or(doc.setup.operations.len(), |p| p + 1);
-            doc.setup.operations.insert(at, copy);
+                .map_or(doc.setup_mut().operations.len(), |p| p + 1);
+            doc.setup_mut().operations.insert(at, copy);
         });
         self.selection = Selection::Operation(new_id);
         self.invalidate();
@@ -1269,7 +1756,7 @@ impl AppController {
         let td = self
             .document
             .current()
-            .setup
+            .setup()
             .tools
             .iter()
             .find(|t| t.number == tool);
@@ -1389,9 +1876,7 @@ impl AppController {
                 // snapped pick point rides on it); with no pick, fall back to the
                 // longest edge. The inspector picker still overrides either way.
                 let direction = match start {
-                    Some([x, y]) => {
-                        Axis::along_edge_at(chain.points(), cam_geo::Point::new(x, y))
-                    }
+                    Some([x, y]) => Axis::along_edge_at(chain.points(), cam_geo::Point::new(x, y)),
                     None => Axis::along_longest_edge(chain.points()),
                 };
                 Operation::Face(FaceOp {
@@ -1455,7 +1940,11 @@ impl AppController {
                     points: vec![centroid(&chain)],
                     internal: true,
                     hand: Hand::Right,
-                    major_dia: if dia.is_finite() && dia > 0.0 { dia } else { 6.0 },
+                    major_dia: if dia.is_finite() && dia > 0.0 {
+                        dia
+                    } else {
+                        6.0
+                    },
                     pitch: 1.0,
                     // Thread span is absolute Z; `depth` is now a positive magnitude
                     // below the top, so the bottom sits that far under it.
@@ -1535,7 +2024,7 @@ impl AppController {
     fn first_tool_number(&self) -> u32 {
         self.document
             .current()
-            .setup
+            .setup()
             .tools
             .iter()
             .map(|t| t.number)
@@ -1723,7 +2212,15 @@ impl AppController {
                 .as_ref()
                 .is_none_or(|(bp, bd, _)| prio < *bp || (prio == *bp && d2 < *bd));
             if better {
-                best = Some((prio, d2, SnapHit { loop_ref, point, kind }));
+                best = Some((
+                    prio,
+                    d2,
+                    SnapHit {
+                        loop_ref,
+                        point,
+                        kind,
+                    },
+                ));
             }
         };
         for (loop_ref, pts, closed) in self.iter_pickable() {
@@ -1789,13 +2286,11 @@ impl AppController {
         } else {
             &[][..]
         };
-        self.iter_loops()
-            .map(|(r, c)| (r, c.points(), true))
-            .chain(
-                open.iter()
-                    .enumerate()
-                    .map(|(i, p)| (LoopRef::open(i), p.points(), false)),
-            )
+        self.iter_loops().map(|(r, c)| (r, c.points(), true)).chain(
+            open.iter()
+                .enumerate()
+                .map(|(i, p)| (LoopRef::open(i), p.points(), false)),
+        )
     }
 
     /// Every closed loop across all regions as `(ref, contour)`.
@@ -1858,7 +2353,11 @@ impl AppController {
             (OpKind::Carve, LoopPart::Outer) => self
                 .regions
                 .get(picked.region)
-                .map(|r| (0..r.holes().len()).map(|h| LoopRef::hole(picked.region, h)).collect())
+                .map(|r| {
+                    (0..r.holes().len())
+                        .map(|h| LoopRef::hole(picked.region, h))
+                        .collect()
+                })
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -1892,9 +2391,14 @@ impl AppController {
         let (Some(boundary), Some(tool)) = (pending.boundary, pending.tool) else {
             return false;
         };
-        if let Some(op) =
-            self.build_op(pending.kind, boundary, &pending.islands, tool, pending.start, cutting)
-        {
+        if let Some(op) = self.build_op(
+            pending.kind,
+            boundary,
+            &pending.islands,
+            tool,
+            pending.start,
+            cutting,
+        ) {
             match pending.replacing {
                 Some(old) => self.replace_operation(old, op),
                 None => self.add_operation(op),
@@ -1921,13 +2425,16 @@ impl AppController {
         let Selection::Operation(id) = self.selection else {
             return;
         };
-        self.document
-            .edit(|doc| doc.setup.operations.retain(|o| o.id() != id));
+        self.document.edit(|doc| {
+            doc.setup_mut().operations.retain(|o| o.id() != id);
+            doc.geometry.bindings.remove(&id);
+            doc.cad_linked_operations.remove(&id);
+        });
         self.excluded.remove(&id);
         self.selection = self
             .document
             .current()
-            .setup
+            .setup()
             .operations
             .first()
             .map_or(Selection::Setup, |o| Selection::Operation(o.id()));
@@ -1950,7 +2457,7 @@ impl AppController {
     pub fn duplicate_operation_groups(&self) -> Vec<Vec<u32>> {
         let ops: Vec<&Operation> = self
             .document()
-            .setup
+            .setup()
             .operations
             .iter()
             .filter(|op| !self.is_operation_excluded(op.id()))
@@ -2001,8 +2508,20 @@ impl AppController {
     /// Move operation `id` one step earlier (`up`) or later in execution order.
     /// A no-op if it can't move that way.
     pub fn move_operation(&mut self, id: u32, up: bool) {
+        let owner = self
+            .setups()
+            .iter()
+            .find(|s| s.operations.iter().any(|op| op.id() == id))
+            .map(|s| s.id);
+        if let Some(owner) = owner {
+            if owner != self.active_setup_id {
+                let _ = self.activate_setup(owner);
+            }
+        } else {
+            return;
+        }
         self.document.edit(|doc| {
-            let ops = &mut doc.setup.operations;
+            let ops = &mut doc.setup_mut().operations;
             if let Some(i) = ops.iter().position(|o| o.id() == id) {
                 // Reorder within the operation's own origin group: swap with the nearest
                 // sibling of the same `work_offset` in the chosen direction. This keeps
@@ -2035,6 +2554,8 @@ impl AppController {
     pub fn undo(&mut self) -> bool {
         let changed = self.document.undo();
         if changed {
+            self.restore_active_setup_view();
+            self.sync_drawing_geometry();
             self.reconcile_selection();
             self.invalidate();
         }
@@ -2045,6 +2566,8 @@ impl AppController {
     pub fn redo(&mut self) -> bool {
         let changed = self.document.redo();
         if changed {
+            self.restore_active_setup_view();
+            self.sync_drawing_geometry();
             self.reconcile_selection();
             self.invalidate();
         }
@@ -2072,9 +2595,10 @@ impl AppController {
             Cow::Borrowed(base)
         } else {
             let mut d = base.clone();
-            d.setup
-                .operations
-                .retain(|o| !self.excluded.contains(&o.id()) && !self.disabled_origins.contains(&o.work_offset()));
+            d.setup_mut().operations.retain(|o| {
+                !self.excluded.contains(&o.id())
+                    && !self.disabled_origins.contains(&o.work_offset())
+            });
             Cow::Owned(d)
         };
         // The resolved stock box (XY) lets roughing strategies (profile stepover)
@@ -2084,11 +2608,27 @@ impl AppController {
         // Tool-change lift height: the setup's explicit value, else the top of the
         // machine's Z envelope.
         let tool_change_height = document
-            .setup
+            .setup()
             .resolved_tool_change_height(self.machine.envelope.max.z);
-        let job = match self.machine.validate() {
-            Ok(()) => build_job(
-                &document,
+        let mut included = document.into_owned();
+        let ids: BTreeSet<_> = included
+            .setup()
+            .operations
+            .iter()
+            .map(|op| op.id())
+            .collect();
+        included.geometry.bindings.retain(|id, _| ids.contains(id));
+        let resolved = self
+            .validate_setup_frame(self.setup())
+            .and_then(|()| crate::cad_operations::resolve_document(&included));
+        let job = match self
+            .machine
+            .validate()
+            .map_err(|e| e.to_string())
+            .and(resolved)
+        {
+            Ok(resolved) => build_job(
+                &resolved,
                 self.defaults.spindle_rpm,
                 SpindleDir::Cw,
                 stock,
@@ -2110,6 +2650,17 @@ impl AppController {
         } else {
             Scene::new()
         };
+        // Backplots return to shared source coordinates; the model never moves
+        // when activating another physical setup.
+        for strip in &mut scene.strips {
+            for point in &mut strip.points {
+                *point = self
+                    .setup()
+                    .frame
+                    .to_world_vector(point.map(f64::from))
+                    .map(|n| n as f32);
+            }
+        }
         for region in &self.regions {
             scene.add_region(region, PART);
         }
@@ -2171,7 +2722,7 @@ impl AppController {
         // (0,0,0), matched by the operator's touch-off for `G15 H<n>`. Operations under
         // different origins (a reorientation) each subtract their own; with one origin
         // this is the whole job shifted by −origin. Design/sim stay in part space.
-        let setup = &self.document.current().setup;
+        let setup = &self.document.current().setup();
         let program = outcome.program.translated_per_datum(|idx| {
             let o = setup.origin_position(idx);
             [-o[0], -o[1], -o[2]]
@@ -2189,7 +2740,7 @@ impl AppController {
         if min[0] >= max[0] || min[1] >= max[1] {
             return (Vec::new(), Vec::new(), Vec::new());
         }
-        let setup_tools = &self.document.current().setup.tools;
+        let setup_tools = &self.document.current().setup().tools;
         let tool_diameter = setup_tools
             .first()
             .map(|t| t.diameter)
@@ -2230,7 +2781,19 @@ impl AppController {
         // Render the stock as a watertight solid down to its floor, so the full
         // thickness shows and cut walls shade crisply (not a smooth top sheet).
         let surface = sim.field.to_solid_mesh(min[2]);
-        let vertices = mesh_vertices(&surface.positions, &surface.normals);
+        let mut vertices = mesh_vertices(&surface.positions, &surface.normals);
+        for vertex in &mut vertices {
+            vertex.position = self
+                .setup()
+                .frame
+                .to_world_vector(vertex.position.map(f64::from))
+                .map(|n| n as f32);
+            vertex.normal = self
+                .setup()
+                .frame
+                .to_world_vector(vertex.normal.map(f64::from))
+                .map(|n| n as f32);
+        }
         (vertices, surface.indices, sim.collisions)
     }
 
@@ -2343,6 +2906,11 @@ impl AppController {
         }
 
         Document::new(Setup {
+            id: 1,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
             name: self.program_name(),
             heights: Heights::new(p.clearance, p.retract, p.top_of_stock),
             stock: self.stock(p.top_of_stock, p.depth),
@@ -2353,36 +2921,6 @@ impl AppController {
             origin_index: 1,
             tool_change_height: None,
         })
-    }
-
-    /// The XY bounding box of all imported geometry, `([min_x, min_y], [max_x,
-    /// max_y])`. Collapses to the origin when nothing is loaded.
-    fn bounds_xy(&self) -> ([f64; 2], [f64; 2]) {
-        let mut min = [f64::MAX, f64::MAX];
-        let mut max = [f64::MIN, f64::MIN];
-        for region in &self.regions {
-            for pt in region.outer().points() {
-                min[0] = min[0].min(pt.x);
-                min[1] = min[1].min(pt.y);
-                max[0] = max[0].max(pt.x);
-                max[1] = max[1].max(pt.y);
-            }
-        }
-        // Open paths count too: a drawing that is *only* engraving strokes would
-        // otherwise report no bounds, leaving the stock and the framed view empty.
-        for path in &self.open_paths {
-            for pt in path.points() {
-                min[0] = min[0].min(pt.x);
-                min[1] = min[1].min(pt.y);
-                max[0] = max[0].max(pt.x);
-                max[1] = max[1].max(pt.y);
-            }
-        }
-        if min[0] > max[0] {
-            ([0.0, 0.0], [0.0, 0.0])
-        } else {
-            (min, max)
-        }
     }
 
     /// The initial part-relative stock: a snug fit to the geometry (no XY offset)
@@ -2401,22 +2939,44 @@ impl AppController {
     /// The current stock resolved to a concrete box `(min, max)` (mm), fitting the
     /// stock spec to the loaded geometry's XY bounds.
     pub fn stock_box(&self) -> ([f64; 3], [f64; 3]) {
-        let (min, max) = self.bounds_xy();
-        self.document.current().setup.stock.resolve(min, max)
+        let (min, max) = self.setup_model_bounds();
+        self.setup().stock.resolve_bounds(min, max)
     }
 
     /// Edit the setup's stock definition as one undoable change.
     pub fn edit_stock(&mut self, f: impl FnOnce(&mut Stock)) {
-        self.document.edit(|doc| f(&mut doc.setup.stock));
+        self.document.edit(|doc| {
+            f(&mut doc.setup_mut().stock);
+            crate::cad_operations::refresh_binding_heights(doc);
+        });
         self.invalidate();
     }
 
     fn program_name(&self) -> String {
-        if self.source_name.is_empty() {
+        if !self.setup().program_name.trim().is_empty() {
+            self.setup().program_name.clone()
+        } else if self.document().setups.len() > 1 {
+            format!(
+                "{}-setup-{}",
+                if self.source_name.is_empty() {
+                    "opencamstudio"
+                } else {
+                    &self.source_name
+                },
+                self.active_setup_id
+            )
+        } else if self.source_name.is_empty() {
             "opencamstudio".to_string()
         } else {
             self.source_name.clone()
         }
+    }
+
+    fn sync_drawing_geometry(&mut self) {
+        self.regions = self.document().geometry.drawing_regions.clone();
+        self.open_paths = self.document().geometry.drawing_paths.clone();
+        self.cad_selection
+            .retain(|r| self.document.current().geometry.entity_exists(r));
     }
 
     /// After an undo/redo, drop a selection that no longer points at anything.
@@ -2427,6 +2987,7 @@ impl AppController {
 
     /// Drop any run/export that no longer reflects the inputs.
     fn invalidate(&mut self) {
+        self.document_epoch = self.document_epoch.wrapping_add(1);
         self.outcome = None;
         self.nc = None;
     }
@@ -2509,7 +3070,10 @@ fn loop_mids(pts: &[Point], corners: &[usize]) -> Vec<[f64; 2]> {
             let seg = w[0].distance_sq(w[1]).sqrt();
             if acc + seg >= half {
                 let t = if seg > 1e-9 { (half - acc) / seg } else { 0.0 };
-                mid = [w[0].x + (w[1].x - w[0].x) * t, w[0].y + (w[1].y - w[0].y) * t];
+                mid = [
+                    w[0].x + (w[1].x - w[0].x) * t,
+                    w[0].y + (w[1].y - w[0].y) * t,
+                ];
                 break;
             }
             acc += seg;
@@ -2553,7 +3117,13 @@ fn nearest_point_on_contour(pts: &[Point], w: Point) -> ([f64; 2], f64) {
 /// phantom segment joining its two ends.
 fn nearest_point_on_path(pts: &[Point], w: Point, closed: bool) -> ([f64; 2], f64) {
     let n = pts.len();
-    let mut best = ([pts.first().map_or(0.0, |p| p.x), pts.first().map_or(0.0, |p| p.y)], f64::MAX);
+    let mut best = (
+        [
+            pts.first().map_or(0.0, |p| p.x),
+            pts.first().map_or(0.0, |p| p.y),
+        ],
+        f64::MAX,
+    );
     let last = if closed { n } else { n.saturating_sub(1) };
     for k in 0..last {
         let (a, b) = (pts[k], pts[(k + 1) % n]);
@@ -2729,6 +3299,11 @@ fn set_origin_index_value(setup: &mut Setup, from: u32, to: u32) {
 /// operations.
 fn empty_document(p: &JobParams) -> Document {
     Document::new(Setup {
+        id: 1,
+        frame: Default::default(),
+        material: String::new(),
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "Untitled".to_string(),
         heights: Heights::new(p.clearance, p.retract, p.top_of_stock),
         stock: Stock::BoundingBox {
@@ -2907,7 +3482,7 @@ mod tests {
         assert_eq!(app.open_dxf(PART_DXF, "part.dxf").unwrap(), 1);
         // Outside profile for the boundary + a hole op (drill/pocket, never an
         // inner profile) = 2 operations.
-        assert_eq!(app.document().setup.operations.len(), 2);
+        assert_eq!(app.document().setup().operations.len(), 2);
         assert_eq!(app.selection(), Selection::Operation(0));
         assert!(app.selected_operation().is_some());
     }
@@ -2978,7 +3553,7 @@ mod tests {
 
     fn op_ids(app: &AppController) -> Vec<u32> {
         app.document()
-            .setup
+            .setup()
             .operations
             .iter()
             .map(|o| o.id())
@@ -2989,7 +3564,8 @@ mod tests {
     fn stock_auto_fits_the_part_and_offsets_grow_it() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        let (bmin, bmax) = app.bounds_xy();
+        let (min3, max3) = app.setup_model_bounds();
+        let (bmin, bmax) = ([min3[0], min3[1]], [max3[0], max3[1]]);
 
         // Default stock snugly fits the part in XY (no offset) and hangs from the
         // top down to the deepest cut.
@@ -3034,10 +3610,7 @@ mod tests {
             vec![vec![0, 2]],
             "op 0 and its copy 2 are exact duplicates"
         );
-        assert_eq!(
-            app.duplicate_operation_ids(),
-            BTreeSet::from([0, 2])
-        );
+        assert_eq!(app.duplicate_operation_ids(), BTreeSet::from([0, 2]));
 
         // Excluding one twin removes it from output, so the pair no longer clashes.
         app.set_operation_excluded(2, true);
@@ -3054,7 +3627,10 @@ mod tests {
                 o.feed = 999.0;
             }
         });
-        assert!(app.duplicate_operation_groups().is_empty(), "different work");
+        assert!(
+            app.duplicate_operation_groups().is_empty(),
+            "different work"
+        );
     }
 
     #[test]
@@ -3106,14 +3682,18 @@ mod tests {
     fn new_operation_builds_each_kind_from_geometry() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        let (bmin, bmax) = app.bounds_xy();
+        let (min3, max3) = app.setup_model_bounds();
+        let (bmin, bmax) = ([min3[0], min3[1]], [max3[0], max3[1]]);
 
         // The convenience builder targets the first region's outer loop with no islands.
         app.new_operation(OpKind::Pocket);
         match app.selected_operation() {
             Some(Operation::Pocket(o)) => {
                 assert!(o.islands.is_empty(), "no islands by default");
-                assert!((0.0..1.0).contains(&o.clear.overlap), "a sane default overlap");
+                assert!(
+                    (0.0..1.0).contains(&o.clear.overlap),
+                    "a sane default overlap"
+                );
             }
             other => panic!("expected pocket, got {other:?}"),
         }
@@ -3253,7 +3833,8 @@ mod tests {
             OpKind::Chamfer,
         ] {
             assert!(
-                app.build_op(kind, LoopRef::open(0), &[], 1, None, None).is_none(),
+                app.build_op(kind, LoopRef::open(0), &[], 1, None, None)
+                    .is_none(),
                 "{kind:?} must refuse an open path"
             );
         }
@@ -3346,11 +3927,17 @@ mod tests {
             region: 0,
             part: LoopPart::Outer,
         };
-        let op = app.build_op(OpKind::Profile, picked, &[], 1, None, None).unwrap();
+        let op = app
+            .build_op(OpKind::Profile, picked, &[], 1, None, None)
+            .unwrap();
         app.replace_operation(target, op);
 
         let ids_after = op_ids(&app);
-        assert_eq!(ids_after.len(), ids_before.len(), "no operation added or lost");
+        assert_eq!(
+            ids_after.len(),
+            ids_before.len(),
+            "no operation added or lost"
+        );
         assert_eq!(
             ids_after.iter().position(|&x| x == target),
             Some(pos_before),
@@ -3460,7 +4047,11 @@ mod tests {
         match app.selected_operation() {
             Some(Operation::Chamfer(o)) => {
                 assert!(o.width > 0.0, "a default chamfer width");
-                assert_eq!(o.side, Side::Outside, "chamfers default to the outside edge");
+                assert_eq!(
+                    o.side,
+                    Side::Outside,
+                    "chamfers default to the outside edge"
+                );
             }
             other => panic!("expected chamfer, got {other:?}"),
         }
@@ -3557,9 +4148,9 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         app.edit_heights(|h| h.clearance = 12.0);
-        assert_eq!(app.document().setup.heights.clearance, 12.0);
+        assert_eq!(app.document().setup().heights.clearance, 12.0);
         assert!(app.undo());
-        assert_eq!(app.document().setup.heights.clearance, 5.0);
+        assert_eq!(app.document().setup().heights.clearance, 5.0);
     }
 
     #[test]
@@ -3599,7 +4190,10 @@ mod tests {
     fn cancelled_runs_cannot_export_or_reuse_the_previous_cached_program() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        assert_eq!(app.run(&CancelToken::new()).completion, JobCompletion::Complete);
+        assert_eq!(
+            app.run(&CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
         let original = app.export_nc().unwrap().to_string();
         assert!(app.exported_nc().is_some());
 
@@ -3607,11 +4201,17 @@ mod tests {
         token.cancel();
         let outcome = app.run(&token);
         assert_eq!(outcome.completion, JobCompletion::Cancelled);
-        assert!(!outcome.has_errors(), "cancellation is separate from diagnostic errors");
+        assert!(
+            !outcome.has_errors(),
+            "cancellation is separate from diagnostic errors"
+        );
         assert!(app.exported_nc().is_none());
         assert_eq!(app.export_nc(), Err(ExportError::Cancelled));
 
-        assert_eq!(app.run(&CancelToken::new()).completion, JobCompletion::Complete);
+        assert_eq!(
+            app.run(&CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
         assert_eq!(app.export_nc().unwrap(), original);
     }
 
@@ -3623,14 +4223,21 @@ mod tests {
         token.cancel();
         app.run(&token);
         let path = temp_path("cancelled.nc");
-        assert!(matches!(app.export_nc_to(&path),
-            Err(ExportToError::Export(ExportError::Cancelled))));
+        assert!(matches!(
+            app.export_nc_to(&path),
+            Err(ExportToError::Export(ExportError::Cancelled))
+        ));
         assert!(!path.exists());
 
         std::fs::write(&path, "previous verified program").unwrap();
-        assert!(matches!(app.export_nc_to(&path),
-            Err(ExportToError::Export(ExportError::Cancelled))));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous verified program");
+        assert!(matches!(
+            app.export_nc_to(&path),
+            Err(ExportToError::Export(ExportError::Cancelled))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "previous verified program"
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -3649,10 +4256,19 @@ mod tests {
             (JobCompletion::Failed, ExportError::HasErrors),
         ] {
             // A full-looking preview is not proof of successful completion.
-            app.outcome = Some(RunOutcome { completion, ..complete.clone() });
+            app.outcome = Some(RunOutcome {
+                completion,
+                ..complete.clone()
+            });
             assert_eq!(app.export_nc(), Err(expected));
-            assert!(matches!(app.export_nc_to(&path), Err(ExportToError::Export(_))));
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous verified program");
+            assert!(matches!(
+                app.export_nc_to(&path),
+                Err(ExportToError::Export(_))
+            ));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "previous verified program"
+            );
         }
         std::fs::remove_file(path).unwrap();
         assert_eq!(RunOutcome::default().completion, JobCompletion::Incomplete);
@@ -3661,7 +4277,10 @@ mod tests {
     #[test]
     fn a_completed_empty_job_is_distinct_from_a_cancelled_empty_job() {
         let mut app = AppController::new(machine());
-        assert_eq!(app.run(&CancelToken::new()).completion, JobCompletion::Complete);
+        assert_eq!(
+            app.run(&CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
         assert!(app.export_nc().is_ok());
         let token = CancelToken::new();
         token.cancel();
@@ -3676,7 +4295,10 @@ mod tests {
         let token = CancelToken::new();
         assert_eq!(app.run(&token).completion, JobCompletion::Complete);
         token.cancel();
-        assert!(app.export_nc().is_ok(), "completed results do not retain a live token");
+        assert!(
+            app.export_nc().is_ok(),
+            "completed results do not retain a live token"
+        );
     }
 
     #[test]
@@ -3719,23 +4341,23 @@ mod tests {
     fn add_and_delete_tool_are_undoable() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        assert_eq!(app.document().setup.tools.len(), 1);
+        assert_eq!(app.document().setup().tools.len(), 1);
 
         app.add_tool();
-        let tools = &app.document().setup.tools;
+        let tools = &app.document().setup().tools;
         assert_eq!(tools.len(), 2);
         // Numbered one past the highest existing tool, and selected.
         assert_eq!(tools[1].number, 2);
         assert_eq!(app.selection(), Selection::Tool(1));
 
         app.delete_tool(1);
-        assert_eq!(app.document().setup.tools.len(), 1);
+        assert_eq!(app.document().setup().tools.len(), 1);
 
         // Both mutations are single undo steps.
         assert!(app.undo()); // undo delete
-        assert_eq!(app.document().setup.tools.len(), 2);
+        assert_eq!(app.document().setup().tools.len(), 2);
         assert!(app.undo()); // undo add
-        assert_eq!(app.document().setup.tools.len(), 1);
+        assert_eq!(app.document().setup().tools.len(), 1);
     }
 
     #[test]
@@ -3743,7 +4365,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         app.edit_tool(0, |t| t.length = 42.0);
-        assert_eq!(app.document().setup.tools[0].length, 42.0);
+        assert_eq!(app.document().setup().tools[0].length, 42.0);
     }
 
     #[test]
@@ -3751,7 +4373,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         app.delete_tool(0);
-        assert!(app.document().setup.tools.is_empty());
+        assert!(app.document().setup().tools.is_empty());
         assert_eq!(app.selection(), Selection::Setup);
     }
 
@@ -3820,7 +4442,11 @@ mod tests {
         let own_machine = other.machine().clone();
         other.open_project(&path).unwrap();
 
-        assert_eq!(other.post_kind(), PostKind::Fanuc, "the local control stands");
+        assert_eq!(
+            other.post_kind(),
+            PostKind::Fanuc,
+            "the local control stands"
+        );
         assert_eq!(other.machine(), &own_machine, "and the local machine");
 
         // The file's answer survives as provenance, envelope included — it still has to
@@ -3890,7 +4516,11 @@ mod tests {
         app.set_post_kind(PostKind::Okuma);
 
         app.new_project();
-        assert_eq!(app.post_kind(), PostKind::Okuma, "a new project keeps your control");
+        assert_eq!(
+            app.post_kind(),
+            PostKind::Okuma,
+            "a new project keeps your control"
+        );
 
         let path = temp_path("keeps_post.ocam");
         app.set_post_kind(PostKind::Fanuc);
@@ -3941,8 +4571,12 @@ mod tests {
         }
         // Plurality, because "1 rapid moves" is the kind of thing that makes a warning
         // look unconsidered.
-        assert!(ExportError::RapidThroughStock(1).to_string().contains("1 rapid move would"));
-        assert!(ExportError::RapidThroughStock(2).to_string().contains("2 rapid moves would"));
+        assert!(ExportError::RapidThroughStock(1)
+            .to_string()
+            .contains("1 rapid move would"));
+        assert!(ExportError::RapidThroughStock(2)
+            .to_string()
+            .contains("2 rapid moves would"));
     }
 
     #[test]
@@ -3964,7 +4598,8 @@ mod tests {
         std::fs::write(&path, project.to_json().unwrap()).unwrap(); // untagged, on purpose
 
         app.new_project();
-        app.open_project(&path).expect("legacy untagged project must load");
+        app.open_project(&path)
+            .expect("legacy untagged project must load");
         assert!(!app.regions().is_empty(), "geometry came back");
         std::fs::remove_file(&path).ok();
     }
@@ -4015,16 +4650,16 @@ mod tests {
         // A real import brings in geometry only — no operations are fabricated
         // (unlike the bundled sample); selection falls back to the Setup.
         assert!(
-            app.document().setup.operations.is_empty(),
+            app.document().setup().operations.is_empty(),
             "import must not auto-create operations"
         );
         assert_eq!(app.selection(), Selection::Setup);
-        // Real imports also start with no embedded tools — tools arrive when ops
-        // are set up (picked from the library).
-        assert!(
-            app.document().setup.tools.is_empty(),
-            "import must not seed tools"
-        );
+        // Additive imports preserve the existing setup, including its starter tool.
+        assert_eq!(app.document().setup().tools.len(), 1);
+        assert!(app.undo());
+        assert!(app.regions().is_empty());
+        assert!(app.redo());
+        assert_eq!(app.regions().len(), n);
         std::fs::remove_file(&path).ok();
     }
 
@@ -4032,7 +4667,7 @@ mod tests {
     fn use_tool_embeds_dedupes_and_reports_used() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap(); // sample: seeds tool T1 + 2 ops
-        let base = app.document().setup.tools.len();
+        let base = app.document().setup().tools.len();
 
         // Embedding a brand-new tool adds it with a fresh number.
         let bit = Tool {
@@ -4044,7 +4679,7 @@ mod tests {
             ..Default::default()
         };
         let n1 = app.use_tool(bit);
-        assert_eq!(app.document().setup.tools.len(), base + 1);
+        assert_eq!(app.document().setup().tools.len(), base + 1);
         assert_ne!(
             n1, 99,
             "embedded number is project-local, not the library's"
@@ -4053,7 +4688,7 @@ mod tests {
         // Embedding the same geometry again reuses the number (no duplicate).
         let n2 = app.use_tool(bit);
         assert_eq!(n1, n2);
-        assert_eq!(app.document().setup.tools.len(), base + 1);
+        assert_eq!(app.document().setup().tools.len(), base + 1);
 
         // used_tools reflects only tools referenced by operations. The freshly
         // embedded tool isn't used by any op yet, so it must not appear.
@@ -4063,8 +4698,8 @@ mod tests {
 
         // Pruning drops the unreferenced embedded tool.
         app.prune_unused_tools();
-        assert_eq!(app.document().setup.tools.len(), base);
-        assert!(app.document().setup.tools.iter().all(|t| t.number != n1));
+        assert_eq!(app.document().setup().tools.len(), base);
+        assert!(app.document().setup().tools.iter().all(|t| t.number != n1));
     }
 
     #[test]
@@ -4315,7 +4950,11 @@ mod tests {
         );
         app.prune_unused_tools();
         assert!(
-            app.document().setup.tools.iter().any(|t| t.number == number),
+            app.document()
+                .setup()
+                .tools
+                .iter()
+                .any(|t| t.number == number),
             "pruning must not drop a tool an operation still references"
         );
     }
@@ -4324,7 +4963,8 @@ mod tests {
     fn snap_at_resolves_end_mid_and_nearest_by_priority() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        let close = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
+        let close =
+            |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
 
         // End near the (70,50) corner.
         let h = app.snap_at([69.4, 49.4], 1.5, &[SnapKind::End]).unwrap();
@@ -4337,13 +4977,19 @@ mod tests {
         assert!(close(h.point, [70.0, 30.0]), "mid {:?}", h.point);
 
         // Nearest on the right edge, away from corner and mid.
-        let h = app.snap_at([69.6, 20.0], 1.5, &[SnapKind::Nearest]).unwrap();
+        let h = app
+            .snap_at([69.6, 20.0], 1.5, &[SnapKind::Nearest])
+            .unwrap();
         assert_eq!(h.kind, SnapKind::Nearest);
         assert!(close(h.point, [70.0, 20.0]), "nearest {:?}", h.point);
 
         // Priority: at a corner with all on, End beats Mid/Nearest.
         let h = app
-            .snap_at([69.6, 49.6], 1.5, &[SnapKind::End, SnapKind::Mid, SnapKind::Nearest])
+            .snap_at(
+                [69.6, 49.6],
+                1.5,
+                &[SnapKind::End, SnapKind::Mid, SnapKind::Nearest],
+            )
             .unwrap();
         assert_eq!(h.kind, SnapKind::End);
 
@@ -4360,7 +5006,9 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         // The hole (centre 40,30, r5) → +X quadrant at (45,30).
-        let h = app.snap_at([44.6, 30.0], 1.5, &[SnapKind::Quadrant]).unwrap();
+        let h = app
+            .snap_at([44.6, 30.0], 1.5, &[SnapKind::Quadrant])
+            .unwrap();
         assert_eq!(h.kind, SnapKind::Quadrant);
         assert!(
             (h.point[0] - 45.0).abs() < 0.1 && (h.point[1] - 30.0).abs() < 0.1,
@@ -4368,7 +5016,9 @@ mod tests {
             h.point
         );
         // The rectangle has corners ⇒ it is not treated as a circle: no quadrant.
-        assert!(app.snap_at([69.5, 30.0], 1.5, &[SnapKind::Quadrant]).is_none());
+        assert!(app
+            .snap_at([69.5, 30.0], 1.5, &[SnapKind::Quadrant])
+            .is_none());
     }
 
     #[test]
@@ -4393,7 +5043,10 @@ mod tests {
             Some(Operation::Drill(o)) => {
                 assert_eq!(o.points.len(), 1);
                 let c = o.points[0];
-                assert!((c[0] - 40.0).abs() < 0.1 && (c[1] - 30.0).abs() < 0.1, "centre {c:?}");
+                assert!(
+                    (c[0] - 40.0).abs() < 0.1 && (c[1] - 30.0).abs() < 0.1,
+                    "centre {c:?}"
+                );
             }
             other => panic!("expected a drill, got {other:?}"),
         }
@@ -4410,7 +5063,11 @@ mod tests {
         app.add_origin();
         assert_eq!(app.origin_indices(), vec![1, 2, 3]);
         app.delete_origin(2);
-        assert_eq!(app.origin_indices(), vec![1, 3], "delete removes just that origin");
+        assert_eq!(
+            app.origin_indices(),
+            vec![1, 3],
+            "delete removes just that origin"
+        );
     }
 
     #[test]
@@ -4429,10 +5086,10 @@ mod tests {
         // One of the operations the import seeded, so it carries real geometry and
         // actually posts. A freshly created op is pending until its geometry is picked
         // and would export nothing to inspect.
-        let id = app.document().setup.operations[0].id();
+        let id = app.document().setup().operations[0].id();
         let offset_of = |app: &AppController, id: u32| {
             app.document()
-                .setup
+                .setup()
                 .operations
                 .iter()
                 .find(|o| o.id() == id)
@@ -4478,7 +5135,7 @@ mod tests {
         let id = app.selected_operation().expect("an operation").id();
         let offset_of = |app: &AppController, id: u32| {
             app.document()
-                .setup
+                .setup()
                 .operations
                 .iter()
                 .find(|o| o.id() == id)
@@ -4532,7 +5189,10 @@ mod tests {
         match app.selected_operation() {
             Some(Operation::Profile(o)) => {
                 let s = o.start.expect("mid snap sets a start");
-                assert!((s[0] - 70.0).abs() < 0.05 && (s[1] - 30.0).abs() < 0.05, "start {s:?}");
+                assert!(
+                    (s[0] - 70.0).abs() < 0.05 && (s[1] - 30.0).abs() < 0.05,
+                    "start {s:?}"
+                );
             }
             other => panic!("expected a profile, got {other:?}"),
         }
@@ -4549,7 +5209,7 @@ mod tests {
         // picked from the library during setup.
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         app.delete_tool(0); // strip the sample's seeded tool
-        assert!(app.document().setup.tools.is_empty());
+        assert!(app.document().setup().tools.is_empty());
         app.begin_operation(OpKind::Profile);
         assert!(app.pending_op().is_some(), "no tool is fine now");
     }
@@ -4582,7 +5242,11 @@ mod tests {
             app.add_origin(); // origins 2..=7
         }
         app.set_post_kind(PostKind::Haas);
-        assert_eq!(app.datum_label(6).as_deref(), Some("G59"), "the last ISO offset");
+        assert_eq!(
+            app.datum_label(6).as_deref(),
+            Some("G59"),
+            "the last ISO offset"
+        );
         assert_eq!(app.datum_label(7), None, "and nothing past it");
         app.set_post_kind(PostKind::Okuma);
         assert_eq!(app.datum_label(7).as_deref(), Some("H7"));

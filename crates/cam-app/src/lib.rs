@@ -11,6 +11,8 @@
 
 mod config;
 mod controller;
+mod import_jobs;
+mod cad_operations;
 // Where per-user files live. One resolver, shared by the tool library and the
 // settings file — two copies of a platform convention drift silently.
 mod machines;
@@ -24,6 +26,7 @@ mod settings;
 // the ungated `project` module reference `ToolLibrary` for the `OcamFile` union.
 mod tool_library;
 
+pub use cad_operations::CadImportPreview;
 pub use controller::{
     op_accepts_open_paths, op_selects_circles, op_takes_islands, AppController, CuttingData,
     ExportError, ExportToError,

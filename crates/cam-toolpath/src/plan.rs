@@ -72,7 +72,7 @@ fn build_job_with_compute(
     cancel: &CancelToken,
     mut compute: impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
 ) -> JobResult {
-    let setup = &doc.setup;
+    let setup = doc.setup();
     let env = JobEnv {
         heights: setup.heights,
         tools: &setup.tools,
@@ -114,7 +114,36 @@ fn build_job_with_compute(
             completion = JobCompletion::Cancelled;
             break;
         }
-        let result = compute(operation, &env, cancel);
+        let result = if doc.cad_linked_operations.contains(&operation.id())
+            && !doc.geometry.bindings.contains_key(&operation.id())
+        {
+            StrategyResult {
+                diagnostics: vec![Diagnostic::error(
+                    "Linked CAD geometry binding is missing; reselect the source geometry before planning",
+                )],
+                ..Default::default()
+            }
+        } else if let Some(binding) = doc.geometry.bindings.get(&operation.id()) {
+            match &binding.status {
+                cam_model::ResolutionStatus::NeedsReselection { reason } => StrategyResult {
+                    diagnostics: vec![Diagnostic::error(format!("Needs reselection: {reason}"))],
+                    ..Default::default()
+                },
+                cam_model::ResolutionStatus::Resolved => {
+                    if !binding.selected.iter().all(|r| doc.geometry.entity_exists(r))
+                        || binding.resolved_fingerprint.as_ref() != Some(&doc.geometry.binding_fingerprint(binding)) {
+                        StrategyResult {
+                            diagnostics: vec![Diagnostic::error("Linked CAD geometry has no matching resolved snapshot; resolve it before planning")],
+                            ..Default::default()
+                        }
+                    } else {
+                        compute_at_heights(operation, &env, binding.effective_heights(), cancel, &mut compute)
+                    }
+                },
+            }
+        } else {
+            compute(operation, &env, cancel)
+        };
         let failed = result.has_errors();
         let cancelled = result.cancelled || cancel.is_cancelled();
         // Stamp ownership here: the planner knows which operation produced these,
@@ -212,6 +241,65 @@ fn build_job_with_compute(
         }
     }
     JobResult { program, diagnostics, completion }
+}
+
+/// Adapt the legacy strategies to an explicit absolute cutting interval. Pocket
+/// and profile compute in a local Z frame so reach checks measure the physical
+/// interval, even when the imported floor lies above world zero. Posting still
+/// applies the work datum exactly once.
+fn compute_at_heights(
+    operation: &Operation,
+    env: &JobEnv,
+    heights: cam_model::CuttingHeights,
+    cancel: &CancelToken,
+    compute: &mut impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
+) -> StrategyResult {
+    if let Err(reason) = heights.validate() {
+        return StrategyResult {
+            diagnostics: vec![Diagnostic::error(reason)],
+            ..Default::default()
+        };
+    }
+    if env.heights.clearance <= heights.top || env.heights.retract <= heights.top {
+        return StrategyResult {
+            diagnostics: vec![Diagnostic::error(
+                "Clearance and retract must be above the linked cutting top; review setup heights",
+            )],
+            ..Default::default()
+        };
+    }
+    let mut op = operation.clone();
+    let depth = heights.top - heights.bottom;
+    let shift = match &mut op {
+        Operation::Pocket(p) => { p.depth = depth; heights.top },
+        Operation::Profile(p) => { p.depth = depth; heights.top },
+        Operation::Drill(p) => {
+            p.depth = depth;
+            p.start_offset = 0.0;
+            0.0
+        },
+        Operation::Face(p) => { p.depth = depth; p.start_offset = heights.top; 0.0 },
+        _ => return StrategyResult {
+            diagnostics: vec![Diagnostic::error("This operation does not support linked CAD geometry")],
+            ..Default::default()
+        },
+    };
+    let local = JobEnv {
+        heights: cam_model::Heights::new(
+            env.heights.clearance - shift, env.heights.retract - shift,
+            if shift != 0.0 || matches!(op, Operation::Pocket(_) | Operation::Profile(_)) {
+                0.0
+            } else if matches!(op, Operation::Drill(_)) { heights.top } else { env.heights.top_of_stock },
+        ),
+        tools: env.tools,
+        // The existing facing strategy sweeps a rectangle. Its resolver only
+        // certifies whole-body rectangular top faces; use that selected extent.
+        stock: if matches!(op, Operation::Face(_)) { None } else { env.stock },
+        spindle: env.spindle,
+    };
+    let mut result = compute(&op, &local, cancel);
+    if shift != 0.0 { result.program = result.program.translated([0.0, 0.0, shift]); }
+    result
 }
 
 /// One operation, computed and ready to be emitted. The fragment's coordinates are in
@@ -423,6 +511,11 @@ mod tests {
 
     fn document(operations: u32) -> Document {
         Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
             name: "completion test".into(),
             heights: Heights::new(5.0, 2.0, 0.0),
             stock: Stock::BoundingBox {
@@ -462,6 +555,24 @@ mod tests {
             matches!(step, Step::Linear { tag, .. }
                 if tag.op_id == op && tag.kind == MoveKind::Cutting)
         })
+    }
+
+    #[test]
+    fn linked_operation_without_binding_fails_instead_of_using_cached_contour() {
+        let mut doc = document(1);
+        doc.cad_linked_operations.insert(0);
+        let job = build_job_with_compute(
+            &doc,
+            1000.0,
+            SpindleDir::Cw,
+            None,
+            50.0,
+            &CancelToken::new(),
+            |op, _, _| fragment(op),
+        );
+        assert_eq!(job.completion, JobCompletion::Failed);
+        assert!(!contains_cut(&job, 0));
+        assert!(job.diagnostics.iter().any(|d| d.message.contains("binding is missing")));
     }
 
     #[test]

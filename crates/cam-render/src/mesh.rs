@@ -17,6 +17,8 @@
 pub struct MeshVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    /// Linear RGBA surface colour (also used for semantic CAD highlights).
+    pub color: [f32; 4],
 }
 
 /// Interleave parallel `positions` and `normals` (as produced by `cam-sim`'s
@@ -27,7 +29,11 @@ pub fn mesh_vertices(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<MeshVe
     positions
         .iter()
         .zip(normals)
-        .map(|(&position, &normal)| MeshVertex { position, normal })
+        .map(|(&position, &normal)| MeshVertex {
+            position,
+            normal,
+            color: [0.55, 0.58, 0.63, 1.0],
+        })
         .collect()
 }
 

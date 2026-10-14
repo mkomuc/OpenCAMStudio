@@ -50,6 +50,11 @@ fn profile_square(id: u32, chain: Contour) -> ProfileOp {
 
 fn setup(operations: Vec<Operation>) -> Document {
     Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "verify".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -225,6 +230,11 @@ fn a_bad_setup_that_rapids_low_is_caught() {
     // hide it. (A single-loop op only *lifts* vertically at the low plane, which is safe:
     // the tool retreats up through the column it cut — so the hazard is the lateral move.)
     let doc = Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "unsafe".into(),
         heights: Heights::new(-1.0, -1.0, 0.0), // clearance below stock top!
         stock: Stock::BoundingBox {

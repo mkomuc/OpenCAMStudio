@@ -64,6 +64,13 @@ fn orthographic(l: f32, r: f32, b: f32, t: f32, z_near: f32, z_far: f32) -> [[f3
     ]
 }
 
+/// A normalized, forward world-space pick ray in millimetres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ray {
+    pub origin: [f64; 3],
+    pub direction: [f64; 3],
+}
+
 /// An orthographic orbit camera around a target point.
 ///
 /// Orientation is a free **world→view rotation** matrix (`orient`) — not
@@ -199,6 +206,35 @@ impl OrbitCamera {
         mul(&proj, &view)
     }
 
+    /// World-space ray from the near plane through a viewport point. The
+    /// orthographic direction is shared by every pixel, including rotated views.
+    pub fn pick_ray(&self, u: f32, v: f32, aspect: f32) -> Ray {
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        };
+        let half = self.half_height();
+        let (hw, hh) = if aspect >= 1.0 {
+            (half * aspect, half)
+        } else {
+            (half, half / aspect)
+        };
+        let right = self.right();
+        let up = self.up();
+        let direction = [
+            -self.orient[0][2] as f64,
+            -self.orient[1][2] as f64,
+            -self.orient[2][2] as f64,
+        ];
+        let near_distance = 1.5 * self.depth_radius.max(self.radius);
+        let origin = std::array::from_fn(|i| {
+            (self.target[i] + self.pan[i] + u * hw * right[i] + v * hh * up[i]) as f64
+                - direction[i] * near_distance as f64
+        });
+        Ray { origin, direction }
+    }
+
     /// Unproject viewport NDC `(u, v)` — each in `[-1, 1]`, `+v` up — to the world
     /// `(x, y)` where the orthographic pick ray meets the plane `z = plane_z`.
     /// `aspect` is width / height. Returns `None` only when the view is edge-on to
@@ -330,6 +366,28 @@ fn transform(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_ray_matches_projection_in_portrait_rotated_panned_and_zoomed_views() {
+        let mut camera = OrbitCamera::framed([-3.0, -5.0, -2.0], [7.0, 9.0, 8.0]);
+        camera.orient = orientation(0.7, 1.1);
+        camera.zoom = 1.3;
+        camera.pan = [2.0, -4.0, 1.0];
+        for aspect in [0.5, 1.0, 2.0] {
+            for (u, v) in [(-0.7, 0.3), (0.0, 0.0), (0.6, -0.8)] {
+                let ray = camera.pick_ray(u, v, aspect);
+                let point = std::array::from_fn(|i| {
+                    (ray.origin[i] + ray.direction[i] * camera.depth_radius as f64) as f32
+                });
+                let clip = transform(&camera.view_proj(aspect), point);
+                assert!(
+                    (clip[0] - u).abs() < 1e-5 && (clip[1] - v).abs() < 1e-5,
+                    "{clip:?} vs {u},{v}"
+                );
+                assert!((ray.direction.iter().map(|v| v * v).sum::<f64>() - 1.0).abs() < 1e-6);
+            }
+        }
+    }
 
     #[test]
     fn centre_of_scene_maps_to_clip_origin() {

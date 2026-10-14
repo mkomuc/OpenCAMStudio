@@ -66,6 +66,11 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
     }
 
     let doc = Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "part.dxf".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {

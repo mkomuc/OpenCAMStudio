@@ -1,0 +1,21 @@
+[package]
+name = "cam-kernel"
+description = "Owned optional OCCT STEP boundary for OpenCAMStudio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+occt = []
+
+[dependencies]
+cam-model = { path = "../cam-model" }
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+cc = "1"

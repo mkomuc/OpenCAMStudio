@@ -125,6 +125,16 @@ pub struct LineRenderer {
 impl LineRenderer {
     /// Create the renderer for a surface of the given `format`.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::with_depth(device, format, false)
+    }
+
+    /// Draw CAD outlines against the solid depth buffer while keeping toolpaths
+    /// on their existing overlay renderer.
+    pub fn new_depth_tested(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::with_depth(device, format, true)
+    }
+
+    fn with_depth(device: &wgpu::Device, format: wgpu::TextureFormat, depth_tested: bool) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cam-render line shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -178,7 +188,19 @@ impl LineRenderer {
                 topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
-            depth_stencil: Some(line_depth()),
+            depth_stencil: Some(if depth_tested {
+                wgpu::DepthStencilState {
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -1.0,
+                        clamp: 0.0,
+                    },
+                    ..line_depth()
+                }
+            } else {
+                line_depth()
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -232,13 +254,15 @@ struct Camera { view_proj: mat4x4<f32> };
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
 };
 
 @vertex
-fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> VsOut {
+fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) color: vec4<f32>) -> VsOut {
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(position, 1.0);
     out.normal = normal;
+    out.color = color;
     return out;
 }
 
@@ -250,9 +274,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let light = normalize(vec3<f32>(0.35, 0.45, 0.82));
     let n = normalize(in.normal);
     let lambert = max(dot(n, light), 0.0);
-    let base = vec3<f32>(0.55, 0.58, 0.63); // machined-steel grey
+    let base = in.color.rgb;
     let shade = base * (0.35 + 0.65 * lambert);
-    return vec4<f32>(shade, 1.0);
+    return vec4<f32>(shade, in.color.a);
 }
 "#;
 
@@ -297,6 +321,11 @@ impl MeshRenderer {
                     offset: 12,
                     shader_location: 1,
                 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 24,
+                    shader_location: 2,
+                },
             ],
         };
 
@@ -322,7 +351,8 @@ impl MeshRenderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // Open shells remain inspectable from either side, matching CPU picking.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(mesh_depth()),

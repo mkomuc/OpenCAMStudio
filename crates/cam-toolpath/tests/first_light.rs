@@ -92,6 +92,11 @@ fn document() -> Document {
         plunge: Plunge::Straight,
     };
     Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "first light".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -730,6 +735,11 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         ..Default::default()
     };
     let doc = Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "lead_helix".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -849,6 +859,11 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
         }));
     }
     Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "carve".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {

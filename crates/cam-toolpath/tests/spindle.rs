@@ -44,6 +44,11 @@ fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
 
 fn doc(ops: Vec<Operation>) -> Document {
     Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "spindle".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {

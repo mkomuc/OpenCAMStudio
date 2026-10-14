@@ -378,6 +378,11 @@ mod tests {
             })
         };
         let mut setup = Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
             name: "s".into(),
             heights: heights(),
             stock: Stock::BoundingBox {

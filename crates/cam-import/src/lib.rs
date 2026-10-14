@@ -267,3 +267,42 @@ mod entity_inventory_tests {
         assert!(skipped.is_empty(), "no unsupported entities skipped");
     }
 }
+
+/// Drawing import remains independent of the optional solid backend.
+#[derive(Clone, Debug)]
+pub enum GeometryImport {
+    Drawing(Import),
+    Solid(Box<cam_kernel::SolidImport>),
+}
+#[derive(Clone, Debug)]
+pub enum GeometryImportError {
+    Drawing(ImportError),
+    Solid(cam_kernel::KernelError),
+    UnsupportedFormat(String),
+}
+impl fmt::Display for GeometryImportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Drawing(e) => e.fmt(f),
+            Self::Solid(e) => e.fmt(f),
+            Self::UnsupportedFormat(ext) => write!(f, "unsupported CAD format: {ext}"),
+        }
+    }
+}
+impl std::error::Error for GeometryImportError {}
+pub use cam_kernel::SolidImportOptions;
+
+/// Strict format dispatch: STEP never falls through to the drawing reader.
+pub fn read_geometry_file(
+    path: impl AsRef<Path>,
+    solid_options: &SolidImportOptions,
+    drawing_options: &ImportOptions,
+) -> Result<GeometryImport, GeometryImportError> {
+    let path = path.as_ref();
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "dxf" | "dwg" => read_cad_file(path, drawing_options).map(GeometryImport::Drawing).map_err(GeometryImportError::Drawing),
+        "step" | "stp" => cam_kernel::read_step_file(path, solid_options).map(|solid| GeometryImport::Solid(Box::new(solid))).map_err(GeometryImportError::Solid),
+        _ => Err(GeometryImportError::UnsupportedFormat(ext)),
+    }
+}

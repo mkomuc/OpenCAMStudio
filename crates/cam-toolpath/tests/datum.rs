@@ -39,7 +39,7 @@ fn two_origin_doc() -> Document {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 2, 2),
     ]);
-    d.setup.extra_origins.push(Origin {
+    d.setups[0].extra_origins.push(Origin {
         index: 2,
         position: [50.0, 0.0, 0.0],
     });
@@ -57,7 +57,7 @@ fn nc(d: &Document, kind: PostKind) -> String {
         machine().envelope.max.z,
         &CancelToken::new(),
     );
-    let setup = &d.setup;
+    let setup = d.setup();
     let translated = program.translated_per_datum(|idx| {
         let o = setup.origin_position(idx);
         [-o[0], -o[1], -o[2]]
@@ -90,7 +90,7 @@ fn every_shutdown_stops_the_spindle_first_then_coolant_then_lifts() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(20.0, 20.0, 60.0, 40.0), Side::Outside, 1, 2),
     ]);
-    d.setup.extra_origins = vec![cam_model::Origin {
+    d.setups[0].extra_origins = vec![cam_model::Origin {
         index: 2,
         position: [0.0, 0.0, 0.0],
     }];
@@ -130,7 +130,7 @@ fn a_tool_change_height_below_clearance_is_raised_and_reported() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 2, 1),
     ]);
-    let clearance = d.setup.heights.clearance;
+    let clearance = d.setups[0].heights.clearance;
     // Well below the clearance plane.
     let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         &d,
@@ -342,6 +342,11 @@ fn tool(number: u32) -> Tool {
 
 fn doc(ops: Vec<Operation>) -> Document {
     Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "datum".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {

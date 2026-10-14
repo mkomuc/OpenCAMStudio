@@ -66,6 +66,11 @@ fn end_mill(number: u32, diameter: f64) -> Tool {
 
 fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
     Document::new(Setup {
+            id: 0,
+            frame: Default::default(),
+            material: String::new(),
+            model_instances: Vec::new(),
+            program_name: String::new(),
         name: "clearing".into(),
         heights: Heights::new(CLEARANCE, RETRACT, TOP),
         stock: Stock::BoundingBox {
@@ -288,7 +293,7 @@ fn a_ramped_clearing_entry_never_drops_vertically_and_re_machines_its_ramp() {
     use cam_model::Plunge;
 
     let mut d = pocket_doc();
-    if let cam_model::Operation::Pocket(p) = &mut d.setup.operations[0] {
+    if let cam_model::Operation::Pocket(p) = &mut d.setups[0].operations[0] {
         p.clear.plunge = Plunge::Ramp { angle_deg: 5.0 };
     }
     let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
@@ -417,7 +422,7 @@ fn a_deep_pocket_stays_safe_at_every_level() {
     // Many levels, so the property is exercised against the *re-entries* too, not just
     // the single first approach.
     let mut doc = pocket_doc();
-    if let Operation::Pocket(p) = &mut doc.setup.operations[0] {
+    if let Operation::Pocket(p) = &mut doc.setups[0].operations[0] {
         p.depth = 6.0;
         p.clear.stepdown = 0.5;
     }
@@ -461,7 +466,7 @@ fn facing_enters_beyond_the_stock_edge() {
 fn an_adaptively_cleared_island_pocket_simulates_clean() {
     use cam_sim::{simulate, SimOptions, SimTool, ToolProfile};
 
-    let mut op = match pocket_doc().setup.operations[0].clone() {
+    let mut op = match pocket_doc().setups[0].operations[0].clone() {
         Operation::Pocket(p) => p,
         other => panic!("expected a pocket, got {other:?}"),
     };
@@ -510,7 +515,7 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
 /// safe.
 #[test]
 fn a_steered_clear_traverses_the_stock_it_has_already_removed() {
-    let mut op = match pocket_doc().setup.operations[0].clone() {
+    let mut op = match pocket_doc().setups[0].operations[0].clone() {
         Operation::Pocket(p) => p,
         other => panic!("expected a pocket, got {other:?}"),
     };
@@ -583,7 +588,7 @@ fn a_ramped_entry_flies_its_arc_lead_in_as_one_arc() {
     use cam_model::{Lead, Plunge};
 
     let mut d = pocket_doc();
-    if let cam_model::Operation::Pocket(p) = &mut d.setup.operations[0] {
+    if let cam_model::Operation::Pocket(p) = &mut d.setups[0].operations[0] {
         p.clear.plunge = Plunge::Ramp { angle_deg: 5.0 };
         p.clear.lead_in = Lead::Arc { radius: 3.0 };
         p.clear.lead_out = Lead::Arc { radius: 3.0 };

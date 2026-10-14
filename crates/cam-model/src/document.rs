@@ -68,7 +68,10 @@ use crate::Tool;
 ///     an export showed seventeen straight plunges up to 3 mm deep). Additive and
 ///     [`Plunge::Straight`] by default, which is precisely what every existing carve
 ///     already does, so the step is an identity and no saved carve changes.
-pub const SCHEMA_VERSION: u32 = 13;
+/// v14: persistent CAD assets, exact topology snapshots, instances and operation
+/// bindings. Legacy operations retain their explicit embedded geometry.
+/// v15: projects contain independently framed setups; old single setups are wrapped.
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// The safety planes for a setup, all **absolute Z in millimetres**. By
 /// convention WCS Z0 is the top of stock, so `top_of_stock` is usually `0.0`.
@@ -113,6 +116,10 @@ pub enum Stock {
         top: f64,
         thickness: f64,
     },
+    /// A fixed-size box positioned against the model bounds on each axis.
+    FixedBox { size: [f64; 3], model_position: [f64; 3] },
+    /// A box grown independently on the negative and positive side of each axis.
+    RelativeBox { offsets: [[f64; 3]; 2] },
 }
 
 impl Stock {
@@ -127,12 +134,27 @@ impl Stock {
                 top,
                 thickness,
             } => (
-                [
-                    min_xy[0] - x_offset,
-                    min_xy[1] - y_offset,
-                    top - thickness,
-                ],
+                [min_xy[0] - x_offset, min_xy[1] - y_offset, top - thickness],
                 [max_xy[0] + x_offset, max_xy[1] + y_offset, top],
+            ),
+            _ => self.resolve_bounds([min_xy[0], min_xy[1], 0.0], [max_xy[0], max_xy[1], 0.0]),
+        }
+    }
+
+    /// Resolve stock against all three model bounds in setup coordinates.
+    pub fn resolve_bounds(&self, min: [f64; 3], max: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+        match *self {
+            Self::BoundingBox { x_offset, y_offset, top, thickness } => (
+                [min[0] - x_offset, min[1] - y_offset, top - thickness],
+                [max[0] + x_offset, max[1] + y_offset, top],
+            ),
+            Self::FixedBox { size, model_position } => {
+                let lo = std::array::from_fn(|i| min[i] - model_position[i] * (size[i] - (max[i] - min[i])));
+                (lo, std::array::from_fn(|i| lo[i] + size[i]))
+            }
+            Self::RelativeBox { offsets } => (
+                std::array::from_fn(|i| min[i] - offsets[0][i]),
+                std::array::from_fn(|i| max[i] + offsets[1][i]),
             ),
         }
     }
@@ -1182,6 +1204,21 @@ pub struct Origin {
 /// ordered operations performed in it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Setup {
+    /// Stable identity within the document.
+    #[serde(default)]
+    pub id: u64,
+    /// Setup orientation relative to shared model coordinates.
+    #[serde(default)]
+    pub frame: crate::SetupFrame,
+    /// Material name for the blank.
+    #[serde(default)]
+    pub material: String,
+    /// Model instance identities included in machining for this setup.
+    #[serde(default)]
+    pub model_instances: Vec<u64>,
+    /// NC program name for this setup.
+    #[serde(default)]
+    pub program_name: String,
     /// Human-readable name.
     pub name: String,
     /// Safety planes.
@@ -1263,23 +1300,60 @@ fn default_origin_index() -> u32 {
     1
 }
 
-/// The top-level document: a schema version and a setup.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// The top-level document: shared geometry and an ordered collection of setups.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Document {
     /// Schema version this document conforms to.
     pub schema_version: u32,
-    /// The setup.
-    pub setup: Setup,
+    /// Independent physical workholding setups, in browser order.
+    #[serde(default)]
+    pub setups: Vec<Setup>,
+    /// Session-only active setup. It is intentionally omitted from project files.
+    #[serde(skip)]
+    pub active_setup_id: u64,
+    /// Self-contained imported geometry and persistent operation selections.
+    #[serde(default)]
+    pub geometry: crate::GeometryState,
+    /// Operation IDs whose cutting geometry is linked to persistent CAD topology.
+    /// This remains separate from the binding map so a missing binding cannot
+    /// silently turn a linked operation into an explicit-contour operation.
+    #[serde(default)]
+    pub cad_linked_operations: std::collections::BTreeSet<u32>,
+}
+
+// Active setup is session/view state: it is intentionally omitted from the wire
+// format and therefore must not make otherwise identical saved documents unequal.
+impl PartialEq for Document {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.setups == other.setups
+            && self.geometry == other.geometry
+            && self.cad_linked_operations == other.cad_linked_operations
+    }
 }
 
 impl Document {
     /// Wrap a setup in a document stamped with the current [`SCHEMA_VERSION`].
     pub fn new(setup: Setup) -> Self {
+        let mut setup = setup;
+        if setup.id == 0 { setup.id = 1; }
         Self {
             schema_version: SCHEMA_VERSION,
-            setup,
+            active_setup_id: setup.id,
+            setups: vec![setup],
+            geometry: crate::GeometryState::default(),
+            cad_linked_operations: Default::default(),
         }
     }
+    pub fn setup(&self) -> &Setup {
+        self.setups.iter().find(|s| s.id == self.active_setup_id).or_else(|| self.setups.first()).expect("document must contain a setup")
+    }
+    pub fn setup_mut(&mut self) -> &mut Setup {
+        let id = self.active_setup_id;
+        let index = self.setups.iter().position(|s| s.id == id).unwrap_or(0);
+        self.setups.get_mut(index).expect("document must contain a setup")
+    }
+    pub fn next_setup_id(&self) -> u64 { self.setups.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1).max(1) }
 }
 
 #[cfg(test)]
@@ -1323,7 +1397,10 @@ mod tests {
             work_offset: 1,
             id: 3,
             tool: 4,
-            clear: clear_tool.map(|t| CarveClearing { tool: t, params: ClearParams::default() }),
+            clear: clear_tool.map(|t| CarveClearing {
+                tool: t,
+                params: ClearParams::default(),
+            }),
             boundary: Contour::new(vec![
                 Point::new(0.0, 0.0),
                 Point::new(10.0, 0.0),
@@ -1389,7 +1466,10 @@ mod tests {
         // Pick near the right edge (vertical) → Y, even though it is the short side.
         assert_eq!(Axis::along_edge_at(&rect, Point::new(59.5, 20.0)), Axis::Y);
         // Degenerate input falls back to X.
-        assert_eq!(Axis::along_edge_at(&[Point::new(1.0, 1.0)], Point::new(0.0, 0.0)), Axis::X);
+        assert_eq!(
+            Axis::along_edge_at(&[Point::new(1.0, 1.0)], Point::new(0.0, 0.0)),
+            Axis::X
+        );
     }
 
     #[test]
@@ -1430,8 +1510,21 @@ mod tests {
             thickness: 20.0,
         };
         let (min, max) = stock.resolve([10.0, 10.0], [70.0, 50.0]);
-        assert_eq!(min, [8.0, 5.0, -20.0], "grown per-axis, bottom = top - thickness");
+        assert_eq!(
+            min,
+            [8.0, 5.0, -20.0],
+            "grown per-axis, bottom = top - thickness"
+        );
         assert_eq!(max, [72.0, 55.0, 0.0]);
+    }
+
+    #[test]
+    fn fixed_and_relative_stock_resolve_all_three_axes() {
+        let bounds=([10.0,20.0,30.0],[40.0,60.0,50.0]);
+        let fixed=Stock::FixedBox{size:[50.0,60.0,40.0],model_position:[0.5,0.0,1.0]};
+        assert_eq!(fixed.resolve_bounds(bounds.0,bounds.1),([-0.0,20.0,10.0],[50.0,80.0,50.0]));
+        let relative=Stock::RelativeBox{offsets:[[1.0,2.0,3.0],[4.0,5.0,6.0]]};
+        assert_eq!(relative.resolve_bounds(bounds.0,bounds.1),([9.0,18.0,27.0],[44.0,65.0,56.0]));
     }
 
     #[test]

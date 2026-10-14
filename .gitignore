@@ -1,8 +1,14 @@
 # Build output
 /target
 
+# Machine-local native CAD SDK and Cargo environment configuration.
+/.local/
+/.cargo/config.toml
+
 # Backups / editor cruft
 **/*.rs.bk
 *.pdb
 
 # Cargo.lock IS committed — this is an application workspace.
+
+/screenshots

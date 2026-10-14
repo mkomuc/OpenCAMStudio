@@ -39,6 +39,12 @@ to export.*
   a carved region's islands (the counters of letters) come from the drawing's own
   nesting rather than being clicked one by one;
   AutoCAD-style object snaps (end / mid / quadrant / nearest) when picking.
+- **STEP feature selection (optional CAD build)** — background import and unit/
+  dimension preview, shaded bodies with face/edge/loop picking, and linked Pocket,
+  Drill, Profile and Face operations in the qualified fixed-axis subset. Geometry
+  links, height overrides and model replacement/reselection survive `.ocam` saves
+  and undo. Requires OCCT 7.9.3 and `--features gui,occt`; see the
+  [native build and qualification notes](docs/cad-import-implementation.md).
 - **Tooling** — a cross-project tool library with every cutter kind fully
   characterised: square / ball-nose / rounded-edge end mills, drill, V-bit,
   chamfer mill, face mill (shell mill), and single-profile / full-form thread
