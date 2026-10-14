@@ -99,7 +99,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "docs/high-level-functions.md",
+                "file": "docs/screenshot.png",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -118,7 +118,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "docs/high-level-functions.md",
+                "file": "docs/screenshot.png",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
@@ -161,7 +161,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "docs/high-level-functions.md",
+                "file": "docs/screenshot.png",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
@@ -190,8 +190,29 @@
   },
   "active": "15184077c00da11e",
   "lastOpenFiles": [
-    "docs/multi-setup-workflow-ui.md",
+    "Pasted image 20261014143248.png",
+    "Pasted image 20261014142719.png",
+    "Pasted image 20261014142633.png",
+    "Pasted image 20261014142545.png",
+    "Pasted image 20261014142358.png",
+    "Pasted image 20261014142246.png",
+    "docs/implementation-plan.md",
+    "docs/tool-library-implementation-reference.md",
+    "screenshots/Bildschirmfoto 2026-10-13 um 18.40.37.png",
+    "screenshots/Bildschirmfoto 2026-10-13 um 18.40.14.png",
     "docs/high-level-functions.md",
-    "docs/tool-library-implementation-reference.md"
+    "screenshots/tool-lib/Bildschirmfoto 2026-10-14 um 14.05.06.png",
+    "docs/screenshot.png",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/work-products.bin",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/metadata.rmeta",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/evb0gxnq29gaevu6kxc9xio3x.o",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/query-cache.bin",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/f395joea8tmi736g3gy6pqcrp.o",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/ez8y35ghgry5ev3er6ltwgsmj.o",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/ewo7zk5wm62446so5ejzgiru2.o",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/eljruxax04poyzhiqenceke46.o",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/dtwcxg82jlpywbre4clj363gq.o",
+    "target/debug/incremental/cam_render-0wc6mmcir11q5/s-hn7byy5pe5-1lybwae-8d3tvgzx42axa5ilyzbtt7lhi/e9uza9a3omrn9t8k235pivk39.o",
+    "docs/multi-setup-workflow-ui.md"
   ]
 }
