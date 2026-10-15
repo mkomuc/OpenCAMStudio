@@ -1339,6 +1339,8 @@ mod tests {
                 }],
             )
             .unwrap();
+        app.controller
+            .edit_setup(|setup| setup.model_instances = vec![1]);
         // This fixture faces 1 mm of stock above the model's top face.
         app.controller.edit_stock(|stock| {
             *stock = Stock::RelativeBox {

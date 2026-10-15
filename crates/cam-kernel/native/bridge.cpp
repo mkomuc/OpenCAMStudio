@@ -124,6 +124,7 @@ std::string translate(const char* path,double deflection,double precision) {
     int projectionbase=0;
     constexpr double projection_tolerance=0.0025;
     bool projection_ok=true;
+    std::string projection_issue;
     unsigned long long next=1;
     int meshbase=0,bodycount=0;
     std::vector<std::pair<TopoDS_Shape,unsigned long long>> shared_bodies;
@@ -156,17 +157,25 @@ std::string translate(const char* path,double deflection,double precision) {
         IMeshTools_Parameters projection_parameters;
         projection_parameters.Deflection=projection_tolerance;
         projection_parameters.DeflectionInterior=projection_tolerance;
-        projection_parameters.Angle=0.05;
-        projection_parameters.AngleInterior=0.05;
+        // Linear deflection governs machining accuracy. An unnecessarily tight
+        // angular constraint overmeshes small rounds independently of that bound.
+        projection_parameters.Angle=0.35;
+        projection_parameters.AngleInterior=0.35;
         projection_parameters.Relative=false;
         projection_parameters.EnableControlSurfaceDeflectionAllSurfaces=true;
         BRepMesh_IncrementalMesh projection(b,projection_parameters);
         const int bad_projection=IMeshData_OpenWire|IMeshData_SelfIntersectingWire|IMeshData_Failure|IMeshData_UnorientedWire|IMeshData_TooFewPoints|IMeshData_UserBreak;
-        if(!projection.IsDone() || (projection.GetStatusFlags() & bad_projection)) projection_ok=false;
+        if(!projection.IsDone() || (projection.GetStatusFlags() & bad_projection)) {
+            projection_ok=false;
+            if(projection_issue.empty()) projection_issue="Body "+std::to_string(bodycount)+": XY projection meshing failed (OCCT status "+std::to_string(projection.GetStatusFlags())+").";
+        }
         for(int i=1;i<=fm.Extent();++i) {
             TopLoc_Location loc;
             Handle(Poly_Triangulation) t=BRep_Tool::Triangulation(TopoDS::Face(fm(i)),loc);
-            if(t.IsNull() || projectiontriangles.entries.size()+t->NbTriangles()>1000000) projection_ok=false;
+            if(t.IsNull() || projectiontriangles.entries.size()+t->NbTriangles()>1000000) {
+                projection_ok=false;
+                if(projection_issue.empty()) projection_issue="Body "+std::to_string(bodycount)+": "+(t.IsNull()?"a face has no XY projection triangulation.":"XY projection exceeds the 1,000,000 triangle budget.");
+            }
             if(!projection_ok) continue;
             for(int n=1;n<=t->NbNodes();++n) projectionvertices.add(xyz(t->Node(n).Transformed(loc.Transformation()).XYZ()));
             for(int n=1;n<=t->NbTriangles();++n) {
@@ -203,7 +212,8 @@ std::string translate(const char* path,double deflection,double precision) {
     }
     if(bodycount==0) throw std::runtime_error("STEP contains no solid bodies; surface-only models are not qualified");
     const std::string projection_json=projection_ok ? "{\"chord_tolerance\":0.0025,\"mesh\":{\"vertices\":"+projectionvertices.str()+",\"triangles\":"+projectiontriangles.str()+",\"triangle_faces\":"+projectionfaces.str()+"}}" : "null";
-    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":[\"Assemblies are flattened to placed solid instances; names, colours and external references are not qualified. STEP source tolerances are preserved; import precision is a fallback, not a tolerance clamp. No additional healing is applied.\"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"projection\":"+projection_json+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
+    const std::string projection_warning=projection_issue.empty()?"":","+quote(projection_issue);
+    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":[\"Assemblies are flattened to placed solid instances; names, colours and external references are not qualified. STEP source tolerances are preserved; import precision is a fallback, not a tolerance clamp. No additional healing is applied.\""+projection_warning+"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"projection\":"+projection_json+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
 }
 }
 extern "C" char* cam_occt_step(const char* path,double display,double precision,char** error) noexcept {

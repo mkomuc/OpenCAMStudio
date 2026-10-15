@@ -74,7 +74,8 @@ use crate::Tool;
 /// v16: manufacturing suppression and stable ID high-water marks persist.
 /// v17: per-operation safety planes, with setup heights as legacy defaults.
 /// v18: reference-plus-offset definitions for all five operation heights.
-pub const SCHEMA_VERSION: u32 = 18;
+/// v19: setup model lists are explicit; an empty list selects no solid bodies.
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// Operation safety planes (also used as legacy setup defaults), all
 /// **absolute Z in millimetres**. By
@@ -1245,7 +1246,7 @@ pub struct Setup {
     /// Material name for the blank.
     #[serde(default)]
     pub material: String,
-    /// Model instance identities included in machining for this setup.
+    /// Model instance identities included in machining for this setup. Empty selects none.
     #[serde(default)]
     pub model_instances: Vec<u64>,
     /// NC program name for this setup.

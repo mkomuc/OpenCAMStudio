@@ -454,7 +454,7 @@ impl Document {
         let setup = self.setup();
         let mut points = vec![];
         for instance in &self.geometry.instances {
-            if !setup.model_instances.is_empty() && !setup.model_instances.contains(&instance.id) {
+            if !setup.model_instances.contains(&instance.id) {
                 continue;
             }
             if let Some(body) = self

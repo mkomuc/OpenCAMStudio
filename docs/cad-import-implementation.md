@@ -15,9 +15,12 @@ intact. Edits or active geometry drafts during translation reject the request
 without discarding those changes. Drawing imports add geometry and preserve
 existing operations/tools; their addition can be undone.
 
-Models contains one visibility row per model instance. Feature lists and filters
-are absent from the project tree. Select geometry in the shaded viewport; setup
-filters remain in the right inspector. Profile accepts a face interior as its
+Models groups each imported source model above its body instances, each with its
+own visibility control. Feature lists and filters are absent from the project
+tree. Setup body selection uses Add followed by clicks in the shaded viewport;
+new setups contain no models by default. The setup selection filter and its
+select-through/hide/isolate controls have been removed. Body visibility and
+isolation remain available in the project tree. Profile accepts a face interior as its
 outer boundary, and Drill accepts cylindrical faces and their visible circular
 rims. STEP and DXF use the same creation controls and five-tab operation editor.
 Hover and selection highlight semantic geometry. Ctrl-click selects the visible
@@ -25,8 +28,8 @@ body's silhouette projected onto the active setup XY reference plane (Z = 0),
 regardless of the geometry filter. Shift-click toggles multiple features;
 Command-click also toggles on macOS. Cylindrical and toroidal fillet faces retain
 their radius for inspection. Profile selection skips nonplanar wall/seam loops;
-a top boundary adjoining a rounded transition selects the whole-body silhouette. Overlapping candidates and explicit select-through are
-available. Hide/isolate/show-all are view state. Select a planar face and choose
+a top boundary adjoining a rounded transition selects the whole-body silhouette.
+Overlapping edge candidates remain available for WCS picking. Hide/isolate/show-all are view state. Select a planar face and choose
 **Use face as machining top at Z0** to establish the fixed frame; its longest
 straight boundary edge sets X. Placement also supports XYZ translation and Z
 rotation. Stock remains independently editable.
@@ -165,3 +168,17 @@ three platforms. Current STEP assemblies are flattened to solid instances with
 shared body identity and placements; assembly hierarchy/metadata are not claimed.
 Surface-only files and unknown/mixed units are rejected with diagnostics. The
 optional backend is not yet enabled in release packaging.
+
+### Multi-body Tigerente import check
+
+`testfiles/Tigerente_multiple.step` imports five valid solid bodies and five
+placements, containing 54 faces. Each body has display mesh triangles. Projection
+meshing retains the 0.0025 mm absolute linear deflection and interior surface
+checks, with a 0.35 rad angular limit instead of 0.05 rad. The tighter angular
+limit unnecessarily overmeshed small rounds and exhausted the combined 1,000,000
+triangle budget at body 4. The optimized import produces 386,326 projection
+triangles covering every face of all five bodies, without a projection warning.
+Local debug import time fell from approximately 21.0 s to 3.6 s. The triangle
+budget, source tolerances and separate display mesh remain unchanged. Regression
+coverage asserts complete face coverage and the original linear tolerance.
+Native projection warnings still identify the body and specific failure or limit.

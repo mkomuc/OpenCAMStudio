@@ -185,3 +185,71 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[cfg(all(test, occt_available))]
+mod multi_body_tests {
+    use super::*;
+    #[test]
+    fn tigerente_multiple_imports_all_bodies() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente_multiple.step");
+        let import = read_step_file(path, &Default::default()).unwrap();
+        eprintln!(
+            "Tigerente: {} bodies, {} placements, {} faces; warnings: {:?}",
+            import.topology.bodies.len(),
+            import.placements.len(),
+            import.topology.faces.len(),
+            import.warnings
+        );
+        import.topology.validate().unwrap();
+        let projection = import
+            .topology
+            .projection
+            .as_ref()
+            .expect("multi-body import must retain machining projection data");
+        assert_eq!(projection.chord_tolerance, 0.0025);
+        assert!(projection.mesh.triangles.len() <= 1_000_000);
+        let covered: std::collections::BTreeSet<_> =
+            projection.mesh.triangle_faces.iter().copied().collect();
+        assert!(
+            import
+                .topology
+                .faces
+                .iter()
+                .all(|face| covered.contains(&face.id)),
+            "every face of every body must contribute to the projection"
+        );
+        assert!(
+            !import
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("budget") || warning.contains("unavailable")),
+            "{:?}",
+            import.warnings
+        );
+        eprintln!(
+            "Tigerente projection: {} triangles",
+            projection.mesh.triangles.len()
+        );
+        assert_eq!(import.topology.bodies.len(), 5);
+        assert_eq!(import.placements.len(), 5);
+        for body in &import.topology.bodies {
+            assert!(
+                import
+                    .topology
+                    .faces
+                    .iter()
+                    .filter(|f| f.body_id == body.id)
+                    .any(|face| import.topology.mesh.triangle_faces.contains(&face.id)),
+                "body {} must be represented in the display mesh",
+                body.id
+            );
+        }
+        assert!(import.topology.bodies.iter().all(|body| body.valid_solid));
+        assert!(import.placements.iter().all(|p| import
+            .topology
+            .bodies
+            .iter()
+            .any(|b| b.id == p.body_id)));
+    }
+}

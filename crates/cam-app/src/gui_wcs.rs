@@ -35,7 +35,8 @@ impl WorkpieceAxes {
 }
 impl App {
     pub(super) fn workpiece_axes(&self, picking: &SetupPickGeometry) -> Option<WorkpieceAxes> {
-        if self.controller.selection() != Selection::Setup
+        if self.model_view.is_some()
+            || self.controller.selection() != Selection::Setup
             || self.cad_inspecting
             || self.controller.pending_op().is_some()
             || self.cad_pending_kind.is_some()

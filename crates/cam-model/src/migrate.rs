@@ -210,6 +210,28 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         16 => Ok(()),
         // Missing height definitions retain legacy absolute operation values.
         17 => Ok(()),
+        // Preserve the old implicit all-model selection as an explicit list.
+        18 => {
+            let instances: Vec<Value> = doc
+                .get("geometry")
+                .and_then(|g| g.get("instances"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|instance| instance.get("id").cloned())
+                .collect();
+            if let Some(setups) = doc.get_mut("setups").and_then(Value::as_array_mut) {
+                for setup in setups {
+                    if setup
+                        .get("model_instances")
+                        .is_none_or(|models| models.as_array().is_some_and(Vec::is_empty))
+                    {
+                        setup["model_instances"] = Value::Array(instances.clone());
+                    }
+                }
+            }
+            Ok(())
+        }
         _ => Err(MigrationError::MissingStep { from }),
     }
 }
@@ -411,6 +433,32 @@ mod tests {
         doc["setups"][0]["operations"][0]["Pocket"]
             .as_object()
             .expect("the fixture has one pocket")
+    }
+
+    #[test]
+    fn explicit_model_selection_migration_preserves_legacy_setups() {
+        let mut doc = serde_json::json!({
+            "schema_version": 18,
+            "geometry": { "instances": [{"id": 2}, {"id": 5}] },
+            "setups": [{"model_instances": []}, {"model_instances": [5]}, {}]
+        });
+        document(&mut doc, 18).unwrap();
+        assert_eq!(
+            doc["setups"][0]["model_instances"],
+            serde_json::json!([2, 5])
+        );
+        assert_eq!(doc["setups"][1]["model_instances"], serde_json::json!([5]));
+        assert_eq!(
+            doc["setups"][2]["model_instances"],
+            serde_json::json!([2, 5])
+        );
+        let mut current =
+            serde_json::json!({"schema_version": 19, "setups": [{"model_instances": []}]});
+        document(&mut current, 19).unwrap();
+        assert_eq!(
+            current["setups"][0]["model_instances"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

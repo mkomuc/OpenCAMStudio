@@ -10,6 +10,13 @@ or duplicate an existing setup to copy its operations and geometry links. Each
 setup has independent model targets, work axes, datum, stock, material, safety
 heights and NC program name. Selecting an operation activates its parent setup.
 
+New setups start with no model bodies selected. In the Setup tab, click Add,
+then click each desired body in the shaded view. Done or Escape finishes picking;
+Remove can clear the last body. The model list and viewport highlights preview
+this selection until OK. Duplicating a setup retains its selected bodies.
+Existing projects migrate their former implicit all-body selection explicitly.
+The Models tree groups body instances beneath their imported source model.
+
 The right column holds Setup, Stock and Postprocess tabs. Edits across the tabs
 share one draft. OK validates and commits the entire draft as one undoable change;
 Cancel restores the committed values in every tab. Tab changes never commit.
@@ -76,3 +83,17 @@ setup are deferred. Bounds are conservatively derived from exact source body
 bounds, independent of display tessellation. The existing heightfield simulation
 remains per-setup 2.5D material removal; this change does not add general fixture,
 holder or freeform collision verification.
+
+### Browser visibility and expansion
+
+Imported model rows expand/collapse their body instances and provide a whole-model
+visibility checkbox and context action. Parent visibility preserves individual
+body choices. Selecting Models shows the collection; selecting a model or body
+shows that item. Selecting a setup or one of its operations scopes CAD display,
+picking, snapping and framing to the setup's model instances (including draft
+membership). An empty setup shows no CAD bodies. Add-model picking temporarily
+exposes other visible models so bodies can be added to the setup.
+
+Tools (in use) starts collapsed. Operations expand to show their own tool details,
+including both tools for a clearing/carving operation in cutting order. Expansion
+and visibility are view state and do not change machining inclusion or the project.

@@ -8,6 +8,7 @@ const TREE_ROW_H: f32 = 26.0;
 pub(super) enum TreeNode {
     Models,
     Setups,
+    Asset(u64),
     Model(InstanceId),
     Setup(u64),
     Operation(u32),
@@ -84,7 +85,14 @@ impl App {
             }
             _ => {
                 self.end_setup_draft();
+                self.operation_draft = None;
+                self.controller.select(Selection::Setup);
+                self.controller.set_cad_selection(vec![]);
+                self.cad_hover = None;
+                self.cad_candidates.clear();
+                self.cad_inspecting = false;
                 self.focus_ops.clear();
+                self.model_view = Some(node.clone());
                 iced::Task::none()
             }
         }
@@ -137,7 +145,7 @@ impl App {
                     TreeNode::Setup(id) => {
                         let _ = self.update(Message::SelectSetup(*id));
                     }
-                    TreeNode::Model(_) => {
+                    TreeNode::Asset(_) | TreeNode::Model(_) => {
                         let _ = self.select_tree_node(&node);
                     }
                     _ => {}
@@ -302,22 +310,47 @@ impl App {
         // Workpiece origins live as group headers in the operation list below (H1
         // above the first op, added origins each heading their own group), not as a
         // node here — an origin *is* the datum a group of operations runs under.
-        let mut list = column![mouse_area(tree_header("Models"))
-            .on_right_press(Message::Tree(TreeMessage::Open(TreeNode::Models)))]
+        let mut list = column![self.tree_row(
+            TreeNode::Models,
+            tree_header("Models"),
+            self.model_view == Some(TreeNode::Models),
+        )]
         .spacing(2);
 
-        if !self.controller.geometry_state().instances.is_empty() {
-            for instance in &self.controller.geometry_state().instances {
-                if self
-                    .controller
-                    .geometry_state()
-                    .asset(instance.asset_id)
-                    .is_none()
-                {
-                    continue;
-                }
+        let geometry = self.controller.geometry_state();
+        for asset in &geometry.assets {
+            let instances: Vec<_> = geometry
+                .instances
+                .iter()
+                .filter(|instance| instance.asset_id == asset.id)
+                .collect();
+            if instances.is_empty() {
+                continue;
+            }
+            let expanded = !self.collapsed_assets.contains(&asset.id);
+            let asset_row = row![
+                button(text(if expanded { "▾" } else { "▸" }).size(11))
+                    .padding(2)
+                    .on_press(Message::ToggleAssetExpanded(asset.id)),
+                checkbox(!self.hidden_assets.contains(&asset.id))
+                    .size(14)
+                    .on_toggle(move |visible| Message::SetAssetVisible(asset.id, visible)),
+                text(&asset.name).size(12).width(Length::Fill),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center);
+            list = list.push(self.tree_row(
+                TreeNode::Asset(asset.id),
+                asset_row.into(),
+                self.model_view == Some(TreeNode::Asset(asset.id)),
+            ));
+            if !expanded {
+                continue;
+            }
+            for instance in instances {
                 let hidden = !instance.visible || self.cad_hidden.contains(&instance.id);
                 let model_row = row![
+                    Space::new().width(16),
                     checkbox(!hidden).size(14).on_toggle(move |visible| {
                         Message::SetInstanceVisible(instance.id, visible)
                     }),
@@ -325,8 +358,11 @@ impl App {
                 ]
                 .spacing(4)
                 .align_y(Alignment::Center);
-                list =
-                    list.push(self.tree_row(TreeNode::Model(instance.id), model_row.into(), false));
+                list = list.push(self.tree_row(
+                    TreeNode::Model(instance.id),
+                    model_row.into(),
+                    self.model_view == Some(TreeNode::Model(instance.id)),
+                ));
             }
         }
 
@@ -334,37 +370,49 @@ impl App {
         // (`T4 …`); one that isn't in the library shows **no number** — the simple,
         // clear signal that it's project-local. Right-clicking an un-numbered tool
         // offers "Add to library" (which registers it and gives it a number).
-        list = list.push(tree_header("Tools (in use)"));
-        let used = self.controller.used_tools();
-        for t in used {
-            let in_library = self
-                .library
-                .tools
-                .iter()
-                .any(|lt| lt.identity() == t.identity());
-            // Numbered ⇒ in the library; un-numbered ⇒ project-local. The number goes
-            // at the *end* (`⌀6 End mill (T5)`) so descriptions align left; a
-            // project-local tool has no `(Tn)` at all — the presence of the number *is*
-            // the distinction (kept deliberately simple).
-            let label = if in_library {
-                format!("⌀{} {} (T{})", fmt_num(t.diameter), t.kind, t.number)
-            } else {
-                format!("⌀{} {}", fmt_num(t.diameter), t.kind)
-            };
-            let row = container(text(label).size(13).color(if in_library {
-                palette::LABEL_COLOR
-            } else {
-                palette::GROUP_LABEL
-            }))
-            .padding(Padding::from([3.0, 6.0]));
-            if in_library {
-                list = list.push(row);
-            } else {
-                // Only un-numbered (not-in-library) tools carry the right-click menu.
-                list = list.push(mouse_area(row).on_right_press(Message::ToolMenu(t.number)));
+        list = list.push(
+            button(
+                row![
+                    text(if self.tools_expanded { "▾" } else { "▸" }).size(11),
+                    text("Tools (in use)").size(12),
+                ]
+                .spacing(4),
+            )
+            .padding([4, 2])
+            .style(|_, status| command_button_style(status))
+            .on_press(Message::ToggleToolsExpanded),
+        );
+        if self.tools_expanded {
+            let used = self.controller.used_tools();
+            for t in used {
+                let in_library = self
+                    .library
+                    .tools
+                    .iter()
+                    .any(|lt| lt.identity() == t.identity());
+                // Numbered ⇒ in the library; un-numbered ⇒ project-local. The number goes
+                // at the *end* (`⌀6 End mill (T5)`) so descriptions align left; a
+                // project-local tool has no `(Tn)` at all — the presence of the number *is*
+                // the distinction (kept deliberately simple).
+                let label = if in_library {
+                    format!("⌀{} {} (T{})", fmt_num(t.diameter), t.kind, t.number)
+                } else {
+                    format!("⌀{} {}", fmt_num(t.diameter), t.kind)
+                };
+                let row = container(text(label).size(13).color(if in_library {
+                    palette::LABEL_COLOR
+                } else {
+                    palette::GROUP_LABEL
+                }))
+                .padding(Padding::from([3.0, 6.0]));
+                if in_library {
+                    list = list.push(row);
+                } else {
+                    // Only un-numbered (not-in-library) tools carry the right-click menu.
+                    list = list.push(mouse_area(row).on_right_press(Message::ToolMenu(t.number)));
+                }
             }
         }
-
         list = list.push(
             mouse_area(tree_header("Setups"))
                 .on_right_press(Message::Tree(TreeMessage::Open(TreeNode::Setups))),
@@ -408,7 +456,11 @@ impl App {
             ]
             .spacing(3)
             .align_y(Alignment::Center);
-            list = list.push(self.tree_row(TreeNode::Setup(setup.id), setup_row.into(), active));
+            list = list.push(self.tree_row(
+                TreeNode::Setup(setup.id),
+                setup_row.into(),
+                active && self.model_view.is_none(),
+            ));
             if !expanded {
                 continue;
             }
@@ -447,18 +499,16 @@ impl App {
                 } else {
                     "pending"
                 };
-                let tools = op
-                    .tools()
-                    .iter()
-                    .map(|n| format!("T{n}"))
-                    .collect::<Vec<_>>()
-                    .join("/");
+                let expanded = self.expanded_operations.contains(&id);
                 let controls = row![
                     Space::new().width(Length::Fixed(14.0)),
+                    button(text(if expanded { "▾" } else { "▸" }).size(11))
+                        .padding(2)
+                        .on_press(Message::ToggleOperationExpanded(id)),
                     checkbox(!self.hidden_ops.contains(&id))
                         .size(12)
                         .on_toggle(move |visible| Message::SetOperationVisible(id, visible)),
-                    text(format!("{} · {} · {}", op_kind(op), tools, state))
+                    text(format!("{} · {}", op_kind(op), state))
                         .size(11)
                         .width(Length::Fill)
                 ]
@@ -469,6 +519,24 @@ impl App {
                     controls.into(),
                     self.focus_ops.contains(&id),
                 ));
+                if expanded {
+                    for number in op.tools() {
+                        let label = setup
+                            .tools
+                            .iter()
+                            .find(|tool| tool.number == number)
+                            .map(|tool| {
+                                format!("T{} · ⌀{} {}", number, fmt_num(tool.diameter), tool.kind)
+                            })
+                            .unwrap_or_else(|| format!("T{number} · missing tool"));
+                        list = list.push(container(text(label).size(11)).padding(Padding {
+                            left: 52.,
+                            top: 2.,
+                            bottom: 2.,
+                            right: 4.,
+                        }));
+                    }
+                }
             }
         }
         scrollable(list.padding(6))
@@ -594,29 +662,33 @@ impl App {
                     .push(item("Import geometry…".into(), Message::ImportCad))
                     .push(item("Show all geometry".into(), Message::CadShowAll));
             }
-            TreeNode::Model(id) => {
-                let hidden = self.cad_hidden.contains(id);
+            TreeNode::Asset(id) => {
+                let hidden = self.hidden_assets.contains(id);
                 items = items
                     .push(item(
                         if hidden { "Show model" } else { "Hide model" }.into(),
+                        Message::SetAssetVisible(*id, hidden),
+                    ))
+                    .push(item("Replace model…".into(), Message::ReplaceCadAsset(*id)))
+                    .push(item("Remove model".into(), Message::RemoveCadAsset(*id)));
+            }
+            TreeNode::Model(id) => {
+                let hidden = self.cad_hidden.contains(id)
+                    || self
+                        .controller
+                        .geometry_state()
+                        .instance(*id)
+                        .is_some_and(|instance| !instance.visible);
+                items = items
+                    .push(item(
+                        if hidden { "Show body" } else { "Hide body" }.into(),
                         Message::SetInstanceVisible(*id, hidden),
                     ))
                     .push(item(
-                        "Isolate model".into(),
+                        "Isolate body".into(),
                         Message::CadIsolateInstance(*id),
                     ))
                     .push(item("Show all geometry".into(), Message::CadShowAll));
-                if let Some(instance) = self.controller.geometry_state().instance(*id) {
-                    items = items
-                        .push(item(
-                            "Replace model…".into(),
-                            Message::ReplaceCadAsset(instance.asset_id),
-                        ))
-                        .push(item(
-                            "Remove model".into(),
-                            Message::RemoveCadAsset(instance.asset_id),
-                        ));
-                }
                 items = creation(items);
             }
         }
@@ -697,6 +769,173 @@ mod tests {
             .collect();
         app.begin_setup_draft();
         (app, ids)
+    }
+
+    fn add_browser_models(app: &mut App) {
+        use cam_model::*;
+        for asset_id in 1..=2 {
+            let points = vec![[0., 0., 0.], [10., 0., 0.], [0., 10., 0.]];
+            let topology = TopologySnapshot {
+                bodies: vec![CadBody {
+                    id: 1,
+                    name: "Plate".into(),
+                    valid_solid: true,
+                    bounds: [[0., 0., 0.], [10., 10., 0.]],
+                }],
+                faces: vec![CadFace {
+                    id: 2,
+                    body_id: 1,
+                    surface: CadSurface::Plane {
+                        origin: [0.; 3],
+                        normal: [0., 0., 1.],
+                    },
+                    loop_ids: vec![],
+                    bounds: [[0., 0., 0.], [10., 10., 0.]],
+                }],
+                vertices: points
+                    .iter()
+                    .enumerate()
+                    .map(|(i, point)| CadVertex {
+                        id: 3 + i as u64,
+                        body_id: 1,
+                        point: *point,
+                    })
+                    .collect(),
+                mesh: CadMesh {
+                    vertices: points,
+                    triangles: vec![[0, 1, 2]],
+                    triangle_faces: vec![2],
+                },
+                ..Default::default()
+            };
+            let instances = (0..2)
+                .map(|i| GeometryInstance {
+                    id: (asset_id - 1) * 2 + i + 1,
+                    asset_id,
+                    body_id: 1,
+                    name: format!("Plate {i}"),
+                    placement: RigidTransform {
+                        translation: [((asset_id - 1) * 40 + i * 20) as f64, 0., 0.],
+                        ..Default::default()
+                    },
+                    visible: true,
+                })
+                .collect();
+            app.controller
+                .add_cad_asset(
+                    GeometryAsset {
+                        id: asset_id,
+                        revision: 1,
+                        name: format!("Model {asset_id}"),
+                        source_format: CadFormat::Step,
+                        source_data: vec![].into(),
+                        import_options: None,
+                        import_diagnostics: vec![],
+                        source_fingerprint: String::new(),
+                        source_units: SourceUnits::Millimetres,
+                        backend: "analytic test".into(),
+                        topology: topology.into(),
+                    },
+                    instances,
+                )
+                .unwrap();
+        }
+        app.controller
+            .edit_setup(|setup| setup.model_instances = vec![1]);
+        app.end_setup_draft();
+        app.refresh_fields();
+    }
+
+    fn visible_bodies(app: &App) -> Vec<u64> {
+        let scene = app.machining_viewport().cad_scene;
+        (1..=4)
+            .filter(|id| {
+                let x = ((*id - 1) * 20) as f64 + 2.;
+                scene
+                    .pick_candidates(
+                        cam_render::Ray {
+                            origin: [x, 2., 10.],
+                            direction: [0., 0., -1.],
+                        },
+                        EntityKind::Body,
+                        0.1,
+                        false,
+                    )
+                    .iter()
+                    .any(|candidate| candidate.entity.instance_id == *id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn model_and_operation_expansion_and_whole_model_visibility_are_view_only() {
+        let (mut app, ids) = tree_app();
+        add_browser_models(&mut app);
+        let before = app.controller.document().clone();
+        assert!(!app.tools_expanded);
+        assert!(app.expanded_operations.is_empty());
+        send(&mut app, Message::ToggleToolsExpanded);
+        send(&mut app, Message::ToggleOperationExpanded(ids[0]));
+        send(&mut app, Message::ToggleAssetExpanded(1));
+        assert!(app.tools_expanded && app.expanded_operations.contains(&ids[0]));
+        assert!(app.collapsed_assets.contains(&1));
+        // A parent hide preserves the user's per-body choices.
+        app.model_view = Some(TreeNode::Models);
+        send(&mut app, Message::SetInstanceVisible(1, false));
+        send(&mut app, Message::SetAssetVisible(1, false));
+        assert_eq!(visible_bodies(&app), [3, 4]);
+        send(&mut app, Message::SetAssetVisible(1, true));
+        assert_eq!(visible_bodies(&app), [2, 3, 4]);
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.project_tree();
+    }
+
+    #[test]
+    fn tree_selection_scopes_models_setups_operations_and_member_picking() {
+        let (mut app, ids) = tree_app();
+        add_browser_models(&mut app);
+        let first_setup = app.controller.active_setup_id();
+        let second_setup = app.controller.add_setup();
+        app.controller
+            .edit_setup(|setup| setup.model_instances = vec![4]);
+        app.refresh_fields();
+        send(&mut app, Message::SelectSetup(second_setup));
+        assert_eq!(visible_bodies(&app), [4]);
+        let _ = app.select_tree_node(&TreeNode::Operation(ids[0]));
+        assert_eq!(app.controller.active_setup_id(), first_setup);
+        assert_eq!(visible_bodies(&app), [1]);
+        let _ = app.select_tree_node(&TreeNode::Asset(2));
+        assert_eq!(visible_bodies(&app), [3, 4]);
+        assert!(!app.machining_viewport().show_stock);
+        assert!(app
+            .machining_viewport()
+            .setup_geometry
+            .stock_bounds()
+            .is_none());
+        let _ = app.select_tree_node(&TreeNode::Model(2));
+        assert_eq!(visible_bodies(&app), [2]);
+        let _ = app.select_tree_node(&TreeNode::Models);
+        assert_eq!(visible_bodies(&app), [1, 2, 3, 4]);
+        send(&mut app, Message::EditSetup(first_setup));
+        assert_eq!(visible_bodies(&app), [1]);
+        send(&mut app, Message::SetupModelPick);
+        assert_eq!(visible_bodies(&app), [1, 2, 3, 4]);
+        send(&mut app, Message::SetupModelPick);
+        assert_eq!(visible_bodies(&app), [1]);
+        send(&mut app, Message::SetupModelToggled(2, true));
+        assert_eq!(
+            visible_bodies(&app),
+            [1, 2],
+            "preview follows the setup draft"
+        );
+        send(&mut app, Message::SetupCancel);
+        assert_eq!(visible_bodies(&app), [1]);
+        app.controller
+            .edit_setup(|setup| setup.model_instances.clear());
+        assert!(
+            visible_bodies(&app).is_empty(),
+            "empty setup must not show all bodies"
+        );
     }
 
     #[test]

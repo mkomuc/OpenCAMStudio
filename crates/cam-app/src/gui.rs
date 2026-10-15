@@ -1779,6 +1779,7 @@ struct App {
     /// draft survives tab changes; only the footer can commit or discard it.
     setup_draft: Option<cam_model::Setup>,
     setup_model_selection: Option<InstanceId>,
+    setup_model_pick: bool,
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
     operation_geometry: Option<Vec<EntityRef>>,
@@ -1806,6 +1807,12 @@ struct App {
     /// An armed edge-reference field. Viewport picks are routed here until cleared.
     setup_axis_pick: Option<usize>,
     expanded_setups: BTreeSet<u64>,
+    collapsed_assets: BTreeSet<u64>,
+    expanded_operations: BTreeSet<u32>,
+    tools_expanded: bool,
+    hidden_assets: BTreeSet<u64>,
+    /// None scopes display and picking to the active setup.
+    model_view: Option<TreeNode>,
     hidden_setups: BTreeSet<u64>,
     hidden_ops: BTreeSet<u32>,
     panes: pane_grid::State<Pane>,
@@ -2246,6 +2253,7 @@ enum Message {
     SetupUseModelOrigin(u64),
     SetupOriginChanged(usize, String),
     SetupWorkOffsetChanged(String),
+    SetupModelPick,
     SetupModelSelected(InstanceId),
     SetupModelToggled(u64, bool),
     SetupStockKindChanged(StockEditorKind),
@@ -2263,6 +2271,10 @@ enum Message {
     SetupDelete(u64),
     SetupMove(u64, bool),
     ToggleSetupExpanded(u64),
+    ToggleAssetExpanded(u64),
+    ToggleOperationExpanded(u32),
+    ToggleToolsExpanded,
+    SetAssetVisible(u64, bool),
     SetSetupVisible(u64, bool),
     SetOperationVisible(u32, bool),
     FieldChanged(Field, String),
@@ -2324,9 +2336,6 @@ enum Message {
     GeometryRemove(usize),
     GeometryClear,
     CadSelect(EntityRef),
-    CadSelectThrough(bool),
-    CadHideSelected,
-    CadIsolateSelected,
     CadIsolateInstance(InstanceId),
     CadShowAll,
     SetInstanceVisible(InstanceId, bool),
@@ -2596,6 +2605,7 @@ fn initial_panes() -> pane_grid::State<Pane> {
 
 impl App {
     fn begin_setup_draft(&mut self) {
+        self.model_view = None;
         self.inspector_active = true;
         self.inspector_enabled = true;
         self.cancel_setup_picks();
@@ -2659,6 +2669,11 @@ impl App {
     }
 
     fn cancel_setup_picks(&mut self) {
+        if self.setup_model_pick {
+            self.cad_hover = None;
+            self.cad_candidates.clear();
+        }
+        self.setup_model_pick = false;
         self.setup_hover = SetupHover::default();
         self.setup_axis_pick = None;
         self.setting_origin = false;
@@ -2712,6 +2727,7 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.model_view = None;
         self.end_setup_draft();
         self.inspector_active = true;
         self.controller.select(Selection::Operation(id));
@@ -2946,6 +2962,7 @@ impl App {
             notice_queue: VecDeque::new(),
             setup_draft: None,
             setup_model_selection: None,
+            setup_model_pick: false,
             setup_values: BTreeMap::new(),
             operation_draft: None,
             operation_geometry: None,
@@ -2971,6 +2988,11 @@ impl App {
             setup_tab: SetupEditorTab::Setup,
             setup_axis_pick: None,
             expanded_setups: BTreeSet::from([1]),
+            collapsed_assets: BTreeSet::new(),
+            expanded_operations: BTreeSet::new(),
+            tools_expanded: false,
+            hidden_assets: BTreeSet::new(),
+            model_view: None,
             hidden_setups: BTreeSet::new(),
             hidden_ops: BTreeSet::new(),
             panes: initial_panes(),
@@ -3205,6 +3227,19 @@ impl App {
             self.cad_hover = None;
             self.cad_candidates.clear();
         }
+        if matches!(
+            &message,
+            Message::Select(_)
+                | Message::SelectSetup(_)
+                | Message::EditSetup(_)
+                | Message::ClickOp(_)
+                | Message::BeginOp(_)
+                | Message::SetupNew
+                | Message::SetupDuplicate(_)
+                | Message::SetupDelete(_)
+        ) {
+            self.model_view = None;
+        }
         // Any action other than opening a group-popup closes the open one (so a
         // command picked from a popup, or a click elsewhere, dismisses it).
         if !matches!(message, Message::ToggleRibbonGroup(_)) {
@@ -3333,6 +3368,8 @@ impl App {
             Message::Tree(message) => return self.update_tree(message),
             Message::OpenSample => match self.controller.open_dxf(SAMPLE_DXF, "sample.dxf") {
                 Ok(n) => {
+                    self.reset_model_browser();
+                    self.model_view = None;
                     self.planar_selection.clear();
                     self.focus_ops.clear();
                     self.controller.select(Selection::Setup);
@@ -3364,6 +3401,26 @@ impl App {
                 if self.controller.active_setup_id() == id {
                     self.begin_setup_draft();
                 }
+            }
+            Message::ToggleAssetExpanded(id) => {
+                if !self.collapsed_assets.remove(&id) {
+                    self.collapsed_assets.insert(id);
+                }
+            }
+            Message::ToggleOperationExpanded(id) => {
+                if !self.expanded_operations.remove(&id) {
+                    self.expanded_operations.insert(id);
+                }
+            }
+            Message::ToggleToolsExpanded => self.tools_expanded = !self.tools_expanded,
+            Message::SetAssetVisible(id, visible) => {
+                if visible {
+                    self.hidden_assets.remove(&id);
+                } else {
+                    self.hidden_assets.insert(id);
+                }
+                self.cad_hover = None;
+                self.cad_candidates.clear();
             }
             Message::ToggleSetupExpanded(id) => {
                 if !self.expanded_setups.remove(&id) {
@@ -3449,49 +3506,46 @@ impl App {
                     draft.origin_index = v;
                 }
             }
+            Message::SetupModelPick => {
+                if self.setup_draft.is_some() {
+                    let picking = !self.setup_model_pick;
+                    self.cancel_setup_picks();
+                    self.setup_model_pick = picking;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                    self.status = if picking {
+                        "Click bodies in the view to add them to this setup. Click Done when finished."
+                    } else { "Setup body selection finished." }.into();
+                }
+            }
             Message::SetupModelSelected(instance) => {
-                if self.setup_draft.as_ref().is_some_and(|draft| {
-                    self.controller
-                        .geometry_state()
-                        .instance(instance)
-                        .is_some()
-                        && (draft.model_instances.is_empty()
-                            || draft.model_instances.contains(&instance))
-                }) {
+                if self
+                    .setup_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.model_instances.contains(&instance))
+                {
                     self.setup_model_selection = Some(instance);
                 }
             }
             Message::SetupModelToggled(instance, included) => {
-                let all: Vec<_> = self
+                if self
                     .controller
                     .geometry_state()
-                    .instances
-                    .iter()
-                    .map(|item| item.id)
-                    .collect();
-                if !all.contains(&instance) {
+                    .instance(instance)
+                    .is_none()
+                {
                     return iced::Task::none();
                 }
                 if let Some(draft) = &mut self.setup_draft {
-                    let mut models = if draft.model_instances.is_empty() {
-                        all
-                    } else {
-                        draft.model_instances.clone()
-                    };
                     if included {
-                        if !models.contains(&instance) {
-                            models.push(instance);
-                            draft.model_instances = models;
+                        if !draft.model_instances.contains(&instance) {
+                            draft.model_instances.push(instance);
                         }
                         self.setup_model_selection = Some(instance);
-                    } else if let Some(index) = models.iter().position(|id| *id == instance) {
-                        if models.len() <= 1 {
-                            self.status = "A setup must target at least one model instance.".into();
-                        } else {
-                            models.remove(index);
-                            self.setup_model_selection =
-                                models.get(index.min(models.len() - 1)).copied();
-                            draft.model_instances = models;
+                    } else {
+                        draft.model_instances.retain(|id| *id != instance);
+                        if self.setup_model_selection == Some(instance) {
+                            self.setup_model_selection = draft.model_instances.last().copied();
                         }
                     }
                 }
@@ -3574,6 +3628,7 @@ impl App {
                 self.setting_origin_2pt = false;
                 self.origin_first = None;
                 self.setup_hover = SetupHover::default();
+                self.setup_model_pick = false;
                 self.setup_axis_pick = Some(axis);
                 self.cad_candidates.clear();
                 self.cad_filter = CadFilter::Edge;
@@ -3891,6 +3946,7 @@ impl App {
                 // different machine or control, so there is nothing to re-target.
                 self.planar_selection.clear();
                 self.controller.new_project();
+                self.reset_model_browser();
                 self.focus_ops.clear();
                 self.controller.select(Selection::Setup);
                 self.end_setup_draft();
@@ -3906,6 +3962,7 @@ impl App {
             Message::ProjectToOpen(Some(path)) => {
                 self.status = match self.controller.open_project(&path) {
                     Ok(()) => {
+                        self.reset_model_browser();
                         self.planar_selection.clear();
                         // Reconcile the project's tool numbers against the shop library
                         // (TOOLING_PLAN §6): matched tools adopt the shop's numbering.
@@ -4017,6 +4074,9 @@ impl App {
             Message::CadReplacementChosen(_, None) => {}
             Message::RemoveCadAsset(id) => {
                 if self.controller.remove_cad_asset(id) {
+                    self.model_view = Some(TreeNode::Models);
+                    self.hidden_assets.remove(&id);
+                    self.collapsed_assets.remove(&id);
                     self.cad_hover = None;
                     self.cad_candidates.clear();
                     self.refresh_fields();
@@ -4053,6 +4113,15 @@ impl App {
             }
             Message::CadHover(entity) => self.cad_hover = entity,
             Message::CadPicked(candidates) => {
+                if self.setup_model_pick {
+                    if let Some(candidate) = candidates.first() {
+                        return self.update(Message::SetupModelToggled(
+                            candidate.entity.instance_id,
+                            true,
+                        ));
+                    }
+                    return iced::Task::none();
+                }
                 if self.height_reference_pick.is_some() {
                     if let Some(candidate) = candidates.first() {
                         self.height_geometry_selected(candidate.entity.clone());
@@ -4093,6 +4162,9 @@ impl App {
             Message::GeometryRemove(index) => self.remove_operation_geometry(Some(index)),
             Message::GeometryClear => self.remove_operation_geometry(None),
             Message::CadSelect(entity) => {
+                if self.setup_model_pick {
+                    return self.update(Message::SetupModelToggled(entity.instance_id, true));
+                }
                 if self.height_reference_pick.is_some() {
                     self.height_geometry_selected(entity);
                     return iced::Task::none();
@@ -4105,17 +4177,6 @@ impl App {
                     self.select_cad_entity(entity);
                 }
             }
-            Message::CadSelectThrough(value) => self.cad_select_through = value,
-            Message::CadHideSelected => {
-                self.cad_hidden.extend(
-                    self.controller
-                        .cad_selection()
-                        .iter()
-                        .map(|r| r.instance_id),
-                );
-                self.controller.set_cad_selection(vec![]);
-                self.cad_hover = None;
-            }
             Message::CadIsolateInstance(id) => {
                 self.cad_hidden = self
                     .controller
@@ -4126,26 +4187,13 @@ impl App {
                     .map(|instance| instance.id)
                     .collect();
             }
-            Message::CadIsolateSelected => {
-                let selected: BTreeSet<_> = self
-                    .controller
-                    .cad_selection()
-                    .iter()
-                    .map(|r| r.instance_id)
-                    .collect();
-                if !selected.is_empty() {
-                    self.cad_hidden = self
-                        .controller
-                        .geometry_state()
-                        .instances
-                        .iter()
-                        .filter(|i| !selected.contains(&i.id))
-                        .map(|i| i.id)
-                        .collect();
-                }
+            Message::CadShowAll => {
+                self.cad_hidden.clear();
+                self.hidden_assets.clear();
             }
-            Message::CadShowAll => self.cad_hidden.clear(),
             Message::SetInstanceVisible(instance, visible) => {
+                self.cad_hover = None;
+                self.cad_candidates.clear();
                 if visible {
                     self.cad_hidden.remove(&instance);
                 } else {
@@ -4153,6 +4201,12 @@ impl App {
                 }
             }
             Message::CadEscape => {
+                if self.setup_model_pick {
+                    self.setup_model_pick = false;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                    return iced::Task::none();
+                }
                 if self.height_reference_pick.take().is_some() {
                     return iced::Task::none();
                 }
@@ -4371,6 +4425,7 @@ impl App {
                 };
             }
             Message::ToggleSetOrigin => {
+                self.setup_model_pick = false;
                 self.setup_axis_pick = None;
                 self.setup_hover = SetupHover::default();
                 let on = !self.setting_origin;
@@ -4386,6 +4441,7 @@ impl App {
                 }
             }
             Message::ToggleSetOrigin2pt => {
+                self.setup_model_pick = false;
                 self.setup_axis_pick = None;
                 self.setup_hover = SetupHover::default();
                 let on = !self.setting_origin_2pt;
@@ -9656,6 +9712,13 @@ impl Viewport {
         // The active machine's travel per axis, when the envelope is shown.
         envelope: Option<[f32; 3]>,
     ) -> Self {
+        let cad_hover = cad_hover.filter(|reference| {
+            !cad_hidden.contains(&reference.instance_id)
+                && controller
+                    .geometry_state()
+                    .instance(reference.instance_id)
+                    .is_some_and(|instance| instance.visible)
+        });
         let picking = controller.pending_op().is_some();
         let pick_z = controller.document().setup().heights.top_of_stock as f32;
         // After a run, show the full backplot; before it, at least show the
@@ -9712,6 +9775,13 @@ impl Viewport {
                 cad_selected.extend(binding.selected.iter().cloned());
             }
         }
+        cad_selected.retain(|reference| {
+            !cad_hidden.contains(&reference.instance_id)
+                && controller
+                    .geometry_state()
+                    .instance(reference.instance_id)
+                    .is_some_and(|instance| instance.visible)
+        });
         let cad_lines = cad_scene.edges(&cad_selected, cad_hover);
         let silhouette_refs: BTreeSet<_> = cad_selected
             .iter()
@@ -11173,12 +11243,14 @@ mod multi_setup_draft_tests {
                     source_units: SourceUnits::Millimetres,
                     backend: "analytic test fixture".into(),
                     topology: TopologySnapshot {
-                        bodies: vec![CadBody {
-                            id: 1,
-                            name: "Body".into(),
-                            valid_solid: true,
-                            bounds: [[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]],
-                        }],
+                        bodies: (1..=3)
+                            .map(|id| CadBody {
+                                id,
+                                name: format!("Body {id}"),
+                                valid_solid: true,
+                                bounds: [[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]],
+                            })
+                            .collect(),
                         ..Default::default()
                     }
                     .into(),
@@ -11187,9 +11259,12 @@ mod multi_setup_draft_tests {
                     .map(|id| GeometryInstance {
                         id,
                         asset_id: 1,
-                        body_id: 1,
+                        body_id: id,
                         name: format!("Body {id}"),
-                        placement: Default::default(),
+                        placement: RigidTransform {
+                            translation: [(id - 1) as f64 * 20., 0., 0.],
+                            ..Default::default()
+                        },
                         visible: true,
                     })
                     .collect(),
@@ -11202,31 +11277,49 @@ mod multi_setup_draft_tests {
     #[test]
     fn model_list_add_remove_and_cancel_are_staged_in_one_setup_draft() {
         let mut app = model_list_app();
-        let (min, max) = app.controller.stock_box();
-        assert!(
-            min[2] < 0.0 && max[2] > 10.0,
-            "default stock contains the entire imported model with allowance"
-        );
         let before = app.controller.document().clone();
-        // Legacy empty lists mean all instances; removing one makes the set explicit.
-        send(&mut app, Message::SetupModelSelected(2));
-        assert!(
-            !app.setup_draft_dirty(),
-            "list selection is only navigation"
+        assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
+        send(&mut app, Message::SetupModelPick);
+        assert!(app.setup_model_pick);
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Body);
+        for instance in [1, 3, 2, 2] {
+            send(
+                &mut app,
+                Message::CadPicked(vec![PickCandidate {
+                    entity: EntityRef {
+                        asset_id: 1,
+                        revision: 1,
+                        instance_id: instance,
+                        body_id: instance,
+                        kind: EntityKind::Body,
+                        id: instance,
+                    },
+                    depth: 0.0,
+                    occluded: false,
+                }]),
+            );
+        }
+        assert_eq!(
+            app.setup_draft.as_ref().unwrap().model_instances,
+            vec![1, 3, 2]
         );
+        assert!(
+            app.setup_model_pick,
+            "multiple bodies can be picked in one session"
+        );
+        assert_eq!(app.controller.document(), &before);
+        send(&mut app, Message::CadEscape);
+        assert!(!app.setup_model_pick);
+        assert!(
+            app.setup_draft_dirty(),
+            "Escape finishes picking without losing draft edits"
+        );
+        send(&mut app, Message::SetupModelSelected(2));
         send(&mut app, Message::SetupModelToggled(2, false));
         assert_eq!(
             app.setup_draft.as_ref().unwrap().model_instances,
             vec![1, 3]
         );
-        assert_eq!(app.controller.document(), &before);
-        send(&mut app, Message::SetupModelToggled(2, true));
-        send(&mut app, Message::SetupModelToggled(2, true));
-        assert_eq!(
-            app.setup_draft.as_ref().unwrap().model_instances,
-            vec![1, 3, 2]
-        );
-        assert_eq!(app.setup_model_selection, Some(2));
         send(&mut app, Message::SetupCancel);
         assert_eq!(app.controller.document(), &before);
         assert!(app.setup_model_selection.is_none());
@@ -11234,20 +11327,77 @@ mod multi_setup_draft_tests {
     }
 
     #[test]
-    fn model_list_rejects_unknown_ids_and_keeps_a_machining_model() {
+    fn model_list_rejects_unknown_ids_and_allows_removing_the_last_model() {
         let mut app = model_list_app();
-        send(&mut app, Message::SetupModelToggled(3, false));
-        send(&mut app, Message::SetupModelToggled(2, false));
-        send(&mut app, Message::SetupModelToggled(1, false));
+        send(&mut app, Message::SetupModelToggled(1, true));
         send(&mut app, Message::SetupModelToggled(99, true));
-        send(&mut app, Message::SetupModelToggled(99, false));
         send(&mut app, Message::SetupModelSelected(99));
         assert_eq!(app.setup_draft.as_ref().unwrap().model_instances, vec![1]);
-        assert_eq!(app.setup_model_selection, Some(1));
+        let (min, max) = app
+            .controller
+            .pending_setup_model_bounds(app.setup_draft.as_ref().unwrap());
+        assert_eq!((min, max), ([0.; 3], [10.; 3]));
         send(&mut app, Message::SetupCommit);
         assert_eq!(app.controller.document().setup().model_instances, vec![1]);
-        assert!(app.controller.undo());
+        app.begin_setup_draft();
+        send(&mut app, Message::SetupModelToggled(1, false));
+        assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
+        assert!(app.setup_model_selection.is_none());
+        send(&mut app, Message::SetupCommit);
         assert!(app.controller.document().setup().model_instances.is_empty());
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document().setup().model_instances, vec![1]);
+    }
+
+    #[test]
+    fn body_membership_controls_bounds_and_survives_save_and_reopen() {
+        let mut app = model_list_app();
+        assert!(app
+            .controller
+            .setup_geometry_state()
+            .unwrap()
+            .instances
+            .is_empty());
+        send(&mut app, Message::SetupModelToggled(2, true));
+        send(&mut app, Message::SetupCommit);
+        assert_eq!(
+            app.controller.setup_model_bounds(),
+            ([20., 0., 0.], [30., 10., 10.])
+        );
+        let geometry = app.controller.setup_geometry_state().unwrap();
+        assert_eq!(geometry.instances.len(), 1);
+        assert_eq!(geometry.instances[0].body_id, 2);
+        let path =
+            std::env::temp_dir().join(format!("setup-body-membership-{}.ocam", std::process::id()));
+        let first = app.controller.active_setup_id();
+        let selected_bounds = app.controller.setup_model_bounds();
+        let empty_setup = app.controller.add_setup();
+        app.controller.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        reopened.activate_setup(empty_setup).unwrap();
+        assert!(reopened.document().setup().model_instances.is_empty());
+        assert!(reopened
+            .setup_geometry_state()
+            .unwrap()
+            .instances
+            .is_empty());
+        reopened.activate_setup(first).unwrap();
+        assert_eq!(reopened.document().setup().model_instances, vec![2]);
+        assert_eq!(reopened.setup_model_bounds(), selected_bounds);
+    }
+
+    #[test]
+    fn new_setup_has_no_models_but_duplicate_preserves_its_selection() {
+        let mut app = model_list_app();
+        send(&mut app, Message::SetupModelToggled(2, true));
+        send(&mut app, Message::SetupCommit);
+        let first = app.controller.active_setup_id();
+        app.controller.duplicate_setup(first).unwrap();
+        assert_eq!(app.controller.document().setup().model_instances, vec![2]);
+        send(&mut app, Message::SetupNew);
+        assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
     }
 
     #[test]

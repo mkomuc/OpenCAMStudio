@@ -339,7 +339,6 @@ impl Project {
                 .find(|setup| setup.operations.iter().any(|op| op.id() == *id))
                 .unwrap();
             if matches!(&binding.status, cam_model::ResolutionStatus::Resolved)
-                && !owner.model_instances.is_empty()
                 && binding
                     .selected
                     .iter()

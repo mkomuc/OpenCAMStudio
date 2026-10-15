@@ -242,10 +242,20 @@ fn controller() -> AppController {
     });
     app
 }
+fn select_all_models(app: &mut AppController) {
+    let ids = app
+        .geometry_state()
+        .instances
+        .iter()
+        .map(|i| i.id)
+        .collect();
+    app.edit_setup(|setup| setup.model_instances = ids);
+}
 fn install_pocket(app: &mut AppController) -> EntityRef {
     let (state, r) = pocket();
     app.add_cad_asset(state.assets[0].clone(), state.instances)
         .unwrap();
+    select_all_models(app);
     r
 }
 
@@ -295,6 +305,7 @@ fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
     app.edit_tool(0, |t| t.flute_length = 10.);
     app.add_cad_asset(state.assets[0].clone(), state.instances)
         .unwrap();
+    select_all_models(&mut app);
     app.toggle_cad_selection(selected.clone(), false).unwrap();
     let preview = app.cad_operation_eligibility(OpKind::Profile).unwrap();
     assert_eq!(
@@ -376,6 +387,7 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
         let mut app = controller();
         app.add_cad_asset(state.assets[0].clone(), state.instances)
             .unwrap();
+        select_all_models(&mut app);
         let before = app.document().clone();
         let error = app
             .create_cad_operation(OpKind::Profile, vec![selected])
@@ -782,8 +794,11 @@ fn replacement_requires_review_and_undo_restores_links_and_export_eligibility() 
 fn asset_and_binding_duplicate_delete_undo_together() {
     let mut app = controller();
     let r = install_pocket(&mut app);
-    assert!(app.undo());
+    assert!(app.undo()); // setup body selection
+    assert!(app.document().setup().model_instances.is_empty());
+    assert!(app.undo()); // import
     assert!(app.geometry_state().assets.is_empty());
+    assert!(app.redo());
     assert!(app.redo());
     let id = app.create_cad_operation(OpKind::Pocket, vec![r]).unwrap();
     app.duplicate_selected_operation();
@@ -794,6 +809,7 @@ fn asset_and_binding_duplicate_delete_undo_together() {
     assert!(app.undo());
     assert_eq!(app.geometry_state().bindings.len(), 2);
     assert!(app.remove_cad_asset(1));
+    assert!(app.document().setup().model_instances.is_empty());
     assert_eq!(
         app.run(&CancelToken::new()).completion,
         JobCompletion::Failed
@@ -936,6 +952,7 @@ fn deleted_asset_id_is_never_reused_for_an_unrelated_import() {
     let instances = app.geometry_state().instances.clone();
     assert!(app.remove_cad_asset(asset.id));
     app.add_cad_asset(asset, instances).unwrap();
+    select_all_models(&mut app);
     assert_eq!(app.geometry_state().assets[0].id, 2);
     assert!(!app.geometry_state().entity_exists(&reference));
     assert_eq!(app.geometry_state().instances[0].id, 2);
@@ -1051,6 +1068,7 @@ fn a_different_body_instance_cannot_be_added_to_the_geometry_field() {
     asset.id = 2;
     second.asset_id = 2;
     app.add_cad_asset(asset, vec![second]).unwrap();
+    select_all_models(&mut app);
     let mut second_floor = floor.clone();
     second_floor.asset_id = 2;
     second_floor.instance_id = 2;
@@ -1112,6 +1130,7 @@ fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
     let mut app = controller();
     app.add_cad_asset(state.assets[0].clone(), state.instances)
         .unwrap();
+    select_all_models(&mut app);
     let old_tool = app.use_tool(Tool {
         number: 10,
         diameter: 6.,
@@ -1275,6 +1294,7 @@ fn pocket_and_drill_ignore_unrelated_blends_but_reject_obstructed_approaches() {
         app.edit_tool(0, |t| t.flute_length = 10.);
         app.add_cad_asset(state.assets[0].clone(), state.instances.clone())
             .unwrap();
+        select_all_models(&mut app);
         let preview = app
             .preview_cad_operation(kind, std::slice::from_ref(&selected))
             .unwrap();
@@ -1329,6 +1349,7 @@ fn pocket_and_drill_ignore_unrelated_blends_but_reject_obstructed_approaches() {
             let mut app = controller();
             app.add_cad_asset(state.assets[0].clone(), state.instances)
                 .unwrap();
+            select_all_models(&mut app);
             let result = app.preview_cad_operation(kind, std::slice::from_ref(&selected));
             if blocked {
                 assert!(result.unwrap_err().contains("blocks vertical access"));

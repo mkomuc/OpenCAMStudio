@@ -2,23 +2,11 @@
 use super::*;
 use iced::widget::column;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SetupModelChoice {
-    id: InstanceId,
-    label: String,
-}
-impl std::fmt::Display for SetupModelChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.label)
-    }
-}
-
 impl App {
     fn setup_geometry_list(&self, draft: &cam_model::Setup) -> Element<'_, Message> {
         let geometry = self.controller.geometry_state();
-        let included = |id| draft.model_instances.is_empty() || draft.model_instances.contains(&id);
+        let included = |id| draft.model_instances.contains(&id);
         let mut entries = column![].spacing(2).width(Length::Fill);
-        let mut available = Vec::new();
         let mut count = 0;
         for instance in &geometry.instances {
             let label = geometry
@@ -35,18 +23,13 @@ impl App {
                         .style(move |theme, status| inspector_tab(theme, status, selected))
                         .on_press(Message::SetupModelSelected(instance.id)),
                 );
-            } else {
-                available.push(SetupModelChoice {
-                    id: instance.id,
-                    label,
-                });
             }
         }
         if count == 0 {
             entries = entries.push(
                 container(
                     text(if self.controller.has_geometry() {
-                        "Drawing geometry is included in this setup."
+                        "No models selected. Click Add, then pick bodies in the view."
                     } else {
                         "Import a model to add setup geometry."
                     })
@@ -77,30 +60,19 @@ impl App {
         if !geometry.instances.is_empty() {
             let remove = self
                 .setup_model_selection
-                .filter(|id| count > 1 && included(*id))
+                .filter(|id| included(*id))
                 .map(|id| Message::SetupModelToggled(id, false));
-            let placeholder = if available.is_empty() {
-                "All models added"
-            } else {
-                "Add model…"
-            };
             form = form.push(
                 row![
-                    pick_list(available, None::<SetupModelChoice>, |choice| {
-                        Message::SetupModelToggled(choice.id, true)
-                    })
-                    .placeholder(placeholder)
-                    .text_size(12)
-                    .padding([7, 9])
-                    .style(inspector_picker)
-                    .width(Length::Fill),
+                    inspector_button(if self.setup_model_pick { "Done" } else { "Add" })
+                        .on_press(Message::SetupModelPick),
                     inspector_button("Remove").on_press_maybe(remove),
                 ]
                 .spacing(6),
             );
-            if count == 1 {
+            if self.setup_model_pick {
                 form = form.push(
-                    text("Keep at least one model in the setup.")
+                    text("Click bodies in the view to add them. Click Done when finished.")
                         .size(11)
                         .color(INSPECTOR_MUTED),
                 );
@@ -164,51 +136,8 @@ impl App {
                 );
                 list = list.push(inspector_section("Geometry"));
                 list = list.push(self.setup_geometry_list(draft));
-                list = list.push(text("Viewport selection").size(11).color(INSPECTOR_MUTED));
-                list = list.push(
-                    row![
-                        text("Selection filter")
-                            .size(12)
-                            .color(INSPECTOR_TEXT)
-                            .width(Length::Fill),
-                        pick_list(
-                            &CadFilter::ALL[..],
-                            Some(self.cad_filter),
-                            Message::CadFilterChanged
-                        )
-                        .text_size(12)
-                        .padding([7, 9])
-                        .style(inspector_picker)
-                        .width(120),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                );
-                list = list.push(
-                    checkbox(self.cad_select_through)
-                        .label("Select through solids")
-                        .size(15)
-                        .spacing(8)
-                        .on_toggle(Message::CadSelectThrough)
-                        .text_size(12),
-                );
-                list = list.push(
-                    row![
-                        inspector_button("Hide selected").on_press(Message::CadHideSelected),
-                        inspector_button("Isolate").on_press(Message::CadIsolateSelected),
-                        inspector_button("Show all").on_press(Message::CadShowAll),
-                    ]
-                    .spacing(6)
-                    .wrap(),
-                );
                 list = list.push(inspector_section("Coordinate system"));
-                if let Some(instance) = draft.model_instances.first().copied().or_else(|| {
-                    self.controller
-                        .geometry_state()
-                        .instances
-                        .first()
-                        .map(|i| i.id)
-                }) {
+                if let Some(instance) = draft.model_instances.first().copied() {
                     list = list.push(
                         text(if draft.frame.references.model_instance.is_some() {
                             "Using model coordinates"

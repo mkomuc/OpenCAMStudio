@@ -137,7 +137,7 @@ pub(crate) fn prepare_import(path: &Path) -> Result<PreparedImport, String> {
                     id: index as u64 + 1,
                     asset_id: 1,
                     body_id: p.body_id,
-                    name: format!("{name} / body {}", p.body_id),
+                    name: format!("Body {}", index + 1),
                     placement: p.placement,
                     visible: true,
                 })
@@ -186,11 +186,9 @@ pub(crate) fn geometry_for_setup(document: &Document) -> Result<GeometryState, S
     let mut geometry = document.geometry.geometry_in_setup(&setup.frame)?;
     let ids: std::collections::BTreeSet<_> = setup.operations.iter().map(Operation::id).collect();
     geometry.bindings.retain(|id, _| ids.contains(id));
-    if !setup.model_instances.is_empty() {
-        geometry
-            .instances
-            .retain(|instance| setup.model_instances.contains(&instance.id));
-    }
+    geometry
+        .instances
+        .retain(|instance| setup.model_instances.contains(&instance.id));
     Ok(geometry)
 }
 
@@ -206,7 +204,7 @@ pub(crate) fn model_bounds(geometry: &GeometryState, setup: &Setup) -> ([f64; 3]
         }
     };
     for instance in &geometry.instances {
-        if !setup.model_instances.is_empty() && !setup.model_instances.contains(&instance.id) {
+        if !setup.model_instances.contains(&instance.id) {
             continue;
         }
         let Some(asset) = geometry.asset(instance.asset_id) else {

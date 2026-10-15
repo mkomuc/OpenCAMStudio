@@ -1137,6 +1137,10 @@ impl AppController {
         self.edit_document(move |doc| {
             doc.geometry.assets.retain(|a| a.id != id);
             doc.geometry.instances.retain(|i| i.asset_id != id);
+            let remaining: BTreeSet<_> = doc.geometry.instances.iter().map(|i| i.id).collect();
+            for setup in &mut doc.setups {
+                setup.model_instances.retain(|id| remaining.contains(id));
+            }
             for binding in doc
                 .geometry
                 .bindings

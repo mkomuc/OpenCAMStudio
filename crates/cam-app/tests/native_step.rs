@@ -85,6 +85,15 @@ fn posted_cutting_z_range(nc: &str) -> (f64, f64) {
             .expect("posted Z words"),
     )
 }
+fn select_all_models(app: &mut AppController) {
+    let ids = app
+        .geometry_state()
+        .instances
+        .iter()
+        .map(|i| i.id)
+        .collect();
+    app.edit_setup(|setup| setup.model_instances = ids);
+}
 fn new_app() -> AppController {
     assert!(
         cam_kernel::backend_available(),
@@ -111,6 +120,7 @@ fn step_source_tolerances_preserve_validity_and_geometry_selection() {
     let mut app = new_app();
     app.import_cad(fixture("toleranced-spline-prism-mm.step"))
         .unwrap();
+    select_all_models(&mut app);
     let state = app.geometry_state();
     state.validate().unwrap();
     let topology = &state.assets[0].topology;
@@ -132,6 +142,7 @@ fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
     let mut app = new_app();
     app.import_cad(fixture("blended-box-blind-bore-mm.step"))
         .unwrap();
+    select_all_models(&mut app);
     let state = app.geometry_state();
     let topology = &state.assets[0].topology;
     assert!(topology.bodies[0].valid_solid);
@@ -223,6 +234,7 @@ fn step_plate_floor_island_four_holes_profile_generates_and_reopens_without_sour
     let source = std::env::temp_dir().join(format!("native-source-{}.step", std::process::id()));
     std::fs::copy(fixture("pocket-island-holes-mm.step"), &source).unwrap();
     app.import_cad(&source).unwrap();
+    select_all_models(&mut app);
     std::fs::remove_file(&source).unwrap();
     app.geometry_state().validate().unwrap();
     let topology = &app.geometry_state().assets[0].topology;
@@ -290,6 +302,7 @@ fn step_plate_floor_island_four_holes_profile_generates_and_reopens_without_sour
 fn box_step_machines_top_and_bottom_faces_in_independent_frames_and_round_trips() {
     let mut app = new_app();
     app.import_cad(fixture("box-mm.step")).unwrap();
+    select_all_models(&mut app);
     app.geometry_state().validate().unwrap();
     let asset = &app.geometry_state().assets[0];
     let instance_id = app.geometry_state().instances[0].id;
@@ -349,6 +362,7 @@ fn box_step_machines_top_and_bottom_faces_in_independent_frames_and_round_trips(
     let bottom_setup_id = app.add_setup();
     let mut bottom_setup = app.document().setup().clone();
     bottom_setup.name = "Bottom".into();
+    bottom_setup.model_instances = vec![instance_id];
     bottom_setup.program_name = "BOTTOM".into();
     bottom_setup.frame =
         SetupFrame::from_axes(Some([1.0, 0.0, 0.0]), Some([0.0, -1.0, 0.0]), None).unwrap();
@@ -499,6 +513,7 @@ fn display_tessellation_quality_does_not_change_pocket_nc() {
             .collect();
         let mut app = new_app();
         app.add_cad_asset(asset, instances).unwrap();
+        select_all_models(&mut app);
         let f=app.geometry_state().assets[0].topology.faces.iter().find(|f|matches!(f.surface,CadSurface::Plane{origin,normal} if (origin[2]+6.).abs()<1e-6&&normal[2]>0.9)).unwrap();
         let r = reference(app.geometry_state(), EntityKind::Face, f.id);
         app.create_cad_operation(OpKind::Pocket, vec![r]).unwrap();
@@ -516,6 +531,7 @@ fn rotated_step_can_be_aligned_to_one_fixed_machining_frame() {
     let mut app = new_app();
     app.import_cad(fixture("pocket-island-holes-rotated.step"))
         .unwrap();
+    select_all_models(&mut app);
     let topology = &app.geometry_state().assets[0].topology;
     let top = topology
         .faces
@@ -555,6 +571,7 @@ fn rotated_step_can_be_aligned_to_one_fixed_machining_frame() {
 fn repeated_step_components_keep_separate_placements_and_selection_identity() {
     let mut app = new_app();
     app.import_cad(fixture("repeated-boxes.step")).unwrap();
+    select_all_models(&mut app);
     assert_eq!(app.geometry_state().instances.len(), 2);
     assert_eq!(app.geometry_state().assets[0].topology.bodies.len(), 1);
     let first = &app.geometry_state().instances[0];
@@ -570,6 +587,7 @@ fn background_replacement_preview_requires_commit_and_marks_operations_for_resel
     let mut app = new_app();
     app.import_cad(fixture("pocket-island-holes-mm.step"))
         .unwrap();
+    select_all_models(&mut app);
     let f=app.geometry_state().assets[0].topology.faces.iter().find(|f|matches!(f.surface,CadSurface::Plane{origin,normal} if (origin[2]+6.).abs()<1e-6&&normal[2]>0.9)).unwrap();
     let r = reference(app.geometry_state(), EntityKind::Face, f.id);
     let id = app.create_cad_operation(OpKind::Pocket, vec![r]).unwrap();
@@ -603,6 +621,7 @@ fn background_replacement_preview_requires_commit_and_marks_operations_for_resel
 fn facing_uses_actual_stock_top_and_rederives_it_after_stock_edits() {
     let mut app = new_app();
     app.import_cad(fixture("box-mm.step")).unwrap();
+    select_all_models(&mut app);
     let f=app.geometry_state().assets[0].topology.faces.iter().find(|f|matches!(f.surface,CadSurface::Plane{origin,normal}if origin[2].abs()<1e-6&&normal[2]>0.9)).unwrap();
     let r = reference(app.geometry_state(), EntityKind::Face, f.id);
     app.edit_stock(|s| {
@@ -647,6 +666,7 @@ fn tigerente_face_32_can_face_stock_above_spline_boundaries_and_blends() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente.step");
     app.import_cad(&path).unwrap();
+    select_all_models(&mut app);
     let target = reference(app.geometry_state(), EntityKind::Face, 32);
     assert!(app
         .preview_cad_operation(OpKind::Face, std::slice::from_ref(&target))
@@ -688,6 +708,7 @@ fn tigerente_blind_pockets_and_drills_use_local_certificates_in_both_setups() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente.step");
         app.import_cad(&path).unwrap();
+        select_all_models(&mut app);
         let floor = reference(app.geometry_state(), EntityKind::Face, floor_id);
         let bore = reference(app.geometry_state(), EntityKind::Face, bore_id);
         // A wrong setup still fails for the selected feature, regardless of
@@ -746,6 +767,7 @@ fn rounded_exterior_xy_silhouette_profiles_and_reopens_without_source() {
     let mut app = new_app();
     app.import_cad(fixture("blended-box-blind-bore-mm.step"))
         .unwrap();
+    select_all_models(&mut app);
     let state = app.geometry_state();
     let selected = reference(state, EntityKind::Silhouette, state.instances[0].body_id);
     let scene = cam_render::CadScene::from_geometry(state, &std::collections::BTreeSet::new());
@@ -846,6 +868,7 @@ fn silhouette_projection_is_independent_of_display_quality_on_curved_step_models
         );
         let mut app = new_app();
         app.import_cad(&path).unwrap();
+        select_all_models(&mut app);
         let state = app.geometry_state();
         let selected = reference(state, EntityKind::Silhouette, state.instances[0].body_id);
         let preview = app

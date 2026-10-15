@@ -155,6 +155,9 @@ impl App {
             }
             Ok(count) => {
                 self.cad_hidden.clear();
+                self.hidden_assets.clear();
+                self.model_view = (!self.controller.geometry_state().instances.is_empty())
+                    .then_some(TreeNode::Models);
                 self.cad_hover = None;
                 self.cad_candidates.clear();
                 self.cad_pending_kind = None;

@@ -84,6 +84,43 @@ pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, 
     (vertices, indices)
 }
 impl App {
+    pub(super) fn reset_model_browser(&mut self) {
+        self.model_view = Some(TreeNode::Models);
+        self.cad_hidden.clear();
+        self.hidden_assets.clear();
+        self.collapsed_assets.clear();
+        self.expanded_operations.clear();
+        self.tools_expanded = false;
+        self.hidden_setups.clear();
+        self.hidden_ops.clear();
+    }
+
+    /// One visibility mask for rendering, picking, snapping and camera framing.
+    /// Choosing setup members temporarily exposes the full model collection.
+    pub(super) fn viewport_hidden_instances(&self) -> BTreeSet<InstanceId> {
+        let setup = self
+            .setup_draft
+            .as_ref()
+            .unwrap_or_else(|| self.controller.document().setup());
+        let mut hidden = self.cad_hidden.clone();
+        for instance in &self.controller.geometry_state().instances {
+            let in_scope = if self.setup_model_pick {
+                true
+            } else {
+                match &self.model_view {
+                    Some(TreeNode::Asset(id)) => instance.asset_id == *id,
+                    Some(TreeNode::Model(id)) => instance.id == *id,
+                    Some(_) => true,
+                    None => setup.model_instances.contains(&instance.id),
+                }
+            };
+            if !in_scope || self.hidden_assets.contains(&instance.asset_id) {
+                hidden.insert(instance.id);
+            }
+        }
+        hidden
+    }
+
     pub(super) fn switch_workspace(&mut self, workspace: Workspace) {
         if self.workspace == workspace {
             return;
@@ -183,13 +220,15 @@ impl App {
         .height(Length::Fill)
         .into()
     }
-    fn machining_viewport(&self) -> Viewport {
+    pub(super) fn machining_viewport(&self) -> Viewport {
+        let cad_hidden = self.viewport_hidden_instances();
+        let model_view = self.model_view.is_some();
         let hidden: Vec<_> = self
             .controller
             .setups()
             .iter()
             .flat_map(|setup| {
-                let hidden_setup = self.hidden_setups.contains(&setup.id);
+                let hidden_setup = model_view || self.hidden_setups.contains(&setup.id);
                 setup
                     .operations
                     .iter()
@@ -199,11 +238,15 @@ impl App {
             .collect();
         let mut viewport = Viewport::new(
             &self.controller,
-            self.cad_filter.kind(),
+            if self.setup_model_pick {
+                EntityKind::Body
+            } else {
+                self.cad_filter.kind()
+            },
             self.cad_hover.as_ref(),
-            &self.cad_hidden,
+            &cad_hidden,
             self.cad_select_through,
-            self.show_stock,
+            self.show_stock && !model_view,
             self.view,
             self.show_gizmo,
             self.gizmo_size,
@@ -231,9 +274,38 @@ impl App {
             self.setup_draft
                 .as_ref()
                 .unwrap_or_else(|| self.controller.document().setup()),
-            &self.cad_hidden,
+            &cad_hidden,
         );
+        if model_view {
+            viewport.setup_geometry = SetupPickGeometry::default();
+            viewport.drill_marks.clear();
+        }
         viewport.setup_axis = self.setup_axis_pick.is_some();
+        if let Some(draft) = &self.setup_draft {
+            let geometry = self.controller.geometry_state();
+            let selected: Vec<_> = draft
+                .model_instances
+                .iter()
+                .filter_map(|id| {
+                    let instance = geometry.instance(*id)?;
+                    let asset = geometry.asset(instance.asset_id)?;
+                    Some(EntityRef {
+                        asset_id: asset.id,
+                        revision: asset.revision,
+                        instance_id: *id,
+                        body_id: instance.body_id,
+                        kind: EntityKind::Body,
+                        id: instance.body_id,
+                    })
+                })
+                .collect();
+            viewport.cad_edges = Arc::new(
+                viewport
+                    .cad_scene
+                    .edges(&selected, self.cad_hover.as_ref())
+                    .line_vertices(),
+            );
+        }
         viewport.setup_hover = self.setup_hover.clone();
         viewport.setup_snaps = if self.settings.snapping.enabled {
             self.snaps.clone()
@@ -241,10 +313,16 @@ impl App {
             vec![]
         };
         viewport.frame_bounds = union_bounds(
-            viewport.setup_geometry.stock_bounds(),
+            if model_view {
+                None
+            } else {
+                viewport.setup_geometry.stock_bounds()
+            },
             viewport.cad_scene.bounds(),
         );
-        viewport.cad_silhouette = self.modifiers.control() && self.height_reference_pick.is_none();
+        viewport.cad_silhouette = self.modifiers.control()
+            && self.height_reference_pick.is_none()
+            && !self.setup_model_pick;
         viewport.cad_operation_kind = self.cad_pending_kind.or_else(|| {
             self.cad_editing_op.and_then(|id| {
                 self.current_operation(id)
@@ -715,6 +793,8 @@ mod tests {
                     .join("../cam-kernel/fixtures/box-mm.step"),
             )
             .unwrap();
+        let model = app.controller.geometry_state().instances[0].id;
+        app.controller.edit_setup(|setup| setup.model_instances = vec![model]);
         app.begin_setup_draft();
         app.setup_draft.as_mut().unwrap().stock = cam_model::Stock::RelativeBox {
             offsets: [[5.; 3], [5.; 3]],
@@ -976,6 +1056,8 @@ mod tests {
                     .join("../cam-kernel/fixtures/box-mm.step"),
             )
             .unwrap();
+        let models = controller.geometry_state().instances.iter().map(|instance| instance.id).collect();
+        controller.edit_setup(|setup| setup.model_instances = models);
         let mut viewport = Viewport::new(
             &controller,
             EntityKind::Loop,

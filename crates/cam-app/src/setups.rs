@@ -44,6 +44,7 @@ impl AppController {
         setup.id = self.document().next_setup_id().max(self.setup_id_floor);
         setup.name = format!("Setup {}", setup.id);
         setup.program_name = format!("setup-{}", setup.id);
+        setup.model_instances.clear();
         setup.operations.clear();
         setup.operation_heights.clear();
         setup.height_settings.clear();
