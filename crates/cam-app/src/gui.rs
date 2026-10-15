@@ -36,6 +36,10 @@ use crate::tool_library::{families_for, ToolKindPick, ToolLibrary};
 #[path = "gui_inspector_style.rs"]
 mod inspector_style;
 use inspector_style::*;
+#[path = "gui_height_editor.rs"]
+mod height_editor;
+#[path = "gui_height_planes.rs"]
+mod height_planes;
 #[path = "gui_inspector.rs"]
 mod inspector_view;
 #[path = "gui_jobs.rs"]
@@ -55,7 +59,9 @@ mod workspace_view;
 use workspace_view::Workspace;
 #[path = "gui_geometry_selection.rs"]
 mod geometry_selection;
-use geometry_selection::{cad_geometry_labels, drawing_geometry_labels, operation_geometry_labels};
+use geometry_selection::{
+    cad_geometry_labels, cad_silhouette_note, drawing_geometry_labels, operation_geometry_labels,
+};
 #[path = "gui_creation.rs"]
 mod creation;
 #[path = "gui_grid.rs"]
@@ -1788,6 +1794,12 @@ struct App {
     operation_binding_preview: Option<cam_model::GeometryBinding>,
     drawing_editing_op: Option<u32>,
     operation_tab: OperationTab,
+    focused_height: Option<String>,
+    height_draft_id: Option<u32>,
+    height_draft: Option<cam_model::OperationHeightSettings>,
+    height_offsets: BTreeMap<cam_model::HeightPlaneKind, String>,
+    height_reference_pick: Option<cam_model::HeightPlaneKind>,
+    collapsed_heights: BTreeSet<cam_model::HeightPlaneKind>,
     workspace: Workspace,
     machining_tab: RibbonTab,
     show_project_browser: bool,
@@ -2233,13 +2245,13 @@ enum Message {
     #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     Select(Selection),
     SelectSetup(u64),
+    EditSetup(u64),
     SetupTabChanged(SetupEditorTab),
     SetupNameChanged(String),
     SetupProgramChanged(String),
     SetupMaterialChanged(String),
     SetupUseModelFrame(u64),
     SetupUseModelOrigin(u64),
-    SetupHeightChanged(usize, String),
     SetupOriginChanged(usize, String),
     SetupWorkOffsetChanged(String),
     SetupModelSelected(InstanceId),
@@ -2262,6 +2274,16 @@ enum Message {
     SetSetupVisible(u64, bool),
     SetOperationVisible(u32, bool),
     FieldChanged(Field, String),
+    HeightReferenceChanged(cam_model::HeightPlaneKind, cam_model::HeightReference),
+    HeightOffsetChanged(cam_model::HeightPlaneKind, String),
+    HeightSourceToggled(cam_model::HeightPlaneKind, cam_model::HeightReference, bool),
+    HeightSectionToggle(cam_model::HeightPlaneKind),
+    HeightPickToggle(cam_model::HeightPlaneKind),
+    HeightSelectionClear(cam_model::HeightPlaneKind),
+    HeightEntityRemove(cam_model::HeightPlaneKind, usize),
+    HeightDefaults,
+    CheckHeightFocus,
+    HeightFocus(String, bool),
     /// Rename the machine.
     MachineNameChanged(String),
     /// Choose the post/controller dialect for export.
@@ -2319,7 +2341,9 @@ enum Message {
     CadEscape,
     ConfirmCadOperation,
     EditCadGeometry(u32),
+    #[allow(dead_code)] // Legacy absolute-height compatibility command.
     CadOverrideTopChanged(String),
+    #[allow(dead_code)] // Legacy absolute-height compatibility command.
     CadOverrideBottomChanged(String),
     /// The chosen CAD file to import (`None` = cancelled).
     CadToImport(Option<PathBuf>),
@@ -2579,14 +2603,32 @@ fn initial_panes() -> pane_grid::State<Pane> {
 impl App {
     fn begin_setup_draft(&mut self) {
         self.inspector_active = true;
+        self.inspector_enabled = true;
         self.cancel_setup_picks();
         self.setup_tab = SetupEditorTab::Setup;
-        self.rebase_setup_draft();
+        self.setup_draft = Some(self.controller.document().setup().clone());
+        self.setup_values.clear();
+        self.setup_model_selection = None;
+        self.operation_draft = None;
+        self.operation_tools.clear();
+        self.operation_geometry = None;
+        self.operation_binding_preview = None;
     }
 
-    /// Refresh the setup snapshot after a committed document change without
-    /// changing the visible tab or cancelling an unrelated operation inspector.
+    fn end_setup_draft(&mut self) {
+        self.setup_draft = None;
+        self.setup_values.clear();
+        self.setup_model_selection = None;
+        self.cancel_setup_picks();
+        self.inspector_active = false;
+    }
+
+    /// Refresh an existing edit session after a committed document change.
+    /// Background operation updates must never start a setup edit session.
     fn rebase_setup_draft(&mut self) {
+        if self.setup_draft.is_none() {
+            return;
+        }
         let id = self.controller.active_setup_id();
         self.setup_draft = self
             .controller
@@ -2599,12 +2641,12 @@ impl App {
     }
 
     fn setup_draft_dirty(&self) -> bool {
-        if !self.setup_values.is_empty() {
-            return true;
-        }
         let Some(draft) = &self.setup_draft else {
             return false;
         };
+        if !self.setup_values.is_empty() {
+            return true;
+        }
         self.controller
             .setups()
             .iter()
@@ -2676,12 +2718,14 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.end_setup_draft();
         self.inspector_active = true;
         self.controller.select(Selection::Operation(id));
         self.operation_geometry = None;
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
+        self.seed_height_editor(id);
         self.operation_tools.clear();
         self.fields.clear();
         self.refresh_fields();
@@ -2726,6 +2770,9 @@ impl App {
         let Selection::Operation(id) = self.controller.selection() else {
             return false;
         };
+        if self.height_rules_dirty() {
+            return true;
+        }
         if self.operation_geometry.as_ref().is_some_and(|selected| {
             self.controller
                 .geometry_state()
@@ -2913,6 +2960,12 @@ impl App {
             operation_binding_preview: None,
             drawing_editing_op: None,
             operation_tab: OperationTab::default(),
+            focused_height: None,
+            height_draft_id: None,
+            height_draft: None,
+            height_offsets: BTreeMap::new(),
+            height_reference_pick: None,
+            collapsed_heights: BTreeSet::new(),
             workspace: Workspace::Machining,
             machining_tab: RibbonTab::Home,
             show_project_browser: true,
@@ -3012,8 +3065,6 @@ impl App {
             app.panes.close(project);
         }
         app.controller.select(Selection::Setup);
-        app.begin_setup_draft();
-        app.inspector_active = false;
         app.refresh_fields();
         app.sync_inspector_visibility();
         // Seed the fixed layout against the assumed window size; the first real
@@ -3069,6 +3120,7 @@ impl App {
                 &message,
                 Message::Select(_)
                     | Message::SelectSetup(_)
+                    | Message::EditSetup(_)
                     | Message::ClickOp(_)
                     | Message::BeginOp(_)
                     | Message::SelectOrigin(_)
@@ -3102,6 +3154,7 @@ impl App {
                     | Message::SelectRibbonTab(RibbonTab::Tooling | RibbonTab::Machinery)
                     | Message::Select(_)
                     | Message::SelectSetup(_)
+                    | Message::EditSetup(_)
                     | Message::ClickOp(_)
                     | Message::BeginOp(_)
                     | Message::SelectOrigin(_)
@@ -3130,6 +3183,7 @@ impl App {
             &message,
             Message::Select(_)
                 | Message::SelectSetup(_)
+                | Message::EditSetup(_)
                 | Message::ClickOp(_)
                 | Message::SelectOrigin(_)
                 | Message::AddOrigin
@@ -3147,6 +3201,7 @@ impl App {
         if matches!(
             &message,
             Message::SelectSetup(_)
+                | Message::EditSetup(_)
                 | Message::SetupNew
                 | Message::SetupDuplicate(_)
                 | Message::SetupDelete(_)
@@ -3199,7 +3254,11 @@ impl App {
                 self.reload_tool_edit();
                 self.status = "Tool changes cancelled.".into();
             }
-            Message::OperationTabChanged(tab) => self.operation_tab = tab,
+            Message::OperationTabChanged(tab) => {
+                self.operation_tab = tab;
+                self.height_reference_pick = None;
+                self.focused_height = None;
+            }
             Message::ProfileCompChanged(comp) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(profile) = op {
@@ -3284,7 +3343,7 @@ impl App {
                     self.planar_selection.clear();
                     self.focus_ops.clear();
                     self.controller.select(Selection::Setup);
-                    self.begin_setup_draft();
+                    self.end_setup_draft();
                     self.refresh_fields();
                     self.status = format!("Imported {n} region(s).");
                     self.rerun();
@@ -3302,8 +3361,15 @@ impl App {
                     self.cad_editing_op = None;
                     self.controller.select(Selection::Setup);
                     self.operation_draft = None;
-                    self.begin_setup_draft();
+                    self.end_setup_draft();
+                    self.focus_ops.clear();
                     self.refresh_fields();
+                }
+            }
+            Message::EditSetup(id) => {
+                let _ = self.update(Message::SelectSetup(id));
+                if self.controller.active_setup_id() == id {
+                    self.begin_setup_draft();
                 }
             }
             Message::ToggleSetupExpanded(id) => {
@@ -3371,17 +3437,6 @@ impl App {
                     if let Some(draft) = &mut self.setup_draft {
                         draft.origin = draft.frame.to_setup_vector(model_origin);
                         draft.frame.references.origin = cam_model::FrameOrigin::ModelOrigin;
-                    }
-                }
-            }
-            Message::SetupHeightChanged(index, value) => {
-                self.setup_values.insert(10 + index, value.clone());
-                if let (Some(draft), Ok(v)) = (&mut self.setup_draft, value.parse::<f64>()) {
-                    match index {
-                        0 => draft.heights.clearance = v,
-                        1 => draft.heights.retract = v,
-                        2 => draft.heights.top_of_stock = v,
-                        _ => {}
                     }
                 }
             }
@@ -3564,12 +3619,9 @@ impl App {
                 if let Some(draft) = self.setup_draft.clone() {
                     match self.controller.apply_setup_settings(draft) {
                         Ok(()) => {
-                            self.setup_draft = None;
-                            self.setup_values.clear();
-                            self.cancel_setup_picks();
+                            self.end_setup_draft();
                             self.refresh_fields();
                             self.rerun();
-                            self.begin_setup_draft();
                             self.status = "Setup settings applied.".into();
                         }
                         Err(error) => self.status = error,
@@ -3577,9 +3629,8 @@ impl App {
                 }
             }
             Message::SetupCancel => {
-                self.cancel_setup_picks();
-                self.setup_values.clear();
-                self.begin_setup_draft();
+                self.end_setup_draft();
+                self.refresh_fields();
                 self.status = "Setup changes cancelled.".into();
             }
             Message::SetupNew => {
@@ -3603,7 +3654,8 @@ impl App {
                             self.expanded_setups.insert(new_id);
                             self.controller.activate_setup(new_id).ok();
                             self.controller.select(Selection::Setup);
-                            self.begin_setup_draft();
+                            self.end_setup_draft();
+                            self.refresh_fields();
                         }
                         Err(error) => self.status = error,
                     }
@@ -3615,7 +3667,7 @@ impl App {
                 } else if let Err(error) = self.controller.delete_setup(id) {
                     self.status = error;
                 } else {
-                    self.begin_setup_draft();
+                    self.end_setup_draft();
                     self.refresh_fields();
                 }
             }
@@ -3633,16 +3685,13 @@ impl App {
                 }
                 self.cad_inspecting = false;
                 self.cad_editing_op = None;
+                self.end_setup_draft();
                 self.controller.select(selection);
-                self.inspector_active =
-                    matches!(selection, Selection::Setup | Selection::Operation(_));
+                self.inspector_active = matches!(selection, Selection::Operation(_));
                 if let Selection::Operation(id) = selection {
                     self.begin_operation_draft(id);
                 } else {
                     self.operation_draft = None;
-                }
-                if selection == Selection::Setup {
-                    self.begin_setup_draft();
                 }
                 // Keep the viewport highlight in step: a single operation focuses
                 // just it; any non-operation node (Setup/Stock/Tool) clears the
@@ -3688,14 +3737,103 @@ impl App {
                     self.begin_operation_draft(op_id);
                 } else {
                     self.operation_draft = None;
-                    self.begin_setup_draft();
-                    self.inspector_active = false;
+                    self.end_setup_draft();
                 }
                 self.refresh_fields();
             }
             Message::ModifiersChanged(m) => self.modifiers = m,
             // Field edits only touch the local buffer; nothing is applied or
             // recomputed until Apply, so undo has one step per real change.
+            Message::HeightReferenceChanged(plane, reference) => {
+                self.height_reference_selected(plane, reference)
+            }
+            Message::HeightOffsetChanged(plane, value) => {
+                self.height_offsets.insert(plane, value);
+                self.focused_height = Some(height_editor::plane_input_id(plane));
+            }
+            Message::HeightSourceToggled(plane, reference, on) => {
+                if let Some(settings) = &mut self.height_draft {
+                    let sources = &mut settings.definition_mut(plane).sources;
+                    sources.retain(|r| *r != reference);
+                    if on {
+                        sources.push(reference);
+                    }
+                }
+                self.focused_height = Some(height_editor::plane_input_id(plane));
+            }
+            Message::HeightDefaults => {
+                let settings = cam_model::OperationHeightSettings::default();
+                self.height_offsets = cam_model::HeightPlaneKind::ALL
+                    .into_iter()
+                    .map(|p| (p, fmt_num(settings.definition(p).offset)))
+                    .collect();
+                self.height_draft = Some(settings);
+                self.height_reference_pick = None;
+            }
+            Message::HeightSectionToggle(plane) => {
+                if !self.collapsed_heights.remove(&plane) {
+                    self.collapsed_heights.insert(plane);
+                }
+            }
+            Message::HeightPickToggle(plane) => {
+                self.height_reference_pick = if self.height_reference_pick == Some(plane) {
+                    None
+                } else {
+                    Some(plane)
+                };
+                self.cad_filter = if self.height_draft.as_ref().is_some_and(|s| {
+                    matches!(
+                        s.definition(plane).reference,
+                        cam_model::HeightReference::FixtureTop
+                            | cam_model::HeightReference::FixtureBottom
+                    )
+                }) {
+                    CadFilter::Body
+                } else {
+                    CadFilter::Face
+                };
+                self.cad_inspecting = false;
+                self.focused_height = Some(height_editor::plane_input_id(plane));
+            }
+            Message::HeightEntityRemove(plane, index) => {
+                if let Some(settings) = &mut self.height_draft {
+                    let entities = &mut settings.definition_mut(plane).entities;
+                    if index < entities.len() {
+                        entities.remove(index);
+                    } else {
+                        let index = index - entities.len();
+                        let drawings = &mut settings.definition_mut(plane).drawings;
+                        if index < drawings.len() {
+                            drawings.remove(index);
+                        }
+                    }
+                }
+            }
+            Message::HeightSelectionClear(plane) => {
+                if let Some(settings) = &mut self.height_draft {
+                    let d = settings.definition_mut(plane);
+                    d.entities.clear();
+                    d.drawings.clear();
+                }
+            }
+            Message::CheckHeightFocus => {
+                if self.operation_tab == OperationTab::Heights
+                    && matches!(self.controller.selection(), Selection::Operation(_))
+                {
+                    return iced::Task::batch(self.height_input_ids().into_iter().map(|id| {
+                        iced::widget::operation::is_focused(id.clone())
+                            .map(move |focused| Message::HeightFocus(id.clone(), focused))
+                    }));
+                }
+                self.focused_height = None;
+            }
+            Message::HeightFocus(id, focused) => {
+                if focused {
+                    self.focused_height = Some(id);
+                } else if self.focused_height.as_ref() == Some(&id) {
+                    self.focused_height = None;
+                }
+            }
             Message::FieldChanged(field, value) => {
                 self.fields.insert(field, value);
                 // In the Tooling editor, every field edit flows into the working copy so
@@ -3762,7 +3900,7 @@ impl App {
                 self.controller.new_project();
                 self.focus_ops.clear();
                 self.controller.select(Selection::Setup);
-                self.begin_setup_draft();
+                self.end_setup_draft();
                 self.refresh_fields();
                 self.status = "New project.".to_string();
             }
@@ -3781,7 +3919,7 @@ impl App {
                         let report = self.controller.reconcile_tools(&self.library.tools);
                         self.focus_ops.clear();
                         self.controller.select(Selection::Setup);
-                        self.begin_setup_draft();
+                        self.end_setup_draft();
                         self.refresh_fields();
                         self.rerun();
                         match report.summary() {
@@ -3922,6 +4060,12 @@ impl App {
             }
             Message::CadHover(entity) => self.cad_hover = entity,
             Message::CadPicked(candidates) => {
+                if self.height_reference_pick.is_some() {
+                    if let Some(candidate) = candidates.first() {
+                        self.height_geometry_selected(candidate.entity.clone());
+                    }
+                    return iced::Task::none();
+                }
                 if let (Some(axis), [candidate]) = (self.setup_axis_pick, candidates.as_slice()) {
                     self.set_setup_axis_reference(axis, Some(candidate.entity.clone()));
                     self.setup_axis_pick = None;
@@ -3943,7 +4087,7 @@ impl App {
                         && !self.setup_draft_dirty()
                         && !self.inspector_dirty()
                     {
-                        self.inspector_active = false;
+                        self.end_setup_draft();
                         self.focus_ops.clear();
                     }
                 }
@@ -3956,6 +4100,10 @@ impl App {
             Message::GeometryRemove(index) => self.remove_operation_geometry(Some(index)),
             Message::GeometryClear => self.remove_operation_geometry(None),
             Message::CadSelect(entity) => {
+                if self.height_reference_pick.is_some() {
+                    self.height_geometry_selected(entity);
+                    return iced::Task::none();
+                }
                 if let Some(axis) = self.setup_axis_pick {
                     self.set_setup_axis_reference(axis, Some(entity));
                     self.setup_axis_pick = None;
@@ -4012,6 +4160,9 @@ impl App {
                 }
             }
             Message::CadEscape => {
+                if self.height_reference_pick.take().is_some() {
+                    return iced::Task::none();
+                }
                 self.cancel_tree_drag();
                 self.drawing_editing_op = None;
                 self.planar_selection.clear();
@@ -4167,6 +4318,9 @@ impl App {
             Message::Undo => {
                 if self.controller.undo() {
                     self.rebase_setup_draft();
+                    if let Selection::Operation(id) = self.controller.selection() {
+                        self.begin_operation_draft(id);
+                    }
                     self.refresh_fields();
                     self.rerun();
                     self.status = format!("Undid change. {}", self.status);
@@ -4177,6 +4331,9 @@ impl App {
             Message::Redo => {
                 if self.controller.redo() {
                     self.rebase_setup_draft();
+                    if let Selection::Operation(id) = self.controller.selection() {
+                        self.begin_operation_draft(id);
+                    }
                     self.refresh_fields();
                     self.rerun();
                     self.status = format!("Redid change. {}", self.status);
@@ -4185,10 +4342,12 @@ impl App {
                 }
             }
             Message::SelectOrigin(index) => {
+                self.end_setup_draft();
                 self.controller.select_origin(index);
                 self.refresh_fields();
             }
             Message::AddOrigin => {
+                self.end_setup_draft();
                 self.controller.add_origin();
                 self.refresh_fields();
             }
@@ -4284,6 +4443,7 @@ impl App {
                 }
             }
             Message::BeginOp(kind) => {
+                self.end_setup_draft();
                 if !self.controller.geometry_state().instances.is_empty()
                     && (self.controller.regions().is_empty()
                         || !self.controller.cad_selection().is_empty())
@@ -4436,6 +4596,28 @@ impl App {
                 }
             }
             Message::PickWorld(w, aperture) => {
+                if let Some(plane) = self.height_reference_pick {
+                    if let Some((reference, _)) = self
+                        .controller
+                        .nearest_drawing_feature(w.map(f64::from), aperture as f64)
+                    {
+                        if let Some((points, closed)) = self.controller.loop_points(reference) {
+                            let selection = cam_model::DrawingHeightSelection {
+                                points: points.iter().map(|p| [p.x, p.y]).collect(),
+                                closed,
+                            };
+                            if let Some(settings) = &mut self.height_draft {
+                                let drawings = &mut settings.definition_mut(plane).drawings;
+                                if let Some(index) = drawings.iter().position(|d| d == &selection) {
+                                    drawings.remove(index);
+                                } else {
+                                    drawings.push(selection);
+                                }
+                            }
+                        }
+                    }
+                    return iced::Task::none();
+                }
                 if self.controller.pending_op().is_none() {
                     if self.setup_draft_dirty()
                         || (matches!(self.controller.selection(), Selection::Operation(_))
@@ -4446,7 +4628,7 @@ impl App {
                                 .into();
                         return iced::Task::none();
                     }
-                    self.inspector_active = false;
+                    self.end_setup_draft();
                     self.focus_ops.clear();
                     let Some((feature, _)) = self
                         .controller
@@ -5404,6 +5586,15 @@ impl App {
                 iced::Subscription::none()
             },
             iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                ))
+                | iced::Event::Keyboard(iced::keyboard::Event::KeyReleased { .. }) => {
+                    Some(Message::CheckHeightFocus)
+                }
+                _ => None,
+            }),
             // Track the window-absolute cursor so overlays (the op context menu)
             // anchor exactly under the pointer — widget-local positions are offset
             // by the pane's origin, which is what caused the menu to appear astray.
@@ -5478,11 +5669,9 @@ impl App {
             || self.creating_operation()
             || self.cad_editing_op.is_some()
             || self.drawing_editing_op.is_some()
+            || (self.controller.selection() == Selection::Setup && self.setup_draft.is_some())
             || (self.inspector_active
-                && matches!(
-                    self.controller.selection(),
-                    Selection::Setup | Selection::Operation(_)
-                ));
+                && matches!(self.controller.selection(), Selection::Operation(_)));
         let show = self.inspector_enabled && editing;
         if show != self.pane_handle(Pane::Inspector).is_some() {
             self.set_pane_visible(Pane::Inspector, show);
@@ -5692,6 +5881,17 @@ impl App {
     /// Reload the inspector edit buffers from the model for the current
     /// selection.
     fn refresh_fields(&mut self) {
+        if let Selection::Operation(id) = self.controller.selection() {
+            if self.height_draft_id != Some(id) {
+                self.seed_height_editor(id);
+            }
+        } else {
+            self.height_draft_id = None;
+            self.height_draft = None;
+            self.height_offsets.clear();
+            self.height_reference_pick = None;
+        }
+        self.focused_height = None;
         self.fields.clear();
         if let Selection::Operation(id) = self.controller.selection() {
             if let Some(binding) = self.controller.geometry_state().bindings.get(&id) {
@@ -5972,6 +6172,11 @@ impl App {
         if !self.library_mode() {
             if let Selection::Operation(id) = self.controller.selection() {
                 if let Some(operation) = self.current_operation(id) {
+                    if matches!(field, Field::Clearance | Field::Retract | Field::TopOfStock)
+                        && self.preview_safety_heights(id).validate().is_err()
+                    {
+                        return true;
+                    }
                     if operation_tabs::operation_field_invalid(operation, field, value) {
                         return true;
                     }
@@ -6077,6 +6282,21 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
+        if let Selection::Operation(id) = self.controller.selection() {
+            if !self.library_mode()
+                && !self.creating_operation()
+                && (self.height_rules_dirty()
+                    || self
+                        .controller
+                        .document()
+                        .setup()
+                        .height_settings
+                        .contains_key(&id))
+                && self.resolve_height_editor(id).is_err()
+            {
+                return true;
+            }
+        }
         if !self.library_mode() && !self.creating_operation() {
             if let Selection::Operation(id) = self.controller.selection() {
                 if matches!(self.current_operation(id), Some(Operation::Thread(_))) {
@@ -6317,14 +6537,9 @@ impl App {
             return vec![Field::SpindleRpm, Field::Feed, Field::PlungeFeed];
         }
         match self.controller.selection() {
-            // Ordered top-down by height: tool-change height, clearance, retract, then
-            // the stock top at the bottom — the inspector reads like the Z stack.
-            Selection::Setup => vec![
-                Field::ToolChangeHeight,
-                Field::Clearance,
-                Field::Retract,
-                Field::TopOfStock,
-            ],
+            // Safety planes are edited on the operation; tool-change height is
+            // still shared by the setup.
+            Selection::Setup => vec![Field::ToolChangeHeight],
             Selection::Machine => vec![
                 Field::MachineTravelX,
                 Field::MachineTravelY,
@@ -6352,7 +6567,11 @@ impl App {
             ],
             Selection::Operation(id) => self
                 .current_operation(id)
-                .map(operation_fields)
+                .map(|op| {
+                    let mut fields = operation_fields(op);
+                    fields.extend([Field::Clearance, Field::Retract, Field::TopOfStock]);
+                    fields
+                })
                 .unwrap_or_default(),
         }
     }
@@ -6398,10 +6617,14 @@ impl App {
             });
         }
         let setup = self.controller.document().setup();
+        let heights = match self.controller.selection() {
+            Selection::Operation(id) => setup.heights_for(id),
+            _ => setup.heights,
+        };
         match field {
-            Field::Clearance => Some(setup.heights.clearance),
-            Field::Retract => Some(setup.heights.retract),
-            Field::TopOfStock => Some(setup.heights.top_of_stock),
+            Field::Clearance => Some(heights.clearance),
+            Field::Retract => Some(heights.retract),
+            Field::TopOfStock => Some(heights.top_of_stock),
             // Shows the *effective* height: the explicit value if set, else the
             // machine-Z-travel default the planner would resolve.
             Field::ToolChangeHeight => {
@@ -6606,16 +6829,40 @@ impl App {
                 .copied()
                 .filter(|tool| used_tools.contains(&tool.number))
                 .collect();
-            match self.controller.apply_operation_settings_with_geometry(
-                operation,
-                overrides,
-                tools,
-                self.operation_geometry.clone(),
-            ) {
+            let heights = self.preview_safety_heights(id);
+            let result = if self.height_rules_dirty()
+                || self
+                    .controller
+                    .document()
+                    .setup()
+                    .height_settings
+                    .contains_key(&id)
+            {
+                match self.edited_height_settings() {
+                    Ok(settings) => self.controller.apply_operation_height_settings(
+                        operation,
+                        overrides,
+                        tools,
+                        self.operation_geometry.clone(),
+                        settings,
+                    ),
+                    Err(reason) => Err(reason),
+                }
+            } else {
+                self.controller.apply_operation_settings_with_heights(
+                    operation,
+                    overrides,
+                    tools,
+                    self.operation_geometry.clone(),
+                    Some(heights),
+                )
+            };
+            match result {
                 Ok(()) => {
                     self.operation_draft = None;
                     self.operation_tools.clear();
                     self.rebase_setup_draft();
+                    self.seed_height_editor(id);
                     self.refresh_fields();
                     self.rerun();
                     self.operation_geometry = None;
@@ -6629,15 +6876,6 @@ impl App {
 
         match self.controller.selection() {
             Selection::Setup => self.controller.edit_setup(|s| {
-                if let Some(&v) = parsed.get(&Field::Clearance) {
-                    s.heights.clearance = v;
-                }
-                if let Some(&v) = parsed.get(&Field::Retract) {
-                    s.heights.retract = v;
-                }
-                if let Some(&v) = parsed.get(&Field::TopOfStock) {
-                    s.heights.top_of_stock = v;
-                }
                 if let Some(&v) = parsed.get(&Field::ToolChangeHeight) {
                     s.tool_change_height = Some(v);
                 }
@@ -7705,20 +7943,30 @@ impl App {
                 .cad_editing_op
                 .and_then(|id| self.current_operation(id))
                 .is_some_and(|op| matches!(op, Operation::Drill(_)));
-        let additive = (self.geometry_additive && multiple)
-            || self.modifiers.command()
-            || self.modifiers.control()
-            || self.modifiers.shift();
+        let additive =
+            (self.geometry_additive && multiple && entity.kind != EntityKind::Silhouette)
+                || (self.modifiers.command() && !self.modifiers.control())
+                || self.modifiers.shift();
         self.geometry_row_selection = None;
         match self.controller.toggle_cad_selection(entity, additive) {
             Ok(()) => {
                 if !self.creating_operation() && self.cad_editing_op.is_none() {
-                    self.inspector_active = false;
+                    self.end_setup_draft();
                 }
                 self.focus_ops.clear();
                 self.status = format!(
-                    "{} CAD feature(s) selected.",
-                    self.controller.cad_selection().len()
+                    "{} CAD feature(s) selected.{}",
+                    self.controller.cad_selection().len(),
+                    if self
+                        .controller
+                        .cad_selection()
+                        .iter()
+                        .any(|r| r.kind == EntityKind::Silhouette)
+                    {
+                        " XY silhouette: whole-body outline on the setup reference plane."
+                    } else {
+                        ""
+                    }
                 );
             }
             Err(error) => self.status = error,
@@ -7958,7 +8206,7 @@ impl App {
         let selected = self.controller.cad_selection();
         let mut list = column![
             inspector_heading("CAD geometry selection"),
-            text("Click selects; Ctrl/⌘ or Shift-click toggles. Drag to orbit. Escape cancels.")
+            text("Click selects; Ctrl-click selects the XY silhouette. Shift-click adds/removes. Drag to orbit. Escape cancels.")
                 .size(12)
         ]
         .spacing(10)
@@ -7973,6 +8221,49 @@ impl App {
                 .size(12),
             );
             if let Some(asset) = self.controller.geometry_state().asset(entity.asset_id) {
+                if entity.kind == EntityKind::Silhouette {
+                    list = list
+                        .push(text("Whole-body outline projected onto setup XY (Z = 0).").size(12));
+                    if let Some(projection) = &asset.topology.projection {
+                        list = list.push(
+                            text(format!(
+                                "Projection deflection {:.4} mm; outward allowance {:.4} mm.",
+                                projection.chord_tolerance,
+                                projection.chord_tolerance + cam_geo::GRID_MM * 2.
+                            ))
+                            .size(11),
+                        );
+                    } else {
+                        list = list.push(
+                            text("Reimport the STEP file to enable its silhouette.").size(12),
+                        );
+                    }
+                }
+                let radius = match entity.kind {
+                    EntityKind::Edge => asset
+                        .topology
+                        .edges
+                        .iter()
+                        .find(|e| e.id == entity.id)
+                        .and_then(|e| match e.curve {
+                            cam_model::CadCurve::CircleArc { radius, .. } => Some(radius),
+                            _ => None,
+                        }),
+                    EntityKind::Face => asset
+                        .topology
+                        .faces
+                        .iter()
+                        .find(|f| f.id == entity.id)
+                        .and_then(|f| match f.surface {
+                            cam_model::CadSurface::Cylinder { radius, .. } => Some(radius),
+                            cam_model::CadSurface::Torus { minor_radius, .. } => Some(minor_radius),
+                            _ => None,
+                        }),
+                    _ => None,
+                };
+                if let Some(radius) = radius {
+                    list = list.push(text(format!("Radius {radius:.3} mm")).size(12));
+                }
                 for diagnostic in &asset.import_diagnostics {
                     list = list.push(text(diagnostic).size(11));
                 }
@@ -9045,6 +9336,9 @@ fn field_row_labeled<'a>(
         .on_input(move |v| Message::FieldChanged(field, v))
         .on_submit(Message::Apply)
         .width(Length::Fixed(INSPECTOR_INPUT_W));
+    if operation_tabs::field_tab(field) == OperationTab::Heights {
+        input = input.id(height_planes::field_id(field));
+    }
     if invalid {
         input = input.style(|theme, status| {
             let mut s = inspector_input_style(theme, status);
@@ -9231,9 +9525,17 @@ enum CadFilter {
     Edge,
     Loop,
     Vertex,
+    Silhouette,
 }
 impl CadFilter {
-    const ALL: [Self; 5] = [Self::Body, Self::Face, Self::Edge, Self::Loop, Self::Vertex];
+    const ALL: [Self; 6] = [
+        Self::Body,
+        Self::Face,
+        Self::Edge,
+        Self::Loop,
+        Self::Vertex,
+        Self::Silhouette,
+    ];
     fn kind(self) -> EntityKind {
         match self {
             Self::Body => EntityKind::Body,
@@ -9241,6 +9543,7 @@ impl CadFilter {
             Self::Edge => EntityKind::Edge,
             Self::Loop => EntityKind::Loop,
             Self::Vertex => EntityKind::Vertex,
+            Self::Silhouette => EntityKind::Silhouette,
         }
     }
 }
@@ -9270,6 +9573,7 @@ struct Viewport {
     cad_scene: Arc<CadScene>,
     cad_filter: EntityKind,
     cad_operation_kind: Option<OpKind>,
+    cad_silhouette: bool,
     cad_select_through: bool,
     /// Scene extent (backplot + overlays) — used to *size* markers to the view.
     bounds: Option<([f32; 3], [f32; 3])>,
@@ -9370,7 +9674,11 @@ impl Viewport {
         // Frame the camera on the *stable* part/backplot only — capture bounds
         // before the transient pick overlays (hover highlight, snap marker), or
         // the whole view would re-fit and drift as the cursor moves.
-        let cad_scene = CadScene::from_geometry(controller.geometry_state(), cad_hidden);
+        let cad_scene = CadScene::from_geometry_in_setup(
+            controller.geometry_state(),
+            cad_hidden,
+            &controller.document().setup().frame,
+        );
         let bounds = union_bounds(scene.bounds(), cad_scene.bounds());
         let mut cad_selected = controller.cad_selection().to_vec();
         for id in focus_ops {
@@ -9378,7 +9686,40 @@ impl Viewport {
                 cad_selected.extend(binding.selected.iter().cloned());
             }
         }
-        let cad_edges = Arc::new(cad_scene.edges(&cad_selected, cad_hover).line_vertices());
+        let cad_lines = cad_scene.edges(&cad_selected, cad_hover);
+        let silhouette_refs: BTreeSet<_> = cad_selected
+            .iter()
+            .chain(cad_hover)
+            .filter(|r| r.kind == EntityKind::Silhouette)
+            .cloned()
+            .collect();
+        if !silhouette_refs.is_empty() {
+            let frame = &controller.document().setup().frame;
+            if let Ok(geometry) = controller.geometry_state().geometry_in_setup(frame) {
+                for reference in silhouette_refs {
+                    if let Ok(region) = cam_geometry3d::silhouette(&geometry, &reference) {
+                        let mut points: Vec<_> = region
+                            .outer()
+                            .points()
+                            .iter()
+                            .map(|p| frame.to_world_vector([p.x, p.y, 0.]).map(|v| v as f32))
+                            .collect();
+                        if let Some(first) = points.first().copied() {
+                            points.push(first);
+                        }
+                        let color = if cad_selected.contains(&reference) {
+                            PICK_BOUNDARY
+                        } else {
+                            PICK_HOVER
+                        };
+                        // The reference-plane outline must stay visible through
+                        // the model/stock, like other selection overlays.
+                        scene.add_strip(points, color);
+                    }
+                }
+            }
+        }
+        let cad_edges = Arc::new(cad_lines.line_vertices());
         // While the pick wizard is active, highlight the chosen boundary (accent)
         // and any excluded islands (gold) so the user sees what they picked.
         if let Some(pending) = controller.pending_op() {
@@ -9469,24 +9810,28 @@ impl Viewport {
         let (mut mesh_vertices, mut mesh_indices) = match (show_stock, controller.outcome()) {
             (true, Some(outcome))
                 if outcome.completion == JobCompletion::Complete
-                    || !outcome.stock_indices.is_empty() => (
-                outcome.stock_vertices.clone(),
-                outcome.stock_indices.clone(),
-            ),
+                    || !outcome.stock_indices.is_empty() =>
+            {
+                (
+                    outcome.stock_vertices.clone(),
+                    outcome.stock_indices.clone(),
+                )
+            }
             (true, _) => workspace_view::uncut_stock_mesh(controller),
             _ => (Vec::new(), Vec::new()),
         };
-        let (transparent_stock_vertices, transparent_stock_indices) = if prefs.view.transparent_stock {
-            for vertex in &mut mesh_vertices {
-                vertex.color[3] = 0.25;
-            }
-            (
-                std::mem::take(&mut mesh_vertices),
-                std::mem::take(&mut mesh_indices),
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let (transparent_stock_vertices, transparent_stock_indices) =
+            if prefs.view.transparent_stock {
+                for vertex in &mut mesh_vertices {
+                    vertex.color[3] = 0.25;
+                }
+                (
+                    std::mem::take(&mut mesh_vertices),
+                    std::mem::take(&mut mesh_indices),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
         let (cad_vertices, cad_indices) = cad_scene.mesh(&cad_selected, cad_hover);
         let offset = mesh_vertices.len() as u32;
         mesh_vertices.extend(cad_vertices);
@@ -9546,6 +9891,7 @@ impl Viewport {
             cad_scene: Arc::new(cad_scene),
             cad_filter,
             cad_operation_kind: None,
+            cad_silhouette: false,
             cad_select_through,
             bounds,
             frame_bounds,
@@ -9601,6 +9947,13 @@ impl Viewport {
         let aperture =
             0.5 * self.snap_catch_px * camera.world_per_pixel(bounds.height) / aspect.min(1.0);
         let ray = camera.pick_ray(u, v, aspect);
+        if self.cad_silhouette && !self.setup_axis {
+            return self.cad_scene.pick_silhouette_candidates(
+                ray,
+                aperture as f64,
+                self.cad_select_through,
+            );
+        }
         match if self.setup_axis {
             None
         } else {
@@ -10640,6 +10993,91 @@ mod multi_setup_draft_tests {
 
     fn send(app: &mut App, message: Message) {
         let _task = app.update(message);
+    }
+
+    #[test]
+    fn setup_selection_and_context_menu_do_not_start_editing() {
+        let (mut app, _) = App::new();
+        assert!(app.setup_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+        send(&mut app, Message::OpenSample);
+        let id = app.controller.active_setup_id();
+        send(&mut app, Message::SelectSetup(id));
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Open(TreeNode::Setup(id))),
+        );
+        assert_eq!(app.tree_menu, Some(TreeNode::Setup(id)));
+        assert!(app.setup_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Command(Box::new(Message::EditSetup(id)))),
+        );
+        assert!(app.setup_draft.is_some());
+        assert!(app.pane_handle(Pane::Inspector).is_some());
+        send(&mut app, Message::SetupNameChanged("Explicit edit".into()));
+        send(&mut app, Message::BeginOp(OpKind::Profile));
+        assert!(app.controller.pending_op().is_none());
+        assert!(app.setup_draft_dirty());
+        assert!(app.pane_handle(Pane::Inspector).is_some());
+        send(&mut app, Message::SetupCancel);
+        assert!(app.setup_draft.is_none());
+        assert!(!app.setup_draft_dirty());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+
+        send(&mut app, Message::EditSetup(id));
+        send(&mut app, Message::SetupNameChanged("Applied edit".into()));
+        send(&mut app, Message::SetupCommit);
+        assert_eq!(app.controller.document().setup().name, "Applied edit");
+        assert!(app.setup_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+    }
+
+    #[test]
+    fn cancelling_new_operations_never_leaves_a_hidden_setup_edit() {
+        let (mut app, _) = App::new();
+        send(&mut app, Message::OpenSample);
+        let id = app.controller.active_setup_id();
+        send(&mut app, Message::EditSetup(id));
+        for cancel in [Message::CancelOp, Message::CadEscape] {
+            send(&mut app, Message::BeginOp(OpKind::Profile));
+            assert!(app.creating_operation(), "{}", app.status);
+            assert!(app.setup_draft.is_none());
+            send(&mut app, cancel);
+            assert!(!app.creating_operation());
+            assert!(app.setup_draft.is_none());
+            assert!(!app.setup_draft_dirty());
+            assert!(app.pane_handle(Pane::Inspector).is_none());
+        }
+        send(&mut app, Message::Tree(TreeMessage::Open(TreeNode::Setups)));
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Command(Box::new(Message::SetupNew))),
+        );
+        assert_ne!(app.controller.active_setup_id(), id);
+        assert!(app.setup_draft.is_some());
+        assert!(app.pane_handle(Pane::Inspector).is_some());
+    }
+
+    #[test]
+    fn cancelling_cad_operations_does_not_reactivate_the_setup_editor() {
+        let mut app = model_list_app();
+        for cancel in [Message::CancelOp, Message::CadEscape] {
+            send(&mut app, Message::BeginOp(OpKind::Face));
+            assert_eq!(app.cad_pending_kind, Some(OpKind::Face), "{}", app.status);
+            assert!(app.setup_draft.is_none());
+            send(&mut app, cancel);
+            assert!(!app.creating_operation());
+            assert!(app.setup_draft.is_none());
+            assert!(!app.setup_draft_dirty());
+            assert!(app.pane_handle(Pane::Inspector).is_none());
+        }
+        let id = app.controller.active_setup_id();
+        send(&mut app, Message::EditSetup(id));
+        assert!(app.setup_draft.is_some(), "{}", app.status);
+        assert!(app.pane_handle(Pane::Inspector).is_some());
     }
 
     fn blank_app() -> App {

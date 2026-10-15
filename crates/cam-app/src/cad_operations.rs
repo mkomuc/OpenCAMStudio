@@ -414,6 +414,15 @@ pub(crate) fn resolve_document_checked(
     }
     document.geometry.validate().map_err(error)?;
     let mut resolved = document.clone();
+    // Resolve all reference geometry in its source placement, before rotating
+    // instances for the strategy adapters. Keep a worker-only absolute snapshot.
+    for operation in &document.setup().operations {
+        if document.excluded_operations.contains(&operation.id()) || document.disabled_origins.get(&document.setup().id).is_some_and(|set|set.contains(&operation.work_offset())) { continue; }
+        if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
+            let heights = settings.resolve(document,operation).map_err(|reason| error(format!("Operation {}: {reason}",operation.id())).for_op(operation.id()))?;
+            resolved.setup_mut().height_settings.get_mut(&operation.id()).unwrap().resolved=Some(heights);
+        }
+    }
     resolved.geometry = geometry_for_setup(document).map_err(error)?;
     let mut operations = std::mem::take(&mut resolved.setup_mut().operations);
     for operation in &mut operations {
@@ -483,7 +492,7 @@ pub(crate) fn resolve_document_checked(
                         .map(|h| [h.center.x, h.center.y])
                         .collect();
                     p.depth = depth;
-                    p.start_offset = input.heights.top - document.setup().heights.top_of_stock;
+                    p.start_offset = input.heights.top - document.setup().heights_for(id).top_of_stock;
                 }
                 (Operation::Face(p), ExtractionRecipe::FaceRegion) => {
                     if p.overshoot < 0.0 {
@@ -580,6 +589,8 @@ pub(crate) fn capture_height_override(
 pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<(), String> {
     let mut preview = document.clone();
     preview.setup_mut().operations.retain(|op| op.id() == id);
+    // Geometry repair is independent of the height editor's pending references.
+    preview.setup_mut().height_settings.clear();
     let resolved = resolve_document(&preview)?;
     let operation = resolved
         .setup()

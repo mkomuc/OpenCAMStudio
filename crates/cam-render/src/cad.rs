@@ -46,12 +46,24 @@ pub struct CadScene {
     face_outer_loops: BTreeMap<EntityRef, EntityRef>,
     cylindrical_faces: BTreeSet<EntityRef>,
     bore_rims: BTreeMap<EntityRef, Vec<EntityRef>>,
+    planar_loops: BTreeSet<EntityRef>,
+    profile_targets: BTreeMap<EntityRef, EntityRef>,
 }
 
 impl CadScene {
     /// Compose component placement without changing the topology identities.
     /// Hidden instances contribute neither pixels nor pick candidates.
     pub fn from_geometry(geometry: &GeometryState, hidden: &BTreeSet<InstanceId>) -> Self {
+        Self::from_geometry_in_setup(geometry, hidden, &cam_model::SetupFrame::default())
+    }
+
+    /// Display remains in world coordinates; profile candidates are classified
+    /// relative to the machining frame, independently of camera orientation.
+    pub fn from_geometry_in_setup(
+        geometry: &GeometryState,
+        hidden: &BTreeSet<InstanceId>,
+        frame: &cam_model::SetupFrame,
+    ) -> Self {
         let mut scene = Self::default();
         for instance in &geometry.instances {
             if !instance.visible || hidden.contains(&instance.id) {
@@ -86,6 +98,78 @@ impl CadScene {
                 }
                 if matches!(face.surface, CadSurface::Cylinder { .. }) {
                     scene.cylindrical_faces.insert(face_ref);
+                }
+            }
+            for wire in topology
+                .loops
+                .iter()
+                .filter(|w| w.body_id == instance.body_id)
+            {
+                let points: Vec<_> = wire
+                    .edge_uses
+                    .iter()
+                    .filter_map(|u| topology.edges.iter().find(|e| e.id == u.edge_id))
+                    .flat_map(|e| curve_points(&e.curve))
+                    .map(|p| frame.to_setup_vector(instance.placement.transform_point(p)))
+                    .collect();
+                let planar_face = topology
+                    .faces
+                    .iter()
+                    .find(|f| f.id == wire.face_id)
+                    .is_some_and(|f| match f.surface {
+                        CadSurface::Plane { normal, .. } => {
+                            let n =
+                                frame.to_setup_vector(instance.placement.transform_vector(normal));
+                            n[0].abs() < 1e-5 && n[1].abs() < 1e-5
+                        }
+                        _ => false,
+                    });
+                let planar = planar_face
+                    || points
+                        .first()
+                        .is_some_and(|p| points.iter().all(|q| (p[2] - q[2]).abs() < 1e-5));
+                let reference = entity(EntityKind::Loop, wire.id);
+                if planar {
+                    scene.planar_loops.insert(reference.clone());
+                }
+                // A rounded transition makes the top face boundary an inset.
+                // Select the full body envelope explicitly in that case.
+                let blended = wire.is_outer
+                    && wire.edge_uses.iter().any(|u| {
+                        topology
+                            .edges
+                            .iter()
+                            .find(|e| e.id == u.edge_id)
+                            .is_some_and(|e| {
+                                matches!(e.curve, CadCurve::Unsupported { .. })
+                                    || e.face_ids.iter().any(|id| {
+                                        if *id == wire.face_id {
+                                            return false;
+                                        }
+                                        topology.faces.iter().find(|f| f.id == *id).is_some_and(
+                                            |f| match f.surface {
+                                                CadSurface::Unsupported { .. }
+                                                | CadSurface::Torus { .. } => true,
+                                                CadSurface::Cylinder {
+                                                    axis,
+                                                    inward: false,
+                                                    ..
+                                                } => {
+                                                    let axis = frame.to_setup_vector(
+                                                        instance.placement.transform_vector(axis),
+                                                    );
+                                                    axis[0].abs() > 1e-5 || axis[1].abs() > 1e-5
+                                                }
+                                                _ => false,
+                                            },
+                                        )
+                                    })
+                            })
+                    });
+                if blended && topology.projection.is_some() {
+                    scene
+                        .profile_targets
+                        .insert(reference, entity(EntityKind::Silhouette, instance.body_id));
                 }
             }
             for edge in topology.edges.iter().filter(|edge| {
@@ -345,11 +429,11 @@ impl CadScene {
             }
         };
         match filter {
-            EntityKind::Face | EntityKind::Body => {
+            EntityKind::Face | EntityKind::Body | EntityKind::Silhouette => {
                 for (i, depth) in hits {
                     let mut entity = self.triangles[i].face.clone();
-                    if filter == EntityKind::Body {
-                        entity.kind = EntityKind::Body;
+                    if matches!(filter, EntityKind::Body | EntityKind::Silhouette) {
+                        entity.kind = filter;
                         entity.id = entity.body_id;
                     }
                     push(entity, depth, nearest);
@@ -402,19 +486,59 @@ impl CadScene {
         aperture: f64,
         select_through: bool,
     ) -> Vec<PickCandidate> {
-        let loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
+        let mut loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
+        loops.retain(|c| self.planar_loops.contains(&c.entity));
+        for candidate in &mut loops {
+            if let Some(target) = self.profile_targets.get(&candidate.entity) {
+                candidate.entity = target.clone();
+            }
+        }
         if !loops.is_empty() {
+            deduplicate_candidates(&mut loops);
             return loops;
         }
         let mut candidates: Vec<_> = self
             .pick_candidates(ray, EntityKind::Face, aperture, select_through)
             .into_iter()
             .filter_map(|mut candidate| {
-                candidate.entity = self.face_outer_loops.get(&candidate.entity)?.clone();
+                let wire = self.face_outer_loops.get(&candidate.entity)?;
+                candidate.entity = if let Some(target) = self.profile_targets.get(wire) {
+                    target.clone()
+                } else if self.planar_loops.contains(wire) {
+                    wire.clone()
+                } else {
+                    // Vertical wall/fillet loops include seams or span several
+                    // elevations. They cannot be used as a planar profile.
+                    let mut body = candidate.entity;
+                    body.kind = EntityKind::Silhouette;
+                    body.id = body.body_id;
+                    body
+                };
                 Some(candidate)
             })
             .collect();
         deduplicate_candidates(&mut candidates);
+        candidates
+    }
+
+    /// Ctrl-click selects the envelope of the visible body instance, regardless
+    /// of the active face/edge/loop filter. Catch narrow features near their edges.
+    pub fn pick_silhouette_candidates(
+        &self,
+        ray: Ray,
+        aperture: f64,
+        select_through: bool,
+    ) -> Vec<PickCandidate> {
+        let mut candidates =
+            self.pick_candidates(ray, EntityKind::Silhouette, aperture, select_through);
+        if candidates.is_empty() {
+            candidates = self.pick_candidates(ray, EntityKind::Edge, aperture, select_through);
+            for candidate in &mut candidates {
+                candidate.entity.kind = EntityKind::Silhouette;
+                candidate.entity.id = candidate.entity.body_id;
+            }
+            deduplicate_candidates(&mut candidates);
+        }
         candidates
     }
 
@@ -1032,6 +1156,94 @@ mod tests {
                 .filter(|v| v.color == [0.2, 0.6, 0.98, 1.])
                 .count(),
             3
+        );
+    }
+    #[test]
+    fn silhouette_picks_nearest_visible_instance_and_respects_hidden_instances() {
+        let mut geometry = geometry();
+        let mut other = geometry.instances[0].clone();
+        other.id = 2;
+        other.placement.translation[2] = 3.;
+        geometry.instances.push(other);
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        let ray = Ray {
+            origin: [0., 0., 10.],
+            direction: [0., 0., -1.],
+        };
+        let picks = scene.pick_silhouette_candidates(ray, 0.1, false);
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].entity.kind, EntityKind::Silhouette);
+        assert_eq!(picks[0].entity.id, 1);
+        assert_eq!(picks[0].entity.instance_id, 2);
+        let through = scene.pick_silhouette_candidates(ray, 0.1, true);
+        assert_eq!(through.len(), 2);
+        assert!(through[1].occluded);
+        let hidden = CadScene::from_geometry(&geometry, &BTreeSet::from([2]));
+        assert_eq!(
+            hidden.pick_silhouette_candidates(ray, 0.1, false)[0]
+                .entity
+                .instance_id,
+            1
+        );
+    }
+
+    #[test]
+    fn profile_prefers_planar_rim_over_a_wall_loop_with_a_vertical_seam() {
+        let mut geometry = geometry();
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        for (edge, start, end) in [
+            (61, [-0.1, 0., 2.], [0.1, 0., 2.]),
+            (62, [0., 0., 2.], [0., 0., 0.]),
+        ] {
+            topology.edges.push(CadEdge {
+                id: edge,
+                body_id: 1,
+                vertices: [40, 41],
+                face_ids: vec![10, 70],
+                curve: CadCurve::Line { start, end },
+            });
+        }
+        for (wire, face, edge) in [(60, 10, 61), (63, 70, 62)] {
+            topology.loops.push(CadLoop {
+                id: wire,
+                body_id: 1,
+                face_id: face,
+                is_outer: true,
+                edge_uses: vec![EdgeUse {
+                    edge_id: edge,
+                    reversed: false,
+                }],
+            });
+        }
+        topology.faces.push(CadFace {
+            id: 70,
+            body_id: 1,
+            surface: CadSurface::Cylinder {
+                origin: [0., 0., 0.],
+                axis: [0., 0., 1.],
+                radius: 1.,
+                inward: false,
+            },
+            loop_ids: vec![63],
+            bounds: [[-1., -1., 0.], [1., 1., 2.]],
+        });
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        let picks = scene.pick_profile_candidates(down(), 0.1, false);
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].entity.id, 60);
+        assert_eq!(picks[0].entity.kind, EntityKind::Loop);
+        geometry.instances[0].placement.rotation = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]];
+        let frame =
+            cam_model::SetupFrame::from_axes(Some([1., 0., 0.]), Some([0., 0., 1.]), None).unwrap();
+        let rotated = CadScene::from_geometry_in_setup(&geometry, &BTreeSet::new(), &frame);
+        let ray = Ray {
+            origin: [0., -5., 0.],
+            direction: [0., 1., 0.],
+        };
+        let picks = rotated.pick_profile_candidates(ray, 0.1, false);
+        assert_eq!(
+            picks[0].entity.id, 60,
+            "profile loop planarity follows the setup axes"
         );
     }
 }

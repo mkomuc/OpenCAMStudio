@@ -112,7 +112,7 @@ fn build_job_with_compute(
     mut compute: impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
 ) -> JobResult {
     let setup = doc.setup();
-    let env = JobEnv {
+    let mut env = JobEnv {
         heights: setup.heights,
         tools: &setup.tools,
         stock,
@@ -131,14 +131,34 @@ fn build_job_with_compute(
     // clearance plane would turn the lift into a descent and cross the part below
     // clearance — so raise it, and say so rather than silently overruling the value
     // the operator typed.
-    let tool_change_height = if tool_change_height < setup.heights.clearance {
+    let max_clearance = setup
+        .operations
+        .iter()
+        .filter(|op| {
+            !doc.excluded_operations.contains(&op.id())
+                && !doc
+                    .disabled_origins
+                    .get(&setup.id)
+                    .is_some_and(|set| set.contains(&op.work_offset()))
+        })
+        .map(|op| {
+            setup
+                .height_settings
+                .get(&op.id())
+                .and_then(|settings| settings.resolve(doc, op).ok())
+                .map_or(setup.heights_for(op.id()).clearance, |heights| {
+                    heights.clearance
+                })
+        })
+        .fold(setup.heights.clearance, f64::max);
+    let tool_change_height = if tool_change_height < max_clearance {
         diagnostics.push(Diagnostic::warning(format!(
             "tool-change height {tool_change_height:.3} mm is below the clearance plane \
              {:.3} mm; using the clearance plane instead — a tool change or re-fixture \
              must not bring the tool down.",
-            setup.heights.clearance
+            max_clearance
         )));
-        setup.heights.clearance
+        max_clearance
     } else {
         tool_change_height
     };
@@ -161,7 +181,29 @@ fn build_job_with_compute(
             completion = JobCompletion::Cancelled;
             break;
         }
-        let result = if doc.cad_linked_operations.contains(&operation.id())
+        env.heights = setup.heights_for(operation.id());
+        let configured = setup
+            .height_settings
+            .get(&operation.id())
+            .map(|settings| settings.resolve(doc, operation));
+        if let Some(Ok(heights)) = configured {
+            env.heights = heights.safety();
+        }
+        let mut result = if let Some(Err(reason)) = &configured {
+            StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason.clone())],
+                ..Default::default()
+            }
+        } else if let Some(reason) = setup
+            .operation_heights
+            .get(&operation.id())
+            .and_then(|h| h.validate().err())
+        {
+            StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            }
+        } else if doc.cad_linked_operations.contains(&operation.id())
             && !doc.geometry.bindings.contains_key(&operation.id())
         {
             StrategyResult {
@@ -193,16 +235,40 @@ fn build_job_with_compute(
                         compute_at_heights(
                             operation,
                             &env,
-                            binding.effective_heights(),
+                            configured
+                                .as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .map_or(binding.effective_heights(), |h| h.cutting()),
                             cancel,
                             &mut compute,
+                            true,
                         )
                     }
                 }
             }
+        } else if let Some(Ok(heights)) = configured {
+            compute_at_heights(
+                operation,
+                &env,
+                heights.cutting(),
+                cancel,
+                &mut compute,
+                false,
+            )
         } else {
             compute(operation, &env, cancel)
         };
+        if let Some(Ok(heights)) = configured {
+            if let Some(feed_z) = heights.feed {
+                match apply_feed_height(&result.program, feed_z, operation) {
+                    Ok(program) => result.program = program,
+                    Err(reason) => {
+                        result.program = Program::new();
+                        result.diagnostics.push(Diagnostic::error(reason));
+                    }
+                }
+            }
+        }
         let failed = result.has_errors();
         let cancelled = result.cancelled || cancel.is_cancelled();
         // Stamp ownership here: the planner knows which operation produced these,
@@ -235,6 +301,7 @@ fn build_job_with_compute(
         };
         planned.push(Planned {
             op_id: operation.id(),
+            clearance: env.heights.clearance,
             tool: operation.tools()[0],
             rpm,
             // A multi-tool operation (Carve) emits its own tool change mid-fragment;
@@ -278,7 +345,7 @@ fn build_job_with_compute(
             dir,
             &mut st,
             tool_change_height,
-            setup.heights.clearance,
+            pl.clearance,
         );
     }
 
@@ -328,6 +395,7 @@ fn compute_at_heights(
     heights: cam_model::CuttingHeights,
     cancel: &CancelToken,
     compute: &mut impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
+    linked: bool,
 ) -> StrategyResult {
     if let Err(reason) = heights.validate() {
         return StrategyResult {
@@ -335,12 +403,12 @@ fn compute_at_heights(
             ..Default::default()
         };
     }
-    if env.heights.clearance <= heights.top || env.heights.retract <= heights.top {
+    if env.heights.clearance < heights.top || env.heights.retract < heights.top {
         return StrategyResult {
             diagnostics: vec![Diagnostic::error(format!(
-                "Clearance Z{:.3} mm and retract Z{:.3} mm must both be above the linked \
-                 cutting top Z{:.3} mm. In Setup > Safe heights, enter absolute Z heights \
-                 in setup coordinates above Z{:.3} mm",
+                "Clearance Z{:.3} mm and retract Z{:.3} mm must both be at or above \
+                 cutting top Z{:.3} mm. Adjust the references and offsets in Operation > Heights \
+                 to resolve at or above Z{:.3} mm",
                 env.heights.clearance, env.heights.retract, heights.top, heights.top,
             ))],
             ..Default::default()
@@ -367,13 +435,25 @@ fn compute_at_heights(
             p.start_offset = heights.top;
             0.0
         }
-        _ => {
-            return StrategyResult {
-                diagnostics: vec![Diagnostic::error(
-                    "This operation does not support linked CAD geometry",
-                )],
-                ..Default::default()
-            }
+        Operation::Chamfer(p) => {
+            p.top = heights.top;
+            p.depth = depth;
+            0.0
+        }
+        Operation::Engrave(p) => {
+            p.top = heights.top;
+            p.depth = depth;
+            0.0
+        }
+        Operation::Carve(p) => {
+            p.top = heights.top;
+            p.depth = depth;
+            0.0
+        }
+        Operation::Thread(p) => {
+            p.z_top = heights.top;
+            p.z_bottom = heights.bottom;
+            0.0
         }
     };
     let local = JobEnv {
@@ -391,7 +471,7 @@ fn compute_at_heights(
         tools: env.tools,
         // The existing facing strategy sweeps a rectangle. Its resolver only
         // certifies whole-body rectangular top faces; use that selected extent.
-        stock: if matches!(op, Operation::Face(_)) {
+        stock: if linked && matches!(op, Operation::Face(_)) {
             None
         } else {
             env.stock
@@ -405,11 +485,138 @@ fn compute_at_heights(
     result
 }
 
+/// Separate the air approach from the feed descent at the configured feed plane.
+/// Drilling cycles are expanded when their feed plane differs from their retract
+/// plane, because canned cycles share those planes on several target controls.
+fn apply_feed_height(
+    program: &Program,
+    feed_z: f64,
+    operation: &Operation,
+) -> Result<Program, String> {
+    let plunge = match operation {
+        Operation::Profile(o) => o.plunge_feed,
+        Operation::Pocket(o) => o.clear.plunge_feed,
+        Operation::Face(o) => o.plunge_feed,
+        Operation::Drill(o) => o.feed,
+        Operation::Thread(o) => o.plunge_feed,
+        Operation::Chamfer(o) => o.plunge_feed,
+        Operation::Engrave(o) => o.plunge_feed,
+        Operation::Carve(o) => o.plunge_feed,
+    };
+    let mut expanded = Program::new();
+    for step in program.steps() {
+        if let Step::Drill(c) = step {
+            if (c.retract - feed_z).abs() > 1e-9 {
+                let entry = feed_z.min(c.retract);
+                for &[x, y] in &c.points {
+                    expanded.push(Step::Rapid {
+                        to: Point3::new(x, y, c.retract.max(feed_z)),
+                        tag: c.tag,
+                    });
+                    expanded.push(Step::Rapid {
+                        to: Point3::new(x, y, entry),
+                        tag: c.tag,
+                    });
+                    let mut previous = c.z_top;
+                    let peck = c.peck.unwrap_or(c.z_top - c.depth);
+                    let count = ((c.z_top - c.depth) / peck).ceil();
+                    // Strategy validation bounds the interval; cap expansion against
+                    // malicious/tiny peck settings, matching the post's own bound.
+                    if !count.is_finite() || count * c.points.len() as f64 > 100_000. {
+                        return Err(
+                            "Feed-height drilling exceeds 100000 pecks; increase the peck depth"
+                                .into(),
+                        );
+                    }
+                    for index in 1..=count as usize {
+                        let z = (c.z_top - index as f64 * peck).max(c.depth);
+                        if index > 1 {
+                            expanded.push(Step::Rapid {
+                                to: Point3::new(x, y, (previous + 0.5).min(entry)),
+                                tag: c.tag,
+                            });
+                        }
+                        expanded.push(Step::Linear {
+                            to: Point3::new(x, y, z),
+                            feed: c.feed,
+                            tag: c.tag,
+                        });
+                        if z <= c.depth {
+                            if let Some(seconds) = c.dwell {
+                                expanded.push(Step::Dwell { seconds });
+                            }
+                        }
+                        expanded.push(Step::Rapid {
+                            to: Point3::new(x, y, c.retract.max(feed_z)),
+                            tag: c.tag,
+                        });
+                        previous = z;
+                    }
+                }
+                continue;
+            }
+        }
+        expanded.push(step.clone());
+    }
+    let mut out = Program::new();
+    let mut previous: Option<Point3> = None;
+    for step in expanded.steps() {
+        match (previous, step) {
+            (Some(from), Step::Rapid { to, tag })
+                if (from.x - to.x).abs() < 1e-9
+                    && (from.y - to.y).abs() < 1e-9
+                    && to.z < from.z
+                    && to.z < feed_z =>
+            {
+                if from.z > feed_z {
+                    out.push(Step::Rapid {
+                        to: Point3::new(to.x, to.y, feed_z),
+                        tag: *tag,
+                    });
+                }
+                out.push(Step::Linear {
+                    to: *to,
+                    feed: plunge,
+                    tag: *tag,
+                });
+            }
+            (Some(from), Step::Linear { to, feed, tag })
+                if matches!(tag.kind, MoveKind::Plunge | MoveKind::Link)
+                    && (from.x - to.x).abs() < 1e-9
+                    && (from.y - to.y).abs() < 1e-9
+                    && to.z < from.z
+                    && from.z > feed_z =>
+            {
+                out.push(Step::Rapid {
+                    to: Point3::new(to.x, to.y, feed_z.max(to.z)),
+                    tag: *tag,
+                });
+                if to.z < feed_z {
+                    out.push(Step::Linear {
+                        to: *to,
+                        feed: *feed,
+                        tag: *tag,
+                    });
+                }
+            }
+            _ => out.push(step.clone()),
+        }
+        previous = match step {
+            Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+            Step::Arc { end, .. } => Some(*end),
+            Step::Drill(c) => c.points.last().map(|[x, y]| Point3::new(*x, *y, c.retract)),
+            _ => previous,
+        };
+    }
+    Ok(out)
+}
+
 /// One operation, computed and ready to be emitted. The fragment's coordinates are in
 /// the part frame; the post re-references them to the operation's origin.
 struct Planned {
     /// The emitting operation's id — for tagging the group's start-point rapid.
     op_id: u32,
+    clearance: f64,
     fragment: Program,
     tool: u32,
     rpm: f64,
@@ -516,6 +723,28 @@ fn emit_instance(
             program.push(Step::Rapid {
                 to: Point3::new(start.x, start.y, clearance),
                 tag: Tag::new(pl.op_id, MoveKind::Traverse),
+            });
+        }
+    } else if let (Some(previous), Some(start)) =
+        (last_position(program), first_position(&pl.fragment))
+    {
+        // Operations may now have different safety planes. Lift vertically before
+        // crossing XY, then descend at the destination; never traverse diagonally
+        // upward from a lower operation's clearance into a taller workpiece.
+        if (previous.z - clearance).abs() > 1e-9 {
+            let travel_z = previous.z.max(clearance);
+            let tag = Tag::new(pl.op_id, MoveKind::Traverse);
+            program.push(Step::Rapid {
+                to: Point3::new(previous.x, previous.y, travel_z),
+                tag,
+            });
+            program.push(Step::Rapid {
+                to: Point3::new(start.x, start.y, travel_z),
+                tag,
+            });
+            program.push(Step::Rapid {
+                to: Point3::new(start.x, start.y, clearance),
+                tag,
             });
         }
     }
@@ -661,8 +890,179 @@ mod tests {
             origin: [0.0; 3],
             extra_origins: Vec::new(),
             origin_index: 1,
+            operation_heights: Default::default(),
+            height_settings: Default::default(),
             tool_change_height: None,
         })
+    }
+
+    #[test]
+    fn reference_heights_drive_cutting_limits_and_independent_feed_with_pecks_and_dwell() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R, OperationHeightSettings};
+        let mut doc = document(1);
+        if let Operation::Drill(op) = &mut doc.setup_mut().operations[0] {
+            op.depth = 4.;
+            op.peck = Some(1.);
+            op.dwell = Some(0.25);
+        }
+        let mut settings = OperationHeightSettings::default();
+        settings.definition_mut(P::Feed).offset = 2.;
+        settings.definition_mut(P::Bottom).offset = -0.5;
+        doc.setup_mut().height_settings.insert(0, settings);
+        let result = build_job(&doc, 1000., SpindleDir::Cw, None, 50., &CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(!result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::Drill(_))));
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s,Step::Linear{to,..} if to.z == -4.5)));
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s,Step::Dwell{seconds} if *seconds == 0.25)));
+        let mut previous = None;
+        for step in result.program.steps() {
+            match step {
+                Step::Rapid { to, .. } => {
+                    if let Some(from) = previous {
+                        assert!(
+                            to.z >= from || to.z >= 2.,
+                            "rapid descended below feed height"
+                        );
+                    }
+                    previous = Some(to.z);
+                }
+                Step::Linear { to, .. } => previous = Some(to.z),
+                _ => {}
+            }
+        }
+        doc.setup_mut()
+            .height_settings
+            .get_mut(&0)
+            .unwrap()
+            .definition_mut(P::Feed)
+            .reference = R::Disabled;
+        let result = build_job(&doc, 1000., SpindleDir::Cw, None, 50., &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Complete);
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s,Step::Drill(c) if c.depth == -4.5)));
+    }
+
+    #[test]
+    fn feed_height_edits_reuse_strategy_fragments_but_rebuild_the_approach() {
+        use cam_model::{HeightPlaneKind as P, OperationHeightSettings};
+        let mut doc = document(1);
+        let mut settings = OperationHeightSettings::default();
+        settings.definition_mut(P::Feed).offset = 2.;
+        doc.setup_mut().height_settings.insert(0, settings);
+        let mut cache = crate::OperationCache::default();
+        fn request(doc: &Document) -> PlanRequest<'_> {
+            PlanRequest {
+                document: doc,
+                spindle_rpm: 1000.,
+                dir: SpindleDir::Cw,
+                stock: None,
+                tool_change_height: 50.,
+            }
+        }
+        let first = build_job_cached(request(&doc), &CancelToken::new(), &mut cache, |_| {});
+        assert_eq!(first.completion, JobCompletion::Complete);
+        assert_eq!(cache.stats.computed, 1);
+        doc.setup_mut()
+            .height_settings
+            .get_mut(&0)
+            .unwrap()
+            .definition_mut(P::Feed)
+            .offset = 3.;
+        let next = build_job_cached(request(&doc), &CancelToken::new(), &mut cache, |_| {});
+        assert_eq!(next.completion, JobCompletion::Complete);
+        assert_eq!(cache.stats.reused, 1);
+        assert_ne!(first.program, next.program);
+    }
+
+    #[test]
+    fn operation_planes_reach_strategies_and_safe_inter_operation_links() {
+        let mut doc = document(2);
+        doc.setup_mut()
+            .operation_heights
+            .insert(1, Heights::new(20., 12., 3.));
+        let mut seen = Vec::new();
+        let result = build_job_with_compute(
+            &doc,
+            1000.,
+            SpindleDir::Cw,
+            None,
+            10.,
+            &CancelToken::new(),
+            |op, env, _| {
+                seen.push((op.id(), env.heights));
+                let mut program = Program::new();
+                program.push(Step::Rapid {
+                    to: Point3::new(op.id() as f64 * 10., 0., env.heights.clearance),
+                    tag: Tag::new(op.id(), MoveKind::Link),
+                });
+                StrategyResult {
+                    program,
+                    ..Default::default()
+                }
+            },
+        );
+        assert_eq!(result.completion, JobCompletion::Complete);
+        assert_eq!(
+            seen,
+            [
+                (0, Heights::new(5., 2., 0.)),
+                (1, Heights::new(20., 12., 3.))
+            ]
+        );
+        let rapids: Vec<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|s| match s {
+                Step::Rapid { to, .. } => Some(*to),
+                _ => None,
+            })
+            .collect();
+        // The tool-change height is raised above *all* operation clearances.
+        assert_eq!(rapids[0].z, 20.);
+        // Before crossing from op 0 to taller op 1, lift at the previous XY.
+        assert!(rapids.windows(2).any(
+            |pair| pair[0] == Point3::new(0., 0., 20.) && pair[1] == Point3::new(10., 0., 20.)
+        ));
+    }
+
+    #[test]
+    fn invalid_operation_planes_fail_before_strategy_computation() {
+        let mut doc = document(1);
+        doc.setup_mut()
+            .operation_heights
+            .insert(0, Heights::new(1., 2., 0.));
+        let result = build_job_with_compute(
+            &doc,
+            1000.,
+            SpindleDir::Cw,
+            None,
+            50.,
+            &CancelToken::new(),
+            |_, _, _| panic!("invalid planes must not reach a strategy"),
+        );
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result.diagnostics.iter().any(|d| d.op == Some(0)));
     }
 
     #[test]

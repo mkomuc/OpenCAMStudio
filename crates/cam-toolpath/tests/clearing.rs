@@ -84,6 +84,8 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
+        operation_heights: Default::default(),
+        height_settings: Default::default(),
         tool_change_height: None,
     })
 }

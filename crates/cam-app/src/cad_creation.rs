@@ -55,6 +55,10 @@ impl AppController {
             self.active_origin,
             defaults,
         )?;
+        document
+            .setup_mut()
+            .height_settings
+            .insert(id, cam_model::OperationHeightSettings::default());
         document.setup_mut().operations.push(operation);
         document.geometry.bindings.insert(id, binding);
         document.cad_linked_operations.insert(id);

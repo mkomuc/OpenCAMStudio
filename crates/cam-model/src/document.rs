@@ -72,9 +72,12 @@ use crate::Tool;
 /// bindings. Legacy operations retain their explicit embedded geometry.
 /// v15: projects contain independently framed setups; old single setups are wrapped.
 /// v16: manufacturing suppression and stable ID high-water marks persist.
-pub const SCHEMA_VERSION: u32 = 16;
+/// v17: per-operation safety planes, with setup heights as legacy defaults.
+/// v18: reference-plus-offset definitions for all five operation heights.
+pub const SCHEMA_VERSION: u32 = 18;
 
-/// The safety planes for a setup, all **absolute Z in millimetres**. By
+/// Operation safety planes (also used as legacy setup defaults), all
+/// **absolute Z in millimetres**. By
 /// convention WCS Z0 is the top of stock, so `top_of_stock` is usually `0.0`.
 ///
 /// Heights are first-class (a core design rule): unsafe Z is a primary hazard
@@ -90,6 +93,21 @@ pub struct Heights {
 }
 
 impl Heights {
+    /// Validate finite, ordered absolute safety planes. Negative Z is valid.
+    pub fn validate(&self) -> Result<(), String> {
+        if ![self.clearance, self.retract, self.top_of_stock]
+            .iter()
+            .all(|v| v.is_finite())
+            || self.clearance < self.retract
+            || self.retract < self.top_of_stock
+        {
+            return Err(
+                "Clearance must be at or above retract, and retract at or above stock top".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// A sensible default: clearance and retract above a stock top at Z0.
     pub fn new(clearance: f64, retract: f64, top_of_stock: f64) -> Self {
         Self {
@@ -1235,8 +1253,23 @@ pub struct Setup {
     pub program_name: String,
     /// Human-readable name.
     pub name: String,
-    /// Safety planes.
+    /// Legacy safety-plane defaults for operations without an explicit entry.
     pub heights: Heights,
+    /// Operation safety planes keyed by stable operation ID. Missing entries use
+    /// the legacy setup defaults, preserving existing projects.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        deserialize_with = "deserialize_operation_map"
+    )]
+    pub operation_heights: std::collections::BTreeMap<u32, Heights>,
+    /// Parametric operation heights; absent entries retain the legacy behavior.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        deserialize_with = "deserialize_operation_map"
+    )]
+    pub height_settings: std::collections::BTreeMap<u32, crate::OperationHeightSettings>,
     /// The raw stock.
     pub stock: Stock,
     /// Tools available in this setup.
@@ -1272,6 +1305,14 @@ pub struct Setup {
 }
 
 impl Setup {
+    /// Effective safety planes for one operation.
+    pub fn heights_for(&self, operation: u32) -> Heights {
+        self.operation_heights
+            .get(&operation)
+            .copied()
+            .unwrap_or(self.heights)
+    }
+
     /// The tool-change height to plan with: the explicit
     /// [`tool_change_height`](Self::tool_change_height) if set, else `machine_max_z`
     /// (the top of the machine's Z envelope). The caller supplies `machine_max_z`
@@ -1647,4 +1688,24 @@ mod tests {
         });
         assert!(!prof.same_work(&drill));
     }
+}
+
+// Internally tagged project files buffer JSON object keys as strings.
+fn deserialize_operation_map<'de, D, T>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<u32, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let encoded =
+        <std::collections::BTreeMap<String, T> as serde::Deserialize>::deserialize(deserializer)?;
+    let mut values = std::collections::BTreeMap::new();
+    for (key, value) in encoded {
+        let id = key.parse::<u32>().map_err(serde::de::Error::custom)?;
+        if values.insert(id, value).is_some() {
+            return Err(serde::de::Error::custom("duplicate operation height ID"));
+        }
+    }
+    Ok(values)
 }

@@ -1,5 +1,6 @@
-//! Exact, conservative fixed-axis feature extraction. Display meshes never enter
-//! this module's derivation. Unsupported topology produces a reason, not a cut.
+//! Fixed-axis feature extraction. Analytic operations use exact topology;
+//! silhouettes use a separate CAD projection tessellation with an explicit
+//! allowance. Display meshes never enter machining derivation.
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
 use std::{collections::BTreeSet, f64::consts::TAU};
@@ -18,7 +19,7 @@ pub struct ResolvedInput {
     pub regions: Vec<Polygon>,
     pub holes: Vec<ResolvedHole>,
     pub heights: CuttingHeights,
-    /// Includes exact topology, instance placement, recipe and overrides; excludes mesh.
+    /// Includes topology/projection data, placement, recipe and overrides; excludes the display mesh.
     pub fingerprint: String,
     pub diagnostics: Vec<String>,
 }
@@ -27,6 +28,9 @@ pub struct ResolvedInput {
 /// the complete selected feature; this only chooses the initial profile side.
 pub fn profile_side(state: &GeometryState, selected: &[EntityRef]) -> Result<Side, String> {
     let view = View::new(state, selected)?;
+    if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette {
+        return Ok(Side::Outside);
+    }
     if selected.len() != 1 || selected[0].kind != EntityKind::Loop {
         return Err(
             "Profile requires one closed coplanar loop; select one boundary per operation".into(),
@@ -105,7 +109,52 @@ pub fn resolve_binding(
     let hash = encoded.into_iter().fold(0xcbf29ce484222325_u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     });
-    Ok(ResolvedInput { regions, holes, heights, fingerprint:format!("{hash:016x}"), diagnostics:vec![format!("Exact curves approximated within {MACHINING_CHORD_TOLERANCE} mm; planar grid error ≤ {} mm",cam_geo::GRID_MM/2f64.sqrt())] })
+    let diagnostics = if binding
+        .selected
+        .iter()
+        .any(|r| r.kind == EntityKind::Silhouette)
+    {
+        let tolerance = view
+            .asset
+            .topology
+            .projection
+            .as_ref()
+            .unwrap()
+            .chord_tolerance;
+        vec![format!("XY silhouette from independent CAD projection tessellation ({tolerance} mm deflection); outward allowance {} mm. This profiles the whole body envelope, including rounded transitions.", silhouette_allowance(tolerance))]
+    } else {
+        vec![format!("Exact curves approximated within {MACHINING_CHORD_TOLERANCE} mm; planar grid error ≤ {} mm",cam_geo::GRID_MM/2f64.sqrt())]
+    };
+    Ok(ResolvedInput {
+        regions,
+        holes,
+        heights,
+        fingerprint: format!("{hash:016x}"),
+        diagnostics,
+    })
+}
+/// Project one placed body onto setup XY. Only the external outline is used;
+/// holes are filled because this selection represents an outside profile.
+/// Old projects need reimporting to obtain the independent projection data.
+pub fn silhouette(state: &GeometryState, reference: &EntityRef) -> Result<Polygon, String> {
+    let view = View::new(state, std::slice::from_ref(reference))?;
+    view.silhouette()
+}
+fn silhouette_allowance(tolerance: f64) -> f64 {
+    // Cover tessellation deviation and planar-grid rounding. Leave this allowance
+    // on the part rather than offsetting a faceted approximation into its surface.
+    tolerance + cam_geo::GRID_MM * 2.
+}
+struct CachedSilhouette {
+    topology: std::sync::Weak<TopologySnapshot>,
+    body: BodyId,
+    placement: RigidTransform,
+    region: Polygon,
+}
+thread_local! {
+    // Hover reuses immutable CAD data. Weak ownership does not keep deleted
+    // imports alive; placement and snapshot identity prevent stale outlines.
+    static SILHOUETTES: std::cell::RefCell<Vec<CachedSilhouette>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 struct View<'a> {
     asset: &'a GeometryAsset,
@@ -145,6 +194,108 @@ impl<'a> View<'a> {
             instance,
             body,
         })
+    }
+    fn silhouette(&self) -> Result<Polygon, String> {
+        if let Some(region) = SILHOUETTES.with(|cache| {
+            cache
+                .borrow()
+                .iter()
+                .find(|entry| {
+                    entry.body == self.body.id
+                        && entry.placement == self.instance.placement
+                        && entry
+                            .topology
+                            .upgrade()
+                            .is_some_and(|t| std::sync::Arc::ptr_eq(&t, &self.asset.topology))
+                })
+                .map(|entry| entry.region.clone())
+        }) {
+            return Ok(region);
+        }
+        let projection = self.asset.topology.projection.as_ref().ok_or(
+            "Reimport this STEP file to select its XY silhouette; this project has no independent CAD projection data"
+        )?;
+        if projection.chord_tolerance > MACHINING_CHORD_TOLERANCE / 2. {
+            return Err(
+                "CAD projection exceeds the machining tolerance; reimport the STEP file".into(),
+            );
+        }
+        let face_ids: BTreeSet<_> = self
+            .asset
+            .topology
+            .faces
+            .iter()
+            .filter(|f| f.body_id == self.body.id)
+            .map(|f| f.id)
+            .collect();
+        let covered: BTreeSet<_> = projection
+            .mesh
+            .triangle_faces
+            .iter()
+            .copied()
+            .filter(|id| face_ids.contains(id))
+            .collect();
+        if covered != face_ids || covered.is_empty() {
+            return Err("Incomplete CAD projection data; reimport the STEP file".into());
+        }
+        let mut triangles = Vec::new();
+        for (indices, face) in projection
+            .mesh
+            .triangles
+            .iter()
+            .zip(&projection.mesh.triangle_faces)
+        {
+            if !face_ids.contains(face) {
+                continue;
+            }
+            let points: Vec<_> = indices
+                .iter()
+                .map(|i| {
+                    let p = self.point(projection.mesh.vertices[*i as usize]);
+                    Point::new(p[0], p[1])
+                })
+                .collect();
+            let contour = Contour::new(points);
+            // Vertical triangles project to a segment. The planar boolean handles
+            // rounding and tiny slivers consistently with every other strategy.
+            if contour.area() > 0. {
+                triangles.push(Polygon::new(contour).map_err(|e| e.to_string())?);
+            }
+        }
+        let regions = cam_geo::union(&triangles, &[]).map_err(|e| e.to_string())?;
+        // Preserve every projected component. Tiny seams introduced by curve
+        // discretization/grid rounding close under the declared allowance;
+        // genuinely separate outlines still fail below, never become a hull.
+        let envelopes: Vec<_> = regions
+            .iter()
+            .map(|region| Polygon::new(region.outer().clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let expanded = cam_geo::offset(
+            &envelopes,
+            silhouette_allowance(projection.chord_tolerance),
+            cam_geo::JoinStyle::Round,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut expanded = cam_geo::union(&expanded, &[]).map_err(|e| e.to_string())?;
+        if expanded.len() != 1 {
+            return Err("The projected outline cannot form one profile boundary".into());
+        }
+        let region = expanded.remove(0);
+        SILHOUETTES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.retain(|entry| entry.topology.strong_count() > 0);
+            if cache.len() >= 8 {
+                cache.remove(0);
+            }
+            cache.push(CachedSilhouette {
+                topology: std::sync::Arc::downgrade(&self.asset.topology),
+                body: self.body.id,
+                placement: self.instance.placement,
+                region: region.clone(),
+            });
+        });
+        Ok(region)
     }
     fn face(&self, id: u64) -> Result<&CadFace, String> {
         self.asset
@@ -616,6 +767,20 @@ fn derive(
         return view.blind_bore_profile(&binding.selected);
     }
     let refs = &binding.selected;
+    if refs.len() == 1 && refs[0].kind == EntityKind::Silhouette {
+        let bounds = view.bounds(view.body.bounds);
+        let heights = match binding.recipe {
+            ExtractionRecipe::ProfileLoop { side: Side::Outside } => CuttingHeights {
+                top: bounds[1][2], bottom: bounds[0][2],
+            },
+            ExtractionRecipe::FaceRegion => CuttingHeights {
+                top: stock_top, bottom: bounds[1][2],
+            },
+            _ => return Err("An XY silhouette supports outside Profile or Face; select a face for Pocket or Drill".into()),
+        };
+        heights.validate()?;
+        return Ok((vec![view.silhouette()?], vec![], heights));
+    }
     match binding.recipe {
         ExtractionRecipe::PocketFloor => {
             if refs.len() != 1 || refs[0].kind != EntityKind::Face {
@@ -1530,5 +1695,162 @@ mod tests {
                 .unwrap_err()
                 .contains("circular edges")
         );
+    }
+    fn projected_l_prism() -> (GeometryState, EntityRef) {
+        let mut fixture = Fixture::new();
+        let face = fixture.id();
+        fixture.t.bodies[0].bounds = [[0., 0., -5.], [4., 4., 0.]];
+        fixture.t.faces.push(CadFace {
+            id: face,
+            body_id: 1,
+            surface: CadSurface::Unsupported {
+                description: "rounded exterior".into(),
+            },
+            loop_ids: vec![],
+            bounds: fixture.t.bodies[0].bounds,
+        });
+        fixture.t.projection = Some(CadProjectionMesh {
+            chord_tolerance: 0.0025,
+            mesh: CadMesh {
+                vertices: vec![
+                    [0., 0., 0.],
+                    [4., 0., 0.],
+                    [4., 1., 0.],
+                    [1., 1., 0.],
+                    [1., 4., 0.],
+                    [0., 4., 0.],
+                ],
+                triangles: vec![[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5]],
+                triangle_faces: vec![face; 4],
+            },
+        });
+        let geometry = GeometryState {
+            assets: vec![GeometryAsset {
+                id: 1,
+                revision: 1,
+                name: "L".into(),
+                source_format: CadFormat::Step,
+                source_data: vec![].into(),
+                source_units: SourceUnits::Millimetres,
+                backend: "test".into(),
+                import_options: None,
+                import_diagnostics: vec![],
+                source_fingerprint: String::new(),
+                topology: fixture.t.into(),
+            }],
+            instances: vec![GeometryInstance {
+                id: 1,
+                asset_id: 1,
+                body_id: 1,
+                name: "L".into(),
+                placement: RigidTransform::default(),
+                visible: true,
+            }],
+            ..Default::default()
+        };
+        (
+            geometry,
+            EntityRef {
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                kind: EntityKind::Silhouette,
+                id: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn xy_silhouette_preserves_concavities_and_is_independent_of_display_geometry() {
+        let (mut geometry, selected) = projected_l_prism();
+        let binding = resolve_selection(
+            &geometry,
+            &[selected],
+            ExtractionRecipe::ProfileLoop {
+                side: Side::Outside,
+            },
+            0.,
+        )
+        .unwrap();
+        let before = resolve_binding(&geometry, &binding).unwrap();
+        assert_eq!(
+            before.heights,
+            CuttingHeights {
+                top: 0.,
+                bottom: -5.
+            }
+        );
+        let region = &before.regions[0];
+        assert!(region.contains(Point::new(3., 0.5)));
+        assert!(region.contains(Point::new(0.5, 3.)));
+        assert!(
+            !region.contains(Point::new(2., 2.)),
+            "projection must not become a convex hull or bounding box"
+        );
+        assert!(region.area() > 7. && region.area() < 7.1);
+        std::sync::Arc::make_mut(&mut geometry.assets[0].topology).mesh = CadMesh {
+            vertices: vec![[100., 100., 100.]],
+            ..Default::default()
+        };
+        assert_eq!(before, resolve_binding(&geometry, &binding).unwrap());
+        geometry.instances[0].placement.translation = [10., 20., 30.];
+        let moved = resolve_binding(&geometry, &binding).unwrap();
+        assert!(moved.regions[0].contains(Point::new(13., 20.5)));
+        assert!(!moved.regions[0].contains(Point::new(3., 0.5)));
+        assert_eq!(
+            moved.heights,
+            CuttingHeights {
+                top: 30.,
+                bottom: 25.
+            }
+        );
+        assert_ne!(before.fingerprint, moved.fingerprint);
+        geometry.instances[0].placement.rotation = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]];
+        let frame = SetupFrame::from_axes(Some([1., 0., 0.]), Some([0., 0., 1.]), None).unwrap();
+        let in_setup = geometry.geometry_in_setup(&frame).unwrap();
+        let rotated = resolve_binding(&in_setup, &binding).unwrap();
+        assert!(rotated.regions[0].contains(Point::new(13., 30.5)));
+        assert!(!rotated.regions[0].contains(Point::new(12., 32.)));
+        assert_eq!(
+            rotated.heights,
+            CuttingHeights {
+                top: -20.,
+                bottom: -25.
+            }
+        );
+    }
+
+    #[test]
+    fn xy_silhouette_rejects_missing_incomplete_stale_and_coarse_projection_data() {
+        let (mut geometry, selected) = projected_l_prism();
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        let saved = topology.projection.take().unwrap();
+        assert!(silhouette(&geometry, &selected)
+            .unwrap_err()
+            .contains("Reimport"));
+        std::sync::Arc::make_mut(&mut geometry.assets[0].topology).projection = Some(saved);
+        let projection = std::sync::Arc::make_mut(&mut geometry.assets[0].topology)
+            .projection
+            .as_mut()
+            .unwrap();
+        projection.chord_tolerance = 0.5;
+        assert!(silhouette(&geometry, &selected)
+            .unwrap_err()
+            .contains("tolerance"));
+        let projection = std::sync::Arc::make_mut(&mut geometry.assets[0].topology)
+            .projection
+            .as_mut()
+            .unwrap();
+        projection.chord_tolerance = 0.0025;
+        projection.mesh.triangles.clear();
+        projection.mesh.triangle_faces.clear();
+        assert!(silhouette(&geometry, &selected)
+            .unwrap_err()
+            .contains("Incomplete"));
+        geometry.assets[0].revision += 1;
+        assert!(silhouette(&geometry, &selected)
+            .unwrap_err()
+            .contains("stale"));
     }
 }

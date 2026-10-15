@@ -113,7 +113,7 @@ impl App {
         let Some(draft) = &self.setup_draft else {
             return column![
                 inspector_heading("Setup"),
-                text("Select a setup to edit its settings.").size(12)
+                text("Right-click a setup and choose Edit setup to edit its settings.").size(12)
             ]
             .spacing(8)
             .padding(14)
@@ -340,17 +340,6 @@ impl App {
                         "mm",
                         move |v| Message::SetupOriginChanged(i, v),
                     ));
-                }
-                list = list.push(inspector_section("Safe heights"));
-                for (label, index, value) in [
-                    ("Clearance", 0, draft.heights.clearance),
-                    ("Retract", 1, draft.heights.retract),
-                    ("Top of stock", 2, draft.heights.top_of_stock),
-                ] {
-                    let value = self.setup_value(10 + index, fmt_num(value));
-                    list = list.push(inspector_value(label, &value, "mm", move |v| {
-                        Message::SetupHeightChanged(index, v)
-                    }));
                 }
                 if let Some(error) = self.setup_frame_issue(draft) {
                     list = list.push(text(error).size(11).color(palette::ERROR));

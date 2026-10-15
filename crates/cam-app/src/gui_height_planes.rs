@@ -1,0 +1,470 @@
+//! Focused operation height preview: setup-aligned bounding rectangles and labels.
+use super::*;
+
+pub(super) fn field_id(field: Field) -> String {
+    format!("height-{field:?}")
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct HeightPlane {
+    pub name: &'static str,
+    pub z: f64,
+    pub color: Color,
+    pub active: bool,
+    pub corners: [[f32; 3]; 4],
+}
+
+pub(super) struct HeightOverlay {
+    pub camera: OrbitCamera,
+    pub planes: Vec<HeightPlane>,
+    pub browser_width: f32,
+}
+
+impl App {
+    pub(super) fn preview_safety_heights(&self, id: u32) -> cam_model::Heights {
+        let saved = self.controller.document().setup().heights_for(id);
+        let value = |field, fallback| {
+            self.fields
+                .get(&field)
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(fallback)
+        };
+        cam_model::Heights::new(
+            value(Field::Clearance, saved.clearance),
+            value(Field::Retract, saved.retract),
+            value(Field::TopOfStock, saved.top_of_stock),
+        )
+    }
+
+    pub(super) fn height_input_ids(&self) -> Vec<String> {
+        let mut ids: Vec<_> = self
+            .inspector_fields()
+            .into_iter()
+            .filter(|f| operation_tabs::field_tab(*f) == OperationTab::Heights)
+            .map(field_id)
+            .collect();
+        ids.extend(["height-cad-top".into(), "height-cad-bottom".into()]);
+        ids.extend(
+            cam_model::HeightPlaneKind::ALL
+                .into_iter()
+                .map(super::height_editor::plane_input_id),
+        );
+        ids
+    }
+
+    pub(super) fn height_preview(
+        &self,
+        camera: OrbitCamera,
+        browser_width: f32,
+    ) -> Option<HeightOverlay> {
+        let focused = self
+            .height_reference_pick
+            .map(super::height_editor::plane_input_id)
+            .or_else(|| self.focused_height.clone())?;
+        if self.workspace != Workspace::Machining
+            || self.operation_tab != OperationTab::Heights
+            || !self.inspector_enabled
+            || !self.inspector_active
+            || self.creating_operation()
+            || self.cad_editing_op.is_some()
+            || self.drawing_editing_op.is_some()
+        {
+            return None;
+        }
+        let Selection::Operation(id) = self.controller.selection() else {
+            return None;
+        };
+        let heights = self.resolve_height_editor(id).ok()?;
+        let setup = self.controller.document().setup();
+        let (min, max) = self.controller.stock_box();
+        let pad = (max[0] - min[0]).max(max[1] - min[1]).max(1.) * 0.08;
+        let colors = [
+            Color::from_rgb(1., 0.38, 0.16),
+            Color::from_rgb(0.87, 0.75, 0.16),
+            Color::from_rgb(0.25, 0.94, 0.35),
+            Color::from_rgb(0.12, 0.78, 1.),
+            Color::from_rgb(0.77, 0.52, 1.),
+        ];
+        let names = ["Clearance", "Retract", "Feed", "Top", "Bottom"];
+        let planes = cam_model::HeightPlaneKind::ALL
+            .into_iter()
+            .filter_map(|plane| {
+                let z = heights.plane(plane)?;
+                let corners = [
+                    [min[0] - pad, min[1] - pad, z],
+                    [max[0] + pad, min[1] - pad, z],
+                    [max[0] + pad, max[1] + pad, z],
+                    [min[0] - pad, max[1] + pad, z],
+                ]
+                .map(|p| setup.frame.to_world_vector(p).map(|v| v as f32));
+                Some(HeightPlane {
+                    name: names[plane.index()],
+                    z,
+                    color: colors[plane.index()],
+                    active: super::height_editor::plane_input_id(plane) == focused,
+                    corners,
+                })
+            })
+            .collect();
+        Some(HeightOverlay {
+            camera,
+            planes,
+            browser_width,
+        })
+    }
+}
+
+fn project(camera: OrbitCamera, point: [f32; 3], size: iced::Size) -> iced::Point {
+    let matrix = camera.view_proj(size.width / size.height.max(1.));
+    let clip: [f32; 4] = std::array::from_fn(|r| {
+        matrix[0][r] * point[0] + matrix[1][r] * point[1] + matrix[2][r] * point[2] + matrix[3][r]
+    });
+    iced::Point::new(
+        (clip[0] / clip[3] + 1.) * size.width / 2.,
+        (1. - clip[1] / clip[3]) * size.height / 2.,
+    )
+}
+
+impl canvas::Program<Message> for HeightOverlay {
+    type State = ();
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &iced::Renderer,
+        _: &iced::Theme,
+        bounds: iced::Rectangle,
+        _: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let left = if self.browser_width > 0. {
+            self.browser_width + 16.
+        } else {
+            8.
+        };
+        // Finish every outline before painting labels so another plane's edge
+        // cannot run through a label (especially at coincident top planes).
+        for plane in &self.planes {
+            let points = plane
+                .corners
+                .map(|p| project(self.camera, p, bounds.size()));
+            if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                continue;
+            }
+            let path = canvas::Path::new(|p| {
+                p.move_to(points[0]);
+                for point in &points[1..] {
+                    p.line_to(*point);
+                }
+                p.close();
+            });
+            frame.stroke(
+                &path,
+                canvas::Stroke::default()
+                    .with_color(plane.color)
+                    .with_width(if plane.active { 2.5 } else { 1.2 }),
+            );
+        }
+        let mut labels: Vec<iced::Rectangle> = Vec::new();
+        let mut captions = Vec::new();
+        for (index, plane) in self.planes.iter().enumerate() {
+            let points = plane
+                .corners
+                .map(|p| project(self.camera, p, bounds.size()));
+            if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                continue;
+            }
+            // Distribute labels along the same edge; resolve collisions for top views
+            // and coincident stock/cutting planes without losing their true Z outline.
+            let t = (index as f32 + 0.5) / self.planes.len().max(1) as f32;
+            let anchor = points[0] + (points[1] - points[0]) * t;
+            let content = format!("{}: {} mm", plane.name, fmt_num(plane.z));
+            let width = content.len() as f32 * 6.8 + 16.;
+            let mut rect = iced::Rectangle {
+                x: anchor.x.clamp(
+                    left.min((bounds.width - width - 8.).max(0.)),
+                    (bounds.width - width - 8.).max(left),
+                ),
+                y: (anchor.y - 23.).clamp(8., (bounds.height - 30.).max(8.)),
+                width,
+                height: 22.,
+            };
+            for _ in 0..self.planes.len() {
+                if !labels.iter().any(|r| r.intersects(&rect)) {
+                    break;
+                }
+                rect.y += 25.;
+                if rect.y + rect.height > bounds.height - 8. {
+                    rect.y = 8.;
+                }
+            }
+            labels.push(rect);
+            let target = iced::Point::new(
+                anchor.x.clamp(rect.x, rect.x + rect.width),
+                anchor.y.clamp(rect.y, rect.y + rect.height),
+            );
+            frame.stroke(
+                &canvas::Path::line(anchor, target),
+                canvas::Stroke::default()
+                    .with_color(plane.color)
+                    .with_width(1.),
+            );
+            captions.push((plane, content, rect));
+        }
+        for (plane, content, rect) in captions {
+            frame.fill_rectangle(rect.position(), rect.size(), plane.color);
+            frame.fill_text(canvas::Text {
+                content,
+                position: rect.position() + iced::Vector::new(8., 3.),
+                size: 12.0.into(),
+                color: Color::from_rgb(0.05, 0.07, 0.09),
+                ..Default::default()
+            });
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operation_editor() -> (App, u32) {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Profile);
+        let id = app
+            .controller
+            .document()
+            .setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Heights));
+        (app, id)
+    }
+
+    #[test]
+    fn reference_offsets_are_transactional_persisted_and_operation_scoped() {
+        use cam_model::HeightPlaneKind as P;
+        let (mut app, id) = operation_editor();
+        let original = app.controller.document().clone();
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "20".into()));
+        let _ = app.update(Message::HeightOffsetChanged(P::Retract, "8".into()));
+        assert_eq!(app.resolve_height_editor(id).unwrap().clearance, 28.);
+        assert_eq!(app.controller.document(), &original);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Tool));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Heights));
+        assert_eq!(app.height_offsets[&P::Clearance], "20");
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller.document().setup().height_settings[&id]
+                .definition(P::Clearance)
+                .offset,
+            20.
+        );
+        assert_eq!(
+            app.controller.document().setup().heights,
+            original.setup().heights
+        );
+        assert!(app
+            .controller
+            .document()
+            .setup()
+            .operations
+            .iter()
+            .filter(|o| o.id() != id)
+            .all(|o| !app
+                .controller
+                .document()
+                .setup()
+                .height_settings
+                .contains_key(&o.id())));
+        let path = std::env::temp_dir().join(format!(
+            "opencam-relative-heights-{}.ocam",
+            std::process::id()
+        ));
+        app.controller.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            reopened.document().setup().height_settings[&id],
+            app.controller.document().setup().height_settings[&id]
+        );
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.controller.document(), &original);
+        assert!(!app.inspector_dirty());
+        let _ = app.update(Message::Redo);
+        assert!(!app.inspector_dirty());
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "40".into()));
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.height_offsets[&P::Clearance], "20");
+    }
+    #[test]
+    fn all_five_planes_preview_live_offsets_in_the_setup_orientation_and_hide_on_blur() {
+        use cam_model::HeightPlaneKind as P;
+        let (mut app, id) = operation_editor();
+        let camera = OrbitCamera::framed([0., 0., -10.], [100., 80., 25.]);
+        assert!(app.height_preview(camera, 0.).is_none());
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "23.5".into()));
+        let preview = app.height_preview(camera, 0.).unwrap();
+        assert_eq!(preview.planes.len(), 5);
+        assert!(preview.planes[0].active);
+        assert_eq!(preview.planes[0].z, 28.5);
+        assert!(preview.planes[0].corners.iter().all(|p| p[2] == 28.5));
+        let _ = app.update(Message::HeightOffsetChanged(P::Bottom, "-0.25".into()));
+        let preview = app.height_preview(camera, 0.).unwrap();
+        assert_eq!(
+            preview
+                .planes
+                .iter()
+                .find(|p| p.name == "Bottom")
+                .unwrap()
+                .z,
+            -4.25
+        );
+        app.controller.edit_setup(|s| {
+            s.frame.world_from_setup.rotation = [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]]
+        });
+        let preview = app.height_preview(camera, 0.).unwrap();
+        assert!(preview.planes[0]
+            .corners
+            .iter()
+            .all(|p| p[0] == preview.planes[0].z as f32));
+        let _ = app.update(Message::HeightFocus(
+            super::super::height_editor::plane_input_id(P::Bottom),
+            false,
+        ));
+        assert!(app.height_preview(camera, 0.).is_none());
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "24".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Tool));
+        assert!(app.height_preview(camera, 0.).is_none());
+        assert!(app
+            .controller
+            .document()
+            .setup()
+            .height_settings
+            .contains_key(&id));
+    }
+    #[test]
+    fn cycles_invalid_offsets_and_missing_selections_block_apply_and_defaults_recover() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R};
+        let (mut app, id) = operation_editor();
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::HeightReferenceChanged(
+            P::Retract,
+            R::Plane(P::Clearance),
+        ));
+        assert!(app
+            .resolve_height_editor(id)
+            .unwrap_err()
+            .contains("Circular"));
+        let _ = app.update(Message::Apply);
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::HeightDefaults);
+        let _ = app.update(Message::HeightOffsetChanged(P::Top, "NaN".into()));
+        assert!(app.any_field_invalid());
+        let _ = app.update(Message::HeightDefaults);
+        let _ = app.update(Message::HeightReferenceChanged(P::Top, R::Selection));
+        assert!(app.any_field_invalid());
+        let _ = app.update(Message::HeightDefaults);
+        let _ = app.update(Message::HeightReferenceChanged(P::Feed, R::Disabled));
+        assert!(app.resolve_height_editor(id).unwrap().feed.is_none());
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller.document().setup().height_settings[&id]
+                .definition(P::Feed)
+                .reference,
+            R::Disabled
+        );
+    }
+    #[test]
+    fn selected_drawing_reference_is_persistent_and_picking_preserves_the_operation_editor() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R};
+        let (mut app, id) = operation_editor();
+        let _ = app.update(Message::HeightReferenceChanged(P::Top, R::Selection));
+        let _ = app.update(Message::HeightPickToggle(P::Top));
+        let _ = app.update(Message::PickWorld([10., 10.], 1.));
+        assert_eq!(app.controller.selection(), Selection::Operation(id));
+        assert!(!app.cad_inspecting);
+        assert_eq!(
+            app.height_draft
+                .as_ref()
+                .unwrap()
+                .definition(P::Top)
+                .drawings
+                .len(),
+            1
+        );
+        assert_eq!(app.resolve_height_editor(id).unwrap().top, 0.);
+        let _ = app.update(Message::HeightPickToggle(P::Top));
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller.document().setup().height_settings[&id]
+                .definition(P::Top)
+                .drawings
+                .len(),
+            1
+        );
+    }
+    #[test]
+    fn every_operation_gets_valid_reference_defaults_including_natural_chamfer_depth() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R};
+        let (mut app, _) = operation_editor();
+        for kind in [
+            OpKind::Profile,
+            OpKind::Pocket,
+            OpKind::Face,
+            OpKind::Drill,
+            OpKind::Thread,
+            OpKind::Chamfer,
+            OpKind::Engrave,
+            OpKind::Carve,
+        ] {
+            app.controller.new_operation(kind);
+            let id = app
+                .controller
+                .document()
+                .setup()
+                .operations
+                .last()
+                .unwrap()
+                .id();
+            app.begin_operation_draft(id);
+            let heights = app
+                .resolve_height_editor(id)
+                .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            assert_eq!(
+                app.height_draft
+                    .as_ref()
+                    .unwrap()
+                    .definition(P::Clearance)
+                    .reference,
+                R::Plane(P::Retract)
+            );
+            assert_eq!(
+                app.height_draft
+                    .as_ref()
+                    .unwrap()
+                    .definition(P::Clearance)
+                    .offset,
+                10.
+            );
+            assert!(heights.top > heights.bottom);
+            if kind == OpKind::Chamfer {
+                assert!((heights.bottom + 1.).abs() < 1e-9);
+                let _ = app.update(Message::HeightOffsetChanged(P::Bottom, "0.5".into()));
+                assert!(app
+                    .resolve_height_editor(id)
+                    .unwrap_err()
+                    .contains("chamfer width"));
+                let _ = app.update(Message::CancelOperationDraft);
+            }
+        }
+    }
+}

@@ -20,8 +20,12 @@ are absent from the project tree. Select geometry in the shaded viewport; setup
 filters remain in the right inspector. Profile accepts a face interior as its
 outer boundary, and Drill accepts cylindrical faces and their visible circular
 rims. STEP and DXF use the same creation controls and five-tab operation editor.
-Hover and selection highlight semantic geometry. Ctrl/Command or Shift-click
-changes multi-selection. Overlapping candidates and explicit select-through are
+Hover and selection highlight semantic geometry. Ctrl-click selects the visible
+body's silhouette projected onto the active setup XY reference plane (Z = 0),
+regardless of the geometry filter. Shift-click toggles multiple features;
+Command-click also toggles on macOS. Cylindrical and toroidal fillet faces retain
+their radius for inspection. Profile selection skips nonplanar wall/seam loops;
+a top boundary adjoining a rounded transition selects the whole-body silhouette. Overlapping candidates and explicit select-through are
 available. Hide/isolate/show-all are view state. Select a planar face and choose
 **Use face as machining top at Z0** to establish the fixed frame; its longest
 straight boundary edge sets X. Placement also supports XYZ translation and Z
@@ -35,7 +39,7 @@ redo. Absolute height overrides are explicit; blank height inputs follow geometr
 parameters and overrides. Unsupported selections give an incompatibility reason.
 
 Assets embed their original bytes, source fingerprint, units, backend version,
-import budgets, exact analytic topology and semantic display mesh in schema-14
+import budgets, analytic topology, independent projection tessellation and semantic display mesh in schema-14
 JSON `.ocam` files. Asset source/topology snapshots share storage across history
 entries. Existing projects migrate to explicit embedded geometry; no CAD
 associations are guessed. Saving validates a temporary file and atomically
@@ -46,7 +50,7 @@ in the background and commits directly, then warns when linked operations need
 review. The controller retains its staged preview API for headless callers. Replacements
 require reselection, preserve overrides, and invalidate runs. Missing, changed or
 unresolved included sources block generation/export. Excluded operations are not
-resolved or machined. Every run derives new planar inputs from exact curves;
+resolved or machined. Every run resolves planar inputs from the bound topology/projection data;
 there is no stale embedded-contour fallback. Direct planner calls also require a
 matching resolved fingerprint.
 
@@ -61,8 +65,15 @@ matching resolved fingerprint.
   planar entry/termination. Split seam faces are merged. Bore diameter, entry and
   depth must agree within a group; the tool diameter must match. Circular edges
   alone cannot establish a hole. Conical tips and breakthrough are not inferred.
-- Profile: an exterior coplanar loop with vertical supporting walls, a certified
-  whole-body silhouette and an outside computed-compensation cut. A circular
+- Profile: an exterior coplanar loop with vertical supporting walls and an outside
+  computed-compensation cut. Alternatively, select the whole-body XY silhouette,
+  including spline outlines and rounded top transitions. It uses a separate OCCT
+  projection tessellation at 0.0025 mm deflection and adds a 0.0027 mm outward
+  allowance (deflection plus planar-grid margin). Concavities are retained;
+  projected internal holes are filled for the outside profile. This is a bounded
+  approximation of the body envelope, not a 3D fillet-finishing operation.
+  Display tessellation never supplies this boundary. Old embedded imports without
+  projection data require reimporting; incomplete projection data is rejected. A circular
   blind-bore floor also supports an inside cut: its inward cylindrical wall,
   complete circular rims and planar disk floor certify the local feature. Its
   entry must be at the top of the body in setup Z, excluding material above it.
@@ -73,6 +84,8 @@ matching resolved fingerprint.
 - Face: an upward planar target at the body's highest setup Z. Conservative exact
   body bounds drive a rectangular stock-facing region, including above holes and
   curved boundaries below the target. Bosses above the target remain blocked.
+  An XY silhouette can also supply the facing boundary, with the highest body
+  bound as the target and stock top as entry.
 
 Pocket and Drill certify the local constant-section void and check vertical
 access above its opening using transformed exact face bounds. Unknown curved

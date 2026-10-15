@@ -56,7 +56,11 @@ pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, 
     let frame = &controller.document().setup().frame;
     let corners: [[f64; 3]; 8] = std::array::from_fn(|index| {
         std::array::from_fn(|axis| {
-            if index & (1 << axis) == 0 { min[axis] } else { max[axis] }
+            if index & (1 << axis) == 0 {
+                min[axis]
+            } else {
+                max[axis]
+            }
         })
     });
     let mut vertices = Vec::with_capacity(24);
@@ -108,6 +112,9 @@ impl App {
             self.active_tab = self.machining_tab;
         }
         self.workspace = workspace;
+        if self.setup_draft.is_some() {
+            self.end_setup_draft();
+        }
         self.reload_tool_edit();
         self.status = format!("{} workspace.", workspace.label());
     }
@@ -139,12 +146,20 @@ impl App {
         let labels = grid_view::GridLabels {
             camera: viewport.camera(),
         };
+        let height_preview = self.height_preview(viewport.camera(), viewport.browser_overlay_width);
         let mut layers = iced::widget::stack![
             shader(viewport).width(Length::Fill).height(Length::Fill),
             canvas::Canvas::new(labels)
                 .width(Length::Fill)
                 .height(Length::Fill)
         ];
+        if let Some(preview) = height_preview {
+            layers = layers.push(
+                canvas::Canvas::new(preview)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            );
+        }
         if let Some(workpiece) = workpiece {
             layers = layers.push(
                 canvas::Canvas::new(workpiece)
@@ -240,12 +255,16 @@ impl App {
             viewport.setup_geometry.stock_bounds(),
             viewport.cad_scene.bounds(),
         );
+        viewport.cad_silhouette = self.modifiers.control() && self.height_reference_pick.is_none();
         viewport.cad_operation_kind = self.cad_pending_kind.or_else(|| {
             self.cad_editing_op.and_then(|id| {
                 self.current_operation(id)
                     .map(AppController::operation_kind)
             })
         });
+        if self.height_reference_pick.is_some() {
+            viewport.cad_operation_kind = None;
+        }
         viewport.browser_overlay_width = if self.show_project_browser {
             self.project_px.clamp(220., 360.)
         } else {
@@ -448,21 +467,33 @@ mod tests {
         let transparent = app.machining_viewport();
         assert!(transparent.mesh_indices.is_empty());
         assert_eq!(transparent.transparent_stock_indices.len(), 36);
-        assert!(transparent.transparent_stock_vertices.iter().all(|v| v.color[3] == 0.25));
+        assert!(transparent
+            .transparent_stock_vertices
+            .iter()
+            .all(|v| v.color[3] == 0.25));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
         app.show_stock = false;
         let hidden = app.machining_viewport();
         assert!(hidden.mesh_indices.is_empty() && hidden.transparent_stock_indices.is_empty());
-        assert_eq!(hidden.frame_bounds, frame_bounds, "visibility must not reframe");
+        assert_eq!(
+            hidden.frame_bounds, frame_bounds,
+            "visibility must not reframe"
+        );
 
         app.controller.run(&cam_toolpath::CancelToken::new());
         app.show_stock = true;
         let simulated = app.machining_viewport();
         let outcome = app.controller.outcome().unwrap();
-        assert_eq!(simulated.transparent_stock_indices.as_slice(), outcome.stock_indices);
-        assert_eq!(simulated.transparent_stock_vertices.len(), outcome.stock_vertices.len());
+        assert_eq!(
+            simulated.transparent_stock_indices.as_slice(),
+            outcome.stock_indices
+        );
+        assert_eq!(
+            simulated.transparent_stock_vertices.len(),
+            outcome.stock_vertices.len()
+        );
         assert!(!simulated.transparent_stock_indices.is_empty());
     }
 
@@ -473,9 +504,8 @@ mod tests {
         setup.stock = cam_model::Stock::RelativeBox {
             offsets: [[5.; 3]; 2],
         };
-        setup.frame = cam_model::SetupFrame::from_axes(
-            Some([0., 1., 0.]), Some([0., 0., 1.]), None,
-        ).unwrap();
+        setup.frame =
+            cam_model::SetupFrame::from_axes(Some([0., 1., 0.]), Some([0., 0., 1.]), None).unwrap();
         app.controller.apply_setup_settings(setup).unwrap();
         let (min, max) = app.controller.stock_box();
         let frame = &app.controller.document().setup().frame;
@@ -1000,5 +1030,28 @@ mod tests {
         assert!(
             matches!(message, Some(Message::CadPicked(ref candidates)) if !candidates.is_empty() && candidates[0].entity.kind == EntityKind::Loop)
         );
+        // Ctrl takes precedence over the operation/filter. The actual click
+        // message retains the body-instance reference and replaces face picks.
+        viewport.cad_silhouette = true;
+        let candidates = viewport.cad_candidates_at(point, bounds);
+        assert_eq!(candidates[0].entity.kind, EntityKind::Silhouette);
+        let selected = candidates[0].entity.clone();
+        let (mut app, _) = App::new();
+        app.controller = controller;
+        app.modifiers = iced::keyboard::Modifiers::CTRL;
+        let _ = app.update(Message::CadPicked(candidates.clone()));
+        assert_eq!(app.controller.cad_selection(), &[selected.clone()]);
+        assert!(
+            app.machining_viewport()
+                .vertices
+                .iter()
+                .any(|vertex| vertex.color == PICK_BOUNDARY && vertex.position[2].abs() < 1e-6),
+            "the XY selection overlay remains visible through the stock"
+        );
+        let _ = app.update(Message::CadPicked(candidates.clone()));
+        assert_eq!(app.controller.cad_selection(), &[selected]);
+        app.modifiers = iced::keyboard::Modifiers::SHIFT;
+        let _ = app.update(Message::CadPicked(candidates));
+        assert!(app.controller.cad_selection().is_empty());
     }
 }

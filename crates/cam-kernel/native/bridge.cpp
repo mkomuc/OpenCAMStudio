@@ -24,9 +24,11 @@
 #include <BRep_Tool.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <Poly_Triangulation.hxx>
+#include <IMeshData_Status.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Torus.hxx>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -71,6 +73,10 @@ std::string surface(const TopoDS_Face& f) {
         gp_Vec radial(c.Location(),p); gp_Vec axis(c.Axis().Direction()); radial-=axis*radial.Dot(axis);
         o << "{\"Cylinder\":{\"origin\":" << xyz(c.Location().XYZ()) << ",\"axis\":" << xyz(c.Axis().Direction().XYZ())
           << ",\"radius\":" << c.Radius() << ",\"inward\":" << (normal.Dot(radial)<0?"true":"false") << "}}";
+    } else if(a.GetType()==GeomAbs_Torus) {
+        gp_Torus t=a.Torus();
+        o << "{\"Torus\":{\"origin\":" << xyz(t.Location().XYZ()) << ",\"axis\":" << xyz(t.Axis().Direction().XYZ())
+          << ",\"major_radius\":" << t.MajorRadius() << ",\"minor_radius\":" << t.MinorRadius() << "}}";
     } else o << "{\"Unsupported\":{\"description\":\"nonanalytic or unsupported surface\"}}";
     return o.str();
 }
@@ -114,6 +120,10 @@ std::string translate(const char* path,double deflection,double precision) {
     if(transferred!=roots) throw std::runtime_error("STEP translation was partial; not all root components transferred");
     TopoDS_Shape shape=reader.OneShape();
     Array bodies,faces,edges,loops,vertices,meshvertices,triangles,trianglefaces,placements;
+    Array projectionvertices,projectiontriangles,projectionfaces;
+    int projectionbase=0;
+    constexpr double projection_tolerance=0.0025;
+    bool projection_ok=true;
     unsigned long long next=1;
     int meshbase=0,bodycount=0;
     std::vector<std::pair<TopoDS_Shape,unsigned long long>> shared_bodies;
@@ -142,6 +152,31 @@ std::string translate(const char* path,double deflection,double precision) {
             if(ef.Contains(e)) for(TopTools_ListIteratorOfListOfShape it(ef.FindFromKey(e));it.More();it.Next()) adjacent.add(std::to_string(fi[fm.FindIndex(it.Value())]));
             edges.add("{\"id\":"+std::to_string(ei[i])+",\"body_id\":"+std::to_string(bodyid)+",\"vertices\":["+std::to_string(vi[vm.FindIndex(v1)])+","+std::to_string(vi[vm.FindIndex(v2)])+"],\"face_ids\":"+adjacent.str()+",\"curve\":"+curve(e)+"}");
         }
+        BRepTools::Clean(b);
+        IMeshTools_Parameters projection_parameters;
+        projection_parameters.Deflection=projection_tolerance;
+        projection_parameters.DeflectionInterior=projection_tolerance;
+        projection_parameters.Angle=0.05;
+        projection_parameters.AngleInterior=0.05;
+        projection_parameters.Relative=false;
+        projection_parameters.EnableControlSurfaceDeflectionAllSurfaces=true;
+        BRepMesh_IncrementalMesh projection(b,projection_parameters);
+        const int bad_projection=IMeshData_OpenWire|IMeshData_SelfIntersectingWire|IMeshData_Failure|IMeshData_UnorientedWire|IMeshData_TooFewPoints|IMeshData_UserBreak;
+        if(!projection.IsDone() || (projection.GetStatusFlags() & bad_projection)) projection_ok=false;
+        for(int i=1;i<=fm.Extent();++i) {
+            TopLoc_Location loc;
+            Handle(Poly_Triangulation) t=BRep_Tool::Triangulation(TopoDS::Face(fm(i)),loc);
+            if(t.IsNull() || projectiontriangles.entries.size()+t->NbTriangles()>1000000) projection_ok=false;
+            if(!projection_ok) continue;
+            for(int n=1;n<=t->NbNodes();++n) projectionvertices.add(xyz(t->Node(n).Transformed(loc.Transformation()).XYZ()));
+            for(int n=1;n<=t->NbTriangles();++n) {
+                int a,c,d; t->Triangle(n).Get(a,c,d);
+                projectiontriangles.add("["+std::to_string(projectionbase+a-1)+","+std::to_string(projectionbase+c-1)+","+std::to_string(projectionbase+d-1)+"]");
+                projectionfaces.add(std::to_string(fi[i]));
+            }
+            projectionbase+=t->NbNodes();
+        }
+        BRepTools::Clean(b);
         BRepMesh_IncrementalMesh mesh(b,deflection,false,0.35,false);
         if(!mesh.IsDone()) throw std::runtime_error("OCCT tessellation did not complete");
         for(int i=1;i<=fm.Extent();++i) {
@@ -167,7 +202,8 @@ std::string translate(const char* path,double deflection,double precision) {
         }
     }
     if(bodycount==0) throw std::runtime_error("STEP contains no solid bodies; surface-only models are not qualified");
-    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":[\"Assemblies are flattened to placed solid instances; names, colours and external references are not qualified. STEP source tolerances are preserved; import precision is a fallback, not a tolerance clamp. No additional healing is applied.\"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
+    const std::string projection_json=projection_ok ? "{\"chord_tolerance\":0.0025,\"mesh\":{\"vertices\":"+projectionvertices.str()+",\"triangles\":"+projectiontriangles.str()+",\"triangle_faces\":"+projectionfaces.str()+"}}" : "null";
+    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":[\"Assemblies are flattened to placed solid instances; names, colours and external references are not qualified. STEP source tolerances are preserved; import precision is a fallback, not a tolerance clamp. No additional healing is applied.\"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"projection\":"+projection_json+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
 }
 }
 extern "C" char* cam_occt_step(const char* path,double display,double precision,char** error) noexcept {

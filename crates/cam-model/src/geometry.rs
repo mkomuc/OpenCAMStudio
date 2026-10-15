@@ -434,6 +434,8 @@ pub enum EntityKind {
     Edge,
     Loop,
     Vertex,
+    /// Body outline projected into the active setup XY plane.
+    Silhouette,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntityRef {
@@ -462,6 +464,13 @@ pub enum CadSurface {
         axis: [f64; 3],
         radius: f64,
         inward: bool,
+    },
+    /// Analytic fillet surface; inspectable, with no 3D surfacing adapter.
+    Torus {
+        origin: [f64; 3],
+        axis: [f64; 3],
+        major_radius: f64,
+        minor_radius: f64,
     },
     Unsupported {
         description: String,
@@ -526,6 +535,13 @@ pub struct CadMesh {
     pub triangles: Vec<[u32; 3]>,
     pub triangle_faces: Vec<EntityId>,
 }
+/// Independent CAD tessellation for projected machining outlines. Never replace
+/// this with the viewport mesh: display quality must not change a toolpath.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CadProjectionMesh {
+    pub mesh: CadMesh,
+    pub chord_tolerance: f64,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TopologySnapshot {
     pub version: u32,
@@ -535,6 +551,8 @@ pub struct TopologySnapshot {
     pub loops: Vec<CadLoop>,
     pub vertices: Vec<CadVertex>,
     pub mesh: CadMesh,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<CadProjectionMesh>,
 }
 impl Default for TopologySnapshot {
     fn default() -> Self {
@@ -546,6 +564,7 @@ impl Default for TopologySnapshot {
             loops: vec![],
             vertices: vec![],
             mesh: CadMesh::default(),
+            projection: None,
         }
     }
 }
@@ -700,7 +719,9 @@ impl GeometryState {
         }
         let t = &a.topology;
         match r.kind {
-            EntityKind::Body => t.bodies.iter().any(|e| e.id == r.id && e.id == r.body_id),
+            EntityKind::Body | EntityKind::Silhouette => {
+                t.bodies.iter().any(|e| e.id == r.id && e.id == r.body_id)
+            }
             EntityKind::Face => t
                 .faces
                 .iter()
@@ -841,6 +862,19 @@ impl TopologySnapshot {
                     radius,
                     ..
                 } => finite(*origin) && direction(*axis) && radius.is_finite() && *radius > 0.,
+                CadSurface::Torus {
+                    origin,
+                    axis,
+                    major_radius,
+                    minor_radius,
+                } => {
+                    finite(*origin)
+                        && direction(*axis)
+                        && major_radius.is_finite()
+                        && *major_radius > 0.
+                        && minor_radius.is_finite()
+                        && *minor_radius > 0.
+                }
                 CadSurface::Unsupported { .. } => true,
             };
             if !ok {
@@ -910,21 +944,28 @@ impl TopologySnapshot {
                 return Err("invalid CAD loop adjacency".into());
             }
         }
-        if self.mesh.triangles.len() != self.mesh.triangle_faces.len()
-            || !self.mesh.vertices.iter().all(|p| finite(*p))
-            || !self
-                .mesh
-                .triangles
-                .iter()
-                .flatten()
-                .all(|i| (*i as usize) < self.mesh.vertices.len())
-            || !self
-                .mesh
-                .triangle_faces
-                .iter()
-                .all(|id| self.faces.iter().any(|f| f.id == *id))
+        for mesh in std::iter::once(&self.mesh).chain(self.projection.iter().map(|p| &p.mesh)) {
+            if mesh.triangles.len() != mesh.triangle_faces.len()
+                || !mesh.vertices.iter().all(|p| finite(*p))
+                || !mesh
+                    .triangles
+                    .iter()
+                    .flatten()
+                    .all(|i| (*i as usize) < mesh.vertices.len())
+                || !mesh
+                    .triangle_faces
+                    .iter()
+                    .all(|id| self.faces.iter().any(|f| f.id == *id))
+            {
+                return Err("invalid CAD mesh face mapping".into());
+            }
+        }
+        if self
+            .projection
+            .as_ref()
+            .is_some_and(|p| !p.chord_tolerance.is_finite() || p.chord_tolerance <= 0.)
         {
-            return Err("invalid CAD mesh face mapping".into());
+            return Err("invalid CAD projection tolerance".into());
         }
         Ok(())
     }

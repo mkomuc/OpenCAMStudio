@@ -270,7 +270,11 @@ mod tests {
         assert_eq!(app.cache_stats().computed, 2);
         app.edit_heights(|h| h.clearance += 1.);
         app.run(&CancelToken::new());
-        assert_eq!(app.cache_stats().computed, 2);
+        assert_eq!(
+            app.cache_stats().reused,
+            2,
+            "operation reference heights are independent of legacy setup defaults"
+        );
         app.edit_stock(|s| {
             if let Stock::FixedBox { size, .. } = s {
                 size[0] += 1.;

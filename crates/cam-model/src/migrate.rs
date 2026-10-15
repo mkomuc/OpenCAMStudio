@@ -206,6 +206,10 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         14 => v14_to_v15(doc),
         // v16 adds suppression and ID marks with serde defaults.
         15 => Ok(()),
+        // v17 adds optional operation safety planes; legacy defaults remain intact.
+        16 => Ok(()),
+        // Missing height definitions retain legacy absolute operation values.
+        17 => Ok(()),
         _ => Err(MigrationError::MissingStep { from }),
     }
 }

@@ -244,6 +244,14 @@ impl Project {
                     setup.name
                 ));
             }
+            for settings in setup.height_settings.values() {
+                settings.validate_structure()?;
+            }
+            for (id, heights) in &setup.operation_heights {
+                heights
+                    .validate()
+                    .map_err(|error| format!("Operation {id}: {error}"))?;
+            }
             let mut offsets = BTreeSet::new();
             if setup.origin_index == 0 || !offsets.insert(setup.origin_index) {
                 return Err(format!(

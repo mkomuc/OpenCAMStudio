@@ -197,10 +197,10 @@ impl App {
             col =
                 col.push(self.geometry_list(cad_geometry_labels(self.controller.cad_selection())));
             let prompt = match operation_kind {
-                OpKind::Face => "Select a planar top face. Facing clears the whole stock top.",
+                OpKind::Face => "Select a planar top face, or Ctrl-click for the whole-body XY outline.",
                 OpKind::Pocket => "Select a planar pocket floor in the viewport.",
                 OpKind::Profile => {
-                    "Select a closed boundary. For a blind bore, select its floor loop."
+                    "Select a closed boundary or Ctrl-click for its XY silhouette. For a blind bore, select its floor loop."
                 }
                 OpKind::Drill => {
                     "Select cylindrical hole faces. Select adds holes; Remove deletes a list item."
@@ -208,6 +208,12 @@ impl App {
                 _ => "Select geometry in the viewport. Remove list items to replace them.",
             };
             col = col.push(text(prompt).size(11).color(INSPECTOR_MUTED));
+            if let Some(note) = cad_silhouette_note(
+                self.controller.geometry_state(),
+                self.controller.cad_selection(),
+            ) {
+                col = col.push(text(note).size(11).color(INSPECTOR_MUTED));
+            }
             if self.cad_candidates.len() > 1 {
                 col = col.push(
                     text("Overlapping candidates")

@@ -76,14 +76,14 @@ impl App {
                 {
                     if owner != self.controller.active_setup_id() {
                         self.controller.activate_setup(owner).ok();
-                        self.setup_draft = None;
+                        self.end_setup_draft();
                         self.expanded_setups.insert(owner);
                     }
                 }
                 self.update(Message::ClickOp(*id))
             }
             _ => {
-                self.inspector_active = false;
+                self.end_setup_draft();
                 self.focus_ops.clear();
                 iced::Task::none()
             }
@@ -129,7 +129,7 @@ impl App {
                             .map(|s| s.id);
                         if let Some(owner) = owner {
                             self.controller.activate_setup(owner).ok();
-                            self.setup_draft = None;
+                            self.end_setup_draft();
                             self.expanded_setups.insert(owner);
                         }
                         let _ = self.update(Message::OpMenu(*id));
@@ -233,13 +233,10 @@ impl App {
                             self.status = "Execution order unchanged.".into();
                             return iced::Task::none();
                         }
-                        self.setup_draft = None;
+                        self.end_setup_draft();
                         self.operation_draft = None;
                         if let Selection::Operation(id) = self.controller.selection() {
                             self.begin_operation_draft(id);
-                        }
-                        if self.controller.selection() == Selection::Setup {
-                            self.begin_setup_draft();
                         }
                         self.refresh_fields();
                         self.rerun();
@@ -525,8 +522,7 @@ impl App {
             }
             TreeNode::Setup(id) => {
                 items = items
-                    .push(item("Edit setup".into(), Message::SelectSetup(*id)))
-                    .push(item("New setup".into(), Message::SetupNew))
+                    .push(item("Edit setup".into(), Message::EditSetup(*id)))
                     .push(item("Duplicate setup".into(), Message::SetupDuplicate(*id)))
                     .push(item(
                         "Move setup earlier".into(),
@@ -535,8 +531,7 @@ impl App {
                     .push(item(
                         "Move setup later".into(),
                         Message::SetupMove(*id, false),
-                    ))
-                    .push(item("Pick datum point".into(), Message::ToggleSetOrigin));
+                    ));
                 items = creation(items);
                 if self.controller.setups().len() > 1 {
                     items = items.push(item("Delete setup".into(), Message::SetupDelete(*id)));

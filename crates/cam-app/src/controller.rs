@@ -994,6 +994,10 @@ impl AppController {
             );
         }
         let mut preview = self.document().clone();
+        preview
+            .setup_mut()
+            .height_settings
+            .insert(id, cam_model::OperationHeightSettings::default());
         preview.setup_mut().operations.push(op);
         preview.geometry.bindings.insert(id, binding);
         preview.cad_linked_operations.insert(id);
@@ -1718,7 +1722,12 @@ impl AppController {
         set_op_id(&mut op, id);
         // A new operation joins the active origin's group (H<n>).
         op.set_work_offset(self.active_origin);
-        self.edit_document(move |doc| doc.setup_mut().operations.push(op));
+        self.edit_document(move |doc| {
+            doc.setup_mut()
+                .height_settings
+                .insert(id, cam_model::OperationHeightSettings::default());
+            doc.setup_mut().operations.push(op);
+        });
         self.selection = Selection::Operation(id);
         self.invalidate();
     }
@@ -2388,6 +2397,8 @@ impl AppController {
             origin: [0.0, 0.0, 0.0],
             extra_origins: vec![],
             origin_index: 1,
+            operation_heights: Default::default(),
+            height_settings: Default::default(),
             tool_change_height: None,
         })
     }
@@ -2828,6 +2839,8 @@ fn empty_document(p: &JobParams) -> Document {
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
+        operation_heights: Default::default(),
+        height_settings: Default::default(),
         tool_change_height: None,
     })
 }

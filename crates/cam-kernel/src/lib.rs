@@ -143,8 +143,13 @@ mod native {
             };
             return Err(KernelError::Translation(message));
         }
-        serde_json::from_slice(unsafe { CStr::from_ptr(value.0) }.to_bytes())
-            .map_err(|e| KernelError::Translation(format!("invalid bridge result: {e}")))
+        let mut import: SolidImport =
+            serde_json::from_slice(unsafe { CStr::from_ptr(value.0) }.to_bytes())
+                .map_err(|e| KernelError::Translation(format!("invalid bridge result: {e}")))?;
+        if import.topology.projection.is_none() {
+            import.warnings.push("XY silhouette is unavailable: CAD projection tessellation was incomplete or exceeded its resource budget. Faces remain inspectable.".into());
+        }
+        Ok(import)
     }
 }
 

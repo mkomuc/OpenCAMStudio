@@ -14,6 +14,8 @@
 //! design rule (see `ARCHITECTURE.md`).
 
 mod document;
+mod operation_heights;
+pub use operation_heights::*;
 mod geometry;
 mod history;
 pub mod migrate;

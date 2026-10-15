@@ -162,7 +162,38 @@ fn grow_arc(points: &[Point], i: usize, tol: f64) -> Option<(Point, bool, usize)
     // the centre by least squares over the *whole* run, then pin it to the
     // perpendicular bisector of the start–end chord so the emitted endpoints are
     // exactly equidistant from it: a self-consistent, machine-valid arc.
-    let refined = refine_center(&points[i..=end]).unwrap_or(center);
+    let run = &points[i..=end];
+    let refined = refine_center(run).unwrap_or(center);
+    // Refining changes the actual emitted circle. Recheck that circle, including
+    // its sweep: a numerically unstable centre can put the run on the opposite
+    // side and turn a small corner into an almost complete, very large circle.
+    let radius = refined.distance(run[0]);
+    if !radius.is_finite()
+        || radius > MAX_ARC_RADIUS
+        || radius > MAX_ARC_RADIUS_PER_EXTENT * extent
+        || run
+            .iter()
+            .any(|p| (refined.distance(*p) - radius).abs() > tol)
+    {
+        return None;
+    }
+    let mut sweep = 0.;
+    for pair in run.windows(2) {
+        if chord_sagitta(radius, pair[0].distance(pair[1])) > tol {
+            return None;
+        }
+        let a = Point::new(pair[0].x - refined.x, pair[0].y - refined.y);
+        let b = Point::new(pair[1].x - refined.x, pair[1].y - refined.y);
+        let turn =
+            (a.x * b.y - a.y * b.x).atan2(a.x * b.x + a.y * b.y) * if ccw { 1. } else { -1. };
+        if turn < -1e-10 {
+            return None;
+        }
+        sweep += turn.max(0.);
+    }
+    if sweep > std::f64::consts::TAU + 1e-8 {
+        return None;
+    }
     Some((refined, ccw, end))
 }
 
@@ -208,7 +239,10 @@ fn least_squares_circle(pts: &[Point]) -> Option<Point> {
         syz += y * z;
         sz += z;
     }
-    let sol = solve3([[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], [-sxz, -syz, -sz])?;
+    let sol = solve3(
+        [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]],
+        [-sxz, -syz, -sz],
+    )?;
     Some(Point::new(-0.5 * sol[0], -0.5 * sol[1]))
 }
 
@@ -400,13 +434,22 @@ mod tests {
                         .iter()
                         .map(|c| center.distance(*c))
                         .fold(f64::MAX, f64::min);
-                    assert!(nearest < 1e-3, "arc centre off the corner by {nearest:.5} mm");
-                    assert!((r_start - 6.0).abs() < 1e-3, "arc radius {r_start:.5} ≠ 6.0");
+                    assert!(
+                        nearest < 1e-3,
+                        "arc centre off the corner by {nearest:.5} mm"
+                    );
+                    assert!(
+                        (r_start - 6.0).abs() < 1e-3,
+                        "arc radius {r_start:.5} ≠ 6.0"
+                    );
                     start = end;
                 }
             }
         }
-        assert_eq!(arcs, 4, "the four rounded corners refit to four arcs, got {arcs}");
+        assert_eq!(
+            arcs, 4,
+            "the four rounded corners refit to four arcs, got {arcs}"
+        );
     }
 
     #[test]
@@ -432,7 +475,6 @@ mod tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod full_circle_guard_tests {
@@ -485,9 +527,13 @@ mod full_circle_guard_tests {
         for (end, center) in &arcs {
             assert!(
                 (center.distance(*end) - 6.0).abs() < 0.05,
-                "radius {:.3} is not 6", center.distance(*end)
+                "radius {:.3} is not 6",
+                center.distance(*end)
             );
-            assert!(center.distance(Point::new(40.0, 30.0)) < 0.05, "centre moved");
+            assert!(
+                center.distance(Point::new(40.0, 30.0)) < 0.05,
+                "centre moved"
+            );
         }
         // And no single arc closes on itself.
         let mut cur = pts[0];

@@ -6,8 +6,30 @@ use iced::widget::column;
 pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
     selected
         .iter()
-        .map(|entity| format!("{:?} {} · Body {}", entity.kind, entity.id, entity.body_id))
+        .map(|entity| {
+            if entity.kind == EntityKind::Silhouette {
+                format!("XY silhouette · Body {}", entity.body_id)
+            } else {
+                format!("{:?} {} · Body {}", entity.kind, entity.id, entity.body_id)
+            }
+        })
         .collect()
+}
+
+pub(super) fn cad_silhouette_note(
+    state: &cam_model::GeometryState,
+    selected: &[EntityRef],
+) -> Option<String> {
+    let reference = selected.iter().find(|r| r.kind == EntityKind::Silhouette)?;
+    let projection = state
+        .asset(reference.asset_id)?
+        .topology
+        .projection
+        .as_ref()?;
+    Some(format!(
+        "Whole-body XY outline · {:.4} mm outward allowance. Internal holes are filled.",
+        projection.chord_tolerance + cam_geo::GRID_MM * 2.
+    ))
 }
 
 pub(super) fn drawing_geometry_labels(selected: &[LoopRef]) -> Vec<String> {

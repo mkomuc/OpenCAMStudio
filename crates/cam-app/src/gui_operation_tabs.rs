@@ -43,7 +43,10 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
         Field::MajorDia => OperationTab::Geometry,
-        Field::Depth
+        Field::Clearance
+        | Field::Retract
+        | Field::TopOfStock
+        | Field::Depth
         | Field::OperationTop
         | Field::DrillStartOffset
         | Field::FaceStartOffset
@@ -142,7 +145,10 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
             }
         }
         Field::PlungeB | Field::ClearPlungeB => value <= 0.0,
-        Field::OperationTop
+        Field::Clearance
+        | Field::Retract
+        | Field::TopOfStock
+        | Field::OperationTop
         | Field::StartX
         | Field::StartY
         | Field::DrillStartOffset
@@ -315,6 +321,16 @@ impl App {
                 }
                 Operation::Pocket(o) => format!("Boundary with {} islands", o.islands.len()),
                 Operation::Carve(o) => format!("Boundary with {} islands", o.islands.len()),
+                Operation::Face(_)
+                    if linked.is_some_and(|binding| {
+                        binding
+                            .selected
+                            .iter()
+                            .any(|r| r.kind == EntityKind::Silhouette)
+                    }) =>
+                {
+                    "Projected facing boundary".into()
+                }
                 Operation::Face(_) => "Rectangular facing boundary".into(),
                 Operation::Drill(o) => format!("{} hole centres", o.points.len()),
                 Operation::Thread(o) => format!("{} thread centres", o.points.len()),
@@ -322,6 +338,11 @@ impl App {
             list = list.push(text(geometry).size(12));
             if let Some(binding) = linked {
                 list = list.push(self.geometry_list(cad_geometry_labels(&binding.selected)));
+                if let Some(note) =
+                    cad_silhouette_note(self.controller.geometry_state(), &binding.selected)
+                {
+                    list = list.push(text(note).size(11).color(INSPECTOR_MUTED));
+                }
                 list = list.push(
                     text(format!("Association: {:?}", binding.status))
                         .size(11)
@@ -333,49 +354,7 @@ impl App {
         }
 
         if tab == OperationTab::Heights {
-            let heights = self.controller.document().setup().heights;
-            list = list.push(text(format!("Inherited from Setup (absolute Z, mm)\nClearance {:.3} · Retract {:.3}\nStock top {:.3}", heights.clearance, heights.retract, heights.top_of_stock)).size(12).color(palette::GROUP_LABEL));
-            if let Some(binding) = linked {
-                let mut preview = binding.clone();
-                preview.overrides.top = self
-                    .cad_override_top
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|n| n.is_finite());
-                preview.overrides.bottom = self
-                    .cad_override_bottom
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|n| n.is_finite());
-                let effective = preview.effective_heights();
-                list = list.push(text(format!("Derived CAD top Z {:.3} / bottom Z {:.3}\nEffective top Z {:.3} / bottom Z {:.3}", binding.heights.top, binding.heights.bottom, effective.top, effective.bottom)).size(12));
-                list = list.push(
-                    text("Manual absolute Z overrides (mm). Blank follows geometry.").size(11),
-                );
-                list = list.push(text("Top Z override (mm)").size(12)).push(
-                    inspector_input(
-                        &format!("CAD top {:.3}", binding.heights.top),
-                        &self.cad_override_top,
-                    )
-                    .on_input(Message::CadOverrideTopChanged)
-                    .size(12),
-                );
-                list = list.push(text("Bottom Z override (mm)").size(12)).push(
-                    inspector_input(
-                        &format!("CAD bottom {:.3}", binding.heights.bottom),
-                        &self.cad_override_bottom,
-                    )
-                    .on_input(Message::CadOverrideBottomChanged)
-                    .size(12),
-                );
-                if !self.operation_height_overrides_valid() {
-                    list = list.push(
-                        text("Height overrides must be finite numbers, with top above bottom.")
-                            .size(11)
-                            .color(palette::ERROR),
-                    );
-                }
-            }
+            list = list.push(self.reference_height_controls(id));
         }
         if tab == OperationTab::Linking {
             let supports_start = matches!(
@@ -397,7 +376,7 @@ impl App {
                 );
             }
             match op {
-                Operation::Drill(_) => list = list.push(text("Approach and retract follow the drilling cycle and Setup safety heights.").size(12)),
+                Operation::Drill(_) => list = list.push(text("Approach and retract follow the drilling cycle and operation safety heights.").size(12)),
                 Operation::Face(_) => list = list.push(text("Facing links and turnaround arcs are determined by the strategy. Overshoot is on Passes.").size(12)),
                 Operation::Thread(_) => list = list.push(text("Helical entry and exit are determined by the threading strategy.").size(12)),
                 Operation::Engrave(o) if !o.closed => list = list.push(text("Open strokes start at their first vertex. Entry and exit are determined by the engraving strategy.").size(12)),
@@ -405,6 +384,9 @@ impl App {
             }
         }
         for field in operation_fields(op) {
+            if tab == OperationTab::Heights && field != Field::ThreadBlindAllowance {
+                continue;
+            }
             if field_tab(field) != tab || is_clear_field(field) {
                 continue;
             }
@@ -1547,7 +1529,8 @@ mod tests {
         app.setup_draft = None;
         let _ = app.update(Message::ClickOp(new_id));
         assert_eq!(app.controller.selection(), Selection::Setup);
-        assert!(app.setup_draft.is_some());
+        assert!(app.setup_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
     }
     #[test]
     fn step_creation_uses_shared_cutting_controls_and_one_undo_transaction() {

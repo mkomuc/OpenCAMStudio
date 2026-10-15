@@ -168,7 +168,7 @@ impl App {
                 self.operation_tools.clear();
                 self.view = ViewControls::default();
                 self.controller.select(Selection::Setup);
-                self.begin_setup_draft();
+                self.end_setup_draft();
                 self.refresh_fields();
                 self.status = format!("Imported {count} geometry item(s).");
                 let mut warnings = preview

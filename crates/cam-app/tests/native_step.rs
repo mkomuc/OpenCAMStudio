@@ -135,10 +135,10 @@ fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
     let state = app.geometry_state();
     let topology = &state.assets[0].topology;
     assert!(topology.bodies[0].valid_solid);
-    assert!(topology
-        .faces
-        .iter()
-        .any(|f| matches!(f.surface, CadSurface::Unsupported { .. })));
+    assert!(topology.faces.iter().any(|f| matches!(
+        f.surface,
+        CadSurface::Unsupported { .. } | CadSurface::Torus { .. }
+    )));
     let floor = topology.faces.iter().find(|f| matches!(f.surface,
         CadSurface::Plane { origin, normal } if (origin[2] + 2.0).abs() < 1e-6 && normal[2] > 0.99
     )).expect("blind-bore floor");
@@ -737,5 +737,121 @@ fn tigerente_blind_pockets_and_drills_use_local_certificates_in_both_setups() {
         assert!((min_z - bottom).abs() < 1e-6, "{min_z}");
         assert!(!outcome.program.is_empty());
         assert!(app.export_nc().unwrap().contains("M30"));
+    }
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn rounded_exterior_xy_silhouette_profiles_and_reopens_without_source() {
+    let mut app = new_app();
+    app.import_cad(fixture("blended-box-blind-bore-mm.step"))
+        .unwrap();
+    let state = app.geometry_state();
+    let selected = reference(state, EntityKind::Silhouette, state.instances[0].body_id);
+    let scene = cam_render::CadScene::from_geometry(state, &std::collections::BTreeSet::new());
+    let ray = cam_render::Ray {
+        origin: [10., 10., 50.],
+        direction: [0., 0., -1.],
+    };
+    let hits = scene.pick_profile_candidates(ray, 0.1, false);
+    assert_eq!(
+        hits[0].entity, selected,
+        "the inset top-face boundary must resolve to the full exterior across its fillet"
+    );
+    assert!(
+        state.assets[0]
+            .topology
+            .faces
+            .iter()
+            .any(|face| matches!(face.surface,
+                CadSurface::Cylinder { axis, radius, .. } if axis[2].abs() < 0.1 && radius > 0.
+            )),
+        "rounded top transitions retain their inspectable radius"
+    );
+    let preview = app
+        .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&selected))
+        .unwrap();
+    assert!(preview
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("outward allowance")));
+    assert_eq!(preview.regions.len(), 1);
+    assert!(preview.regions[0].holes().is_empty());
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![selected])
+        .unwrap();
+    assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.side == Side::Outside));
+    let run = app.run(&CancelToken::new());
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
+    let bounds = run.program.validate().unwrap().unwrap();
+    assert!(
+        bounds.max.x - bounds.min.x < 65. && bounds.max.y - bounds.min.y < 45.,
+        "profile motions must stay beside the 60 × 40 mm body: {bounds:?}"
+    );
+    let nc = app.export_nc().unwrap().to_owned();
+    let path =
+        std::env::temp_dir().join(format!("opencam-xy-silhouette-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut loaded = new_app();
+    loaded.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let run = loaded.run(&CancelToken::new());
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
+    assert_eq!(loaded.export_nc().unwrap(), nc);
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn silhouette_projection_is_independent_of_display_quality_on_curved_step_models() {
+    for path in [
+        fixture("blended-box-blind-bore-mm.step"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente.step"),
+    ] {
+        let coarse = cam_kernel::read_step_file(
+            &path,
+            &cam_kernel::SolidImportOptions {
+                display_tolerance: 0.5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fine = cam_kernel::read_step_file(
+            &path,
+            &cam_kernel::SolidImportOptions {
+                display_tolerance: 0.01,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            coarse.topology.projection.is_some(),
+            "{} has no usable projection",
+            path.display()
+        );
+        assert_eq!(
+            coarse.topology.projection,
+            fine.topology.projection,
+            "{}",
+            path.display()
+        );
+        let mut app = new_app();
+        app.import_cad(&path).unwrap();
+        let state = app.geometry_state();
+        let selected = reference(state, EntityKind::Silhouette, state.instances[0].body_id);
+        let preview = app
+            .preview_cad_operation(OpKind::Profile, &[selected])
+            .unwrap();
+        assert_eq!(preview.regions.len(), 1);
+        assert!(preview.regions[0].area() > 1.);
     }
 }

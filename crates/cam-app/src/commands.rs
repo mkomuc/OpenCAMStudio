@@ -9,6 +9,8 @@ impl AppController {
         };
         self.edit_document(|doc| {
             doc.setup_mut().operations.retain(|o| o.id() != id);
+            doc.setup_mut().operation_heights.remove(&id);
+            doc.setup_mut().height_settings.remove(&id);
             doc.geometry.bindings.remove(&id);
             doc.excluded_operations.remove(&id);
             doc.cad_linked_operations.remove(&id);
@@ -52,7 +54,13 @@ impl AppController {
             }
             let mut group = vec![ops[i].id()];
             for j in (i + 1)..ops.len() {
-                if !taken[j] && ops[i].same_work(ops[j]) {
+                if !taken[j]
+                    && ops[i].same_work(ops[j])
+                    && self.setup().height_settings.get(&ops[i].id())
+                        == self.setup().height_settings.get(&ops[j].id())
+                    && self.setup().heights_for(ops[i].id())
+                        == self.setup().heights_for(ops[j].id())
+                {
                     taken[j] = true;
                     group.push(ops[j].id());
                 }

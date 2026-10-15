@@ -8,9 +8,10 @@ no native distribution or whole-STEP-standard qualification is implied.
 Missing SDKs return `BackendUnavailable`, including all-features headless tests.
 
 The bridge uses the real `STEPControl_Reader`, millimetre system units, solid
-validation, exact plane/cylinder and line/circle descriptors, oriented topology,
-and independent display tessellation. Other analytic/spline entities are displayed
-but explicitly unsupported by machining extraction. OCCT calls are serialized,
+validation, analytic plane/cylinder/torus and line/circle descriptors, oriented topology,
+and independent display tessellation. Other analytic/spline entities do not
+supply analytic feature adapters. Whole-body XY silhouettes use a separate,
+fixed-tolerance projection tessellation rather than display triangles. OCCT calls are serialized,
 all handles live inside a call, and all C++ exceptions are translated.
 
 Source units must be known and homogeneous. Assemblies are flattened to placed
@@ -24,7 +25,8 @@ Solid validation and the independent machining eligibility checks still apply.
 Saved source bytes plus the versioned exact subset snapshot support reopening
 without the original file.
 The snapshot preserves the supported machining subset, not arbitrary native B-rep;
-unsupported curved surfaces remain inspectable through their display mesh only.
+unsupported curved surfaces remain inspectable, and can contribute to the
+whole-body projected outline through the independent projection tessellation.
 
 The feature resolver can profile a circular blind-bore floor even when the body
 has unrelated blends. This uses the analytic bore wall and complete planar floor
@@ -36,3 +38,16 @@ fixture corpus on each desktop target, audit the SDK packaging/licence notices,
 and qualify AP203/AP214/AP242 units, instances and topology. This repository does
 not pretend a text scanner is a STEP importer and never substitutes display facets
 for exact machining geometry.
+
+Ctrl-click silhouette selection stores a body/instance reference. Imports also
+embed a separate 3D projection mesh at 0.0025 mm absolute edge/interior deflection,
+with surface-deflection checks enabled for analytic surfaces as well as splines.
+The resolver projects it into the active setup XY plane, unions the triangles,
+fills internal holes and adds a 0.0027 mm outward allowance. This permits an
+outside envelope Profile across rounded transitions without claiming exact
+freeform-surface machining. The projection does not depend on display quality;
+its snapshot and placement participate in the operation fingerprint. Reopening
+needs neither the STEP source nor OCCT. Projects predating this data need a STEP
+reimport before silhouette selection can drive machining. Failed/incomplete
+projection meshing or more than one million triangles disables silhouettes while
+retaining ordinary inspection/import behavior.

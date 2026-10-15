@@ -110,6 +110,8 @@ fn document() -> Document {
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
+        operation_heights: Default::default(),
+        height_settings: Default::default(),
         tool_change_height: None,
     })
 }
@@ -753,6 +755,8 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
+        operation_heights: Default::default(),
+        height_settings: Default::default(),
         tool_change_height: None,
     });
 
@@ -877,6 +881,8 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
+        operation_heights: Default::default(),
+        height_settings: Default::default(),
         tool_change_height: None,
     })
 }

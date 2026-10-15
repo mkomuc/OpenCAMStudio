@@ -278,7 +278,10 @@ mod tests {
         app
     }
     fn axes(app: &App) -> Option<WorkpieceAxes> {
-        let setup = app.setup_draft.as_ref().unwrap();
+        let setup = app
+            .setup_draft
+            .as_ref()
+            .unwrap_or_else(|| app.controller.document().setup());
         let picking = SetupPickGeometry::new(&app.controller, setup, &app.cad_hidden);
         app.workpiece_axes(&picking)
     }

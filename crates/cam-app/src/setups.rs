@@ -45,6 +45,8 @@ impl AppController {
         setup.name = format!("Setup {}", setup.id);
         setup.program_name = format!("setup-{}", setup.id);
         setup.operations.clear();
+        setup.operation_heights.clear();
+        setup.height_settings.clear();
         setup.stock = default_stock(self.defaults.top_of_stock, self.defaults.depth);
         setup.extra_origins.clear();
         let id = setup.id;
@@ -66,7 +68,15 @@ impl AppController {
         let mut next_id = self.next_op_id();
         let mut bindings = Vec::new();
         let mut linked = Vec::new();
+        let old_heights = std::mem::take(&mut copy.operation_heights);
+        let old_settings = std::mem::take(&mut copy.height_settings);
         for op in &mut copy.operations {
+            if let Some(settings) = old_settings.get(&op.id()) {
+                copy.height_settings.insert(next_id, settings.clone());
+            }
+            if let Some(heights) = old_heights.get(&op.id()) {
+                copy.operation_heights.insert(next_id, *heights);
+            }
             if self.document().cad_linked_operations.contains(&op.id()) {
                 linked.push(next_id);
             }
@@ -307,6 +317,8 @@ impl AppController {
         for op in &mut definition.operations {
             op.map_tools(|old| mapping.get(&old).copied().unwrap_or(old));
         }
+        let heights = source.heights_for(id);
+        let settings = source.height_settings.get(&id).cloned();
         let mut operation = definition.operations.remove(0);
         let new_id = if copy { self.next_op_id() } else { id };
         operation.set_id(new_id);
@@ -332,6 +344,24 @@ impl AppController {
                 binding.resolved_fingerprint = None;
             }
         }
+        if !copy {
+            document
+                .setups
+                .iter_mut()
+                .find(|s| s.id == source_id)
+                .unwrap()
+                .operation_heights
+                .remove(&id);
+        }
+        if !copy {
+            document
+                .setups
+                .iter_mut()
+                .find(|s| s.id == source_id)
+                .unwrap()
+                .height_settings
+                .remove(&id);
+        }
         document.active_setup_id = destination;
         let target = document.setup_mut();
         for tool in definition.tools {
@@ -343,6 +373,10 @@ impl AppController {
                 target.tools.push(tool);
             }
         }
+        if let Some(settings) = settings {
+            target.height_settings.insert(new_id, settings);
+        }
+        target.operation_heights.insert(new_id, heights);
         target.operations.insert(insertion, operation);
         if document.geometry.bindings.contains_key(&new_id) {
             crate::cad_operations::validate_binding_edit(&mut document, new_id)?;
@@ -383,12 +417,55 @@ impl AppController {
         tools: Vec<Tool>,
         geometry: Option<Vec<EntityRef>>,
     ) -> Result<(), String> {
-        let document = self.prepare_operation_settings(operation, overrides, tools, geometry)?;
+        self.apply_operation_settings_with_heights(operation, overrides, tools, geometry, None)
+    }
+
+    /// Apply safety planes together with every operation tab in one undo step.
+    pub fn apply_operation_settings_with_heights(
+        &mut self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
+        heights: Option<Heights>,
+    ) -> Result<(), String> {
+        let document =
+            self.prepare_operation_settings(operation, overrides, tools, geometry, heights)?;
         if document == *self.document() {
             return Ok(());
         }
         self.edit_document(move |current| *current = document);
         self.invalidate();
+        Ok(())
+    }
+
+    /// Commit references, offsets, geometry and cutting parameters atomically.
+    pub fn apply_operation_height_settings(
+        &mut self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
+        mut settings: cam_model::OperationHeightSettings,
+    ) -> Result<(), String> {
+        settings.resolved = None;
+        let id = operation.id();
+        let mut document =
+            self.prepare_operation_settings(operation, overrides, tools, geometry, None)?;
+        settings.resolve(
+            &document,
+            document
+                .setup()
+                .operations
+                .iter()
+                .find(|o| o.id() == id)
+                .unwrap(),
+        )?;
+        document.setup_mut().height_settings.insert(id, settings);
+        if document != *self.document() {
+            self.edit_document(move |current| *current = document);
+            self.invalidate();
+        }
         Ok(())
     }
 
@@ -398,6 +475,7 @@ impl AppController {
         overrides: Option<cam_model::GeometryOverrides>,
         tools: Vec<Tool>,
         geometry: Option<Vec<EntityRef>>,
+        safety_heights: Option<Heights>,
     ) -> Result<Document, String> {
         let id = operation.id();
         let old = self
@@ -433,8 +511,15 @@ impl AppController {
         {
             return Err("Operation refers to a missing tool".into());
         }
-        let heights = document.setup().heights;
-        let before = old.legacy_cutting_heights(&heights);
+        let before = old.legacy_cutting_heights(&document.setup().heights_for(id));
+        if let Some(heights) = safety_heights {
+            heights.validate()?;
+            document.setup_mut().height_settings.remove(&id);
+            if heights != document.setup().heights_for(id) {
+                document.setup_mut().operation_heights.insert(id, heights);
+            }
+        }
+        let heights = document.setup().heights_for(id);
         if let Some(selected) = &geometry {
             crate::cad_operations::validate_selection(&document.geometry, selected)?;
             let binding = document
@@ -487,7 +572,7 @@ impl AppController {
     ) -> Result<cam_model::GeometryBinding, String> {
         let id = operation.id();
         let document =
-            self.prepare_operation_settings(operation, overrides, tools, Some(selected))?;
+            self.prepare_operation_settings(operation, overrides, tools, Some(selected), None)?;
         Ok(document.geometry.bindings[&id].clone())
     }
 
@@ -563,6 +648,12 @@ impl AppController {
             return Err(
                 "Clearance must be at or above retract, and retract at or above stock top".into(),
             );
+        }
+        for settings in setup.height_settings.values() {
+            settings.validate_structure()?;
+        }
+        for heights in setup.operation_heights.values() {
+            heights.validate()?;
         }
         if let Some(height) = setup.tool_change_height {
             if !height.is_finite() || height < setup.heights.clearance {
@@ -743,6 +834,49 @@ mod tests {
             work_offset: 1,
             feed: 100.,
         })
+    }
+
+    #[test]
+    fn operation_safety_planes_follow_copies_moves_deletion_and_undo() {
+        let mut app = AppController::new(crate::default_machine());
+        app.add_operation(drill());
+        let first = app.active_setup_id();
+        let id = app.setup().operations[0].id();
+        let heights = Heights::new(25., 10., 3.);
+        app.apply_operation_settings_with_heights(
+            app.operation(id).unwrap().clone(),
+            None,
+            vec![],
+            None,
+            Some(heights),
+        )
+        .unwrap();
+        let duplicated = app.duplicate_setup(first).unwrap();
+        let copy_id = app.setup().operations[0].id();
+        assert_ne!(copy_id, id);
+        assert_eq!(app.setup().heights_for(copy_id), heights);
+        assert!(!app.setup().operation_heights.contains_key(&id));
+        let second = app.add_setup();
+        assert!(app.setup().operation_heights.is_empty());
+        let copied = app
+            .transfer_operation_to_setup(copy_id, second, true)
+            .unwrap();
+        assert_eq!(app.setup().heights_for(copied), heights);
+        app.transfer_operation_to_setup(id, second, false).unwrap();
+        assert_eq!(app.setup().heights_for(id), heights);
+        assert!(!app
+            .setups()
+            .iter()
+            .find(|s| s.id == first)
+            .unwrap()
+            .operation_heights
+            .contains_key(&id));
+        app.delete_selected_operation();
+        assert!(!app.setup().operation_heights.contains_key(&id));
+        app.undo();
+        assert_eq!(app.setup().heights_for(id), heights);
+        app.activate_setup(duplicated).unwrap();
+        assert_eq!(app.setup().heights_for(copy_id), heights);
     }
 
     #[test]
