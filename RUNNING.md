@@ -549,8 +549,16 @@ things worth eyeballing:
   keeps its dragged size. Separators are visible. **View → Panes** hides/shows
   Project / Tools / Inspector / Output but never the Viewport.
 - **Project tree:** rows read as a tree (plain text, selected row highlighted —
-  not blue buttons). **Right-click an operation** → a Delete / Duplicate /
-  Reinitialize menu at the cursor; clicking off dismisses it. The include checkbox
+  not blue buttons). **Right-click a setup or operation** → Recompute toolpath /
+  Simulate toolpath / Post process and export at the top of the menu. A setup
+  processes all included operations; an operation processes only itself. Recompute
+  forces fresh generation. Simulate opens a player below the viewport: Play/Pause,
+  a 0.25×–10× speed slider, elapsed/total time and a timeline that can be scrubbed
+  in either direction. Confirm rewinding restores stock and playing at the end
+  restarts. Closing simulation returns to the complete verified backplot. Post
+  process and export generates the selected scope before offering a save location.
+  Existing Delete / Duplicate / Reinitialize commands remain below; clicking off
+  dismisses the menu. The include checkbox
   and ↑ / ↓ work. Reinitialize should replace the op **in place**, keeping its
   position in the list.
 - **Tools (in use):** after creating an op, its tool appears here read-only; with

@@ -67,6 +67,8 @@ pub(crate) struct JobInputs {
     pub spindle_rpm: f64,
     pub tool_diameter: f64,
     pub frame_error: Option<String>,
+    /// A playback prefix bypasses planning; it never replaces the verified job.
+    pub preview_program: Option<Program>,
 }
 impl JobInputs {
     pub fn execute(
@@ -82,65 +84,74 @@ impl JobInputs {
                 ..Default::default()
             };
         }
-        progress.set(JobPhase::GeometryResolution, 0, 1, None);
-        let setup_id = self.document.setup().id;
-        let resolved = self.frame_error.clone().map_or_else(
-            || {
-                self.machine
-                    .validate()
-                    .map_err(|error| {
-                        Diagnostic::error(error.to_string())
-                            .with_code(DiagnosticCode::InvalidInput)
-                            .for_setup(setup_id)
-                    })
-                    .and_then(|()| {
-                        crate::cad_operations::resolve_document_checked(&self.document, &|| {
-                            cancel.is_cancelled()
-                        })
-                    })
-            },
-            |error| {
-                Err(Diagnostic::error(error)
-                    .with_code(DiagnosticCode::GeometryUnresolved)
-                    .for_setup(setup_id))
-            },
-        );
-        if cancel.is_cancelled() {
-            return RunOutcome {
-                completion: JobCompletion::Cancelled,
-                ..Default::default()
-            };
-        }
-        let job = match resolved {
-            Ok(document) => {
-                let total = document.setup().operations.len();
-                let mut completed = 0;
-                progress.set(JobPhase::Generation, 0, total, None);
-                let job = build_job_cached(
-                    PlanRequest {
-                        document: &document,
-                        spindle_rpm: self.spindle_rpm,
-                        dir: SpindleDir::Cw,
-                        stock: Some(([self.min[0], self.min[1]], [self.max[0], self.max[1]])),
-                        tool_change_height: document
-                            .setup()
-                            .resolved_tool_change_height(self.machine.envelope.max.z),
-                    },
-                    cancel,
-                    cache,
-                    |id| {
-                        progress.set(JobPhase::Generation, completed, total, Some(id));
-                        completed += 1;
-                    },
-                );
-                progress.set(JobPhase::Generation, completed, total, None);
-                job
+        let job = if let Some(program) = &self.preview_program {
+            cam_toolpath::JobResult {
+                program: program.clone(),
+                diagnostics: Vec::new(),
+                completion: JobCompletion::Complete,
             }
-            Err(error) => cam_toolpath::JobResult {
-                program: Program::new(),
-                diagnostics: vec![error],
-                completion: JobCompletion::Failed,
-            },
+        } else {
+            progress.set(JobPhase::GeometryResolution, 0, 1, None);
+            let setup_id = self.document.setup().id;
+            let resolved = self.frame_error.clone().map_or_else(
+                || {
+                    self.machine
+                        .validate()
+                        .map_err(|error| {
+                            Diagnostic::error(error.to_string())
+                                .with_code(DiagnosticCode::InvalidInput)
+                                .for_setup(setup_id)
+                        })
+                        .and_then(|()| {
+                            crate::cad_operations::resolve_document_checked(&self.document, &|| {
+                                cancel.is_cancelled()
+                            })
+                        })
+                },
+                |error| {
+                    Err(Diagnostic::error(error)
+                        .with_code(DiagnosticCode::GeometryUnresolved)
+                        .for_setup(setup_id))
+                },
+            );
+            if cancel.is_cancelled() {
+                return RunOutcome {
+                    completion: JobCompletion::Cancelled,
+                    ..Default::default()
+                };
+            }
+            let job = match resolved {
+                Ok(document) => {
+                    let total = document.setup().operations.len();
+                    let mut completed = 0;
+                    progress.set(JobPhase::Generation, 0, total, None);
+                    let job = build_job_cached(
+                        PlanRequest {
+                            document: &document,
+                            spindle_rpm: self.spindle_rpm,
+                            dir: SpindleDir::Cw,
+                            stock: Some(([self.min[0], self.min[1]], [self.max[0], self.max[1]])),
+                            tool_change_height: document
+                                .setup()
+                                .resolved_tool_change_height(self.machine.envelope.max.z),
+                        },
+                        cancel,
+                        cache,
+                        |id| {
+                            progress.set(JobPhase::Generation, completed, total, Some(id));
+                            completed += 1;
+                        },
+                    );
+                    progress.set(JobPhase::Generation, completed, total, None);
+                    job
+                }
+                Err(error) => cam_toolpath::JobResult {
+                    program: Program::new(),
+                    diagnostics: vec![error],
+                    completion: JobCompletion::Failed,
+                },
+            };
+            job
         };
         let mut completion = job.completion;
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
@@ -150,6 +161,50 @@ impl JobInputs {
         } else {
             Scene::new()
         };
+        if self.preview_program.is_some() {
+            let tip = job.program.steps.iter().rev().find_map(|step| match step {
+                cam_cldata::Step::Rapid { to, .. } | cam_cldata::Step::Linear { to, .. } => {
+                    Some(*to)
+                }
+                cam_cldata::Step::Arc { end, .. } => Some(*end),
+                _ => None,
+            });
+            let number = job.program.steps.iter().rev().find_map(|step| match step {
+                cam_cldata::Step::ToolChange { tool } => Some(*tool),
+                _ => None,
+            });
+            let tool = self
+                .document
+                .setup()
+                .tools
+                .iter()
+                .find(|tool| Some(tool.number) == number);
+            if let Some(tip) = tip {
+                let radius = tool.map_or(self.tool_diameter, |tool| tool.diameter) / 2.;
+                let length = tool.map_or(20., |tool| tool.length);
+                let color = [0.15, 0.85, 1., 1.];
+                scene.add_strip(
+                    (0..=32)
+                        .map(|i| {
+                            let angle = i as f64 * std::f64::consts::TAU / 32.;
+                            [
+                                (tip.x + radius * angle.cos()) as f32,
+                                (tip.y + radius * angle.sin()) as f32,
+                                tip.z as f32,
+                            ]
+                        })
+                        .collect(),
+                    color,
+                );
+                scene.add_strip(
+                    vec![
+                        [tip.x as f32, tip.y as f32, tip.z as f32],
+                        [tip.x as f32, tip.y as f32, (tip.z + length) as f32],
+                    ],
+                    color,
+                );
+            }
+        }
         for strip in &mut scene.strips {
             if cancel.is_cancelled() {
                 break;

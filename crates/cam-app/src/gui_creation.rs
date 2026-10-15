@@ -20,6 +20,7 @@ impl App {
                 .setup()
                 .tools
                 .iter()
+                .chain(self.operation_tools.iter())
                 .find(|tool| tool.number == number)
                 .copied()
         }
@@ -64,240 +65,188 @@ impl App {
         };
         (cutting.rpm >= 0. && cutting.feed > 0. && cutting.plunge_feed > 0.).then_some(cutting)
     }
-    pub(super) fn op_wizard(
+
+    pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.operation_tab = OperationTab::Tool;
+        self.creation_edited_fields.clear();
+        self.inspector_active = true;
+        self.operation_binding_preview = None;
+        self.operation_geometry = None;
+        self.operation_draft = Some(self.controller.operation_template(kind, 0));
+        self.height_draft_id = Some(0);
+        let settings = cam_model::OperationHeightSettings::default();
+        self.height_offsets = cam_model::HeightPlaneKind::ALL
+            .into_iter()
+            .map(|p| (p, fmt_num(settings.definition(p).offset)))
+            .collect();
+        self.height_draft = Some(settings);
+        self.sync_creation_tool();
+        let work_offset = self.controller.active_origin();
+        self.edit_operation_draft(|op| op.set_work_offset(work_offset));
+        self.refresh_fields();
+        self.seed_wizard_cutting();
+    }
+
+    pub(super) fn sync_creation_tool(&mut self) {
+        if let Some(tool) = self.wizard_tool() {
+            let number = self.stage_operation_tool(tool);
+            self.edit_operation_draft(|op| op.set_tool(number));
+        }
+    }
+
+    pub(super) fn creation_operation(
         &self,
-        operation_kind: OpKind,
-        pending: Option<PendingOp>,
-    ) -> Element<'_, Message> {
-        let cad = self.cad_pending_kind.is_some();
-        let geometry_selected = if cad {
-            !self.controller.cad_selection().is_empty()
-        } else {
-            pending.as_ref().is_some_and(|p| p.boundary.is_some())
-        };
-        let tool = self.wizard_tool();
-        let kind = match operation_kind {
-            OpKind::Profile => "Profile",
-            OpKind::Pocket => "Pocket",
-            OpKind::Drill => "Drill",
-            OpKind::Face => "Face",
-            OpKind::Chamfer => "Chamfer",
-            OpKind::Thread => "Thread",
-            OpKind::Engrave => "Engrave",
-            OpKind::Carve => "Carve",
-        };
-        // The tool is chosen in two steps — **family**, then a tool within it — so a
-        // library of hundreds does not have to be scrolled for every operation. The
-        // families offered are bounded by the operation (see `families_for`).
-        let families = families_for(operation_kind);
-        let family = self.wizard_family.filter(|f| families.contains(f));
-        let family_picker = pick_list(families.to_vec(), family, Message::SetPendingFamily)
-            .placeholder("Choose a family")
-            .text_size(12)
-            .padding([7, 9])
-            .style(inspector_picker)
-            .width(Length::Fill);
-
-        // Tools of the chosen family only. Nothing is listed until a family is picked.
-        let tools: Vec<ToolChoice> = match family {
-            Some(f) => self
-                .library
-                .tools
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| ToolKindPick::of(t.kind) == f)
-                .map(|(index, t)| ToolChoice {
-                    index,
-                    number: t.number,
-                    diameter: t.diameter,
-                    kind: t.kind,
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        let selected = tool
-            .and_then(|embedded| {
-                self.library
-                    .tools
-                    .iter()
-                    .position(|saved| saved.identity() == embedded.identity())
+    ) -> Result<(Operation, Option<cam_model::GeometryBinding>), String> {
+        let mut draft = self
+            .operation_draft
+            .clone()
+            .ok_or("Operation unavailable")?;
+        self.wizard_tool().ok_or("Choose a cutter")?;
+        self.wizard_cutting().ok_or("Enter valid cutting data")?;
+        let fields = self
+            .inspector_fields()
+            .into_iter()
+            .map(|field| {
+                self.fields
+                    .get(&field)
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+                    .filter(|v| {
+                        v.is_finite() && !operation_tabs::operation_field_invalid(&draft, field, *v)
+                    })
+                    .map(|v| (field, v))
+                    .ok_or("Correct invalid operation fields")
             })
-            .and_then(|index| tools.iter().find(|choice| choice.index == index).copied());
-        let tool_picker = pick_list(tools.clone(), selected, |c| {
-            Message::SetPendingLibraryTool(c.index)
-        })
-        .placeholder(if family.is_some() {
-            "Choose a tool"
-        } else {
-            "Choose a family first"
-        })
-        .text_size(12)
-        .padding([7, 9])
-        .style(inspector_picker)
-        .width(Length::Fill);
-
-        let verb = if pending
-            .as_ref()
-            .is_some_and(|pending| pending.replacing.is_some())
-        {
-            "Reinitialize"
-        } else {
-            "New"
-        };
-        let mut col = column![
-            inspector_heading(format!("{verb} {kind} operation")),
-            text("Tool family").size(12),
-            family_picker,
-            text("Tool").size(12),
-            tool_picker,
-        ]
-        .spacing(10)
-        .padding(14);
-
-        // A family with nothing in it is a dead end now that the wizard has no
-        // "New tool" shortcut — say where to go rather than leaving an empty list.
-        if let Some(f) = family {
-            if tools.is_empty() {
-                col = col.push(
-                    text(format!(
-                        "No {f} in the library — add one in the Tools tab."
-                    ))
-                    .size(12)
-                    .color(palette::WARN),
-                );
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        apply_op_fields(&mut draft, &fields);
+        if let Some(kind) = self.cad_pending_kind {
+            let mut document = self.controller.document().clone();
+            document
+                .setup_mut()
+                .tools
+                .extend(self.operation_tools.iter().copied());
+            let (geometry, binding) = crate::cad_operations::create_operation(
+                &document,
+                kind,
+                self.controller.cad_selection().to_vec(),
+                0,
+                draft.tool(),
+                self.controller.active_origin(),
+                *self.controller.defaults(),
+            )?;
+            match (&mut draft, geometry) {
+                (Operation::Profile(op), Operation::Profile(new)) => {
+                    op.chain = new.chain;
+                    op.side = new.side;
+                    op.comp = new.comp;
+                }
+                (Operation::Pocket(op), Operation::Pocket(new)) => {
+                    op.boundary = new.boundary;
+                    op.islands = new.islands;
+                }
+                (Operation::Face(op), Operation::Face(new)) => op.boundary = new.boundary,
+                (Operation::Drill(op), Operation::Drill(new)) => op.points = new.points,
+                _ => return Err("Unsupported CAD operation".into()),
             }
-        }
-
-        // Cutting data for the new operation, seeded from the tool's nominals and
-        // editable here (or later in the operation's inspector). Shown once a tool is
-        // chosen — before then there is nothing to seed from.
-        if tool.is_some() {
-            col = col.push(inspector_section("Cutting data"));
-            for f in [Field::SpindleRpm, Field::Feed, Field::PlungeFeed] {
-                let value = self.fields.get(&f).cloned().unwrap_or_default();
-                col = col.push(field_row_labeled(
-                    f,
-                    self.field_label(f),
-                    self.field_help(f),
-                    &value,
-                    self.tooltips,
-                    self.field_invalid(f),
-                ));
+            Ok((draft, Some(binding)))
+        } else {
+            let pending = self
+                .controller
+                .pending_op()
+                .ok_or("Operation unavailable")?;
+            if !self.controller.pending_ready() {
+                return Err("Select compatible geometry and a cutter".into());
             }
+            let mut operation = self.controller.operation_with_drawing_geometry(
+                &draft,
+                &self.controller.pending_operation_geometry(),
+            )?;
+            if self.creation_edited_fields.contains(&Field::MajorDia) {
+                if let (Operation::Thread(op), Operation::Thread(edited)) = (&mut operation, &draft)
+                {
+                    op.major_dia = edited.major_dia;
+                }
+            }
+            if operation_tabs::operation_start(&operation).is_none() {
+                if let Some(start) = pending.start {
+                    operation_tabs::set_operation_start(&mut operation, true);
+                    operation_tabs::set_operation_start_coordinate(&mut operation, 0, start[0]);
+                    operation_tabs::set_operation_start_coordinate(&mut operation, 1, start[1]);
+                }
+            }
+            Ok((operation, None))
         }
+    }
 
-        // Object snaps govern where the start/lead-in lands; show them for the
-        // kinds that carry a start, while still awaiting that (boundary) pick.
-        if !cad && op_uses_snaps(operation_kind) && !geometry_selected {
-            col = col.push(self.snap_toolbar());
-        }
+    pub(super) fn creation_ready(&self) -> bool {
+        self.creation_operation()
+            .and_then(|(op, binding)| {
+                let mut document = self.controller.document().clone();
+                document
+                    .setup_mut()
+                    .tools
+                    .extend(self.operation_tools.iter().copied());
+                if let Some(binding) = binding {
+                    document.geometry.bindings.insert(0, binding);
+                }
+                self.edited_height_settings()?
+                    .resolve(&document, &op)
+                    .map(|_| ())
+            })
+            .is_ok()
+    }
 
-        let geometry_ready = if cad {
-            col = col.push(inspector_section("Geometry"));
+    pub(super) fn creation_geometry_controls(&self) -> Element<'_, Message> {
+        let kind = self
+            .cad_pending_kind
+            .or_else(|| self.controller.pending_op().map(|p| p.kind))
+            .unwrap();
+        let mut col = column![].spacing(10);
+        if self.cad_pending_kind.is_some() {
             col =
                 col.push(self.geometry_list(cad_geometry_labels(self.controller.cad_selection())));
-            let prompt = match operation_kind {
+            col = col.push(text(match kind {
                 OpKind::Face => "Select a planar top face, or Ctrl-click for the whole-body XY outline.",
                 OpKind::Pocket => "Select a planar pocket floor in the viewport.",
-                OpKind::Profile => {
-                    "Select a closed boundary or Ctrl-click for its XY silhouette. For a blind bore, select its floor loop."
-                }
-                OpKind::Drill => {
-                    "Select cylindrical hole faces. Select adds holes; Remove deletes a list item."
-                }
-                _ => "Select geometry in the viewport. Remove list items to replace them.",
-            };
-            col = col.push(text(prompt).size(11).color(INSPECTOR_MUTED));
+                OpKind::Profile => "Select a closed boundary or Ctrl-click for its XY silhouette. For a blind bore, select its floor loop.",
+                OpKind::Drill => "Select cylindrical hole faces. Select adds holes; Remove deletes a list item.",
+                _ => "Select geometry in the viewport.",
+            }).size(11).color(INSPECTOR_MUTED));
             if let Some(note) = cad_silhouette_note(
                 self.controller.geometry_state(),
                 self.controller.cad_selection(),
             ) {
                 col = col.push(text(note).size(11).color(INSPECTOR_MUTED));
             }
-            if self.cad_candidates.len() > 1 {
+            for candidate in &self.cad_candidates {
                 col = col.push(
-                    text("Overlapping candidates")
-                        .size(11)
-                        .color(INSPECTOR_MUTED),
+                    inspector_button(format!(
+                        "{:?} {}",
+                        candidate.entity.kind, candidate.entity.id
+                    ))
+                    .on_press(Message::CadSelect(candidate.entity.clone())),
                 );
-                for candidate in &self.cad_candidates {
-                    col = col.push(
-                        inspector_button(format!(
-                            "{:?} {}",
-                            candidate.entity.kind, candidate.entity.id
-                        ))
-                        .on_press(Message::CadSelect(candidate.entity.clone())),
-                    );
-                }
             }
-            match self
+            if let Err(reason) = self
                 .controller
-                .preview_cad_operation(operation_kind, self.controller.cad_selection())
+                .preview_cad_operation(kind, self.controller.cad_selection())
             {
-                Ok(input) => {
-                    col = col.push(
-                        text(format!(
-                            "{} feature(s) · top Z {:.3} / bottom Z {:.3} mm",
-                            self.controller.cad_selection().len(),
-                            input.heights.top,
-                            input.heights.bottom
-                        ))
-                        .size(12),
-                    );
-                    true
-                }
-                Err(reason) => {
-                    if geometry_selected {
-                        col = col.push(text(reason).size(12).color(palette::WARN));
-                    }
-                    false
+                if !self.controller.cad_selection().is_empty() {
+                    col = col.push(text(reason).size(12).color(palette::WARN));
                 }
             }
         } else {
-            col = col.push(inspector_section("Geometry"));
+            if op_uses_snaps(kind) {
+                col = col.push(self.snap_toolbar());
+            }
             col = col.push(self.geometry_list(drawing_geometry_labels(
                 &self.controller.pending_operation_geometry(),
             )));
-            self.controller.pending_ready()
-        };
-        // Progress, then the one commit point. Tool and geometry may be chosen in
-        // either order; Confirm stays disabled until both are settled.
-        col = col.push(
-            text(match (tool.is_some(), geometry_selected) {
-                (false, false) => {
-                    "Choose a tool and click the geometry in the viewport.".to_string()
-                }
-                (true, false) => "Now click the geometry in the viewport.".to_string(),
-                (false, true) => "Geometry selected — now choose a tool.".to_string(),
-                (true, true) if cad && !geometry_ready => {
-                    "Review the selected geometry before confirming.".to_string()
-                }
-                (true, true) if !cad && op_takes_islands(operation_kind) => format!(
-                    "Click enclosed areas to exclude ({} selected), then Confirm.",
-                    pending.as_ref().map_or(0, |pending| pending.islands.len())
-                ),
-                (true, true) => "Ready — Confirm to create the operation.".to_string(),
-            })
-            .size(12),
-        );
-        let footer = inspector_footer(
-            row![
-                inspector_button("Cancel").on_press(Message::CancelOp),
-                Space::new().width(Length::Fill),
-                inspector_button("Confirm")
-                    .style(inspector_primary)
-                    .on_press_maybe(
-                        (geometry_ready && self.wizard_cutting().is_some())
-                            .then_some(Message::ConfirmOp)
-                    ),
-            ]
-            .spacing(8),
-        );
-        column![
-            scrollable(col).width(Length::Fill).height(Length::Fill),
-            footer
-        ]
-        .height(Length::Fill)
-        .into()
+            col = col.push(
+                text("Select geometry in the viewport. Ctrl/Command adds compatible features.")
+                    .size(11)
+                    .color(INSPECTOR_MUTED),
+            );
+        }
+        col.into()
     }
 }

@@ -9,15 +9,11 @@ impl App {
         if self.drawing_editing_op.is_some() {
             return self.drawing_geometry_picker();
         }
-        if let Some(kind) = self.cad_pending_kind {
-            return self.op_wizard(kind, None);
+        if self.creating_operation() {
+            return self.operation_inspector(0);
         }
         if self.cad_inspecting || self.cad_editing_op.is_some() {
             return self.cad_inspector();
-        }
-        // While a new-operation wizard is active, the inspector is the wizard.
-        if let Some(pending) = self.controller.pending_op() {
-            return self.op_wizard(pending.kind, Some(pending));
         }
         if self.controller.selection() == Selection::Setup {
             return self.setup_editor();

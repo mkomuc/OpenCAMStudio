@@ -203,20 +203,31 @@ impl std::fmt::Display for Compensation {
 
 impl App {
     pub(super) fn operation_inspector(&self, id: u32) -> Element<'_, Message> {
-        let Some(op) = self.current_operation(id) else {
+        let creating = self.creating_operation();
+        let creation_preview = creating.then(|| self.creation_operation().ok()).flatten();
+        let Some(op) = creation_preview
+            .as_ref()
+            .map(|(op, _)| op)
+            .or_else(|| self.current_operation(id))
+        else {
             return text("Operation unavailable").into();
         };
         let tab = self.operation_tab;
         let linked = self
             .operation_binding_preview
             .as_ref()
-            .or_else(|| self.controller.geometry_state().bindings.get(&id));
-        let mut list = column![inspector_heading(format!(
-            "Operation {id} · {}",
-            op_kind(op)
-        ))]
-        .spacing(10)
-        .padding(14);
+            .or_else(|| self.controller.geometry_state().bindings.get(&id))
+            .or_else(|| {
+                creation_preview
+                    .as_ref()
+                    .and_then(|(_, binding)| binding.as_ref())
+            });
+        let heading = if creating {
+            format!("New {} operation", op_kind(op))
+        } else {
+            format!("Operation {id} · {}", op_kind(op))
+        };
+        let mut list = column![inspector_heading(heading)].spacing(10).padding(14);
         // Two rows keep every tab reachable in a narrow inspector. Navigation
         // never reloads the shared numeric buffers or operation draft.
         let tab_button = |value: OperationTab| {
@@ -313,7 +324,10 @@ impl App {
                     .color(palette::GROUP_LABEL),
             );
         }
-        if tab == OperationTab::Geometry {
+        if tab == OperationTab::Geometry && creating {
+            list = list.push(self.creation_geometry_controls());
+        }
+        if tab == OperationTab::Geometry && !creating {
             let geometry = match op {
                 Operation::Profile(_) | Operation::Chamfer(_) => "One closed chain".into(),
                 Operation::Engrave(o) => {
@@ -404,7 +418,14 @@ impl App {
             {
                 continue;
             }
-            let value = self.fields.get(&field).cloned().unwrap_or_default();
+            let value = if creating
+                && field == Field::MajorDia
+                && !self.creation_edited_fields.contains(&field)
+            {
+                op_field(op, field).map(fmt_num).unwrap_or_default()
+            } else {
+                self.fields.get(&field).cloned().unwrap_or_default()
+            };
             list = list.push(field_row_labeled(
                 field,
                 self.field_label(field),
@@ -790,16 +811,26 @@ impl App {
         let footer = inspector_footer(
             column![
                 row![
-                    inspector_button("Cancel").on_press(Message::CancelOperationDraft),
+                    inspector_button("Cancel").on_press(if creating {
+                        Message::CancelOp
+                    } else {
+                        Message::CancelOperationDraft
+                    }),
                     Space::new().width(Length::Fill),
-                    inspector_button("Apply changes")
-                        .style(inspector_primary)
-                        .on_press_maybe(
-                            (!self.any_field_invalid()
-                                && self.operation_height_overrides_valid()
-                                && self.inspector_dirty())
-                            .then_some(Message::Apply)
-                        ),
+                    inspector_button(if creating {
+                        "Create operation"
+                    } else {
+                        "Apply changes"
+                    })
+                    .style(inspector_primary)
+                    .on_press_maybe(if creating {
+                        self.creation_ready().then_some(Message::ConfirmOp)
+                    } else {
+                        (!self.any_field_invalid()
+                            && self.operation_height_overrides_valid()
+                            && self.inspector_dirty())
+                        .then_some(Message::Apply)
+                    }),
                 ]
                 .spacing(8),
                 text("All tabs and linked heights commit together.")
@@ -1542,16 +1573,26 @@ mod tests {
         let before = app.controller.document().clone();
         let _ = app.update(Message::BeginOp(OpKind::Face));
         assert!(app.creating_operation());
+        assert_eq!(app.operation_tab, OperationTab::Tool);
         assert_eq!(
             app.inspector_fields(),
-            vec![Field::SpindleRpm, Field::Feed, Field::PlungeFeed]
+            operation_fields(app.operation_draft.as_ref().unwrap())
         );
+        assert!(app.inspector_fields().contains(&Field::Stepdown));
         assert!(
             !app.cad_inspecting,
             "STEP uses the common creation inspector"
         );
         let _ = app.update(Message::FieldChanged(Field::Feed, "432.1".into()));
         let _ = app.update(Message::FieldChanged(Field::SpindleRpm, "9000".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Passes));
+        let _ = app.update(Message::FaceDirectionChanged(Axis::Y));
+        let _ = app.update(Message::FieldChanged(Field::Stepdown, "0.75".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Heights));
+        let _ = app.update(Message::HeightOffsetChanged(
+            cam_model::HeightPlaneKind::Clearance,
+            "12.50".into(),
+        ));
         let _ = app.update(Message::CadSelect(reference));
         assert_eq!(
             app.controller.cad_selection().len(),
@@ -1571,6 +1612,15 @@ mod tests {
         assert_ne!(id, old_id);
         assert!(
             matches!(app.controller.operation(id), Some(Operation::Face(op)) if op.feed == 432.1 && op.spindle_rpm == 9000.)
+        );
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(op)) if op.direction == Axis::Y && op.stepdown == 0.75)
+        );
+        assert_eq!(
+            app.controller.document().setup().height_settings[&id]
+                .definition(cam_model::HeightPlaneKind::Clearance)
+                .offset,
+            12.5
         );
         assert!(app.cad_pending_kind.is_none());
         assert!(!app.cad_inspecting);
@@ -1678,5 +1728,152 @@ mod tests {
         assert!(app.cad_pending_kind.is_none());
         assert_eq!(app.controller.document(), &before);
         assert!(!app.inspector_dirty());
+    }
+    #[test]
+    fn new_operations_share_all_tabs_and_commit_parameters_heights_and_geometry_together() {
+        use cam_model::HeightPlaneKind as P;
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
+        app.operation_tab = OperationTab::Heights;
+        app.setup_draft = None;
+        app.controller.select(Selection::Setup);
+        app.refresh_fields();
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::BeginOp(OpKind::Profile));
+        assert_eq!(app.operation_tab, OperationTab::Tool);
+        let _ = app.inspector();
+        let _ = app.update(Message::FieldChanged(Field::Feed, "432.1".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Passes));
+        let _ = app.update(Message::FieldChanged(Field::Stepdown, "0.75".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::LeadInKindChanged(LeadKind::Linear));
+        let _ = app.update(Message::FieldChanged(Field::LeadInSize, "2.5".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Heights));
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "12.50".into()));
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        assert!(app.creation_ready(), "{}", app.status);
+        let camera = OrbitCamera::framed([0., 0., -10.], [100., 80., 25.]);
+        let preview = app.height_preview(camera, 0.).unwrap();
+        assert_eq!(preview.planes[0].value_label, "17.50");
+        for tab in OperationTab::ALL {
+            let _ = app.update(Message::OperationTabChanged(tab));
+            let _ = app.inspector();
+        }
+        assert_eq!(app.fields[&Field::Feed], "432.1");
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("created operation selected");
+        };
+        let Operation::Profile(op) = app.controller.operation(id).unwrap() else {
+            panic!("profile");
+        };
+        assert_eq!(op.feed, 432.1);
+        assert_eq!(op.stepdown, 0.75);
+        assert!(matches!(op.lead_in, Lead::Linear { length } if length == 2.5));
+        assert_eq!(
+            app.controller.document().setup().height_settings[&id]
+                .definition(P::Clearance)
+                .offset,
+            12.5
+        );
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn creation_rejects_invalid_heights_and_cancel_discards_every_tab() {
+        use cam_model::HeightPlaneKind as P;
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
+        app.setup_draft = None;
+        app.controller.select(Selection::Setup);
+        app.refresh_fields();
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::BeginOp(OpKind::Face));
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        let _ = app.update(Message::FaceDirectionChanged(Axis::Y));
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "NaN".into()));
+        assert!(!app.creation_ready());
+        let _ = app.update(Message::Apply);
+        assert!(app.creating_operation());
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::CancelOp);
+        assert!(!app.creating_operation());
+        assert_eq!(app.controller.document(), &before);
+    }
+    #[test]
+    fn every_new_operation_uses_the_tabbed_editor_and_real_selected_geometry() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
+        app.setup_draft = None;
+        app.controller.select(Selection::Setup);
+        app.refresh_fields();
+        let candidates: Vec<_> = app
+            .controller
+            .regions()
+            .iter()
+            .enumerate()
+            .flat_map(|(i, region)| {
+                std::iter::once(LoopRef::outer(i))
+                    .chain((0..region.holes().len()).map(move |j| LoopRef::hole(i, j)))
+            })
+            .collect();
+        for kind in [
+            OpKind::Profile,
+            OpKind::Pocket,
+            OpKind::Face,
+            OpKind::Drill,
+            OpKind::Thread,
+            OpKind::Chamfer,
+            OpKind::Engrave,
+            OpKind::Carve,
+        ] {
+            let before = app.controller.document().clone();
+            let _ = app.update(Message::BeginOp(kind));
+            assert!(app.creating_operation(), "{kind:?}: {}", app.status);
+            assert_eq!(app.operation_tab, OperationTab::Tool);
+            for tab in OperationTab::ALL {
+                let _ = app.update(Message::OperationTabChanged(tab));
+                let _ = app.inspector();
+            }
+            let geometry = candidates
+                .iter()
+                .find(|r| {
+                    app.controller
+                        .planar_operation_eligibility(kind, &[**r])
+                        .is_ok()
+                })
+                .unwrap();
+            app.controller
+                .set_pending_operation_geometry(&[*geometry], None)
+                .unwrap();
+            if kind == OpKind::Thread {
+                let _ = app.update(Message::FieldChanged(Field::MajorDia, "7.5".into()));
+                assert!(
+                    matches!(app.creation_operation().unwrap().0, Operation::Thread(op) if op.major_dia == 7.5)
+                );
+            }
+            assert!(
+                app.creation_ready(),
+                "{kind:?}: {:?}",
+                app.creation_operation()
+            );
+            let _ = app.update(Message::ConfirmOp);
+            assert!(!app.creating_operation(), "{kind:?}: {}", app.status);
+            assert!(app.controller.undo());
+            assert_eq!(app.controller.document(), &before);
+            app.controller.select(Selection::Setup);
+            app.operation_draft = None;
+            app.refresh_fields();
+        }
     }
 }

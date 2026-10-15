@@ -1,9 +1,20 @@
 //! Background job presentation and output view.
 use super::*;
 use iced::widget::column;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ToolpathAction {
+    Recompute,
+    Simulate,
+    Export,
+}
+
 impl App {
     /// Submit a snapshot; the event loop never runs machining services inline.
     pub(super) fn rerun(&mut self) {
+        self.pending_toolpath_export = None;
+        self.pending_simulation = None;
+        self.simulation = None;
         if self.controller.document().setup().operations.is_empty() {
             self.controller.cancel_run();
             self.status = "No operations to run.".into();
@@ -11,6 +22,86 @@ impl App {
         }
         self.controller.start_run();
         self.status = "Generating toolpaths…".into();
+    }
+
+    pub(super) fn toolpath_command(
+        &mut self,
+        node: TreeNode,
+        action: ToolpathAction,
+    ) -> iced::Task<Message> {
+        if self.setup_draft_dirty()
+            || self.inspector_dirty()
+            || self.any_field_invalid()
+            || !self.operation_height_overrides_valid()
+            || self.controller.pending_op().is_some()
+            || self.cad_pending_kind.is_some()
+            || self.cad_editing_op.is_some()
+            || self.drawing_editing_op.is_some()
+        {
+            self.status = "Apply or cancel inspector changes and geometry selection before processing toolpaths.".into();
+            return iced::Task::none();
+        }
+        let (setup, operation) = match node {
+            TreeNode::Setup(id) => (id, None),
+            TreeNode::Operation(id) => {
+                let Some(setup) = self
+                    .controller
+                    .setups()
+                    .iter()
+                    .find(|setup| setup.operations.iter().any(|op| op.id() == id))
+                else {
+                    self.status = "Operation no longer exists.".into();
+                    return iced::Task::none();
+                };
+                (setup.id, Some(id))
+            }
+            _ => return iced::Task::none(),
+        };
+        if let Err(error) = self.controller.activate_setup(setup) {
+            self.status = error;
+            return iced::Task::none();
+        }
+        self.pending_toolpath_export = None;
+        self.pending_simulation = None;
+        self.simulation = None;
+        self.tree_menu = None;
+        self.open_op_menu = None;
+        self.expanded_setups.insert(setup);
+        self.model_view = None;
+        self.focus_ops.clear();
+        self.focus_ops.extend(operation);
+        self.end_setup_draft();
+        self.operation_draft = None;
+        self.controller
+            .select(operation.map_or(Selection::Setup, Selection::Operation));
+        if let Some(id) = operation {
+            self.begin_operation_draft(id);
+        }
+        self.refresh_fields();
+        self.switch_workspace(Workspace::Machining);
+        match self
+            .controller
+            .start_toolpath_run(operation, action == ToolpathAction::Recompute)
+        {
+            Ok(stamp) => {
+                if action == ToolpathAction::Export {
+                    self.pending_toolpath_export = Some(stamp.clone());
+                }
+                if action == ToolpathAction::Simulate {
+                    self.pending_simulation = Some(stamp);
+                    self.show_stock = true;
+                    self.set_pane_visible(Pane::Output, true);
+                }
+                self.status = match action {
+                    ToolpathAction::Recompute => "Recomputing toolpaths…",
+                    ToolpathAction::Simulate => "Simulating toolpaths…",
+                    ToolpathAction::Export => "Preparing toolpaths for post processing…",
+                }
+                .into();
+            }
+            Err(error) => self.status = error,
+        }
+        iced::Task::none()
     }
     pub(super) fn report_run(&mut self) {
         let Some(outcome) = self.controller.outcome() else {

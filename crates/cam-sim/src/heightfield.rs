@@ -138,7 +138,13 @@ impl Heightfield {
                 let (cx, cy) = self.center(ix, iy);
                 let (t, dist2) = project(cx, cy, [a[0], a[1]], [b[0], b[1]]);
                 if dist2 <= r2 {
-                    let axis_z = a[2] + (b[2] - a[2]) * t;
+                    // A vertical plunge sweeps the entire column down to its
+                    // lowest endpoint; XY projection alone always returns t=0.
+                    let axis_z = if (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-12 {
+                        a[2].min(b[2])
+                    } else {
+                        a[2] + (b[2] - a[2]) * t
+                    };
                     let bottom = (axis_z + tool.offset(dist2.sqrt())) as f32;
                     let cell = &mut self.z[iy * self.nx + ix];
                     *cell = cell.min(bottom);
@@ -581,6 +587,15 @@ fn project(px: f64, py: f64, a: [f64; 2], b: [f64; 2]) -> (f64, f64) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn vertical_plunges_remove_material_to_the_lowest_endpoint() {
+        let mut field = Heightfield::new([0., 0.], [10., 10.], 0.25, 0.);
+        field.cut_segment([5., 5., 2.], [5., 5., -3.], 1.);
+        assert_eq!(field.sample(5., 5.), -3.);
+        field.cut_segment([5., 5., -3.], [5., 5., 2.], 1.);
+        assert_eq!(field.sample(5., 5.), -3.);
+        assert_eq!(field.sample(1., 1.), 0.);
+    }
     #[test]
     fn a_straight_cut_lowers_a_band_to_depth() {
         let mut hf = Heightfield::new([0.0, 0.0], [20.0, 20.0], 0.5, 0.0);

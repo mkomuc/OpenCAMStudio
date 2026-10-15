@@ -214,6 +214,7 @@ impl App {
         }
         column![
             layers.width(Length::Fill).height(Length::Fill),
+            self.simulation_controls(),
             self.viewport_pick_toolbar()
         ]
         .width(Length::Fill)
@@ -238,6 +239,10 @@ impl App {
             .collect();
         let mut viewport = Viewport::new(
             &self.controller,
+            self.simulation
+                .as_ref()
+                .filter(|_| !model_view)
+                .map(|player| &player.preview),
             if self.setup_model_pick {
                 EntityKind::Body
             } else {
@@ -794,7 +799,8 @@ mod tests {
             )
             .unwrap();
         let model = app.controller.geometry_state().instances[0].id;
-        app.controller.edit_setup(|setup| setup.model_instances = vec![model]);
+        app.controller
+            .edit_setup(|setup| setup.model_instances = vec![model]);
         app.begin_setup_draft();
         app.setup_draft.as_mut().unwrap().stock = cam_model::Stock::RelativeBox {
             offsets: [[5.; 3], [5.; 3]],
@@ -887,6 +893,7 @@ mod tests {
         let controller = AppController::new(crate::default_machine());
         let mut viewport = Viewport::new(
             &controller,
+            None,
             EntityKind::Face,
             None,
             &BTreeSet::new(),
@@ -991,6 +998,7 @@ mod tests {
         let controller = AppController::new(crate::default_machine());
         let viewport = Viewport::new(
             &controller,
+            None,
             EntityKind::Face,
             None,
             &BTreeSet::new(),
@@ -1056,10 +1064,16 @@ mod tests {
                     .join("../cam-kernel/fixtures/box-mm.step"),
             )
             .unwrap();
-        let models = controller.geometry_state().instances.iter().map(|instance| instance.id).collect();
+        let models = controller
+            .geometry_state()
+            .instances
+            .iter()
+            .map(|instance| instance.id)
+            .collect();
         controller.edit_setup(|setup| setup.model_instances = models);
         let mut viewport = Viewport::new(
             &controller,
+            None,
             EntityKind::Loop,
             None,
             &BTreeSet::new(),

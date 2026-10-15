@@ -9,7 +9,7 @@ impl AppController {
         self.document_epoch
     }
 
-    pub(super) fn job_inputs(&self) -> JobInputs {
+    pub(crate) fn job_inputs(&self) -> JobInputs {
         let mut document = self.document().clone();
         let excluded = document.excluded_operations.clone();
         let disabled = document
@@ -39,11 +39,48 @@ impl AppController {
             spindle_rpm: self.defaults.spindle_rpm,
             tool_diameter: self.defaults.tool_diameter,
             frame_error: self.validate_setup_frame(self.setup()).err(),
+            preview_program: None,
         }
     }
     /// Generation, verification and mesh preparation run in the bounded worker lane.
     pub fn start_run(&mut self) -> JobStamp {
         let inputs = self.job_inputs();
+        self.submit_run(inputs)
+    }
+
+    /// Run the active setup or one of its included operations. Filtering the
+    /// immutable snapshot preserves document order, suppression and undo history.
+    pub fn start_toolpath_run(
+        &mut self,
+        operation: Option<u32>,
+        recompute: bool,
+    ) -> Result<JobStamp, String> {
+        let mut inputs = self.job_inputs();
+        if let Some(id) = operation {
+            let document = Arc::make_mut(&mut inputs.document);
+            document.setup_mut().operations.retain(|op| op.id() == id);
+            document.geometry.bindings.retain(|op, _| *op == id);
+        }
+        let ids: Vec<_> = inputs
+            .document
+            .setup()
+            .operations
+            .iter()
+            .map(Operation::id)
+            .collect();
+        if ids.is_empty() {
+            return Err(
+                "No included toolpaths to process. The operation or its origin may be suppressed."
+                    .into(),
+            );
+        }
+        if recompute {
+            self.operation_cache.invalidate_operations(&ids);
+        }
+        Ok(self.submit_run(inputs))
+    }
+
+    fn submit_run(&mut self, inputs: JobInputs) -> JobStamp {
         // Source blobs are represented by immutable asset revisions/content hashes,
         // not serialized again on every submit. Revisions + exact stamp equality
         // provide the publication guard; this hash is provenance, not cryptography.
@@ -168,6 +205,58 @@ mod tests {
             }
         }));
         (receiver, release)
+    }
+    #[test]
+    fn context_jobs_scope_generation_export_and_forced_recompute() {
+        let mut app = app();
+        let original = app.document().clone();
+        app.start_toolpath_run(Some(1), false).unwrap();
+        drain(&mut app);
+        let outcome = app.outcome().unwrap();
+        assert_eq!(outcome.completion, JobCompletion::Complete);
+        assert!(outcome
+            .scene
+            .strips
+            .iter()
+            .filter_map(|s| s.op)
+            .all(|id| id == 1));
+        assert!(app.export_nc().is_ok());
+        assert_eq!(app.document(), &original);
+        app.start_toolpath_run(None, false).unwrap();
+        drain(&mut app);
+        assert_eq!(
+            app.cache_stats(),
+            cam_toolpath::CacheStats {
+                reused: 1,
+                computed: 1
+            }
+        );
+        app.start_toolpath_run(Some(1), true).unwrap();
+        drain(&mut app);
+        assert_eq!(
+            app.cache_stats(),
+            cam_toolpath::CacheStats {
+                reused: 0,
+                computed: 1
+            }
+        );
+        app.start_toolpath_run(None, false).unwrap();
+        drain(&mut app);
+        assert_eq!(app.cache_stats().reused, 2);
+        app.set_operation_excluded(1, true);
+        assert!(app.start_toolpath_run(Some(1), false).is_err());
+        app.start_toolpath_run(None, true).unwrap();
+        drain(&mut app);
+        assert!(app
+            .outcome()
+            .unwrap()
+            .scene
+            .strips
+            .iter()
+            .filter_map(|s| s.op)
+            .all(|id| id == 0));
+        app.set_origin_disabled(1, true);
+        assert!(app.start_toolpath_run(None, false).is_err());
     }
     #[test]
     fn long_worker_leaves_controller_responsive_and_edit_cancels_it() {

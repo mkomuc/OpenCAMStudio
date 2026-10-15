@@ -30,6 +30,13 @@ pub struct OperationCache {
     pub stats: CacheStats,
 }
 impl OperationCache {
+    /// Discard every retained version of the selected operations for an explicit
+    /// recompute, while keeping unrelated operations available for reuse.
+    pub fn invalidate_operations(&mut self, ids: &[u32]) {
+        self.entries
+            .retain(|entry| !ids.contains(&entry.key.operation.id()));
+    }
+
     pub fn reset_stats(&mut self) {
         self.stats = CacheStats::default();
     }

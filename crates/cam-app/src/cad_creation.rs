@@ -68,4 +68,71 @@ impl AppController {
         self.invalidate();
         Ok(id)
     }
+    /// Publish the shared operation editor in a single undoable transaction.
+    pub fn commit_operation_creation(
+        &mut self,
+        mut operation: Operation,
+        binding: Option<cam_model::GeometryBinding>,
+        settings: cam_model::OperationHeightSettings,
+        tools: Vec<Tool>,
+    ) -> Result<u32, String> {
+        let replacing = self.pending_op.as_ref().and_then(|p| p.replacing);
+        let id = replacing.unwrap_or_else(|| self.next_op_id());
+        operation.set_id(id);
+        operation.set_work_offset(self.active_origin);
+        let mut document = self.document().clone();
+        for tool in tools {
+            if !document
+                .setup()
+                .tools
+                .iter()
+                .any(|t| t.number == tool.number)
+            {
+                document.setup_mut().tools.push(tool);
+            }
+        }
+        if let Some(binding) = binding {
+            document.geometry.bindings.insert(id, binding);
+            document.cad_linked_operations.insert(id);
+        } else {
+            document.geometry.bindings.remove(&id);
+            document.cad_linked_operations.remove(&id);
+        }
+        if let Some(slot) = document
+            .setup_mut()
+            .operations
+            .iter_mut()
+            .find(|o| o.id() == id)
+        {
+            *slot = operation;
+        } else {
+            document.setup_mut().operations.push(operation);
+        }
+        document.setup_mut().height_settings.insert(id, settings);
+        if document.geometry.bindings.contains_key(&id) {
+            crate::cad_operations::validate_binding_edit(&mut document, id)?;
+        }
+        let operation = document
+            .setup()
+            .operations
+            .iter()
+            .find(|o| o.id() == id)
+            .unwrap();
+        document.setup().height_settings[&id].resolve(&document, operation)?;
+        let used: BTreeSet<_> = document
+            .setup()
+            .operations
+            .iter()
+            .flat_map(Operation::tools)
+            .collect();
+        document
+            .setup_mut()
+            .tools
+            .retain(|tool| used.contains(&tool.number));
+        self.edit_document(move |saved| *saved = document);
+        self.pending_op = None;
+        self.select(Selection::Operation(id));
+        self.invalidate();
+        Ok(id)
+    }
 }

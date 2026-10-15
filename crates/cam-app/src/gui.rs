@@ -44,6 +44,10 @@ mod height_planes;
 mod inspector_view;
 #[path = "gui_jobs.rs"]
 mod jobs_view;
+use jobs_view::ToolpathAction;
+#[path = "gui_simulation.rs"]
+mod simulation_view;
+use simulation_view::SimulationPlayer;
 #[path = "gui_operation_metadata.rs"]
 mod operation_metadata;
 #[path = "gui_operation_tabs.rs"]
@@ -320,7 +324,7 @@ use cam_toolpath::{JobCompletion, Severity};
 
 use crate::{
     op_accepts_open_paths, op_selects_circles, op_takes_islands, AppController, CuttingData,
-    LoopRef, OpKind, PendingOp, PickResult, Selection, SnapHit, SnapKind,
+    LoopRef, OpKind, PickResult, Selection, SnapHit, SnapKind,
 };
 
 /// A small sample part (rectangle + circular hole) so the app is useful without
@@ -1782,6 +1786,7 @@ struct App {
     setup_model_pick: bool,
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
+    creation_edited_fields: BTreeSet<Field>,
     operation_geometry: Option<Vec<EntityRef>>,
     geometry_row_selection: Option<usize>,
     geometry_additive: bool,
@@ -1883,11 +1888,13 @@ struct App {
     tool_edit: Option<cam_model::Tool>,
     /// Which internal tab the Tool Library pane shows (Serial / Family).
     library_view: LibraryView,
-    /// The tool family chosen in the operation wizard, narrowing its Tool list.
-    wizard_family: Option<ToolKindPick>,
     /// The operation whose right-click context menu is open, and where to anchor it
     /// (window-absolute coords, captured from `window_cursor` at right-click time).
     open_op_menu: Option<u32>,
+    /// Export only the exact context-menu job that requested a save dialog.
+    pending_toolpath_export: Option<crate::JobStamp>,
+    pending_simulation: Option<crate::JobStamp>,
+    simulation: Option<SimulationPlayer>,
     op_menu_pos: iced::Point,
     /// The project tool (by number) whose right-click "Add to library" menu is open,
     /// and where to anchor it. `None` unless a menu is open.
@@ -2352,9 +2359,9 @@ enum Message {
     ExportNc,
     /// Answer to the "export exact-duplicate operations anyway?" confirm dialog:
     /// `true` proceeds to the save prompt, `false` aborts the export.
-    ExportDupConfirmed(bool),
+    ExportDupConfirmed(String, bool),
     /// The chosen `.nc` path (`None` = cancelled).
-    NcToExport(Option<PathBuf>),
+    NcToExport(String, Option<PathBuf>),
     // --- Operation-creation wizard ---
     /// Begin creating an operation of `kind` (enter geometry-pick mode).
     BeginOp(OpKind),
@@ -2542,16 +2549,19 @@ enum Message {
     CloseRibbonPopup,
     /// Show (`true`) or hide (`false`) a pane.
     SetPaneVisible(Pane, bool),
-    /// Pick a library tool (by index) for the pending op — embeds it into the setup.
-    /// Choose the tool **family** in the operation wizard, narrowing the tool list.
-    /// Clears any tool already picked, since it belongs to the previous family.
-    SetPendingFamily(ToolKindPick),
+    /// Stage a library tool (by index) for the new operation.
     SetPendingLibraryTool(usize),
     /// Select a library tool for editing in the Tools-tab library editor.
     SelectLibraryTool(usize),
     /// Open the right-click context menu for operation `id` (anchored under the
     /// cursor), and select that operation.
     OpMenu(u32),
+    ToolpathCommand(TreeNode, ToolpathAction),
+    SimulationPlayPause,
+    SimulationSpeed(f64),
+    SimulationSeek(f64),
+    SimulationTick,
+    SimulationClose,
     /// Move the context-menu's operation to the workpiece origin with this index —
     /// i.e. into that origin's group in the project tree, and so under its work offset
     /// at post time. Until this existed the only way across was delete-and-recreate.
@@ -2800,6 +2810,9 @@ impl App {
     }
 
     fn current_operation(&self, id: u32) -> Option<&Operation> {
+        if self.creating_operation() {
+            return self.operation_draft.as_ref().filter(|op| op.id() == id);
+        }
         self.operation_draft
             .as_ref()
             .filter(|op| op.id() == id)
@@ -2965,6 +2978,7 @@ impl App {
             setup_model_pick: false,
             setup_values: BTreeMap::new(),
             operation_draft: None,
+            creation_edited_fields: BTreeSet::new(),
             operation_geometry: None,
             geometry_row_selection: None,
             geometry_additive: false,
@@ -3021,8 +3035,10 @@ impl App {
             lib_sel: 0,
             tool_edit: None,
             library_view: LibraryView::Ordered,
-            wizard_family: None,
             open_op_menu: None,
+            pending_toolpath_export: None,
+            pending_simulation: None,
+            simulation: None,
             op_menu_pos: iced::Point::ORIGIN,
             open_tool_menu: None,
             tool_menu_pos: iced::Point::ORIGIN,
@@ -3091,6 +3107,13 @@ impl App {
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         let task = self.update_message(message);
+        if self
+            .simulation
+            .as_ref()
+            .is_some_and(|player| !player.current(&self.controller))
+        {
+            self.simulation = None;
+        }
         self.sync_inspector_visibility();
         task
     }
@@ -3264,6 +3287,28 @@ impl App {
             self.geometry_row_selection = None;
         }
         match message {
+            Message::SimulationPlayPause => {
+                if let Some(player) = &mut self.simulation {
+                    player.toggle();
+                }
+            }
+            Message::SimulationSpeed(speed) => {
+                if let Some(player) = &mut self.simulation {
+                    player.speed = speed.clamp(0.25, 10.);
+                }
+            }
+            Message::SimulationSeek(seconds) => {
+                if let Some(player) = &mut self.simulation {
+                    player.seek(seconds);
+                }
+            }
+            Message::SimulationTick => {
+                if let Some(player) = &mut self.simulation {
+                    player.tick();
+                }
+            }
+            Message::SimulationClose => self.simulation = None,
+            Message::ToolpathCommand(node, action) => return self.toolpath_command(node, action),
             Message::RunJob => {
                 if self.setup_draft_dirty()
                     || self.inspector_dirty()
@@ -3311,6 +3356,9 @@ impl App {
                 self.refresh_operation_fields();
             }
             Message::OperationToolPicked(index) => {
+                if self.creating_operation() {
+                    return self.update(Message::SetPendingLibraryTool(index));
+                }
                 if let (Some(tool), Selection::Operation(id)) = (
                     self.library.tools.get(index).copied(),
                     self.controller.selection(),
@@ -3883,6 +3931,9 @@ impl App {
                 }
             }
             Message::FieldChanged(field, value) => {
+                if self.creating_operation() {
+                    self.creation_edited_fields.insert(field);
+                }
                 self.fields.insert(field, value);
                 // In the Tools editor, every field edit flows into the working copy so
                 // the viewport previews it instantly (no Apply needed); the length trio
@@ -4093,12 +4144,37 @@ impl App {
             Message::PollRun => {
                 if self.controller.poll_run() {
                     self.report_run();
+                    if self.pending_simulation.take().is_some_and(|stamp| {
+                        self.controller.outcome().is_some_and(|outcome| {
+                            outcome.stamp.as_ref() == Some(&stamp)
+                                && outcome.completion == JobCompletion::Complete
+                        })
+                    }) {
+                        match SimulationPlayer::new(&self.controller) {
+                            Ok(player) => {
+                                self.simulation = Some(player);
+                                self.status = "Simulation ready. Press Play or drag the timeline.".into();
+                            }
+                            Err(error) => self.status = error,
+                        }
+                    }
+                    let export = self.pending_toolpath_export.take().is_some_and(|stamp| {
+                        self.controller.outcome().is_some_and(|outcome| {
+                            outcome.stamp.as_ref() == Some(&stamp)
+                                && outcome.completion == JobCompletion::Complete
+                        })
+                    });
+                    if export {
+                        return self.update(Message::ExportNc);
+                    }
                     if let Some(notice) = self.controller.outcome().and_then(notices::job_notice) {
                         return self.queue_notice(notice);
                     }
                 }
             }
             Message::CancelRun => {
+                self.pending_toolpath_export = None;
+                self.pending_simulation = None;
                 self.controller.cancel_run();
                 self.status = "Run cancelled. Run again before exporting.".into();
             }
@@ -4210,6 +4286,9 @@ impl App {
                 if self.height_reference_pick.take().is_some() {
                     return iced::Task::none();
                 }
+                if self.creating_operation() {
+                    return self.update(Message::CancelOp);
+                }
                 self.cancel_tree_drag();
                 self.drawing_editing_op = None;
                 self.planar_selection.clear();
@@ -4222,6 +4301,9 @@ impl App {
                 self.controller.cancel_operation();
             }
             Message::ConfirmCadOperation => {
+                if self.creating_operation() {
+                    return self.update(Message::ConfirmOp);
+                }
                 if let Some(id) = self.cad_editing_op {
                     let selected = self.controller.cad_selection().to_vec();
                     match self.preview_geometry_draft(id, selected.clone()) {
@@ -4237,38 +4319,6 @@ impl App {
                         Err(error) => self.status = format!("Geometry selection rejected: {error}"),
                     }
                     return iced::Task::none();
-                }
-                if let Some(kind) = self.cad_pending_kind {
-                    let Some(chosen) = self.wizard_tool() else {
-                        self.status = "Choose a cutter.".into();
-                        return iced::Task::none();
-                    };
-                    let Some(cutting) = self.wizard_cutting() else {
-                        self.status = "Enter valid cutting data.".into();
-                        return iced::Task::none();
-                    };
-                    match self.controller.create_cad_operation_from_tool(
-                        kind,
-                        self.controller.cad_selection().to_vec(),
-                        chosen,
-                        cutting,
-                    ) {
-                        Ok(id) => {
-                            self.cad_pending_kind = None;
-                            self.cad_inspecting = false;
-                            self.controller.select(Selection::Operation(id));
-                            self.controller.set_cad_selection(vec![]);
-                            self.focus_ops.clear();
-                            self.focus_ops.insert(id);
-                            self.rebase_setup_draft();
-                            self.begin_operation_draft(id);
-                            self.rerun();
-                            self.status = format!("Created operation {id} linked to CAD geometry.");
-                        }
-                        Err(error) => {
-                            self.status = format!("Selection cannot create this operation: {error}")
-                        }
-                    }
                 }
             }
             Message::EditCadGeometry(id) => {
@@ -4302,44 +4352,68 @@ impl App {
                 // — they close the dialog believing the job exported and go looking for a
                 // file that was never written. Doing the work first means the only dialog
                 // they ever see is one that will produce a file.
-                if let Err(e) = self.controller.export_nc() {
-                    self.status = format!("Export blocked: {e}");
-                    return iced::Task::perform(report_export_blocked(format!("{e}")), |()| {
-                        Message::CloseRibbonPopup
-                    });
-                }
+                let nc = match self.controller.export_nc() {
+                    Ok(nc) => nc.to_owned(),
+                    Err(e) => {
+                        self.status = format!("Export blocked: {e}");
+                        return iced::Task::perform(report_export_blocked(format!("{e}")), |()| {
+                            Message::CloseRibbonPopup
+                        });
+                    }
+                };
                 // Guardrail: if any included operations are exact duplicates, they
                 // would post the same toolpath twice. Confirm before the machine
                 // sees it — but don't block (a spring/finishing pass is legitimate).
-                let groups = self.controller.duplicate_operation_groups();
+                let included: BTreeSet<_> = self
+                    .controller
+                    .outcome()
+                    .into_iter()
+                    .flat_map(|outcome| &outcome.program.steps)
+                    .filter_map(|step| match step {
+                        cam_cldata::Step::Rapid { tag, .. }
+                        | cam_cldata::Step::Linear { tag, .. }
+                        | cam_cldata::Step::Arc { tag, .. } => Some(tag.op_id),
+                        cam_cldata::Step::Drill(cycle) => Some(cycle.tag.op_id),
+                        _ => None,
+                    })
+                    .collect();
+                let groups: Vec<_> = self
+                    .controller
+                    .duplicate_operation_groups()
+                    .into_iter()
+                    .map(|group| {
+                        group.into_iter().filter(|id| included.contains(id)).collect::<Vec<_>>()
+                    })
+                    .filter(|group| group.len() > 1)
+                    .collect();
                 if groups.is_empty() {
                     let kind = self.controller.post_kind();
                     return iced::Task::perform(
                         pick_save("G-code", kind.default_file_name(), kind.file_extensions()),
-                        Message::NcToExport,
+                        move |path| Message::NcToExport(nc.clone(), path),
                     );
                 }
                 return iced::Task::perform(
                     confirm_export_duplicates(describe_duplicates(&groups)),
-                    Message::ExportDupConfirmed,
+                    move |confirmed| Message::ExportDupConfirmed(nc.clone(), confirmed),
                 );
             }
-            Message::ExportDupConfirmed(true) => {
+            Message::ExportDupConfirmed(nc, true) => {
                 let kind = self.controller.post_kind();
                 return iced::Task::perform(
                     pick_save("G-code", kind.default_file_name(), kind.file_extensions()),
-                    Message::NcToExport,
+                    move |path| Message::NcToExport(nc.clone(), path),
                 );
             }
-            Message::ExportDupConfirmed(false) => {
+            Message::ExportDupConfirmed(_, false) => {
                 self.status =
                     "Export cancelled — exclude or edit the duplicate operation(s).".to_string();
             }
-            Message::NcToExport(Some(path)) => {
+            Message::NcToExport(nc, Some(path)) => {
                 // The post already succeeded (checked before the dialog opened), so a
                 // failure here is the *write* — a read-only folder, a full disk. Still
                 // worth a dialog: the operator has just been told a file was coming.
-                match self.controller.export_nc_to(&path) {
+                match std::fs::write(&path, nc) {
                     Ok(()) => {
                         self.status = format!("Exported G-code to {}.", path.display());
                     }
@@ -4361,7 +4435,7 @@ impl App {
             | Message::LibraryToExport(None)
             | Message::LibraryToImport(None)
             | Message::CadToImport(None)
-            | Message::NcToExport(None) => {}
+            | Message::NcToExport(_, None) => {}
             Message::Undo => {
                 if self.controller.undo() {
                     self.rebase_setup_draft();
@@ -4493,6 +4567,8 @@ impl App {
             }
             Message::BeginOp(kind) => {
                 self.end_setup_draft();
+                self.operation_tools.clear();
+                self.operation_tab = OperationTab::Tool;
                 if !self.controller.geometry_state().instances.is_empty()
                     && (self.controller.regions().is_empty()
                         || !self.controller.cad_selection().is_empty())
@@ -4530,7 +4606,6 @@ impl App {
                     }
                     let tool = self.library.default_tool_for(kind);
                     self.cad_tool_pick = tool.map(|tool| tool.number);
-                    self.wizard_family = tool.map(|tool| ToolKindPick::of(tool.kind));
                     self.cad_inspecting = false;
                     self.cad_editing_op = None;
                     self.cad_filter = if kind == OpKind::Profile {
@@ -4539,11 +4614,8 @@ impl App {
                         CadFilter::Face
                     };
                     self.controller.cancel_operation();
-                    self.refresh_fields();
-                    self.seed_wizard_cutting();
-                    self.status =
-                        "Choose a tool and click the geometry in the viewport, then Confirm."
-                            .into();
+                    self.seed_creation_editor(kind);
+                    self.status = "Choose a tool, then select geometry on the Geometry tab.".into();
                     return iced::Task::none();
                 }
                 self.setting_origin = false;
@@ -4558,26 +4630,22 @@ impl App {
                     self.status = error;
                     return iced::Task::none();
                 }
-                // Seed the op with a sensible default tool so it always has a valid
-                // one; the user can change it in the wizard picker. Face prefers the
-                // largest flat end/face mill (see `ToolLibrary::default_tool_for`).
-                // Pre-fill family + tool from the by-kind default, but only when that
-                // default is in a family this operation actually offers — otherwise
-                // leave both blank rather than seed something the wizard forbids.
-                self.wizard_family = None;
+                // Start with a supported cutter; Face prefers the largest flat mill.
+                // Every parameter remains editable in the shared operation tabs.
                 if self.controller.pending_op().is_some() {
                     if let Some(tool) = self.library.default_tool_for(kind) {
                         let family = ToolKindPick::of(tool.kind);
                         if families_for(kind).contains(&family) {
-                            self.wizard_family = Some(family);
-                            let number = self.controller.use_tool(tool);
+                            let number = self.stage_operation_tool(tool);
                             self.controller.set_pending_tool(number);
                         }
                     }
                 }
-                self.refresh_fields();
-                // Seed the wizard's cutting-data row from the (possibly pre-filled) tool.
-                self.seed_wizard_cutting();
+                if self.creating_operation() {
+                    self.seed_creation_editor(kind);
+                } else {
+                    self.refresh_fields();
+                }
                 self.status = if self.controller.pending_op().is_some() {
                     if op_accepts_open_paths(kind) && !self.controller.open_paths().is_empty() {
                         "Choose a tool and click a boundary or an open stroke — in \
@@ -4591,27 +4659,25 @@ impl App {
                     "Open a part first.".to_string()
                 };
             }
-            Message::SetPendingFamily(f) => {
-                self.wizard_family = Some(f);
-                // The previously picked tool is from another family — drop it, and
-                // with it the Confirm gate, rather than leave a stale selection.
-                if self.cad_pending_kind.is_some() {
-                    self.cad_tool_pick = None;
-                } else {
-                    self.controller.clear_pending_tool();
-                    self.controller.prune_unused_tools();
-                }
-                self.refresh_fields();
-            }
             Message::SetPendingLibraryTool(i) => {
                 if let Some(&tool) = self.library.tools.get(i) {
+                    if let Some(op) = self.operation_draft.as_ref() {
+                        if !families_for(AppController::operation_kind(op))
+                            .contains(&ToolKindPick::of(tool.kind))
+                        {
+                            self.status =
+                                "This cutter kind is not supported by the operation.".into();
+                            return iced::Task::none();
+                        }
+                    }
                     if self.cad_pending_kind.is_some() {
                         self.cad_tool_pick = Some(tool.number);
                     } else {
-                        let number = self.controller.use_tool(tool);
+                        let number = self.stage_operation_tool(tool);
                         self.controller.set_pending_tool(number);
                     }
-                    self.seed_wizard_cutting();
+                    self.sync_creation_tool();
+                    self.refresh_operation_fields();
                 }
             }
             Message::CancelOp => {
@@ -4620,28 +4686,41 @@ impl App {
                 self.cad_inspecting = false;
                 self.controller.set_cad_selection(vec![]);
                 self.controller.cancel_operation();
-                self.controller.prune_unused_tools();
+                self.operation_draft = None;
+                self.operation_tools.clear();
+                self.height_draft_id = None;
+                self.focus_selected_op();
                 self.refresh_fields();
                 self.status = "Cancelled operation creation.".to_string();
             }
             Message::ConfirmOp => {
-                if self.cad_pending_kind.is_some() {
-                    return self.update(Message::ConfirmCadOperation);
-                }
-                let cutting = self.wizard_cutting();
-                if cutting.is_none() {
-                    self.status = "Choose a cutter and enter valid cutting data.".into();
-                    return iced::Task::none();
-                }
-                if self.controller.confirm_operation(cutting) {
-                    self.planar_selection.clear();
-                    self.cursor = None;
-                    self.rebase_setup_draft();
-                    self.operation_draft = None;
-                    self.focus_selected_op();
-                    self.refresh_fields();
-                    self.rerun();
-                    self.status = "Operation created.".to_string();
+                if self.creating_operation() {
+                    let result = self.creation_operation().and_then(|(operation, binding)| {
+                        let settings = self.edited_height_settings()?;
+                        self.controller.commit_operation_creation(
+                            operation,
+                            binding,
+                            settings,
+                            self.operation_tools.clone(),
+                        )
+                    });
+                    match result {
+                        Ok(id) => {
+                            self.cad_pending_kind = None;
+                            self.cad_tool_pick = None;
+                            self.cad_inspecting = false;
+                            self.controller.set_cad_selection(vec![]);
+                            self.planar_selection.clear();
+                            self.cursor = None;
+                            self.rebase_setup_draft();
+                            self.begin_operation_draft(id);
+                            self.focus_ops.clear();
+                            self.focus_ops.insert(id);
+                            self.rerun();
+                            self.status = "Operation created.".into();
+                        }
+                        Err(reason) => self.status = reason,
+                    }
                 }
             }
             Message::PickWorld(w, aperture) => {
@@ -4888,24 +4967,23 @@ impl App {
                 self.remember();
             }
             Message::ReinitOp => {
+                self.operation_tools.clear();
                 let id = self.open_op_menu.take();
                 if let Some(id) = id {
                     if self.controller.reinitialize_operation(id) {
-                        // Same two-step tool choice as a fresh operation; seed the
-                        // family from the op's own kind default where it is offered.
-                        self.wizard_family = None;
+                        // Reinitialization uses the same tabbed creation editor.
                         if let Some(kind) = self.controller.pending_op().map(|p| p.kind) {
                             if let Some(tool) = self.library.default_tool_for(kind) {
                                 let family = ToolKindPick::of(tool.kind);
                                 if families_for(kind).contains(&family) {
-                                    self.wizard_family = Some(family);
-                                    let number = self.controller.use_tool(tool);
+                                    let number = self.stage_operation_tool(tool);
                                     self.controller.set_pending_tool(number);
                                 }
                             }
                         }
-                        self.refresh_fields();
-                        self.seed_wizard_cutting();
+                        if let Some(pending) = self.controller.pending_op() {
+                            self.seed_creation_editor(pending.kind);
+                        }
                         self.status = "Reinitialising: pick a tool, then the geometry \
                                        (the operation keeps its place)."
                             .to_string();
@@ -5628,6 +5706,11 @@ impl App {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::batch([
+            if self.simulation.as_ref().is_some_and(SimulationPlayer::needs_tick) {
+                iced::time::every(std::time::Duration::from_millis(33)).map(|_| Message::SimulationTick)
+            } else {
+                iced::Subscription::none()
+            },
             if self.controller.run_needs_poll() {
                 iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::PollRun)
             } else {
@@ -5936,6 +6019,16 @@ impl App {
     /// Reload the inspector edit buffers from the model for the current
     /// selection.
     fn refresh_fields(&mut self) {
+        if self.creating_operation() {
+            self.focused_height = None;
+            self.fields.clear();
+            for field in self.inspector_fields() {
+                if let Some(value) = self.field_value(field) {
+                    self.fields.insert(field, fmt_num(value));
+                }
+            }
+            return;
+        }
         if let Selection::Operation(id) = self.controller.selection() {
             if self.height_draft_id != Some(id) {
                 self.seed_height_editor(id);
@@ -6052,11 +6145,14 @@ impl App {
     /// The one place the `Field` → (style, slot) mapping lives, so the label and the help
     /// cannot disagree about which parameter they are describing.
     fn plunge_param(&self, field: Field) -> Option<(Plunge, bool, bool)> {
-        let id = match self.controller.selection() {
-            Selection::Operation(id) => id,
-            _ => return None,
+        let op = if self.creating_operation() {
+            self.operation_draft.as_ref()?
+        } else {
+            let Selection::Operation(id) = self.controller.selection() else {
+                return None;
+            };
+            self.current_operation(id)?
         };
-        let op = self.current_operation(id)?;
         let (own, clear) = Self::op_plunge_styles(op);
         let (plunge, clearing) = match field {
             Field::PlungeA | Field::PlungeB => (own?, false),
@@ -6224,6 +6320,12 @@ impl App {
         else {
             return true;
         };
+        if self.creating_operation() {
+            return self
+                .operation_draft
+                .as_ref()
+                .is_some_and(|op| operation_tabs::operation_field_invalid(op, field, value));
+        }
         if !self.library_mode() {
             if let Selection::Operation(id) = self.controller.selection() {
                 if let Some(operation) = self.current_operation(id) {
@@ -6589,7 +6691,11 @@ impl App {
             return tool_fields(self.inspected_tool_kind());
         }
         if self.creating_operation() {
-            return vec![Field::SpindleRpm, Field::Feed, Field::PlungeFeed];
+            return self
+                .operation_draft
+                .as_ref()
+                .map(operation_fields)
+                .unwrap_or_else(|| vec![Field::SpindleRpm, Field::Feed, Field::PlungeFeed]);
         }
         match self.controller.selection() {
             // Safety planes are edited on the operation; tool-change height is
@@ -6633,13 +6739,10 @@ impl App {
     /// The model value backing a field for the current selection, if any.
     fn field_value(&self, field: Field) -> Option<f64> {
         if self.creating_operation() {
-            let cutting = self.wizard_seeded_cutting()?;
-            return match field {
-                Field::SpindleRpm => Some(cutting.rpm),
-                Field::Feed => Some(cutting.feed),
-                Field::PlungeFeed => Some(cutting.plunge_feed),
-                _ => None,
-            };
+            return self
+                .operation_draft
+                .as_ref()
+                .and_then(|op| op_field(op, field));
         }
         if self.library_mode() {
             // Prefer the live working copy so kind/picker edits repopulate from it.
@@ -9693,6 +9796,7 @@ impl Viewport {
     #[allow(clippy::too_many_arguments)] // cohesive per-frame view inputs
     fn new(
         controller: &AppController,
+        preview: Option<&crate::RunOutcome>,
         cad_filter: EntityKind,
         cad_hover: Option<&EntityRef>,
         cad_hidden: &BTreeSet<InstanceId>,
@@ -9723,7 +9827,8 @@ impl Viewport {
         let pick_z = controller.document().setup().heights.top_of_stock as f32;
         // After a run, show the full backplot; before it, at least show the
         // imported part outlines so opening a file is visibly reflected.
-        let mut scene = match controller.outcome() {
+        let outcome = preview.or_else(|| controller.outcome());
+        let mut scene = match outcome {
             Some(outcome) => outcome.scene.clone(),
             None => {
                 let mut scene = Scene::new();
@@ -9745,8 +9850,7 @@ impl Viewport {
         }
         // Drilling annotations from the backplot (peck rings + dwell bars), once a
         // run has produced a program. Anchors only — sized to the screen at draw.
-        let drill_marks = controller
-            .outcome()
+        let drill_marks = outcome
             .map(|o| {
                 let frame = &controller.document().setup().frame;
                 drill_marks_of(&o.program)
@@ -9768,7 +9872,10 @@ impl Viewport {
             cad_hidden,
             &controller.document().setup().frame,
         );
-        let bounds = union_bounds(scene.bounds(), cad_scene.bounds());
+        let bounds = union_bounds(
+            controller.outcome().and_then(|outcome| outcome.scene.bounds()).or_else(|| scene.bounds()),
+            cad_scene.bounds(),
+        );
         let mut cad_selected = controller.cad_selection().to_vec();
         for id in focus_ops {
             if let Some(binding) = controller.geometry_state().bindings.get(id) {
@@ -9903,7 +10010,7 @@ impl Viewport {
         scene.focus_operations(focus_ops);
         // Before a run show the uncut setup box; afterwards use remaining stock.
         // Transparent stock is drawn separately after the opaque CAD surfaces.
-        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, controller.outcome()) {
+        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, outcome) {
             (true, Some(outcome))
                 if outcome.completion == JobCompletion::Complete
                     || !outcome.stock_indices.is_empty() =>

@@ -10,6 +10,64 @@ pub(super) fn plane_input_id(plane: Plane) -> String {
     format!("plane-offset-{plane:?}")
 }
 impl App {
+    /// Keep explicitly entered decimal places, including trailing zeros. Only
+    /// display rounding is applied; editor buffers and machining values stay exact.
+    pub(super) fn height_display_value(&self, plane: Plane, value: f64) -> String {
+        fn precision(text: &str) -> usize {
+            let (mantissa, exponent) = text
+                .trim()
+                .split_once(['e', 'E'])
+                .map_or((text.trim(), 0), |(m, e)| {
+                    (m, e.parse::<i32>().unwrap_or(0))
+                });
+            let decimals = mantissa.split_once('.').map_or(0, |(_, tail)| tail.len());
+            (decimals as i32).saturating_sub(exponent).clamp(0, 15) as usize
+        }
+        fn entered(app: &App, plane: Plane, visited: &mut BTreeSet<Plane>) -> usize {
+            if !visited.insert(plane) {
+                return 0;
+            }
+            let own = app.height_offsets.get(&plane).map_or(0, |s| precision(s));
+            let Some(settings) = app.height_draft.as_ref() else {
+                return own;
+            };
+            let definition = settings.definition(plane);
+            let sources: Vec<_> = match definition.reference {
+                Reference::Plane(source) => vec![source],
+                Reference::Highest | Reference::Lowest => definition
+                    .sources
+                    .iter()
+                    .filter_map(|r| {
+                        if let Reference::Plane(p) = r {
+                            Some(*p)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+            sources.into_iter().fold(own, |digits, source| {
+                digits.max(entered(app, source, visited))
+            })
+        }
+        let digits = entered(self, plane, &mut BTreeSet::new());
+        let mut label = format!("{value:.precision$}", precision = digits.max(3));
+        while label.contains('.')
+            && label.ends_with('0')
+            && label.split_once('.').unwrap().1.len() > digits
+        {
+            label.pop();
+        }
+        if label.ends_with('.') {
+            label.pop();
+        }
+        if label.starts_with('-') && label.parse::<f64>() == Ok(0.) {
+            label.remove(0);
+        }
+        label
+    }
+
     pub(super) fn seed_height_editor(&mut self, id: u32) {
         self.height_draft_id = Some(id);
         self.height_reference_pick = None;
@@ -91,10 +149,17 @@ impl App {
                 document.setup_mut().tools.push(*tool);
             }
         }
-        let mut op = self
-            .current_operation(id)
-            .cloned()
-            .ok_or("Operation unavailable")?;
+        let mut op = if self.creating_operation() {
+            let (op, binding) = self.creation_operation()?;
+            if let Some(binding) = binding {
+                document.geometry.bindings.insert(id, binding);
+            }
+            op
+        } else {
+            self.current_operation(id)
+                .cloned()
+                .ok_or("Operation unavailable")?
+        };
         let parsed = self
             .fields
             .iter()
@@ -151,7 +216,7 @@ impl App {
                 inspector_button("Use defaults").on_press(Message::HeightDefaults),
             ]
             .spacing(8),
-            text("Offsets are in mm along setup Z. Select an offset to preview the planes.")
+            text("Offsets are in mm along setup Z. Planes are shown while Heights is selected.")
                 .size(11)
                 .color(INSPECTOR_MUTED)
         ]
@@ -330,7 +395,7 @@ impl App {
                     if let Ok(heights) = resolved {
                         if let Some(z) = heights.plane(plane) {
                             section = section.push(
-                                text(format!("Z {} mm", fmt_num(z)))
+                                text(format!("Z {} mm", self.height_display_value(plane, z)))
                                     .size(11)
                                     .color(INSPECTOR_MUTED),
                             );

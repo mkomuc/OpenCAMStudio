@@ -38,9 +38,18 @@ impl JobInputs {
         // toolpath. Refine until the narrowest cut spans a few cells, capped by a
         // cell budget so refining never turns a preview into a hang.
         let feature = narrowest_cut_width(program, setup_tools, max[2]);
-        let by_span = span / 300.0;
+        // Playback rebuilds stock when seeking in either direction. Use a
+        // bounded preview grid so its frames remain responsive; the verified
+        // outcome keeps the full-resolution simulation used for export.
+        let playback = self.preview_program.is_some();
+        let by_span = span / if playback { 120.0 } else { 300.0 };
         let by_feature = feature / 3.0;
-        let budget = span / MAX_SIM_CELLS_ACROSS;
+        let budget = span
+            / if playback {
+                240.0
+            } else {
+                MAX_SIM_CELLS_ACROSS
+            };
         let resolution = by_span.min(by_feature).max(budget).clamp(0.02, 2.0);
         let Some(sim) = cam_sim::simulate_controlled(
             program,

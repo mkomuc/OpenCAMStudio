@@ -549,6 +549,9 @@ impl App {
         let node = self.tree_menu.as_ref()?;
         let item = |label: String, message: Message| {
             let icon = match &message {
+                Message::ToolpathCommand(_, ToolpathAction::Recompute) => Some(Icon::Run),
+                Message::ToolpathCommand(_, ToolpathAction::Simulate) => Some(Icon::ShowStock),
+                Message::ToolpathCommand(_, ToolpathAction::Export) => Some(Icon::Export),
                 Message::DuplicateOp | Message::SetupDuplicate(_) => Some(Icon::Duplicate),
                 Message::ToggleSetOrigin => Some(Icon::SetOrigin),
                 _ => None,
@@ -565,6 +568,19 @@ impl App {
                 .style(|_, status| command_button_style(status))
         };
         let mut items = column![].spacing(2);
+        if matches!(node, TreeNode::Setup(_) | TreeNode::Operation(_)) {
+            for (label, action) in [
+                ("Recompute toolpath", ToolpathAction::Recompute),
+                ("Simulate toolpath", ToolpathAction::Simulate),
+                ("Post process and export…", ToolpathAction::Export),
+            ] {
+                items = items.push(item(
+                    label.into(),
+                    Message::ToolpathCommand(node.clone(), action),
+                ));
+            }
+            items = items.push(iced::widget::rule::horizontal(1));
+        }
         let creation = |items: iced::widget::Column<'static, Message>| {
             let mut items = items;
             for (kind, label) in [
@@ -693,6 +709,7 @@ impl App {
             }
         }
         let menu = container(scrollable(items).height(Length::Shrink))
+            .width(244)
             .max_height((self.window.height - self.op_menu_pos.y - 12.0).max(100.0))
             .padding(4)
             .style(|_| container::Style {
@@ -865,6 +882,95 @@ mod tests {
                     .any(|candidate| candidate.entity.instance_id == *id)
             })
             .collect()
+    }
+
+    fn drain_context_job(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while app.controller.run_needs_poll() {
+            send(app, Message::PollRun);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        while app.notice.is_some() {
+            send(app, Message::NoticeDismissed);
+        }
+    }
+
+    #[test]
+    fn simulation_context_commands_open_scoped_player_and_clear_it_after_edits() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.refresh_fields();
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Open(TreeNode::Operation(ids[1]))),
+        );
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Command(Box::new(Message::ToolpathCommand(
+                TreeNode::Operation(ids[1]),
+                ToolpathAction::Simulate,
+            )))),
+        );
+        assert!(app.tree_menu.is_none());
+        assert!(app.open_op_menu.is_none());
+        drain_context_job(&mut app);
+        assert!(app.simulation.is_some());
+        assert!(app.show_stock);
+        assert!(app
+            .controller
+            .outcome()
+            .unwrap()
+            .scene
+            .strips
+            .iter()
+            .filter_map(|strip| strip.op)
+            .all(|id| id == ids[1]));
+        send(&mut app, Message::SimulationSpeed(4.));
+        send(&mut app, Message::SimulationPlayPause);
+        assert!(app.simulation.as_ref().unwrap().playing);
+        assert_eq!(app.simulation.as_ref().unwrap().speed, 4.);
+        send(&mut app, Message::SimulationSeek(0.));
+        assert!(!app.simulation.as_ref().unwrap().playing);
+        let setup = app.controller.active_setup_id();
+        send(
+            &mut app,
+            Message::ToolpathCommand(TreeNode::Setup(setup), ToolpathAction::Simulate),
+        );
+        drain_context_job(&mut app);
+        assert!(app.simulation.is_some());
+        let visible: BTreeSet<_> = app
+            .controller
+            .outcome()
+            .unwrap()
+            .scene
+            .strips
+            .iter()
+            .filter_map(|strip| strip.op)
+            .collect();
+        assert_eq!(visible, ids.iter().copied().collect());
+        send(&mut app, Message::SetOpExcluded(ids[0], true));
+        assert!(app.simulation.is_none());
+    }
+
+    #[test]
+    fn context_export_is_cancelled_and_stale_targets_do_not_process_another_scope() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.refresh_fields();
+        send(
+            &mut app,
+            Message::ToolpathCommand(TreeNode::Operation(ids[0]), ToolpathAction::Export),
+        );
+        assert!(app.pending_toolpath_export.is_some());
+        send(&mut app, Message::CancelRun);
+        assert!(app.pending_toolpath_export.is_none());
+        send(
+            &mut app,
+            Message::ToolpathCommand(TreeNode::Operation(u32::MAX), ToolpathAction::Recompute),
+        );
+        assert!(app.status.contains("no longer exists"));
+        assert!(!app.controller.run_pending());
     }
 
     #[test]

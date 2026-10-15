@@ -1871,6 +1871,33 @@ impl AppController {
         }
         let (points, closed) = self.loop_points(boundary)?;
         let chain = Contour::new(points);
+        self.build_op_shape(kind, chain, closed, islands, tool, start, cutting)
+    }
+
+    /// An uncommitted parameter template; its placeholder contour is always
+    /// replaced by validated user geometry before publishing an operation.
+    pub fn operation_template(&self, kind: OpKind, tool: u32) -> Operation {
+        let chain = Contour::new(vec![
+            Point::new(0., 0.),
+            Point::new(10., 0.),
+            Point::new(10., 10.),
+            Point::new(0., 10.),
+        ]);
+        self.build_op_shape(kind, chain, true, &[], tool, None, None)
+            .unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_op_shape(
+        &self,
+        kind: OpKind,
+        chain: Contour,
+        closed: bool,
+        islands: &[LoopRef],
+        tool: u32,
+        start: Option<[f64; 2]>,
+        cutting: Option<CuttingData>,
+    ) -> Option<Operation> {
         let p = self.defaults;
         // Cutting data: the values chosen in the wizard if given, else the tool's
         // seeded nominals. A `spindle_rpm` of 0 falls back to the job default at plan
