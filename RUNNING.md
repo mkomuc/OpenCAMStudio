@@ -82,23 +82,23 @@ Across the top is a tabbed **icon ribbon**; below it are three docked panes —
 - **Home** — *Project* (New · Open · Save · Save As), *Data* (Import · Export ·
   Sample), *Edit* (Undo · Redo · Run). New/Open/Save/Import/Export use native
   file dialogs; **Sample** loads a built-in rectangle-with-a-hole demo (no dialog).
-- **Operations** — *Create*: Face · Profile · Pocket · Drill · Thread · Chamfer ·
+- **Machining** — *Create*: Face · Profile · Pocket · Drill · Thread · Chamfer ·
   Engrave · **Carve** — roughly the order a part is made. Clicking a kind starts
   the operation-creation wizard.
-- **Tooling** — the cross-project **tool library** manager (New · Delete ·
+- **Tools** — the cross-project **tool library** manager (New · Delete ·
   Renumber · Import Library · Export Library). While this tab is active the
   **Tool Library pane** replaces the Project pane, the Inspector becomes the tool
   editor, and the Viewport shows a **2D cross-section** of the selected tool.
 - **Machinery** — the shop's machines: **New** · **Delete**. Opening the tab puts the
-  Inspector on the active machine, the way Tooling does for tools, so the tab is the way
-  in and needs no button of its own. It sits beside Tooling because both are
+  Inspector on the active machine, the way Tools does for tools, so the tab is the way
+  in and needs no button of its own. It sits beside Tools because both are
   *installation* scope — neither a machine nor the tool library belongs to a project, and
   a machine deliberately **cannot** be set by one.
 - **View** — Show stock · Reset view · Cube on/off · Origin · **Envelope** · Tips, then the
   orientation-cube **size slider**, then **Panes** — the pane show/hide checkboxes
   (the Tool Library is listed as *Tools* to keep the band narrow).
 
-Tabs read left to right in workflow order: **Home → Edit → Operations → Tooling →
+Tabs read left to right in workflow order: **Home → Edit → Operations → Tools →
 Machinery → View** — set up, edit, cut, tools, machines, look.
 
 The ribbon collapses responsively as the window narrows (groups degrade
@@ -138,7 +138,7 @@ right-to-left; a collapsed group opens as a popup under its button).
   Clearance / Retract / Top of stock; an Operation exposes Depth / Stepdown /
   (Stepover) / Feed / Plunge feed plus **Side / Lead-in / Lead-out / Plunge**
   pickers). Press **Enter** or **Apply** to commit (one undo step, recomputes the
-  toolpath). While the Tooling tab is active the Inspector is instead the **tool
+  toolpath). While the Tools tab is active the Inspector is instead the **tool
   editor** (kind-aware fields + a Type picker; edits preview live in the Viewport
   and **Apply** commits, greyed until you actually change something), and while a
   pick is pending it is the **operation wizard**.
@@ -152,7 +152,7 @@ right-to-left; a collapsed group opens as a popup under its button).
 3. Choose a **Tool family**, then a **Tool** within it. The families offered are
    bounded by the operation — a pocket lists only end mills, engraving only V-bits —
    so a library of hundreds stays usable. If a family is empty the wizard says so and
-   points you at the Tooling tab.
+   points you at the Tools tab.
 4. **Click the geometry** in the Viewport. Picking is line-based — click the outer
    contour, an inner hole, or an imported **open stroke** (engraving only); the click
    snaps to the nearest loop edge, and the picked vertex sets the toolpath start.
@@ -315,7 +315,7 @@ Nothing is said when they match. One consequence worth expecting rather than rep
 the tool-change height falls back to the machine's maximum Z, so opening a shared job on
 a different machine legitimately changes the height of its lifts.
 
-- **Tool Library pane** (replaces Project while the Tooling tab is active): every
+- **Tool Library pane** (replaces Project while the Tools tab is active): every
   library tool, in two views — **Ordered** (by number, `T1: ⌀6 …`) or **Grouped**
   (by family, then size). Right-click a row → **Set number…** (swaps if the number
   is taken). Select a tool to edit it.
@@ -364,6 +364,9 @@ that have no other control:
 - **Snap marker size** — how large the engaged snap glyph draws. Unlike the catch
   distance this *is* its own control: it is a visual size, not a tolerance, so a large
   marker with a tight aperture is a reasonable thing to want.
+- **Stock color** — RGB sliders with a live color preview. Stock starts green; the
+  chosen color applies to both raw stock and remaining simulated material, including
+  transparent stock, and survives a restart.
 - **Origin marker size** — the workpiece-datum cross-and-ring. It is sized from the
   scene (6% of its extent), so it already stays legible on a 20 mm part and a 500 mm
   one; this scales that, for a louder or quieter datum against a busy backplot.
@@ -552,7 +555,7 @@ things worth eyeballing:
   position in the list.
 - **Tools (in use):** after creating an op, its tool appears here read-only; with
   no ops the section shows "(none yet …)".
-- **Operation wizard:** Operations → Profile, choose a family then a tool, click
+- **Operation wizard:** Machining → Profile, choose a family then a tool, click
   the outer rectangle → it profiles the rectangle; click the inner circle → the
   circle. Then check the order does not matter: start again, click the geometry
   **first**, and confirm **Confirm** stays disabled until a tool is chosen. Re-pick a
@@ -592,7 +595,7 @@ things worth eyeballing:
   chamfer mill, profile with a V-bit, thread with an end mill — and confirm the
   Output pane explains why and the operation is marked ⚠ in the tree, while merely
   poor choices (facing with a ball-nose) only warn.
-- **Tool library:** Tooling tab → the Tool Library pane replaces Project and the
+- **Tool library:** Tools tab → the Tool Library pane replaces Project and the
   Viewport shows the selected tool's 2D cross-section. New / Delete; switch the
   **Type** and watch the field set + silhouette change live; edit a field and
   confirm the preview updates *before* Apply, that **Apply** is greyed until you

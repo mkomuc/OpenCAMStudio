@@ -107,7 +107,7 @@ impl App {
         self.cancel_tree_drag();
         if workspace == Workspace::Tools {
             self.machining_tab = self.active_tab;
-            self.active_tab = RibbonTab::Tooling;
+            self.active_tab = RibbonTab::Tools;
         } else {
             self.active_tab = self.machining_tab;
         }
@@ -117,17 +117,6 @@ impl App {
         }
         self.reload_tool_edit();
         self.status = format!("{} workspace.", workspace.label());
-    }
-    pub(super) fn workspace_picker(&self) -> Element<'_, Message> {
-        let choice = |workspace: Workspace| {
-            let selected = self.workspace == workspace;
-            button(text(workspace.label()).size(12))
-                .on_press(Message::WorkspaceChanged(workspace))
-                .style(move |_, status| tab_button_style(selected, status))
-        };
-        row![choice(Workspace::Machining), choice(Workspace::Tools)]
-            .spacing(3)
-            .into()
     }
     pub(super) fn workspace_main(&self) -> Element<'_, Message> {
         if self.workspace == Workspace::Tools {
@@ -367,14 +356,19 @@ impl App {
                 mode(LibraryView::Grouped, "By family")
             ]
             .spacing(12),
-            row![
-                text("Tool").width(54),
-                text("Cutter").width(Length::Fill),
-                text("Ø mm").width(62),
-                text("Length mm").width(80),
-                text("RPM").width(65),
-                text("Feed mm/min").width(100)
-            ]
+            container(
+                row![
+                    text("Tool").width(54),
+                    text("Cutter").width(Length::Fill),
+                    text("Ø mm").width(62),
+                    text("Length mm").width(80),
+                    text("Flute length mm").width(112),
+                    text("RPM").width(65),
+                    text("Feed mm/min").width(100)
+                ]
+                .spacing(4)
+            )
+            .padding(Padding::from([0.0, 7.0]))
         ]
         .spacing(6)
         .padding(16);
@@ -394,6 +388,7 @@ impl App {
                 text(tool.kind.to_string()).width(Length::Fill),
                 text(fmt_num(tool.diameter)).width(62),
                 text(fmt_num(tool.length)).width(80),
+                text(fmt_num(tool.flute_len())).width(112),
                 text(fmt_num(tool.nominal_rpm)).width(65),
                 text(fmt_num(tool.nominal_feed)).width(100)
             ]
@@ -460,9 +455,15 @@ mod tests {
         let opaque = app.machining_viewport();
         assert_eq!(opaque.mesh_indices.len(), 36, "uncut stock before a run");
         assert!(opaque.transparent_stock_indices.is_empty());
+        let [r, g, b] = app.settings.view.stock_color;
+        assert!(opaque
+            .mesh_vertices
+            .iter()
+            .all(|v| v.color == [r, g, b, 1.0]));
         let frame_bounds = opaque.frame_bounds;
         let drawing = opaque.vertices.clone();
 
+        app.settings.view.stock_color = [0.8, 0.3, 0.1];
         app.settings.view.transparent_stock = true;
         let transparent = app.machining_viewport();
         assert!(transparent.mesh_indices.is_empty());
@@ -470,7 +471,7 @@ mod tests {
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color[3] == 0.25));
+            .all(|v| v.color == [0.8, 0.3, 0.1, 0.25]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -495,6 +496,16 @@ mod tests {
             outcome.stock_vertices.len()
         );
         assert!(!simulated.transparent_stock_indices.is_empty());
+        assert!(simulated
+            .transparent_stock_vertices
+            .iter()
+            .all(|v| v.color == [0.8, 0.3, 0.1, 0.25]));
+        app.settings.view.transparent_stock = false;
+        let opaque = app.machining_viewport();
+        assert!(opaque
+            .mesh_vertices
+            .iter()
+            .all(|v| v.color == [0.8, 0.3, 0.1, 1.0]));
     }
 
     #[test]

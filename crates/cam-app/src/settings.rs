@@ -108,6 +108,8 @@ pub struct ViewPrefs {
     pub show_stock: bool,
     /// Blend the stock surface so the model or drawing remains visible inside it.
     pub transparent_stock: bool,
+    /// Stock surface RGB color, with each channel in the range 0–1.
+    pub stock_color: [f32; 3],
     pub show_gizmo: bool,
     pub show_origin: bool,
     /// Draw the active machine's travel as a box around the job.
@@ -225,6 +227,7 @@ impl Default for ViewPrefs {
         Self {
             show_stock: false,
             transparent_stock: false,
+            stock_color: [0.2, 0.65, 0.3],
             show_gizmo: true,
             show_origin: true,
             // Off by default: it is a check you reach for, not something to look past
@@ -323,6 +326,9 @@ impl Settings {
     pub fn clamp_all(&mut self) {
         let d = Settings::default();
         let v = &mut self.view;
+        for (channel, fallback) in v.stock_color.iter_mut().zip(d.view.stock_color) {
+            *channel = clamp(*channel, (0.0, 1.0), fallback);
+        }
         v.gizmo_size = clamp(v.gizmo_size, GIZMO_SIZE_RANGE, d.view.gizmo_size);
         v.origin_marker_scale = clamp(
             v.origin_marker_scale,
@@ -541,6 +547,22 @@ mod tests {
     }
 
     #[test]
+    fn stock_color_defaults_for_older_settings_and_clamps_on_load() {
+        let old: Settings = serde_json::from_str(r#"{"view":{"show_stock":true}}"#).unwrap();
+        assert_eq!(old.view.stock_color, [0.2, 0.65, 0.3]);
+        let scratch = Scratch::new("stock-color");
+        let mut settings = old;
+        settings.view.stock_color = [-1.0, 0.4, 2.0];
+        settings.save_to(&scratch.file("settings.json")).unwrap();
+        let (loaded, outcome) = load_from(&scratch.file("settings.json"));
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(loaded.view.stock_color, [0.0, 0.4, 1.0]);
+        settings.view.stock_color = [f32::NAN; 3];
+        settings.clamp_all();
+        assert_eq!(settings.view.stock_color, ViewPrefs::default().stock_color);
+    }
+
+    #[test]
     fn a_missing_file_yields_defaults_and_writes_nothing() {
         let s = Scratch::new("settings");
         let (got, outcome) = load_from(&s.file("settings.json"));
@@ -663,6 +685,7 @@ mod tests {
             ViewPrefs {
                 tooltips: false,
                 transparent_stock: true,
+                stock_color: [0.8, 0.3, 0.1],
                 gizmo_size: 175.0,
                 ..Default::default()
             },
@@ -681,6 +704,7 @@ mod tests {
         assert!(s.view.transparent_stock);
         let reloaded: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert!(reloaded.view.transparent_stock);
+        assert_eq!(reloaded.view.stock_color, [0.8, 0.3, 0.1]);
         assert_eq!(s.view.gizmo_size, 175.0);
         assert_eq!(s.snapping.default_snaps, vec![SnapKind::End]);
         assert_eq!(s.panes.project_px, 310.0);

@@ -1,7 +1,7 @@
 //! The iced desktop shell — a thin view over [`crate::AppController`].
 //!
 //! A professional-CAM layout built on iced's [`pane_grid`]: a tabbed **ribbon**
-//! (Home / Operations / Tooling / View / Windows) across the top, then four
+//! (Home / Machining / Tools / Machinery / View) across the top, then four
 //! docked, resizable panes — a **Project** tree
 //! (select a node), the **Viewport** (backplot + simulated stock), an
 //! **Inspector** (edit the selected node), and an **Output** console
@@ -486,7 +486,7 @@ impl Pane {
     fn dock_edge(self) -> Option<pane_grid::Edge> {
         match self {
             // Library docks Left, like Project — it substitutes for it on the
-            // Tooling tab, and can also sit alongside it.
+            // Tools tab, and can also sit alongside it.
             Pane::Project | Pane::Library => Some(pane_grid::Edge::Left),
             Pane::Inspector => Some(pane_grid::Edge::Right),
             Pane::Output => Some(pane_grid::Edge::Bottom),
@@ -522,17 +522,12 @@ enum LibraryView {
 }
 
 /// A tab in the top-bar ribbon. Each tab shows a band of grouped commands.
-/// Operations and Tooling are added as those capabilities land.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RibbonTab {
     Home,
-    Operations,
-    Edit,
-    Tooling,
-    /// The shop's machines. Beside **Tooling** deliberately: both are *installation*
-    /// scope, not document scope — a machine is never stored in a project (a file that
-    /// could set yours could disarm the travel check), exactly as the tool library is
-    /// not. `Edit` is the document, which is why Machine did not belong there.
+    Machining,
+    Tools,
+    /// The shop's machines, kept beside the installation's tool library.
     Machinery,
     View,
 }
@@ -619,11 +614,10 @@ impl std::fmt::Display for StockEditorKind {
 
 impl RibbonTab {
     /// The tabs shown in the strip, left to right.
-    const ALL: [RibbonTab; 6] = [
+    const ALL: [RibbonTab; 5] = [
         RibbonTab::Home,
-        RibbonTab::Edit,
-        RibbonTab::Operations,
-        RibbonTab::Tooling,
+        RibbonTab::Machining,
+        RibbonTab::Tools,
         RibbonTab::Machinery,
         RibbonTab::View,
     ];
@@ -631,9 +625,8 @@ impl RibbonTab {
     fn label(self) -> &'static str {
         match self {
             RibbonTab::Home => "Home",
-            RibbonTab::Operations => "Operations",
-            RibbonTab::Edit => "Edit",
-            RibbonTab::Tooling => "Tooling",
+            RibbonTab::Machining => "Machining",
+            RibbonTab::Tools => "Tools",
             RibbonTab::Machinery => "Machinery",
             RibbonTab::View => "View",
         }
@@ -1872,14 +1865,14 @@ struct App {
     /// the pickbox while a geometry pick is pending.
     cursor: Option<iced::Point>,
     /// Cross-project tool library (loaded from the config dir), picked from during
-    /// op setup and managed from the Tooling tab.
+    /// op setup and managed from the Tools tab.
     library: ToolLibrary,
-    /// The library tool selected for editing in the Tooling-tab library editor.
+    /// The library tool selected for editing in the Tools-tab library editor.
     lib_sel: usize,
-    /// A live **working copy** of the selected library tool while editing in the Tooling
+    /// A live **working copy** of the selected library tool while editing in the Tools
     /// tab. Field edits apply here first (so the viewport previews them instantly without
     /// an Apply); the committed library entry is only overwritten on Apply. `None` outside
-    /// Tooling mode. Dirty ⇔ this differs from the committed entry.
+    /// Tools mode. Dirty ⇔ this differs from the committed entry.
     tool_edit: Option<cam_model::Tool>,
     /// Which internal tab the Tool Library pane shows (Serial / Family).
     library_view: LibraryView,
@@ -2230,7 +2223,6 @@ fn face_view(normal: [f32; 3]) -> (f32, f32) {
 #[derive(Debug, Clone)]
 enum Message {
     OpenSample,
-    WorkspaceChanged(Workspace),
     CancelToolDraft,
     RunJob,
     OperationTabChanged(OperationTab),
@@ -2477,6 +2469,8 @@ enum Message {
     SetPaneMin(Pane, f32),
     /// Workpiece-origin marker size, as a multiple of the shipped size.
     SetOriginMarker(f32),
+    /// Stock surface RGB channel, in the range 0–1.
+    SetStockColor(usize, f32),
     /// Put every preference back to its shipped value.
     RestoreDefaults,
     PaneResized(pane_grid::ResizeEvent),
@@ -2544,7 +2538,7 @@ enum Message {
     /// Clears any tool already picked, since it belongs to the previous family.
     SetPendingFamily(ToolKindPick),
     SetPendingLibraryTool(usize),
-    /// Select a library tool for editing in the Tooling-tab library editor.
+    /// Select a library tool for editing in the Tools-tab library editor.
     SelectLibraryTool(usize),
     /// Open the right-click context menu for operation `id` (anchored under the
     /// cursor), and select that operation.
@@ -3151,7 +3145,7 @@ impl App {
                 Message::OpenSample
                     | Message::Undo
                     | Message::Redo
-                    | Message::SelectRibbonTab(RibbonTab::Tooling | RibbonTab::Machinery)
+                    | Message::SelectRibbonTab(RibbonTab::Tools | RibbonTab::Machinery)
                     | Message::Select(_)
                     | Message::SelectSetup(_)
                     | Message::EditSetup(_)
@@ -3249,7 +3243,6 @@ impl App {
                     self.rerun();
                 }
             }
-            Message::WorkspaceChanged(workspace) => self.switch_workspace(workspace),
             Message::CancelToolDraft => {
                 self.reload_tool_edit();
                 self.status = "Tool changes cancelled.".into();
@@ -3836,7 +3829,7 @@ impl App {
             }
             Message::FieldChanged(field, value) => {
                 self.fields.insert(field, value);
-                // In the Tooling editor, every field edit flows into the working copy so
+                // In the Tools editor, every field edit flows into the working copy so
                 // the viewport previews it instantly (no Apply needed); the length trio
                 // also refreshes its derived buffers. Apply then commits the working copy.
                 if self.library_mode() {
@@ -5056,6 +5049,11 @@ impl App {
                 let (lo, hi) = crate::ORIGIN_MARKER_RANGE;
                 self.settings.view.origin_marker_scale = v.clamp(lo, hi);
             }
+            Message::SetStockColor(channel, value) => {
+                if let Some(component) = self.settings.view.stock_color.get_mut(channel) {
+                    *component = value.clamp(0.0, 1.0);
+                }
+            }
             Message::SetPaneMin(pane, v) => {
                 let (lo, hi) = crate::PANE_MIN_RANGE;
                 let v = v.clamp(lo, hi);
@@ -5112,7 +5110,7 @@ impl App {
             }
             Message::ToolKindChanged(kind) => {
                 // Route to whichever tool the inspector is editing: the library
-                // entry (Tooling tab) or the selected setup tool. Switching kind
+                // entry (Tools tab) or the selected setup tool. Switching kind
                 // resets its parameters to the new kind's defaults.
                 // Straight flute only applies to a Square End Mill; changing to any other
                 // kind falls back to a down-cut.
@@ -5542,7 +5540,7 @@ impl App {
                 self.tree_pointer_moved(p);
             }
             Message::SelectRibbonTab(tab) => {
-                let target = if tab == RibbonTab::Tooling {
+                let target = if tab == RibbonTab::Tools {
                     Workspace::Tools
                 } else {
                     Workspace::Machining
@@ -5790,6 +5788,7 @@ impl App {
             crate::ViewPrefs {
                 show_stock: self.show_stock,
                 transparent_stock: self.settings.view.transparent_stock,
+                stock_color: self.settings.view.stock_color,
                 show_gizmo: self.show_gizmo,
                 show_origin: self.show_origin,
                 show_envelope: self.show_envelope,
@@ -5909,7 +5908,7 @@ impl App {
 
     /// Seed the wizard's editable cutting-data buffers (RPM / feed / plunge) from the
     /// pending operation's chosen tool nominals. A no-op unless a tool is set.
-    /// Reset the Tooling working copy to the committed library tool — the clean baseline
+    /// Reset the Tools working copy to the committed library tool — the clean baseline
     /// the dirty check (and thus the Apply button) compares against — and reload the
     /// field buffers from it. Called at every "load" point (tool selection, New, Delete,
     /// tab switch, post-Apply), but *not* on an in-place field/picker edit.
@@ -5947,7 +5946,7 @@ impl App {
         }
     }
 
-    /// Whether the Inspector is in tool-library editing mode (driven by the Tooling
+    /// Whether the Inspector is in tool-library editing mode (driven by the Tools
     /// ribbon tab, independent of the project selection).
     fn library_mode(&self) -> bool {
         self.workspace == Workspace::Tools
@@ -6083,7 +6082,7 @@ impl App {
         }
     }
 
-    /// Kind-aware tooltip for a Tooling-inspector field — the same field means different
+    /// Kind-aware tooltip for a Tools-inspector field — the same field means different
     /// things across tool kinds (a V-bit's `ToolDiameter` is its shaft, a face mill's is
     /// the cutting disc, …), so the help matches the (kind-aware) label. Non-tool fields,
     /// and kinds where the generic wording already fits, fall back to `field.help()`.
@@ -6349,7 +6348,7 @@ impl App {
     }
 
     /// The tool whose cross-section the viewport should preview (Phase 5): the selected
-    /// library tool while the Tooling tab is active, else a selected project tool. `None`
+    /// library tool while the Tools tab is active, else a selected project tool. `None`
     /// ⇒ show the normal 3D backplot.
     fn preview_tool(&self) -> Option<cam_model::Tool> {
         if self.library_mode() {
@@ -6365,8 +6364,8 @@ impl App {
         }
     }
 
-    /// Whether the Tooling inspector has uncommitted edits — the working copy differs
-    /// from the committed library entry. Outside Tooling mode there is no working copy,
+    /// Whether the Tools inspector has uncommitted edits — the working copy differs
+    /// from the committed library entry. Outside Tools mode there is no working copy,
     /// so the Apply button keeps its usual (validity-only) gating.
     fn inspector_dirty(&self) -> bool {
         if self.machine_edit_dirty() {
@@ -6393,7 +6392,7 @@ impl App {
                     }
                 }
             }
-            // Same promise the Tooling editor makes, everywhere else: Apply is live only
+            // Same promise the Tools editor makes, everywhere else: Apply is live only
             // when something is actually pending. The buffers are seeded from the model
             // by `refresh_fields`, so an untouched inspector compares equal all the way
             // down and the button stays grey — which is what tells the operator, at a
@@ -7096,6 +7095,34 @@ impl App {
         ]
         .spacing(6);
 
+        let [r, g, b] = self.settings.view.stock_color;
+        let swatch =
+            container(Space::new().width(28).height(22)).style(move |_| container::Style {
+                background: Some(Background::Color(Color::from_rgb(r, g, b))),
+                ..Default::default()
+            });
+        let mut stock = column![row![heading("Stock color"), swatch]
+            .spacing(12)
+            .align_y(Alignment::Center)]
+        .spacing(6);
+        for (channel, label) in ["Red", "Green", "Blue"].into_iter().enumerate() {
+            let value = self.settings.view.stock_color[channel];
+            stock = stock.push(
+                row![
+                    text(label).size(12).width(150),
+                    slider(0.0..=1.0, value, move |v| Message::SetStockColor(
+                        channel, v
+                    ))
+                    .step(1.0 / 255.0_f32)
+                    .on_release(Message::SettingsSettled)
+                    .width(190),
+                    text(format!("{:.0}", value * 255.0)).size(12).width(64),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        }
+
         let p = &self.settings.panes;
         let pane_row = |pane: Pane, value: f32| -> Element<'_, Message> {
             // Project / Library / Viewport / Inspector are docked left, centre and
@@ -7164,8 +7191,7 @@ impl App {
                      you change them."
                         .to_string()
                 ),
-                snapping,
-                panes,
+                scrollable(column![snapping, stock, panes].spacing(12)).height(Length::Shrink),
                 row![
                     // Left, away from Close: it is destructive, and the two should not
                     // be adjacent when one of them is the escape from an unusable layout.
@@ -7179,6 +7205,7 @@ impl App {
             .padding(4),
         )
         .width(520)
+        .max_height((self.window.height - 40.0).max(200.0))
         .padding(16)
         .style(|theme: &iced::Theme| container::Style {
             background: Some(Background::Color(
@@ -7499,7 +7526,7 @@ impl App {
                 .on_press(Message::SelectRibbonTab(tab))
                 .style(move |_theme, status| tab_button_style(active, status))
         };
-        let mut tabs = row![self.workspace_picker()].spacing(6);
+        let mut tabs = row![].spacing(6);
         for tab in RibbonTab::ALL {
             tabs = tabs.push(tab_btn(tab));
         }
@@ -7599,7 +7626,7 @@ impl App {
                     ],
                 },
             ],
-            RibbonTab::Operations => vec![GroupSpec {
+            RibbonTab::Machining => vec![GroupSpec {
                 title: "Create",
                 // Roughly the order a part is actually made: skim the blank flat,
                 // then cut its shape, then the features, then the decoration.
@@ -7614,7 +7641,6 @@ impl App {
                     cmd(Icon::Carve, "Carve", begin(OpKind::Carve)),
                 ],
             }],
-            RibbonTab::Edit => vec![],
             RibbonTab::Machinery => vec![GroupSpec {
                 title: "Machines",
                 commands: vec![
@@ -7639,7 +7665,7 @@ impl App {
                     ),
                 ],
             }],
-            RibbonTab::Tooling => vec![
+            RibbonTab::Tools => vec![
                 GroupSpec {
                     title: "Library",
                     commands: vec![
@@ -7999,9 +8025,9 @@ impl App {
 
     /// The **Tool Library pane** — a selectable list of every library tool, in one of
     /// two internal tabs: **Serial** (by number) or **Family** (grouped by kind, sorted
-    /// by diameter). Substitutes for the Project pane on the Tooling tab; the selected
+    /// by diameter). Substitutes for the Project pane on the Tools tab; the selected
     /// tool's *fields* live in the Inspector (kept clean). New / Delete are on the
-    /// Tooling ribbon.
+    /// Tools ribbon.
     fn library_pane(&self) -> Element<'_, Message> {
         let tab = |label: &str, view: LibraryView| {
             let active = self.library_view == view;
@@ -8086,9 +8112,9 @@ impl App {
             .into()
     }
 
-    /// The Tooling-tab tool-library editor in the **Inspector**: just the selected
+    /// The Tools-tab tool-library editor in the **Inspector**: just the selected
     /// tool's editable fields (the list lives in the Tool Library pane). New / Delete
-    /// live on the Tooling ribbon tab.
+    /// live on the Tools ribbon tab.
     fn library_editor(&self) -> Element<'_, Message> {
         // Read the header from the working copy so ⌀/kind track the live edits, matching
         // the viewport preview (the committed list/pane updates on Apply).
@@ -9820,6 +9846,10 @@ impl Viewport {
             (true, _) => workspace_view::uncut_stock_mesh(controller),
             _ => (Vec::new(), Vec::new()),
         };
+        let [r, g, b] = prefs.view.stock_color;
+        for vertex in &mut mesh_vertices {
+            vertex.color = [r, g, b, 1.0];
+        }
         let (transparent_stock_vertices, transparent_stock_indices) =
             if prefs.view.transparent_stock {
                 for vertex in &mut mesh_vertices {
@@ -12059,18 +12089,11 @@ mod ribbon_tests {
 
     #[test]
     fn tabs_read_left_to_right_in_workflow_order() {
-        // Home -> Edit -> Operations -> Tooling -> Machinery -> View: set up, then edit,
-        // then cut, then tools, then machines, then look. Windows is gone — its pane
-        // toggles live in View.
-        //
-        // **Machinery sits beside Tooling, not in Edit.** Both are *installation* scope:
-        // neither a machine nor the tool library is stored in a project, and a machine
-        // deliberately cannot be set by one (a file that could would disarm the travel
-        // check). Edit is the document — which is why Machine was in the wrong place.
+        // One tab per destination; workspace navigation is handled by these tabs.
         let labels: Vec<&str> = RibbonTab::ALL.iter().map(|t| t.label()).collect();
         assert_eq!(
             labels,
-            vec!["Home", "Edit", "Operations", "Tooling", "Machinery", "View"]
+            vec!["Home", "Machining", "Tools", "Machinery", "View"]
         );
     }
 

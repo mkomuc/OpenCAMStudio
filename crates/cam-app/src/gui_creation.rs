@@ -160,7 +160,7 @@ impl App {
             if tools.is_empty() {
                 col = col.push(
                     text(format!(
-                        "No {f} in the library — add one in the Tooling tab."
+                        "No {f} in the library — add one in the Tools tab."
                     ))
                     .size(12)
                     .color(palette::WARN),
