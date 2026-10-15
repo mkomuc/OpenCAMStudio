@@ -283,6 +283,9 @@ mod tests {
         );
         assert!(!app.controller.geometry_state().instances.is_empty());
         assert!(app.controller.cad_import_preview().is_none());
+        assert!(app.status.starts_with("Imported "));
+        assert!(app.notice.is_none(), "a clean STEP import needs no warning dialog");
+        assert!(app.notice_queue.is_empty());
         assert!(!app.setup_draft_dirty());
         assert!(app.controller.undo());
         assert_eq!(app.controller.document(), &before);

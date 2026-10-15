@@ -212,8 +212,8 @@ std::string translate(const char* path,double deflection,double precision) {
     }
     if(bodycount==0) throw std::runtime_error("STEP contains no solid bodies; surface-only models are not qualified");
     const std::string projection_json=projection_ok ? "{\"chord_tolerance\":0.0025,\"mesh\":{\"vertices\":"+projectionvertices.str()+",\"triangles\":"+projectiontriangles.str()+",\"triangle_faces\":"+projectionfaces.str()+"}}" : "null";
-    const std::string projection_warning=projection_issue.empty()?"":","+quote(projection_issue);
-    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":[\"Assemblies are flattened to placed solid instances; names, colours and external references are not qualified. STEP source tolerances are preserved; import precision is a fallback, not a tolerance clamp. No additional healing is applied.\""+projection_warning+"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"projection\":"+projection_json+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
+    const std::string projection_warning=projection_issue.empty()?"":quote(projection_issue);
+    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":["+projection_warning+"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"projection\":"+projection_json+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
 }
 }
 extern "C" char* cam_occt_step(const char* path,double display,double precision,char** error) noexcept {

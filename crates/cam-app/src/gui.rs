@@ -1913,10 +1913,8 @@ struct App {
     /// not a widget-local position — is what anchors the op context menu exactly
     /// under the cursor.
     window_cursor: iced::Point,
-    /// Operations whose toolpath is highlighted (vivid) in the viewport while all
-    /// others are dimmed. A *set* so several ops can be lit at once — this is the
-    /// viewport highlight, kept distinct from the single-item `Selection` (which
-    /// drives the inspector). Empty = show every operation at full colour.
+    /// Selected operations whose toolpaths are visible. Empty hides all toolpaths.
+    /// Editor focus is separate: selection alone never opens the inspector.
     focus_ops: BTreeSet<u32>,
     /// Live keyboard modifiers (from a global subscription), so an op click can
     /// tell a plain click (single focus) from ⌘/Ctrl-click (add/remove from set).
@@ -2488,6 +2486,7 @@ enum Message {
     SetOriginMarker(f32),
     /// Stock surface RGB channel, in the range 0–1.
     SetStockColor(usize, f32),
+    SetSimulationAccuracy(f32),
     /// Put every preference back to its shipped value.
     RestoreDefaults,
     PaneResized(pane_grid::ResizeEvent),
@@ -3007,7 +3006,7 @@ impl App {
             expanded_operations: BTreeSet::new(),
             tools_expanded: false,
             hidden_assets: BTreeSet::new(),
-            model_view: None,
+            model_view: Some(TreeNode::Models),
             hidden_setups: BTreeSet::new(),
             hidden_ops: BTreeSet::new(),
             panes: initial_panes(),
@@ -3097,6 +3096,8 @@ impl App {
         if let Some(project) = app.pane_handle(Pane::Project) {
             app.panes.close(project);
         }
+        app.controller
+            .set_simulation_accuracy(app.settings.simulation.accuracy);
         app.controller.select(Selection::Setup);
         app.refresh_fields();
         app.sync_inspector_visibility();
@@ -3260,6 +3261,8 @@ impl App {
                 | Message::SetupDelete(_)
         ) {
             self.model_view = None;
+            self.simulation = None;
+            self.pending_simulation = None;
         }
         // Any action other than opening a group-popup closes the open one (so a
         // command picked from a popup, or a click elsewhere, dismisses it).
@@ -3415,7 +3418,6 @@ impl App {
             Message::OpenSample => match self.controller.open_dxf(SAMPLE_DXF, "sample.dxf") {
                 Ok(n) => {
                     self.reset_model_browser();
-                    self.model_view = None;
                     self.planar_selection.clear();
                     self.focus_ops.clear();
                     self.controller.select(Selection::Setup);
@@ -3780,9 +3782,7 @@ impl App {
                 } else {
                     self.operation_draft = None;
                 }
-                // Keep the viewport highlight in step: a single operation focuses
-                // just it; any non-operation node (Setup/Stock/Tool) clears the
-                // highlight so everything shows vivid again.
+                // Explicit Edit commands select the operation and open its editor.
                 self.focus_ops.clear();
                 if let Selection::Operation(id) = selection {
                     self.focus_ops.insert(id);
@@ -3809,9 +3809,8 @@ impl App {
                     self.focus_ops.clear();
                     self.focus_ops.insert(id);
                 }
-                // The inspector tracks the clicked op if it stays focused, else any
-                // remaining focused op, else the setup (so edits don't target a
-                // path that is no longer highlighted).
+                // Keep the primary selection in the visible set. The controller's
+                // setup fallback represents an empty browser selection below.
                 let sel = if self.focus_ops.contains(&id) {
                     Selection::Operation(id)
                 } else if let Some(&other) = self.focus_ops.iter().next_back() {
@@ -3820,11 +3819,13 @@ impl App {
                     Selection::Setup
                 };
                 self.controller.select(sel);
-                if let Selection::Operation(op_id) = sel {
-                    self.begin_operation_draft(op_id);
-                } else {
-                    self.operation_draft = None;
-                    self.end_setup_draft();
+                self.end_setup_draft();
+                self.operation_draft = None;
+                self.operation_tools.clear();
+                self.operation_geometry = None;
+                self.operation_binding_preview = None;
+                if self.focus_ops.is_empty() {
+                    self.model_view = Some(TreeNode::Models);
                 }
                 self.refresh_fields();
             }
@@ -4144,7 +4145,8 @@ impl App {
                         match SimulationPlayer::new(&self.controller) {
                             Ok(player) => {
                                 self.simulation = Some(player);
-                                self.status = "Simulation ready. Press Play or drag the timeline.".into();
+                                self.status =
+                                    "Simulation ready. Press Play or drag the timeline.".into();
                             }
                             Err(error) => self.status = error,
                         }
@@ -4216,8 +4218,7 @@ impl App {
                         && !self.setup_draft_dirty()
                         && !self.inspector_dirty()
                     {
-                        self.end_setup_draft();
-                        self.focus_ops.clear();
+                        self.clear_browser_selection();
                     }
                 }
                 if self.setup_axis_pick.is_none() {
@@ -4290,6 +4291,9 @@ impl App {
                 self.cad_candidates.clear();
                 self.controller.set_cad_selection(vec![]);
                 self.controller.cancel_operation();
+                if self.setup_draft.is_none() && !self.inspector_active {
+                    self.clear_browser_selection();
+                }
             }
             Message::ConfirmCadOperation => {
                 if self.creating_operation() {
@@ -4373,7 +4377,10 @@ impl App {
                     .duplicate_operation_groups()
                     .into_iter()
                     .map(|group| {
-                        group.into_iter().filter(|id| included.contains(id)).collect::<Vec<_>>()
+                        group
+                            .into_iter()
+                            .filter(|id| included.contains(id))
+                            .collect::<Vec<_>>()
                     })
                     .filter(|group| group.len() > 1)
                     .collect();
@@ -4747,8 +4754,7 @@ impl App {
                                 .into();
                         return iced::Task::none();
                     }
-                    self.end_setup_draft();
-                    self.focus_ops.clear();
+                    self.clear_browser_selection();
                     let Some((feature, _)) = self
                         .controller
                         .nearest_drawing_feature(w.map(f64::from), aperture as f64)
@@ -5108,7 +5114,15 @@ impl App {
                 // decision. `SettingsSettled` fires on release.
                 self.gizmo_size = v.clamp(GIZMO_SIZE_MIN, GIZMO_SIZE_MAX)
             }
-            Message::SettingsSettled => self.remember(),
+            Message::SettingsSettled => {
+                if self
+                    .controller
+                    .set_simulation_accuracy(self.settings.simulation.accuracy)
+                {
+                    self.rerun();
+                }
+                self.remember();
+            }
             Message::ActiveMachineChanged(name) => {
                 if let Some(entry) = self.machines.by_name(&name).cloned() {
                     // A pending edit belongs to the machine it was typed on; carrying it
@@ -5170,6 +5184,10 @@ impl App {
                 let (lo, hi) = crate::ORIGIN_MARKER_RANGE;
                 self.settings.view.origin_marker_scale = v.clamp(lo, hi);
             }
+            Message::SetSimulationAccuracy(value) => {
+                let (lo, hi) = crate::SIMULATION_ACCURACY_RANGE;
+                self.settings.simulation.accuracy = value.clamp(lo, hi);
+            }
             Message::SetStockColor(channel, value) => {
                 if let Some(component) = self.settings.view.stock_color.get_mut(channel) {
                     *component = value.clamp(0.0, 1.0);
@@ -5208,6 +5226,12 @@ impl App {
                 self.inspector_px = s.panes.inspector_px;
                 self.output_px = s.panes.output_px;
                 self.apply_fixed_layout();
+                if self
+                    .controller
+                    .set_simulation_accuracy(self.settings.simulation.accuracy)
+                {
+                    self.rerun();
+                }
                 self.settings.save();
                 self.status = "Preferences restored to defaults.".to_string();
             }
@@ -5644,10 +5668,17 @@ impl App {
             }
             Message::RenumberConfirmed(false) => {}
             Message::OpMenu(id) => {
+                self.simulation = None;
+                self.pending_simulation = None;
                 self.controller.select(Selection::Operation(id));
                 self.focus_ops.clear();
                 self.focus_ops.insert(id);
-                self.begin_operation_draft(id);
+                self.end_setup_draft();
+                self.operation_draft = None;
+                self.operation_tools.clear();
+                self.operation_geometry = None;
+                self.operation_binding_preview = None;
+                self.model_view = None;
                 self.refresh_fields();
                 self.open_op_menu = Some(id);
                 self.op_menu_pos = self.window_cursor;
@@ -5693,8 +5724,13 @@ impl App {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::batch([
-            if self.simulation.as_ref().is_some_and(SimulationPlayer::needs_tick) {
-                iced::time::every(std::time::Duration::from_millis(33)).map(|_| Message::SimulationTick)
+            if self
+                .simulation
+                .as_ref()
+                .is_some_and(SimulationPlayer::needs_tick)
+            {
+                iced::time::every(std::time::Duration::from_millis(33))
+                    .map(|_| Message::SimulationTick)
             } else {
                 iced::Subscription::none()
             },
@@ -7269,6 +7305,19 @@ impl App {
             );
         }
 
+        let simulation = column![
+            heading("Stock cut simulation"),
+            row_for(
+                "Accuracy",
+                crate::SIMULATION_ACCURACY_RANGE,
+                self.settings.simulation.accuracy,
+                0.25,
+                format!("{:.2}×", self.settings.simulation.accuracy),
+                Message::SetSimulationAccuracy,
+            ),
+            note("Higher accuracy resolves finer cuts and uses more time and memory. Rebuilds the simulation when released; also applies to playback.".into()),
+        ].spacing(6);
+
         let p = &self.settings.panes;
         let pane_row = |pane: Pane, value: f32| -> Element<'_, Message> {
             // Project / Library / Viewport / Inspector are docked left, centre and
@@ -7337,7 +7386,8 @@ impl App {
                      you change them."
                         .to_string()
                 ),
-                scrollable(column![snapping, stock, panes].spacing(12)).height(Length::Shrink),
+                scrollable(column![snapping, stock, simulation, panes].spacing(12))
+                    .height(Length::Shrink),
                 row![
                     // Left, away from Close: it is destructive, and the two should not
                     // be adjacent when one of them is the escape from an unusable layout.
@@ -8123,7 +8173,9 @@ impl App {
         match self.controller.toggle_cad_selection(entity, additive) {
             Ok(()) => {
                 if !self.creating_operation() && self.cad_editing_op.is_none() {
-                    self.end_setup_draft();
+                    let selected = self.controller.cad_selection().to_vec();
+                    self.clear_browser_selection();
+                    self.controller.set_cad_selection(selected);
                 }
                 self.focus_ops.clear();
                 self.status = format!(
@@ -9830,17 +9882,22 @@ impl Viewport {
                 scene
             }
         };
-        if !hidden_ops.is_empty() {
-            scene
-                .strips
-                .retain(|strip| strip.op.is_none_or(|id| !hidden_ops.contains(&id)));
-        }
+        scene.strips.retain(|strip| {
+            strip
+                .op
+                .is_none_or(|id| focus_ops.contains(&id) && !hidden_ops.contains(&id))
+        });
         // Drilling annotations from the backplot (peck rings + dwell bars), once a
         // run has produced a program. Anchors only — sized to the screen at draw.
         let drill_marks = outcome
             .map(|o| {
                 let frame = &controller.document().setup().frame;
-                drill_marks_of(&o.program)
+                let visible_drills = Program {
+                    steps: o.program.steps.iter().filter(|step| {
+                        matches!(step, Step::Drill(c) if focus_ops.contains(&c.tag.op_id) && !hidden_ops.contains(&c.tag.op_id))
+                    }).cloned().collect(),
+                };
+                drill_marks_of(&visible_drills)
                     .into_iter()
                     .map(|mut mark| {
                         mark.at = frame
@@ -9860,7 +9917,10 @@ impl Viewport {
             &controller.document().setup().frame,
         );
         let bounds = union_bounds(
-            controller.outcome().and_then(|outcome| outcome.scene.bounds()).or_else(|| scene.bounds()),
+            controller
+                .outcome()
+                .and_then(|outcome| outcome.scene.bounds())
+                .or_else(|| scene.bounds()),
             cad_scene.bounds(),
         );
         let mut cad_selected = controller.cad_selection().to_vec();
@@ -9991,13 +10051,15 @@ impl Viewport {
                 pick_z,
             );
         }
-        // When one or more operations are focused, dim every *other* operation's
-        // toolpath so the focused ones stand out — vital when a part has dozens of
-        // ops. An empty focus set leaves everything vivid.
-        scene.focus_operations(focus_ops);
-        // Before a run show the uncut setup box; afterwards use remaining stock.
+        // Setup selection shows its configured, uncut stock. Operation selection
+        // and playback show the remaining material from the simulation.
         // Transparent stock is drawn separately after the opaque CAD surfaces.
-        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, outcome) {
+        let stock_outcome = if controller.selection() == Selection::Setup && preview.is_none() {
+            None
+        } else {
+            outcome
+        };
+        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_outcome) {
             (true, Some(outcome))
                 if outcome.completion == JobCompletion::Complete
                     || !outcome.stock_indices.is_empty() =>
@@ -10011,8 +10073,12 @@ impl Viewport {
             _ => (Vec::new(), Vec::new()),
         };
         let [r, g, b] = prefs.view.stock_color;
-        for vertex in &mut mesh_vertices {
-            vertex.color = [r, g, b, 1.0];
+        for (index, vertex) in mesh_vertices.iter_mut().enumerate() {
+            if stock_outcome
+                .is_some_and(|outcome| outcome.stock_machined.get(index).copied().unwrap_or(false))
+            {
+                vertex.color = [r, g, b, 1.0];
+            }
         }
         let (transparent_stock_vertices, transparent_stock_indices) =
             if prefs.view.transparent_stock {

@@ -549,13 +549,17 @@ things worth eyeballing:
   keeps its dragged size. Separators are visible. **View → Panes** hides/shows
   Project / Tools / Inspector / Output but never the Viewport.
 - **Project tree:** rows read as a tree (plain text, selected row highlighted —
-  not blue buttons). **Right-click a setup or operation** → Recompute toolpath /
-  Simulate toolpath / Post process and export at the top of the menu. A setup
+  not blue buttons). Selecting an operation shows only its toolpath; Ctrl/Command
+  adds or removes operations from that visible set. Selection leaves the Inspector
+  closed. Selecting a setup shows its configured model and uncut stock. Click empty
+  viewport space or deselect the row to return to the model alone.
+  **Right-click a setup or operation** → Edit is first, followed by Recompute toolpath /
+  Simulate toolpath / Post process and export. Edit opens the Inspector. A setup
   processes all included operations; an operation processes only itself. Recompute
   forces fresh generation. Simulate opens a player below the viewport: Play/Pause,
   a 0.25×–10× speed slider, elapsed/total time and a timeline that can be scrubbed
   in either direction. Confirm rewinding restores stock and playing at the end
-  restarts. Closing simulation returns to the complete verified backplot. Post
+  restarts. Closing simulation returns to the selected operations' verified backplot. Post
   process and export generates the selected scope before offering a save location.
   Existing Delete / Duplicate / Reinitialize commands remain below; clicking off
   dismisses the menu. The include checkbox
@@ -616,6 +620,12 @@ things worth eyeballing:
 - **Viewport:** left-drag orbits (turntable, all the way to the underside), right-
   drag pans, wheel zooms; the orientation cube tracks the view and its faces snap.
   With **Show stock** on, the solid occludes itself while the toolpath stays on top.
+  Original stock surfaces are grey. Simulation exposes cut floors, walls and
+  slopes in the configured stock colour (green by default); rewinding restores
+  the grey stock. Transparency applies to both colours. Preferences → Stock cut
+  simulation → Accuracy adjusts grid density from 0.25× to 2×; higher values resolve
+  smaller cuts and use more time and memory. Releasing the slider rebuilds the
+  simulation. The saved setting also controls playback quality, within the cell budget.
 
 ## Notes
 

@@ -2,17 +2,18 @@
 use super::*;
 impl JobInputs {
     /// Simulate material removal for `program`: triangulate the remaining stock
-    /// into render-ready vertices + indices, and return any collisions found.
+    /// into render-ready vertices, indices and a machined-surface mask, and
+    /// return any collisions found.
     /// Empty when there is no stock (no geometry loaded).
     pub(super) fn simulate_stock(
         &self,
         program: &Program,
         cancel: &CancelToken,
         progress: &Progress,
-    ) -> (Vec<MeshVertex>, Vec<u32>, Vec<Collision>) {
+    ) -> (Vec<MeshVertex>, Vec<u32>, Vec<bool>, Vec<Collision>) {
         let (min, max) = (self.min, self.max);
         if min[0] >= max[0] || min[1] >= max[1] {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
         let setup_tools = &self.document.setup().tools;
         let tool_diameter = setup_tools
@@ -28,29 +29,14 @@ impl JobInputs {
                 profile: sim_profile(t),
             })
             .collect();
-        // Aim for ~300 cells across the larger side, bounded so a big part stays
-        // cheap and a small one stays crisp. (A modest, 2.5D-cosmetic bump from
-        // 200 to sharpen curved-feature silhouettes; dial back if a rerun lags.)
         let span = (max[0] - min[0]).max(max[1] - min[1]);
-        // …but a part-sized grid can be blind to a *narrow* feature: an engraved
-        // V-groove is often under a millimetre wide, so at the span-derived cell size
-        // it would simply not appear and the backplot would read as a failed
-        // toolpath. Refine until the narrowest cut spans a few cells, capped by a
-        // cell budget so refining never turns a preview into a hang.
         let feature = narrowest_cut_width(program, setup_tools, max[2]);
-        // Playback rebuilds stock when seeking in either direction. Use a
-        // bounded preview grid so its frames remain responsive; the verified
-        // outcome keeps the full-resolution simulation used for export.
-        let playback = self.preview_program.is_some();
-        let by_span = span / if playback { 120.0 } else { 300.0 };
-        let by_feature = feature / 3.0;
-        let budget = span
-            / if playback {
-                240.0
-            } else {
-                MAX_SIM_CELLS_ACROSS
-            };
-        let resolution = by_span.min(by_feature).max(budget).clamp(0.02, 2.0);
+        let resolution = simulation_resolution(
+            span,
+            feature,
+            self.simulation_accuracy,
+            self.preview_program.is_some(),
+        );
         let Some(sim) = cam_sim::simulate_controlled(
             program,
             min,
@@ -63,7 +49,7 @@ impl JobInputs {
             &|| cancel.is_cancelled(),
             |done, total| progress.set(JobPhase::Verification, done, total, None),
         ) else {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         };
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         // Render the stock as a watertight solid down to its floor, so the full
@@ -72,12 +58,12 @@ impl JobInputs {
             .field
             .to_solid_mesh_controlled(min[2], &|| cancel.is_cancelled())
         else {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         };
         let mut vertices = mesh_vertices(&surface.positions, &surface.normals);
         for vertex in &mut vertices {
             if cancel.is_cancelled() {
-                return (Vec::new(), Vec::new(), Vec::new());
+                return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             }
             vertex.position = self
                 .document
@@ -92,6 +78,41 @@ impl JobInputs {
                 .to_world_vector(vertex.normal.map(f64::from))
                 .map(|n| n as f32);
         }
-        (vertices, surface.indices, sim.collisions)
+        (vertices, surface.indices, surface.machined, sim.collisions)
+    }
+}
+
+/// Refine both the part-sized grid and narrow-feature sampling with the user's
+/// quality setting. Playback uses a smaller grid; all settings retain the hard
+/// cell budget so tiny grooves on large stock cannot exhaust memory.
+fn simulation_resolution(span: f64, feature: f64, accuracy: f32, playback: bool) -> f64 {
+    let accuracy = f64::from(crate::settings::clamp_simulation_accuracy(accuracy));
+    let by_span = span / (if playback { 120.0 } else { 300.0 } * accuracy);
+    let by_feature = feature / (3.0 * accuracy);
+    let cells = if playback {
+        240.0 * accuracy
+    } else {
+        MAX_SIM_CELLS_ACROSS
+    };
+    let budget = span / cells;
+    by_span.min(by_feature).clamp(0.02, 2.0).max(budget)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accuracy_refines_stock_and_playback_within_the_cell_budget() {
+        for playback in [false, true] {
+            let coarse = simulation_resolution(100., 5., 0.5, playback);
+            let normal = simulation_resolution(100., 5., 1., playback);
+            let fine = simulation_resolution(100., 5., 2., playback);
+            assert!(coarse > normal && normal > fine);
+            let narrow = simulation_resolution(100., 0.001, 2., playback);
+            assert!(100. / narrow <= MAX_SIM_CELLS_ACROSS);
+            let large = simulation_resolution(10_000., 0.001, 2., playback);
+            assert!(10_000. / large <= MAX_SIM_CELLS_ACROSS);
+        }
     }
 }

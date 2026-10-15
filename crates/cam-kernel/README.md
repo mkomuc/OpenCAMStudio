@@ -22,6 +22,9 @@ translator using the STEP file's declared uncertainty. The import precision is a
 fallback for files without uncertainty; it does not clamp source tolerances.
 Forcing a finer precision can falsely invalidate otherwise valid spline joins.
 Solid validation and the independent machining eligibility checks still apply.
+These are normal importer capabilities, documented here rather than reported as
+warnings on every successful import. Import warnings describe file-specific
+problems, such as unavailable XY silhouettes after projection meshing fails.
 Saved source bytes plus the versioned exact subset snapshot support reopening
 without the original file.
 The snapshot preserves the supported machining subset, not arbitrary native B-rep;

@@ -9,6 +9,18 @@ impl AppController {
         self.document_epoch
     }
 
+    /// Change simulation quality without modifying the machining document or history.
+    /// Cancel old work so a result with the previous grid cannot publish afterwards.
+    pub fn set_simulation_accuracy(&mut self, value: f32) -> bool {
+        let value = crate::settings::clamp_simulation_accuracy(value);
+        if self.simulation_accuracy == value {
+            return false;
+        }
+        self.simulation_accuracy = value;
+        self.cancel_run();
+        true
+    }
+
     pub(crate) fn job_inputs(&self) -> JobInputs {
         let mut document = self.document().clone();
         let excluded = document.excluded_operations.clone();
@@ -40,6 +52,7 @@ impl AppController {
             tool_diameter: self.defaults.tool_diameter,
             frame_error: self.validate_setup_frame(self.setup()).err(),
             preview_program: None,
+            simulation_accuracy: self.simulation_accuracy,
         }
     }
     /// Generation, verification and mesh preparation run in the bounded worker lane.
@@ -101,6 +114,7 @@ impl AppController {
             &inputs.machine,
             inputs.spindle_rpm,
             inputs.tool_diameter,
+            inputs.simulation_accuracy,
             inputs.min,
             inputs.max,
             self.post_kind,
@@ -206,6 +220,26 @@ mod tests {
         }));
         (receiver, release)
     }
+    #[test]
+    fn simulation_accuracy_changes_worker_inputs_without_editing_the_project() {
+        let mut app = app();
+        let document = app.document().clone();
+        let revision = app.revision();
+        assert!(!app.set_simulation_accuracy(1.0));
+        assert!(app.set_simulation_accuracy(2.0));
+        assert_eq!(app.job_inputs().simulation_accuracy, 2.0);
+        assert_eq!(app.document(), &document);
+        assert_eq!(app.revision(), revision);
+        app.start_run();
+        assert!(app.set_simulation_accuracy(0.5));
+        drain(&mut app);
+        assert!(
+            app.outcome().is_none(),
+            "a previous-quality result cannot publish"
+        );
+        assert_eq!(app.job_inputs().simulation_accuracy, 0.5);
+    }
+
     #[test]
     fn context_jobs_scope_generation_export_and_forced_recompute() {
         let mut app = app();

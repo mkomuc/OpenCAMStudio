@@ -92,6 +92,7 @@ pub struct Settings {
     pub view: ViewPrefs,
     pub snapping: SnapPrefs,
     pub panes: PanePrefs,
+    pub simulation: SimulationPrefs,
     pub session: SessionState,
     /// Keys this build does not know about, carried through a save untouched.
     ///
@@ -126,6 +127,32 @@ pub struct ViewPrefs {
     pub origin_marker_scale: f32,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Material-removal grid quality, independent of toolpath tolerances.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SimulationPrefs {
+    /// Linear grid density relative to the default; cost grows approximately squared.
+    pub accuracy: f32,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for SimulationPrefs {
+    fn default() -> Self {
+        Self {
+            accuracy: 1.0,
+            extra: Default::default(),
+        }
+    }
+}
+
+/// Stock simulation grid density multiplier.
+pub const SIMULATION_ACCURACY_RANGE: (f32, f32) = (0.25, 2.0);
+
+pub(crate) fn clamp_simulation_accuracy(value: f32) -> f32 {
+    clamp(value, SIMULATION_ACCURACY_RANGE, 1.0)
 }
 
 /// Picking and object-snap tolerances.
@@ -283,6 +310,7 @@ impl Default for Settings {
             view: ViewPrefs::default(),
             snapping: SnapPrefs::default(),
             panes: PanePrefs::default(),
+            simulation: SimulationPrefs::default(),
             session: SessionState::default(),
             extra: Default::default(),
         }
@@ -325,6 +353,7 @@ impl Settings {
     /// propagating through every comparison as a silent false.
     pub fn clamp_all(&mut self) {
         let d = Settings::default();
+        self.simulation.accuracy = clamp_simulation_accuracy(self.simulation.accuracy);
         let v = &mut self.view;
         for (channel, fallback) in v.stock_color.iter_mut().zip(d.view.stock_color) {
             *channel = clamp(*channel, (0.0, 1.0), fallback);
@@ -544,6 +573,26 @@ mod tests {
         let text = serde_json::to_string_pretty(&d).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(d, back);
+    }
+
+    #[test]
+    fn simulation_accuracy_defaults_persists_and_clamps() {
+        let old: Settings = serde_json::from_str(r#"{"view":{"show_stock":true}}"#).unwrap();
+        assert_eq!(old.simulation.accuracy, 1.0);
+        let scratch = Scratch::new("simulation-accuracy");
+        let path = scratch.file("settings.json");
+        for (input, expected) in [(0.25, 0.25), (2.0, 2.0), (0., 0.25), (100., 2.0)] {
+            let mut settings = old.clone();
+            settings.simulation.accuracy = input;
+            settings.save_to(&path).unwrap();
+            let (loaded, outcome) = load_from(&path);
+            assert_eq!(outcome, LoadOutcome::Loaded);
+            assert_eq!(loaded.simulation.accuracy, expected);
+        }
+        let mut settings = old;
+        settings.simulation.accuracy = f32::NAN;
+        settings.clamp_all();
+        assert_eq!(settings.simulation.accuracy, 1.0);
     }
 
     #[test]

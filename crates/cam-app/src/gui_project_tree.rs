@@ -33,6 +33,21 @@ pub(super) enum TreeMessage {
 }
 
 impl App {
+    pub(super) fn clear_browser_selection(&mut self) {
+        self.simulation = None;
+        self.pending_simulation = None;
+        self.end_setup_draft();
+        self.operation_draft = None;
+        self.operation_tools.clear();
+        self.operation_geometry = None;
+        self.operation_binding_preview = None;
+        self.controller.select(Selection::Setup);
+        self.controller.set_cad_selection(vec![]);
+        self.focus_ops.clear();
+        self.model_view = Some(TreeNode::Models);
+        self.refresh_fields();
+    }
+
     pub(super) fn cancel_tree_drag(&mut self) {
         self.tree_drag = None;
         self.tree_menu = None;
@@ -66,7 +81,18 @@ impl App {
 
     fn select_tree_node(&mut self, node: &TreeNode) -> iced::Task<Message> {
         match node {
-            TreeNode::Setup(id) => self.update(Message::SelectSetup(*id)),
+            TreeNode::Setup(id) => {
+                if self.model_view.is_none()
+                    && self.controller.selection() == Selection::Setup
+                    && self.controller.active_setup_id() == *id
+                    && self.setup_draft.is_none()
+                {
+                    self.clear_browser_selection();
+                    iced::Task::none()
+                } else {
+                    self.update(Message::SelectSetup(*id))
+                }
+            }
             TreeNode::Operation(id) => {
                 if let Some(owner) = self
                     .controller
@@ -84,6 +110,8 @@ impl App {
                 self.update(Message::ClickOp(*id))
             }
             _ => {
+                self.simulation = None;
+                self.pending_simulation = None;
                 self.end_setup_draft();
                 self.operation_draft = None;
                 self.controller.select(Selection::Setup);
@@ -243,9 +271,6 @@ impl App {
                         }
                         self.end_setup_draft();
                         self.operation_draft = None;
-                        if let Selection::Operation(id) = self.controller.selection() {
-                            self.begin_operation_draft(id);
-                        }
                         self.refresh_fields();
                         self.rerun();
                         self.status =
@@ -571,7 +596,15 @@ impl App {
                 .style(inspector_secondary)
         };
         let mut items = column![].spacing(2);
-        if matches!(node, TreeNode::Setup(_) | TreeNode::Operation(_)) {
+        if let Some((label, message)) = match node {
+            TreeNode::Setup(id) => Some(("Edit setup", Message::EditSetup(*id))),
+            TreeNode::Operation(id) => {
+                Some(("Edit operation", Message::Select(Selection::Operation(*id))))
+            }
+            _ => None,
+        } {
+            items = items.push(item(label.into(), message));
+            items = items.push(iced::widget::rule::horizontal(1));
             for (label, action) in [
                 ("Recompute toolpath", ToolpathAction::Recompute),
                 ("Simulate toolpath", ToolpathAction::Simulate),
@@ -589,19 +622,13 @@ impl App {
                 items = items.push(item("New setup".into(), Message::SetupNew));
             }
             TreeNode::Setup(id) => {
-                items = items
-                    .push(item("Edit setup".into(), Message::EditSetup(*id)))
-                    .push(item("Duplicate setup".into(), Message::SetupDuplicate(*id)));
+                items = items.push(item("Duplicate setup".into(), Message::SetupDuplicate(*id)));
                 if self.controller.setups().len() > 1 {
                     items = items.push(item("Delete setup".into(), Message::SetupDelete(*id)));
                 }
             }
             TreeNode::Operation(id) => {
                 items = items
-                    .push(item(
-                        "Edit operation".into(),
-                        Message::Select(Selection::Operation(*id)),
-                    ))
                     .push(item("Duplicate".into(), Message::DuplicateOp))
                     .push(item("Reinitialize".into(), Message::ReinitOp))
                     .push(item(
@@ -857,6 +884,35 @@ mod tests {
         while app.notice.is_some() {
             send(app, Message::NoticeDismissed);
         }
+    }
+
+    #[test]
+    fn operation_selection_and_context_menu_open_editor_only_on_edit() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.refresh_fields();
+        send(&mut app, Message::ClickOp(ids[0]));
+        assert_eq!(app.controller.selection(), Selection::Operation(ids[0]));
+        assert!(app.operation_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Open(TreeNode::Operation(ids[1]))),
+        );
+        assert_eq!(app.controller.selection(), Selection::Operation(ids[1]));
+        assert!(app.operation_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Command(Box::new(Message::Select(
+                Selection::Operation(ids[1]),
+            )))),
+        );
+        assert!(app.operation_draft.is_some());
+        assert!(app.pane_handle(Pane::Inspector).is_some());
+        send(&mut app, Message::ClickOp(ids[0]));
+        assert!(app.operation_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
     }
 
     #[test]

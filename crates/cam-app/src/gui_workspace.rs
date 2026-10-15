@@ -251,7 +251,7 @@ impl App {
             self.cad_hover.as_ref(),
             &cad_hidden,
             self.cad_select_through,
-            self.show_stock && !model_view,
+            (self.show_stock || self.controller.selection() == Selection::Setup) && !model_view,
             self.view,
             self.show_gizmo,
             self.gizmo_size,
@@ -537,6 +537,111 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selection_shows_only_selected_toolpaths_and_setup_shows_configured_stock() {
+        let mut app = picking_app();
+        app.end_setup_draft();
+        app.show_origin = false;
+        app.show_envelope = false;
+        app.show_stock = false;
+        let mut ids = Vec::new();
+        for x in [10., 25.] {
+            app.controller
+                .add_operation(Operation::Drill(cam_model::DrillOp {
+                    id: 0,
+                    tool: 1,
+                    points: vec![[x, 10.]],
+                    depth: 2.,
+                    start_offset: 0.,
+                    peck: Some(1.),
+                    dwell: Some(0.2),
+                    spindle_rpm: 1000.,
+                    work_offset: 1,
+                    feed: 100.,
+                }));
+            let Selection::Operation(id) = app.controller.selection() else {
+                panic!()
+            };
+            ids.push(id);
+        }
+        app.controller.run(&cam_toolpath::CancelToken::new());
+        assert_eq!(
+            app.controller.outcome().unwrap().completion,
+            JobCompletion::Complete
+        );
+        let scene = app.controller.outcome().unwrap().scene.clone();
+        let expected = |selected: &[u32]| {
+            let mut scene = scene.clone();
+            scene
+                .strips
+                .retain(|strip| strip.op.is_none_or(|id| selected.contains(&id)));
+            scene.line_vertices()
+        };
+        app.clear_browser_selection();
+        assert_eq!(app.machining_viewport().vertices.as_slice(), expected(&[]));
+        assert!(!app.machining_viewport().show_stock);
+        assert!(app.machining_viewport().drill_marks.is_empty());
+        assert!(app.machining_viewport().mesh_indices.is_empty());
+
+        let _ = app.update(Message::ClickOp(ids[0]));
+        assert_eq!(
+            app.machining_viewport().vertices.as_slice(),
+            expected(&ids[..1])
+        );
+        let first_marks = app.machining_viewport().drill_marks;
+        assert!(!first_marks.is_empty());
+        assert!(app.operation_draft.is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+
+        app.modifiers = iced::keyboard::Modifiers::COMMAND;
+        let _ = app.update(Message::ClickOp(ids[1]));
+        assert_eq!(app.machining_viewport().vertices.as_slice(), expected(&ids));
+        assert_eq!(
+            app.machining_viewport().drill_marks.len(),
+            first_marks.len() * 2
+        );
+        app.hidden_ops.insert(ids[0]);
+        assert_eq!(
+            app.machining_viewport().vertices.as_slice(),
+            expected(&ids[1..])
+        );
+        assert_eq!(
+            app.machining_viewport().drill_marks.len(),
+            first_marks.len()
+        );
+        app.hidden_ops.clear();
+        app.modifiers = iced::keyboard::Modifiers::default();
+        app.show_stock = true;
+        let _ = app.update(Message::CadPicked(vec![]));
+        assert_eq!(app.machining_viewport().vertices.as_slice(), expected(&[]));
+        assert!(!app.machining_viewport().show_stock);
+
+        let setup = app.controller.active_setup_id();
+        let _ = app.update(Message::SelectSetup(setup));
+        let viewport = app.machining_viewport();
+        let (vertices, indices) = uncut_stock_mesh(&app.controller);
+        assert!(
+            viewport.show_stock,
+            "setup selection exposes its stock even with the toggle off"
+        );
+        assert_eq!(viewport.mesh_indices.as_slice(), indices);
+        assert_eq!(viewport.mesh_vertices.as_slice(), vertices);
+        assert_eq!(viewport.vertices.as_slice(), expected(&[]));
+        assert!(viewport.drill_marks.is_empty());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+
+        let _ = app.update(Message::PickWorld([10., 0.], 1.));
+        assert!(
+            !app.machining_viewport().show_stock,
+            "drawing selection leaves only the model"
+        );
+        assert!(app.model_view.is_some());
+        let _ = app.update(Message::ClickOp(ids[0]));
+        let _ = app.update(Message::ClickOp(ids[0]));
+        assert_eq!(app.machining_viewport().vertices.as_slice(), expected(&[]));
+        assert!(!app.machining_viewport().show_stock);
+    }
+
+    #[test]
     fn stock_visibility_and_transparency_work_before_and_after_simulation() {
         let mut app = picking_app();
         app.setup_draft = None;
@@ -545,11 +650,10 @@ mod tests {
         let opaque = app.machining_viewport();
         assert_eq!(opaque.mesh_indices.len(), 36, "uncut stock before a run");
         assert!(opaque.transparent_stock_indices.is_empty());
-        let [r, g, b] = app.settings.view.stock_color;
         assert!(opaque
             .mesh_vertices
             .iter()
-            .all(|v| v.color == [r, g, b, 1.0]));
+            .all(|v| v.color == [0.55, 0.58, 0.63, 1.0]));
         let frame_bounds = opaque.frame_bounds;
         let drawing = opaque.vertices.clone();
 
@@ -561,7 +665,7 @@ mod tests {
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.8, 0.3, 0.1, 0.25]));
+            .all(|v| v.color == [0.55, 0.58, 0.63, 0.25]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -573,6 +677,19 @@ mod tests {
             "visibility must not reframe"
         );
 
+        app.controller
+            .add_operation(Operation::Drill(cam_model::DrillOp {
+                id: 0,
+                tool: 1,
+                points: vec![[10., 10.]],
+                depth: 2.,
+                start_offset: 0.,
+                peck: None,
+                dwell: None,
+                spindle_rpm: 1000.,
+                work_offset: 1,
+                feed: 100.,
+            }));
         app.controller.run(&cam_toolpath::CancelToken::new());
         app.show_stock = true;
         let simulated = app.machining_viewport();
@@ -586,16 +703,31 @@ mod tests {
             outcome.stock_vertices.len()
         );
         assert!(!simulated.transparent_stock_indices.is_empty());
-        assert!(simulated
+        assert!(outcome.stock_machined.iter().any(|&cut| cut));
+        assert!(outcome.stock_machined.iter().any(|&cut| !cut));
+        for (vertex, &cut) in simulated
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.8, 0.3, 0.1, 0.25]));
+            .zip(&outcome.stock_machined)
+        {
+            let expected = if cut {
+                [0.8, 0.3, 0.1, 0.25]
+            } else {
+                [0.55, 0.58, 0.63, 0.25]
+            };
+            assert_eq!(vertex.color, expected);
+        }
         app.settings.view.transparent_stock = false;
+        app.settings.view.stock_color = [0.2, 0.65, 0.3];
         let opaque = app.machining_viewport();
-        assert!(opaque
-            .mesh_vertices
-            .iter()
-            .all(|v| v.color == [0.8, 0.3, 0.1, 1.0]));
+        for (vertex, &cut) in opaque.mesh_vertices.iter().zip(&outcome.stock_machined) {
+            let expected = if cut {
+                [0.2, 0.65, 0.3, 1.0]
+            } else {
+                [0.55, 0.58, 0.63, 1.0]
+            };
+            assert_eq!(vertex.color, expected);
+        }
     }
 
     #[test]

@@ -502,13 +502,16 @@ mod tests {
         player.seek(player.timeline.duration);
         drain_player(&mut player);
         let cut = player.preview.stock_vertices.clone();
+        let cut_faces = player.preview.stock_machined.clone();
         assert!(!cut.is_empty());
+        assert!(cut_faces.iter().any(|&cut| cut));
         player.seek(0.);
         drain_player(&mut player);
         assert!(
             cut != player.preview.stock_vertices,
             "rewinding must restore uncut stock"
         );
+        assert!(player.preview.stock_machined.iter().all(|&cut| !cut));
         assert!(player.current(&controller));
         assert_eq!(controller.export_nc().unwrap(), nc);
         player.seek(player.timeline.duration);
@@ -517,6 +520,7 @@ mod tests {
             cut == player.preview.stock_vertices,
             "seeking forward must reproduce the same stock"
         );
+        assert_eq!(cut_faces, player.preview.stock_machined);
         player.toggle();
         assert!(player.playing);
         assert_eq!(player.position, 0.);

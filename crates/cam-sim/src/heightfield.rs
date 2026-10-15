@@ -40,6 +40,9 @@ pub struct SurfaceDiff {
 pub struct SurfaceMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// Per-vertex material removal flag. Original stock faces remain false;
+    /// newly exposed tops, slopes and internal cut walls are true.
+    pub machined: Vec<bool>,
     pub indices: Vec<u32>,
 }
 
@@ -346,6 +349,7 @@ impl Heightfield {
         SurfaceMesh {
             positions,
             normals,
+            machined: self.z.iter().map(|&z| z < self.top).collect(),
             indices,
         }
     }
@@ -384,12 +388,14 @@ impl Heightfield {
 
         let mut positions: Vec<[f32; 3]> = Vec::new();
         let mut normals: Vec<[f32; 3]> = Vec::new();
+        let mut machined = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
         // One triangle with an explicit per-vertex normal.
-        let mut tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3], n: [f32; 3]| {
+        let mut tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3], n: [f32; 3], cut: bool| {
             let base = positions.len() as u32;
             positions.extend_from_slice(&[a, b, c]);
             normals.extend_from_slice(&[n; 3]);
+            machined.extend_from_slice(&[cut; 3]);
             indices.extend_from_slice(&[base, base + 1, base + 2]);
         };
         // Cell height, or `None` off-grid.
@@ -405,15 +411,17 @@ impl Heightfield {
         // (gradual). Gentle slopes thus share corner heights (continuous ramp);
         // across a wall the steep neighbour is excluded, so the corner stays at
         // this cell's level and a vertical wall is drawn there instead.
-        let corner = |z0: f32, around: [Option<f32>; 3]| -> f32 {
+        let corner = |z0: f32, around: [Option<f32>; 3]| -> (f32, bool) {
             let (mut sum, mut n) = (z0, 1.0f32);
+            let mut cut = z0 < self.top;
             for c in around.into_iter().flatten() {
                 if (c - z0).abs() <= wall_step {
                     sum += c;
                     n += 1.0;
+                    cut |= c < self.top;
                 }
             }
-            sum / n
+            (sum / n, cut)
         };
 
         for iy in 0..self.ny {
@@ -430,10 +438,10 @@ impl Heightfield {
                 let (ne, nw) = (h(i + 1, j + 1), h(i - 1, j + 1));
                 let (se, sw) = (h(i + 1, j - 1), h(i - 1, j - 1));
                 // Corner heights (SW, SE, NE, NW of the cell footprint).
-                let c_sw = corner(z, [w, s, sw]);
-                let c_se = corner(z, [e, s, se]);
-                let c_ne = corner(z, [e, n_, ne]);
-                let c_nw = corner(z, [w, n_, nw]);
+                let (c_sw, cut_sw) = corner(z, [w, s, sw]);
+                let (c_se, cut_se) = corner(z, [e, s, se]);
+                let (c_ne, cut_ne) = corner(z, [e, n_, ne]);
+                let (c_nw, cut_nw) = corner(z, [w, n_, nw]);
                 let (x0, y0) = (ox + ix as f32 * res, oy + iy as f32 * res);
                 let (x1, y1) = (x0 + res, y0 + res);
                 // Sloped top — geometric normal per triangle (a planar bevel shades
@@ -444,12 +452,24 @@ impl Heightfield {
                     [x1, y1, c_ne],
                     [x0, y1, c_nw],
                 );
-                tri(p_sw, p_se, p_ne, tri_normal(p_sw, p_se, p_ne));
-                tri(p_sw, p_ne, p_nw, tri_normal(p_sw, p_ne, p_nw));
+                tri(
+                    p_sw,
+                    p_se,
+                    p_ne,
+                    tri_normal(p_sw, p_se, p_ne),
+                    cut_sw || cut_se || cut_ne,
+                );
+                tri(
+                    p_sw,
+                    p_ne,
+                    p_nw,
+                    tri_normal(p_sw, p_ne, p_nw),
+                    cut_sw || cut_ne || cut_nw,
+                );
                 // Flat bottom (−Z).
                 let down = [0.0, 0.0, -1.0];
-                tri([x0, y0, f], [x0, y1, f], [x1, y1, f], down);
-                tri([x0, y0, f], [x1, y1, f], [x1, y0, f], down);
+                tri([x0, y0, f], [x0, y1, f], [x1, y1, f], down, false);
+                tri([x0, y0, f], [x1, y1, f], [x1, y0, f], down, false);
 
                 // Is a neighbour "open" (off-grid / cut through / a steep drop)?
                 let open = |nb: Option<f32>| match nb {
@@ -483,11 +503,18 @@ impl Heightfield {
                 // this cell's two edge corners down to the neighbour level (clamped
                 // to the floor). Shaded by the gradient normal, or the face axis.
                 let level = |nb: Option<f32>| nb.map_or(f, |v| v.max(f));
+                // Off-grid walls are original stock sides; walls facing a lower
+                // grid cell were exposed by machining, even if this cell is uncut.
                 let mut wall =
-                    |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], axis: [f32; 3]| {
+                    |a: [f32; 3],
+                     b: [f32; 3],
+                     c: [f32; 3],
+                     d: [f32; 3],
+                     axis: [f32; 3],
+                     cut: bool| {
                         let n = grad.unwrap_or(axis);
-                        tri(a, b, c, n);
-                        tri(a, c, d, n);
+                        tri(a, b, c, n, cut);
+                        tri(a, c, d, n, cut);
                     };
                 if open(w) {
                     let l = level(w);
@@ -497,6 +524,7 @@ impl Heightfield {
                         [x0, y1, l],
                         [x0, y0, l],
                         [-1.0, 0.0, 0.0],
+                        w.is_some(),
                     );
                 }
                 if open(e) {
@@ -507,6 +535,7 @@ impl Heightfield {
                         [x1, y0, l],
                         [x1, y1, l],
                         [1.0, 0.0, 0.0],
+                        e.is_some(),
                     );
                 }
                 if open(s) {
@@ -517,6 +546,7 @@ impl Heightfield {
                         [x0, y0, l],
                         [x1, y0, l],
                         [0.0, -1.0, 0.0],
+                        s.is_some(),
                     );
                 }
                 if open(n_) {
@@ -527,6 +557,7 @@ impl Heightfield {
                         [x1, y1, l],
                         [x0, y1, l],
                         [0.0, 1.0, 0.0],
+                        n_.is_some(),
                     );
                 }
             }
@@ -534,6 +565,7 @@ impl Heightfield {
         Some(SurfaceMesh {
             positions,
             normals,
+            machined,
             indices,
         })
     }
@@ -704,6 +736,56 @@ mod tests {
         );
         // No geometry ever dips below the floor.
         assert!(mesh.positions.iter().all(|p| p[2] >= -5.0 - 1e-4));
+        assert_eq!(mesh.machined.len(), mesh.positions.len());
+        assert!(mesh.machined.iter().all(|&cut| !cut));
+    }
+
+    #[test]
+    fn removal_marks_cut_floors_slopes_and_walls_but_not_original_faces() {
+        for depth in [-0.5, -3.0, -6.0] {
+            let mut hf = Heightfield::new([0., 0.], [10., 10.], 0.5, 0.);
+            hf.lower_rect([3., 3.], [7., 7.], depth);
+            let mesh = hf.to_solid_mesh(-5.);
+            assert_eq!(mesh.machined.len(), mesh.positions.len());
+            let mut cut_tops = 0;
+            let mut cut_walls = 0;
+            for (triangle, flags) in mesh.positions.as_chunks::<3>().0.iter()
+                .zip(mesh.machined.as_chunks::<3>().0.iter())
+            {
+                assert!(flags.iter().all(|&cut| cut == flags[0]));
+                let n = tri_normal(triangle[0], triangle[1], triangle[2]);
+                let original = n[2] < -0.9
+                    || (0..2).any(|axis| {
+                        triangle.iter().all(|p| p[axis] == 0.)
+                            || triangle.iter().all(|p| p[axis] == 10.)
+                    })
+                    || triangle.iter().all(|p| p[2] == 0.);
+                assert_eq!(flags[0], !original, "depth {depth}: {triangle:?}");
+                if flags[0] {
+                    if n[2] > 0.1 {
+                        cut_tops += 1;
+                    } else {
+                        cut_walls += 1;
+                    }
+                }
+            }
+            assert_eq!(cut_tops > 0, depth > -5., "through cuts have no floor");
+            assert_eq!(
+                cut_walls > 0, depth < -1.25,
+                "steep and through cuts expose walls"
+            );
+        }
+    }
+
+    #[test]
+    fn uncut_faces_stay_unmachined_at_nonzero_stock_heights() {
+        // Averaging equal corner heights can round below the original top.
+        // Classification must follow material removal, not the rounded mesh Z.
+        for top in [0.1, 100.1, -100.1] {
+            let hf = Heightfield::new([0., 0.], [3., 3.], 1., top);
+            let mesh = hf.to_solid_mesh(top - 5.);
+            assert!(mesh.machined.iter().all(|&cut| !cut));
+        }
     }
 
     #[test]

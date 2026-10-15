@@ -134,6 +134,8 @@ pub struct RunOutcome {
     pub scene: Scene,
     /// Interleaved position+normal vertices of the cut stock surface.
     pub stock_vertices: Vec<MeshVertex>,
+    /// Per-vertex flag distinguishing cut surfaces from original stock faces.
+    pub stock_machined: Vec<bool>,
     /// Triangle indices into `stock_vertices`.
     pub stock_indices: Vec<u32>,
     /// Collisions the material-removal simulation found (e.g. a rapid plowing
@@ -242,6 +244,7 @@ pub struct AppController {
     import_replacement: Option<u64>,
     jobs: crate::jobs::JobService,
     operation_cache: cam_toolpath::OperationCache,
+    simulation_accuracy: f32,
     operation_id_floor: u32,
     setup_id_floor: u64,
     asset_id_floor: u64,
@@ -538,6 +541,7 @@ impl AppController {
             import_replacement: None,
             jobs: Default::default(),
             operation_cache: Default::default(),
+            simulation_accuracy: 1.0,
             operation_id_floor: 0,
             setup_id_floor: 1,
             asset_id_floor: 1,

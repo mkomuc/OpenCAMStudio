@@ -69,6 +69,7 @@ pub(crate) struct JobInputs {
     pub frame_error: Option<String>,
     /// A playback prefix bypasses planning; it never replaces the verified job.
     pub preview_program: Option<Program>,
+    pub simulation_accuracy: f32,
 }
 impl JobInputs {
     pub fn execute(
@@ -186,11 +187,11 @@ impl JobInputs {
             }
             scene.add_open_path(path.points(), PART);
         }
-        let (stock_vertices, stock_indices, collisions) =
+        let (stock_vertices, stock_indices, stock_machined, collisions) =
             if completion == JobCompletion::Complete && !cancel.is_cancelled() {
                 self.simulate_stock(&job.program, cancel, progress)
             } else {
-                (Vec::new(), Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
         if cancel.is_cancelled() {
             completion = JobCompletion::Cancelled;
@@ -205,6 +206,7 @@ impl JobInputs {
             diagnostics: job.diagnostics,
             scene,
             stock_vertices,
+            stock_machined,
             stock_indices,
             collisions,
         }

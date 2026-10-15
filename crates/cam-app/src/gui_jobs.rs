@@ -74,9 +74,6 @@ impl App {
         self.operation_draft = None;
         self.controller
             .select(operation.map_or(Selection::Setup, Selection::Operation));
-        if let Some(id) = operation {
-            self.begin_operation_draft(id);
-        }
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
         match self

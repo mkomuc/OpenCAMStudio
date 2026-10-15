@@ -220,10 +220,7 @@ mod multi_body_tests {
             "every face of every body must contribute to the projection"
         );
         assert!(
-            !import
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("budget") || warning.contains("unavailable")),
+            import.warnings.is_empty(),
             "{:?}",
             import.warnings
         );
