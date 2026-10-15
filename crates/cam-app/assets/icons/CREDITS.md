@@ -65,4 +65,5 @@ The remaining originals are in the flat 24×24 style:
   project `open.svg`/`save.svg` and the CAD/G-code `cui_import.svg`/`cui_export.svg`)
 - `machine.svg` — Machine / post-processor setup (a settings gear)
 - `undo.svg`, `redo.svg`, `run.svg` — edit / run actions
+- `toolpath.svg` — recompute toolpaths (connected cutting passes and direction arrow)
 - `new.svg`, `open.svg`, `save.svg` — project file actions

@@ -331,6 +331,7 @@ impl App {
             let asset_row = row![
                 button(text(if expanded { "▾" } else { "▸" }).size(11))
                     .padding(2)
+                    .style(inspector_secondary)
                     .on_press(Message::ToggleAssetExpanded(asset.id)),
                 checkbox(!self.hidden_assets.contains(&asset.id))
                     .size(14)
@@ -379,7 +380,7 @@ impl App {
                 .spacing(4),
             )
             .padding([4, 2])
-            .style(|_, status| command_button_style(status))
+            .style(inspector_secondary)
             .on_press(Message::ToggleToolsExpanded),
         );
         if self.tools_expanded {
@@ -446,6 +447,7 @@ impl App {
             let setup_row = row![
                 button(text(if expanded { "▾" } else { "▸" }).size(11))
                     .padding(2)
+                    .style(inspector_secondary)
                     .on_press(Message::ToggleSetupExpanded(setup.id)),
                 checkbox(!self.hidden_setups.contains(&setup.id))
                     .size(12)
@@ -504,6 +506,7 @@ impl App {
                     Space::new().width(Length::Fixed(14.0)),
                     button(text(if expanded { "▾" } else { "▸" }).size(11))
                         .padding(2)
+                        .style(inspector_secondary)
                         .on_press(Message::ToggleOperationExpanded(id)),
                     checkbox(!self.hidden_ops.contains(&id))
                         .size(12)
@@ -549,8 +552,8 @@ impl App {
         let node = self.tree_menu.as_ref()?;
         let item = |label: String, message: Message| {
             let icon = match &message {
-                Message::ToolpathCommand(_, ToolpathAction::Recompute) => Some(Icon::Run),
-                Message::ToolpathCommand(_, ToolpathAction::Simulate) => Some(Icon::ShowStock),
+                Message::ToolpathCommand(_, ToolpathAction::Recompute) => Some(Icon::Toolpath),
+                Message::ToolpathCommand(_, ToolpathAction::Simulate) => Some(Icon::Run),
                 Message::ToolpathCommand(_, ToolpathAction::Export) => Some(Icon::Export),
                 Message::DuplicateOp | Message::SetupDuplicate(_) => Some(Icon::Duplicate),
                 Message::ToggleSetOrigin => Some(Icon::SetOrigin),
@@ -565,7 +568,7 @@ impl App {
                 .width(Length::Fixed(236.0))
                 .padding(Padding::from([5.0, 8.0]))
                 .on_press(Message::Tree(TreeMessage::Command(Box::new(message))))
-                .style(|_, status| command_button_style(status))
+                .style(inspector_secondary)
         };
         let mut items = column![].spacing(2);
         if matches!(node, TreeNode::Setup(_) | TreeNode::Operation(_)) {
@@ -581,25 +584,6 @@ impl App {
             }
             items = items.push(iced::widget::rule::horizontal(1));
         }
-        let creation = |items: iced::widget::Column<'static, Message>| {
-            let mut items = items;
-            for (kind, label) in [
-                (OpKind::Profile, "Profile"),
-                (OpKind::Pocket, "Pocket"),
-                (OpKind::Drill, "Drill"),
-                (OpKind::Face, "Face"),
-                (OpKind::Chamfer, "Chamfer"),
-                (OpKind::Thread, "Thread"),
-                (OpKind::Engrave, "Engrave"),
-                (OpKind::Carve, "Carve"),
-            ] {
-                items = items.push(item(
-                    format!("New {label} operation"),
-                    Message::BeginOp(kind),
-                ));
-            }
-            items
-        };
         match node {
             TreeNode::Setups => {
                 items = items.push(item("New setup".into(), Message::SetupNew));
@@ -607,16 +591,7 @@ impl App {
             TreeNode::Setup(id) => {
                 items = items
                     .push(item("Edit setup".into(), Message::EditSetup(*id)))
-                    .push(item("Duplicate setup".into(), Message::SetupDuplicate(*id)))
-                    .push(item(
-                        "Move setup earlier".into(),
-                        Message::SetupMove(*id, true),
-                    ))
-                    .push(item(
-                        "Move setup later".into(),
-                        Message::SetupMove(*id, false),
-                    ));
-                items = creation(items);
+                    .push(item("Duplicate setup".into(), Message::SetupDuplicate(*id)));
                 if self.controller.setups().len() > 1 {
                     items = items.push(item("Delete setup".into(), Message::SetupDelete(*id)));
                 }
@@ -627,18 +602,8 @@ impl App {
                         "Edit operation".into(),
                         Message::Select(Selection::Operation(*id)),
                     ))
-                    .push(item(
-                        "Edit geometry".into(),
-                        if self.controller.geometry_state().bindings.contains_key(id) {
-                            Message::EditCadGeometry(*id)
-                        } else {
-                            Message::EditDrawingGeometry(*id)
-                        },
-                    ))
                     .push(item("Duplicate".into(), Message::DuplicateOp))
                     .push(item("Reinitialize".into(), Message::ReinitOp))
-                    .push(item("Move earlier".into(), Message::MoveOp(*id, true)))
-                    .push(item("Move later".into(), Message::MoveOp(*id, false)))
                     .push(item(
                         if self.controller.is_operation_excluded(*id) {
                             "Include in machining"
@@ -648,7 +613,6 @@ impl App {
                         .into(),
                         Message::SetOpExcluded(*id, !self.controller.is_operation_excluded(*id)),
                     ));
-                items = creation(items);
                 for origin in self.origin_move_targets_for(*id) {
                     items = items.push(item(
                         format!("Move to {}", self.origin_menu_label(origin)),
@@ -705,7 +669,6 @@ impl App {
                         Message::CadIsolateInstance(*id),
                     ))
                     .push(item("Show all geometry".into(), Message::CadShowAll));
-                items = creation(items);
             }
         }
         let menu = container(scrollable(items).height(Length::Shrink))
@@ -917,6 +880,21 @@ mod tests {
         drain_context_job(&mut app);
         assert!(app.simulation.is_some());
         assert!(app.show_stock);
+        let frame_bounds = app.machining_viewport().frame_bounds;
+        app.show_stock = false;
+        app.settings.view.transparent_stock = true;
+        let tool_only = app.machining_viewport();
+        assert!(
+            !tool_only.mesh_indices.is_empty(),
+            "playback shows a solid cutter"
+        );
+        assert!(tool_only.mesh_vertices.iter().all(|v| v.color[3] == 1.));
+        assert!(tool_only.transparent_stock_indices.is_empty());
+        assert_eq!(
+            tool_only.frame_bounds, frame_bounds,
+            "the moving tool must not reframe the part"
+        );
+        app.show_stock = true;
         assert!(app
             .controller
             .outcome()

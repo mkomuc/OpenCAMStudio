@@ -290,6 +290,24 @@ mod tests {
         assert!((0..3).all(|i| (a[i] - b[i]).abs() < 1e-8), "{a:?} != {b:?}");
     }
     #[test]
+    fn escape_aborts_wcs_edge_pick_and_preserves_setup_edits() {
+        let mut app = app();
+        let _ = app.update(Message::SetupNameChanged("Fixture draft".into()));
+        let before = app.setup_draft.clone().unwrap();
+        let committed = app.controller.document().clone();
+        for axis in 0..3 {
+            let _ = app.update(Message::SetupAxisPick(axis));
+            assert_eq!(app.setup_axis_pick, Some(axis));
+            app.setup_hover.edge = Some(SetupFeature::Stock(0));
+            let _ = app.update(Message::CadEscape);
+            assert!(app.setup_axis_pick.is_none());
+            assert!(app.setup_hover.edge.is_none());
+            assert_eq!(app.setup_draft.as_ref(), Some(&before));
+            assert_eq!(app.controller.document(), &committed);
+            assert!(!app.machining_viewport().setup_axis);
+        }
+    }
+    #[test]
     fn selected_setup_always_shows_axes_and_numeric_origin_edits_preview_at_true_z() {
         let mut app = app();
         app.show_origin = false;

@@ -197,12 +197,16 @@ impl SimulationPlayer {
             .clone()
             .ok_or("Run the toolpath before playback.")?;
         let timeline = Timeline::new(&outcome.program, controller.machine().rapid_rate)?;
+        let preview = crate::RunOutcome {
+            program: timeline.prefix(0.),
+            ..Default::default()
+        };
         Ok(Self {
             source,
             inputs: controller.job_inputs(),
             timeline,
             jobs: JobService::default(),
-            preview: crate::RunOutcome::default(),
+            preview,
             position: 0.,
             requested: 0.,
             rendered: 0.,
@@ -268,13 +272,48 @@ impl SimulationPlayer {
     pub fn needs_tick(&self) -> bool {
         self.playing || self.jobs.needs_poll()
     }
+    /// Follow the rendered frame, including its active tool, when seeking in
+    /// either direction. The tool and stock must describe the same instant.
+    pub fn tool_mesh(&self) -> (Vec<MeshVertex>, Vec<u32>) {
+        let program = &self.preview.program;
+        let tip = program.steps.iter().rev().find_map(|step| match step {
+            Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+            Step::Arc { end, .. } => Some(*end),
+            _ => None,
+        });
+        let number = program.steps.iter().rev().find_map(|step| match step {
+            Step::ToolChange { tool } => Some(*tool),
+            _ => None,
+        });
+        let setup = self.inputs.document.setup();
+        let tool = setup.tools.iter().find(|tool| Some(tool.number) == number);
+        let (Some(tip), Some(tool)) = (tip, tool) else {
+            return (vec![], vec![]);
+        };
+        let (mut vertices, indices) = cam_render::tool_mesh(&tool.profile());
+        for vertex in &mut vertices {
+            vertex.position = setup
+                .frame
+                .to_world_vector([
+                    tip.x + vertex.position[0] as f64,
+                    tip.y + vertex.position[1] as f64,
+                    tip.z + vertex.position[2] as f64,
+                ])
+                .map(|v| v as f32);
+            vertex.normal = setup
+                .frame
+                .to_world_vector(vertex.normal.map(f64::from))
+                .map(|v| v as f32);
+        }
+        (vertices, indices)
+    }
     pub fn controls(&self) -> Element<'_, Message> {
         let duration = self.timeline.duration.max(0.001);
         let time = |s: f64| format!("{}:{:02}", s as u64 / 60, s as u64 % 60);
         container(
             column![
                 row![
-                    button(if self.playing { "Pause" } else { "Play" })
+                    inspector_button(if self.playing { "Pause" } else { "Play" })
                         .on_press(Message::SimulationPlayPause),
                     text(format!(
                         "{} / {}",
@@ -294,7 +333,7 @@ impl SimulationPlayer {
                     slider(0.25..=10., self.speed, Message::SimulationSpeed)
                         .step(0.25)
                         .width(150),
-                    button("Close simulation").on_press(Message::SimulationClose),
+                    inspector_button("Close simulation").on_press(Message::SimulationClose),
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),
@@ -489,5 +528,97 @@ mod tests {
             }
         });
         assert!(!player.current(&controller));
+    }
+
+    #[test]
+    fn solid_tool_follows_tool_changes_and_rewind_in_rotated_setup() {
+        let mut controller = AppController::new(crate::default_machine());
+        controller.edit_setup(|setup| {
+            setup.frame = cam_model::SetupFrame::from_xy([0., 0., 1.], [1., 0., 0.]).unwrap();
+            setup.tools = vec![
+                cam_model::Tool {
+                    number: 1,
+                    diameter: 6.,
+                    length: 30.,
+                    ..Default::default()
+                },
+                cam_model::Tool {
+                    number: 2,
+                    diameter: 12.,
+                    length: 40.,
+                    ..Default::default()
+                },
+            ];
+        });
+        let timeline = Timeline::new(
+            &Program {
+                steps: vec![
+                    Step::ToolChange { tool: 1 },
+                    Step::Rapid {
+                        to: Point3::new(0., 0., 0.),
+                        tag: tag(),
+                    },
+                    Step::Linear {
+                        to: Point3::new(10., 0., 0.),
+                        feed: 60.,
+                        tag: tag(),
+                    },
+                    Step::ToolChange { tool: 2 },
+                    Step::Linear {
+                        to: Point3::new(10., 10., 0.),
+                        feed: 60.,
+                        tag: tag(),
+                    },
+                ],
+            },
+            2000.,
+        )
+        .unwrap();
+        let mut player = SimulationPlayer {
+            source: crate::JobStamp {
+                request_id: 1,
+                revision: 0,
+                input_fingerprint: String::new(),
+            },
+            inputs: controller.job_inputs(),
+            timeline,
+            jobs: JobService::default(),
+            preview: Default::default(),
+            position: 0.,
+            requested: 0.,
+            rendered: 0.,
+            playing: false,
+            speed: 1.,
+            error: None,
+            last_tick: Instant::now(),
+        };
+        let frame = &controller.document().setup().frame;
+        for (time, tip, radius, length) in [
+            (5., [5., 0., 0.], 3., 30.),
+            (15., [10., 5., 0.], 6., 40.),
+            (5., [5., 0., 0.], 3., 30.),
+        ] {
+            player.preview.program = player.timeline.prefix(time);
+            let (vertices, indices) = player.tool_mesh();
+            assert!(!indices.is_empty());
+            let points: Vec<_> = vertices
+                .iter()
+                .map(|v| frame.to_setup_vector(v.position.map(f64::from)))
+                .collect();
+            let min: [f64; 3] =
+                std::array::from_fn(|i| points.iter().map(|p| p[i]).fold(f64::INFINITY, f64::min));
+            let max: [f64; 3] = std::array::from_fn(|i| {
+                points
+                    .iter()
+                    .map(|p| p[i])
+                    .fold(f64::NEG_INFINITY, f64::max)
+            });
+            for axis in 0..3 {
+                let expected_min = tip[axis] - if axis < 2 { radius } else { 0. };
+                let expected_max = tip[axis] + if axis < 2 { radius } else { length };
+                assert!((min[axis] - expected_min).abs() < 1e-5);
+                assert!((max[axis] - expected_max).abs() < 1e-5);
+            }
+        }
     }
 }

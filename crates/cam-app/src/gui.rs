@@ -147,6 +147,7 @@ enum Icon {
     Undo,
     Redo,
     Run,
+    Toolpath,
     Profile,
     Pocket,
     Drill,
@@ -176,7 +177,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 29] = [
+    const ALL: [Icon; 30] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -185,6 +186,7 @@ impl Icon {
         Icon::Undo,
         Icon::Redo,
         Icon::Run,
+        Icon::Toolpath,
         Icon::Profile,
         Icon::Pocket,
         Icon::Drill,
@@ -220,6 +222,7 @@ impl Icon {
             Icon::Undo => include_bytes!("../assets/icons/undo.svg"),
             Icon::Redo => include_bytes!("../assets/icons/redo.svg"),
             Icon::Run => include_bytes!("../assets/icons/run.svg"),
+            Icon::Toolpath => include_bytes!("../assets/icons/toolpath.svg"),
             Icon::Profile => include_bytes!("../assets/icons/profile.svg"),
             Icon::Pocket => include_bytes!("../assets/icons/pocket.svg"),
             Icon::Drill => include_bytes!("../assets/icons/drill.svg"),
@@ -257,6 +260,7 @@ impl Icon {
             Icon::Undo => "Undo the last change.",
             Icon::Redo => "Redo the change just undone.",
             Icon::Run => "Generate toolpaths for every operation and simulate the result.",
+            Icon::Toolpath => "Recompute the selected toolpaths.",
             Icon::Profile => {
                 "Add a Profile operation — cut along a chain, inside/outside/on the line."
             }
@@ -2276,7 +2280,6 @@ enum Message {
     SetupNew,
     SetupDuplicate(u64),
     SetupDelete(u64),
-    SetupMove(u64, bool),
     ToggleSetupExpanded(u64),
     ToggleAssetExpanded(u64),
     ToggleOperationExpanded(u32),
@@ -2439,8 +2442,6 @@ enum Message {
     /// Restart the creation wizard for the context-menu operation, replacing it in
     /// place (same kind, same position in the order).
     ReinitOp,
-    /// Move operation `id` one step earlier (`true`) or later.
-    MoveOp(u32, bool),
     /// Include (`false`) or exclude (`true`) an operation from toolpath output.
     SetOpExcluded(u32, bool),
     #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
@@ -3166,7 +3167,6 @@ impl App {
                     | Message::SetupNew
                     | Message::SetupDuplicate(_)
                     | Message::SetupDelete(_)
-                    | Message::SetupMove(_, _)
                     | Message::Undo
                     | Message::Redo
                     | Message::NewProject
@@ -3204,11 +3204,9 @@ impl App {
                     | Message::SetupNew
                     | Message::SetupDuplicate(_)
                     | Message::SetupDelete(_)
-                    | Message::SetupMove(_, _)
                     | Message::DuplicateOp
                     | Message::DeleteOp
                     | Message::ReinitOp
-                    | Message::MoveOp(_, _)
                     | Message::MoveOpToOrigin(_)
                     | Message::TransferOpToSetup(_, _)
                     | Message::SetOpExcluded(_, _)
@@ -3767,13 +3765,6 @@ impl App {
                     self.refresh_fields();
                 }
             }
-            Message::SetupMove(id, up) => {
-                if self.setup_draft_dirty() {
-                    self.status = "Apply or cancel setup changes before reordering setups.".into();
-                } else {
-                    self.controller.move_setup(id, up);
-                }
-            }
             Message::Select(selection) => {
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before changing selection.".into();
@@ -4277,10 +4268,10 @@ impl App {
                 }
             }
             Message::CadEscape => {
-                if self.setup_model_pick {
-                    self.setup_model_pick = false;
-                    self.cad_hover = None;
-                    self.cad_candidates.clear();
+                if self.setup_model_pick || self.setup_axis_pick.is_some() || self.in_origin_pick()
+                {
+                    self.cancel_setup_picks();
+                    self.status = "Setup selection cancelled.".into();
                     return iced::Task::none();
                 }
                 if self.height_reference_pick.take().is_some() {
@@ -5010,10 +5001,6 @@ impl App {
                 self.controller.prune_unused_tools();
                 self.focus_selected_op();
                 self.refresh_fields();
-                self.rerun();
-            }
-            Message::MoveOp(id, up) => {
-                self.controller.move_operation(id, up);
                 self.rerun();
             }
             Message::MoveOpToOrigin(origin) => {

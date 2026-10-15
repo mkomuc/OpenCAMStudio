@@ -274,6 +274,13 @@ impl App {
                 [x as f32, y as f32, z as f32]
             }),
         );
+        if let Some(player) = self.simulation.as_ref().filter(|_| !model_view) {
+            let (vertices, indices) = player.tool_mesh();
+            let offset = viewport.mesh_vertices.len() as u32;
+            Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
+            Arc::make_mut(&mut viewport.mesh_indices)
+                .extend(indices.into_iter().map(|i| i + offset));
+        }
         viewport.setup_geometry = SetupPickGeometry::new(
             &self.controller,
             self.setup_draft

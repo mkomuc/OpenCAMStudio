@@ -161,50 +161,6 @@ impl JobInputs {
         } else {
             Scene::new()
         };
-        if self.preview_program.is_some() {
-            let tip = job.program.steps.iter().rev().find_map(|step| match step {
-                cam_cldata::Step::Rapid { to, .. } | cam_cldata::Step::Linear { to, .. } => {
-                    Some(*to)
-                }
-                cam_cldata::Step::Arc { end, .. } => Some(*end),
-                _ => None,
-            });
-            let number = job.program.steps.iter().rev().find_map(|step| match step {
-                cam_cldata::Step::ToolChange { tool } => Some(*tool),
-                _ => None,
-            });
-            let tool = self
-                .document
-                .setup()
-                .tools
-                .iter()
-                .find(|tool| Some(tool.number) == number);
-            if let Some(tip) = tip {
-                let radius = tool.map_or(self.tool_diameter, |tool| tool.diameter) / 2.;
-                let length = tool.map_or(20., |tool| tool.length);
-                let color = [0.15, 0.85, 1., 1.];
-                scene.add_strip(
-                    (0..=32)
-                        .map(|i| {
-                            let angle = i as f64 * std::f64::consts::TAU / 32.;
-                            [
-                                (tip.x + radius * angle.cos()) as f32,
-                                (tip.y + radius * angle.sin()) as f32,
-                                tip.z as f32,
-                            ]
-                        })
-                        .collect(),
-                    color,
-                );
-                scene.add_strip(
-                    vec![
-                        [tip.x as f32, tip.y as f32, tip.z as f32],
-                        [tip.x as f32, tip.y as f32, (tip.z + length) as f32],
-                    ],
-                    color,
-                );
-            }
-        }
         for strip in &mut scene.strips {
             if cancel.is_cancelled() {
                 break;

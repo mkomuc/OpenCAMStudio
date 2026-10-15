@@ -16,6 +16,7 @@ mod camera;
 mod gizmo;
 mod mesh;
 mod scene;
+mod tool;
 
 pub use cad::{CadScene, PickCandidate};
 pub use camera::{orientation, top_view, OrbitCamera, Ray, IDENTITY};
@@ -23,6 +24,7 @@ pub use camera::{orientation, top_view, OrbitCamera, Ray, IDENTITY};
 pub use gizmo::label_atlas;
 pub use gizmo::{pick_face, unit_cube, GizmoVertex};
 pub use mesh::{mesh_vertices, MeshVertex};
+pub use tool::tool_mesh;
 pub use scene::{
     Color, LineStrip, Scene, Vertex, CUT, ENVELOPE, ENVELOPE_OVER, PART, PLUNGE, RAPID,
 };

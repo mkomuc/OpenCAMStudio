@@ -132,7 +132,7 @@ impl App {
             list = list.push(
                 row![
                     text("Importing geometry…").size(12),
-                    button("Cancel import").on_press(Message::CancelCadImport)
+                    inspector_button("Cancel import").on_press(Message::CancelCadImport)
                 ]
                 .spacing(8),
             );
@@ -152,7 +152,7 @@ impl App {
                         progress.completed, progress.total
                     ))
                     .size(12),
-                    button("Cancel run").on_press(Message::CancelRun)
+                    inspector_button("Cancel run").on_press(Message::CancelRun)
                 ]
                 .spacing(8),
             );
