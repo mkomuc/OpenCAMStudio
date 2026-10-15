@@ -10,14 +10,14 @@
 //! the controller; this module only translates messages and draws. Only compiled
 //! with the `gui` feature.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
-    Space, button, canvas, checkbox, column, container, mouse_area, pick_list, row, scrollable,
-    shader, slider, text, text_input, tooltip,
+    button, canvas, checkbox, column, container, mouse_area, pick_list, row, scrollable, shader,
+    slider, text, text_input, tooltip, Space,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding};
 
@@ -31,7 +31,44 @@ use crate::project::OcamFile;
 // `ToolKindPick`/`families_for` are plain data (an operation's tool families), so they
 // live with the library rather than in this shell -- that is what lets the headless
 // tests assert the starter library can start every operation.
-use crate::tool_library::{ToolKindPick, ToolLibrary, families_for};
+use crate::tool_library::{families_for, ToolKindPick, ToolLibrary};
+
+#[path = "gui_inspector_style.rs"]
+mod inspector_style;
+use inspector_style::*;
+#[path = "gui_inspector.rs"]
+mod inspector_view;
+#[path = "gui_jobs.rs"]
+mod jobs_view;
+#[path = "gui_operation_metadata.rs"]
+mod operation_metadata;
+#[path = "gui_operation_tabs.rs"]
+mod operation_tabs;
+#[path = "gui_setup_editor.rs"]
+mod setup_editor_view;
+use operation_tabs::OperationTab;
+#[path = "gui_project_tree.rs"]
+mod project_tree_view;
+use project_tree_view::{TreeDrag, TreeMessage, TreeNode};
+#[path = "gui_workspace.rs"]
+mod workspace_view;
+use workspace_view::Workspace;
+#[path = "gui_geometry_selection.rs"]
+mod geometry_selection;
+use geometry_selection::{cad_geometry_labels, drawing_geometry_labels, operation_geometry_labels};
+#[path = "gui_creation.rs"]
+mod creation;
+#[path = "gui_grid.rs"]
+mod grid_view;
+#[path = "gui_picking.rs"]
+mod picking_view;
+#[path = "gui_wcs.rs"]
+mod wcs_view;
+use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
+#[path = "gui_notices.rs"]
+mod notices;
+use notices::Notice;
+use operation_metadata::operation_fields;
 
 /// Ribbon palette and metrics, adopted from **OpenCADStudio**'s ribbon
 /// (`HakanSeven12/OpenCADStudio`, GPL-3.0) so users moving CAD → CAM meet a
@@ -114,8 +151,10 @@ enum Icon {
     ExportLibrary,
     Duplicate,
     Delete,
+    #[allow(dead_code)] // Retained view command for the M1a workspace shell.
     ShowStock,
     ResetView,
+    #[allow(dead_code)] // Retained view command for the M1a workspace shell.
     ShowCube,
     SetOrigin,
     Info,
@@ -269,13 +308,13 @@ fn icon_svg(icon: Icon, size: f32) -> Element<'static, Message> {
 }
 use cam_cldata::{Program, Step};
 use cam_render::{
-    CadScene, ENVELOPE, ENVELOPE_OVER, MeshVertex, OrbitCamera, PART, PickCandidate, Scene, Vertex,
+    CadScene, MeshVertex, OrbitCamera, PickCandidate, Scene, Vertex, ENVELOPE, ENVELOPE_OVER, PART,
 };
-use cam_toolpath::{CancelToken, JobCompletion, Severity};
+use cam_toolpath::{JobCompletion, Severity};
 
 use crate::{
-    AppController, CuttingData, LoopRef, OpKind, PendingOp, PickResult, Selection, SnapHit,
-    SnapKind, op_accepts_open_paths, op_selects_circles, op_takes_islands,
+    op_accepts_open_paths, op_selects_circles, op_takes_islands, AppController, CuttingData,
+    LoopRef, OpKind, PendingOp, PickResult, Selection, SnapHit, SnapKind,
 };
 
 /// A small sample part (rectangle + circular hole) so the app is useful without
@@ -515,6 +554,7 @@ impl std::fmt::Display for SetupEditorTab {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)] // All supported stock editor modes are boxes.
 enum StockEditorKind {
     FixedBox,
     RelativeBox,
@@ -558,7 +598,7 @@ impl std::fmt::Display for BoxAnchor {
 }
 
 impl StockEditorKind {
-    const ALL: [Self; 3] = [Self::FixedBox, Self::RelativeBox, Self::LegacyBox];
+    const ALL: [Self; 3] = [Self::RelativeBox, Self::FixedBox, Self::LegacyBox];
 }
 
 impl std::fmt::Display for StockEditorKind {
@@ -913,6 +953,9 @@ fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
 /// An editable inspector field, keyed independently of which node owns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Field {
+    OperationTop,
+    StartX,
+    StartY,
     Clearance,
     Retract,
     TopOfStock,
@@ -1066,6 +1109,9 @@ enum Field {
 impl Field {
     fn label(self) -> &'static str {
         match self {
+            Field::OperationTop => "Cutting top Z (mm)",
+            Field::StartX => "Start X (mm)",
+            Field::StartY => "Start Y (mm)",
             Field::Clearance => "Clearance (mm)",
             Field::Retract => "Retract (mm)",
             Field::ToolChangeHeight => "Tool Change Height (mm)",
@@ -1151,6 +1197,9 @@ impl Field {
     /// shown as a hover tooltip on its label in the inspector.
     fn help(self) -> &'static str {
         match self {
+            Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
+            Field::StartX => "Preferred starting X in setup millimetres; the strategy chooses an eligible point near it.",
+            Field::StartY => "Preferred starting Y in setup millimetres; the strategy chooses an eligible point near it.",
             Field::Clearance => {
                 "Safe height for rapid (non-cutting) moves above the part. The tool \
                  traverses at this Z between features so it never drags through stock."
@@ -1488,75 +1537,99 @@ fn help_wrap<'a>(
     .into()
 }
 
-/// A fixed-width (135 px) inspector label wrapped in a hover tooltip carrying its help
-/// text when `show` — how every field/picker/checkbox row explains itself, keeping the
-/// label column aligned.
+/// A flexible inspector label with hover help. The value column retains its width
+/// while labels wrap to fit the available dock width.
 fn label_help<'a>(
     label: impl iced::widget::text::IntoFragment<'a>,
     help: &'static str,
     show: bool,
 ) -> Element<'a, Message> {
-    help_wrap(text(label).width(Length::Fixed(135.0)).size(13), help, show)
+    help_wrap(
+        text(label)
+            .width(Length::Fill)
+            .size(12)
+            .color(INSPECTOR_TEXT),
+        help,
+        show,
+    )
 }
 
 /// Hover-help text for the inspector's non-numeric controls (pickers, checkboxes).
 /// Numeric fields carry their own via [`Field::help`].
 mod help {
-    pub const SIDE: &str = "Which side of the selected chain the tool runs. Outside keeps the chain as the \
+    pub const SIDE: &str =
+        "Which side of the selected chain the tool runs. Outside keeps the chain as the \
          finished part (cut around it); Inside cuts a pocket/bore to the chain; On centres \
          the tool on the line.";
-    pub const LEAD_IN: &str = "How the tool eases onto the wall at the start of a pass instead of diving \
+    pub const LEAD_IN: &str =
+        "How the tool eases onto the wall at the start of a pass instead of diving \
          straight in — an arc or a straight ramp — to avoid a dwell/witness mark. None \
          starts cutting directly.";
     pub const LEAD_OUT: &str =
         "How the tool eases off the wall at the end of a pass (see lead-in).";
-    pub const PLUNGE: &str = "How the tool enters downward at each level. Straight drops vertically (needs a \
+    pub const PLUNGE: &str =
+        "How the tool enters downward at each level. Straight drops vertically (needs a \
          centre-cutting tool or pre-drilled hole); Ramp descends along the toolpath itself, \
          arriving on the contour at full depth; Zig-zag oscillates in place, for a slot too \
          narrow to ramp along; Helix spirals down — all gentler than a straight plunge.";
-    pub const CLIMB: &str = "Milling direction. Climb (recommended) gives a cleaner finish and is required for \
+    pub const CLIMB: &str =
+        "Milling direction. Climb (recommended) gives a cleaner finish and is required for \
          adaptive clearing; unticking it is conventional milling, which reverses the pass \
          direction.";
-    pub const CARVE_CLEAR: &str = "Clear the flat areas the depth cap leaves with a second, flat-bottomed tool \
+    pub const CARVE_CLEAR: &str =
+        "Clear the flat areas the depth cap leaves with a second, flat-bottomed tool \
          before the V-bit runs. A cone cannot leave a flat floor, so without this those \
          areas come out ridged. The end mill also takes the bulk material, sparing the \
          carving tip.";
-    pub const CARVE_PLUNGE: &str = "How the V-bit enters downward at each ring. A V-bit always has a cutting tip, so \
+    pub const CARVE_PLUNGE: &str =
+        "How the V-bit enters downward at each ring. A V-bit always has a cutting tip, so \
          a straight drop is safe -- but a carve enters hundreds of times, and ramping \
          along the ring is kinder to the tip and to the finish. This is the V-bit's own \
          entry; the clearing tool has its own picker below.";
-    pub const CARVE_CLEAR_PLUNGE: &str = "How the clearing tool enters downward. The flat area is entered in solid stock, \
+    pub const CARVE_CLEAR_PLUNGE: &str =
+        "How the clearing tool enters downward. The flat area is entered in solid stock, \
          so a tool that is not centre-cutting -- or a deep carve in hard material -- \
          wants a ramp or helix rather than a straight drop.";
-    pub const CARVE_STAY_DOWN: &str = "Link the carve rings without lifting where it is safe to do so, instead of \
+    pub const CARVE_STAY_DOWN: &str =
+        "Link the carve rings without lifting where it is safe to do so, instead of \
          retracting to clearance for each. A carve can run to hundreds of rings, so this \
          saves most of the cycle time; each link is checked individually, and any that \
          would gouge still lifts.";
-    pub const FACE_DIRECTION: &str = "The axis the facing passes sweep along. Defaults to the boundary edge you picked; \
+    pub const FACE_DIRECTION: &str =
+        "The axis the facing passes sweep along. Defaults to the boundary edge you picked; \
          otherwise the longest edge.";
-    pub const CHAMFER_GRADUAL: &str = "Spread the chamfer over its passes so each removes an equal amount of material, \
+    pub const CHAMFER_GRADUAL: &str =
+        "Spread the chamfer over its passes so each removes an equal amount of material, \
          rather than full-width passes stepping down. Only matters for a multi-pass chamfer.";
-    pub const THREAD_GRADUAL: &str = "Size the radial infeed passes so each removes an equal amount of material, \
+    pub const THREAD_GRADUAL: &str =
+        "Size the radial infeed passes so each removes an equal amount of material, \
          instead of stepping out by an equal radius each time. A thread form is a V, so \
          the groove widens as it deepens and equal radial steps make the LAST pass the \
          heaviest — the pass that cuts the finished flank. Gradual reverses that, \
          leaving the finishing pass the lightest. Only matters with more than one pass.";
-    pub const BORE: &str = "Whether the thread is cut into a hole (Internal) or onto a boss/stud (External). \
+    pub const BORE: &str =
+        "Whether the thread is cut into a hole (Internal) or onto a boss/stud (External). \
          Sets which side of the pitch line the tool orbits.";
-    pub const HAND: &str = "Thread hand: Right-hand advances when turned clockwise (the common case), \
+    pub const HAND: &str =
+        "Thread hand: Right-hand advances when turned clockwise (the common case), \
          Left-hand the opposite. Sets the helix direction.";
-    pub const THREAD_CUT: &str = "Climb vs conventional milling for the threading orbit — climb usually finishes \
+    pub const THREAD_CUT: &str =
+        "Climb vs conventional milling for the threading orbit — climb usually finishes \
          cleaner.";
-    pub const ACTIVE_MACHINE: &str = "Which machine you are working on. The fields below edit it, and an export is \
+    pub const ACTIVE_MACHINE: &str =
+        "Which machine you are working on. The fields below edit it, and an export is \
          checked against its travel — so this is the one thing that decides whether a \
          job can be cut here. Machines are local to this installation: opening a project \
          built elsewhere never changes it.";
-    pub const POST: &str = "The machine controller/dialect the exported G-code is written for (grbl, Fanuc, \
+    pub const POST: &str =
+        "The machine controller/dialect the exported G-code is written for (grbl, Fanuc, \
          …). Pick the one your control speaks.";
-    pub const TOOL_TYPE: &str = "The cutter geometry class. Changing it reveals the geometry fields that class \
+    pub const TOOL_TYPE: &str =
+        "The cutter geometry class. Changing it reveals the geometry fields that class \
          needs (corner radius, point angle, tip diameter, …) and how the toolpath treats \
          the tip.";
-    pub const MACHINE_NAME: &str = "A free-text label to tell your machines apart. It does not affect the toolpath \
+    pub const MACHINE_NAME: &str =
+        "A free-text label to tell your machines apart. It does not affect the toolpath \
          or output.";
 }
 
@@ -1701,11 +1774,27 @@ impl std::fmt::Display for ToolChoice {
 
 struct App {
     controller: AppController,
+    notice: Option<Notice>,
+    notice_queue: VecDeque<Notice>,
     /// Shared transactional editor for setup, stock and postprocess settings. The
     /// draft survives tab changes; only the footer can commit or discard it.
     setup_draft: Option<cam_model::Setup>,
+    setup_model_selection: Option<InstanceId>,
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
+    operation_geometry: Option<Vec<EntityRef>>,
+    geometry_row_selection: Option<usize>,
+    geometry_additive: bool,
+    operation_binding_preview: Option<cam_model::GeometryBinding>,
+    drawing_editing_op: Option<u32>,
+    operation_tab: OperationTab,
+    workspace: Workspace,
+    machining_tab: RibbonTab,
+    show_project_browser: bool,
+    planar_selection: Vec<LoopRef>,
+    tree_drag: Option<TreeDrag>,
+    tree_hover: Option<(TreeNode, bool)>,
+    tree_menu: Option<TreeNode>,
     /// Tools selected by an operation draft but not yet published to the setup.
     operation_tools: Vec<cam_model::Tool>,
     setup_tab: SetupEditorTab,
@@ -1715,6 +1804,9 @@ struct App {
     hidden_setups: BTreeSet<u64>,
     hidden_ops: BTreeSet<u32>,
     panes: pane_grid::State<Pane>,
+    /// Explicit editor focus, separate from the controller's fallback setup selection.
+    inspector_active: bool,
+    inspector_enabled: bool,
     /// Current window size, tracked so pane resizes can be clamped to per-pane
     /// pixel minimums (pane_grid works in ratios, not pixels).
     window: iced::Size,
@@ -1823,6 +1915,7 @@ struct App {
     /// The object-snap currently under the cursor while a pick is pending (drawn
     /// as a marker and used as the start when clicked). `None` when nothing snaps.
     snap_hover: Option<SnapHit>,
+    setup_hover: SetupHover,
     /// The world-mm pickbox aperture from the last hover, sizing the snap marker
     /// (roughly constant on screen).
     snap_aperture: f64,
@@ -2125,6 +2218,19 @@ fn face_view(normal: [f32; 3]) -> (f32, f32) {
 #[derive(Debug, Clone)]
 enum Message {
     OpenSample,
+    WorkspaceChanged(Workspace),
+    CancelToolDraft,
+    RunJob,
+    OperationTabChanged(OperationTab),
+    ProfileCompChanged(cam_model::Comp),
+    EngraveClosedChanged(bool),
+    OperationStartEnabled(bool),
+    OperationToolPicked(usize),
+    EditDrawingGeometry(u32),
+    UseDrawingGeometry,
+    CancelDrawingGeometry,
+    Tree(TreeMessage),
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     Select(Selection),
     SelectSetup(u64),
     SetupTabChanged(SetupEditorTab),
@@ -2136,12 +2242,14 @@ enum Message {
     SetupHeightChanged(usize, String),
     SetupOriginChanged(usize, String),
     SetupWorkOffsetChanged(String),
+    SetupModelSelected(InstanceId),
     SetupModelToggled(u64, bool),
     SetupStockKindChanged(StockEditorKind),
     SetupStockNumberChanged(usize, String),
     SetupStockPositionChanged(usize, BoxAnchor),
     SetupAxisPick(usize),
     SetupAxisFlip(usize, bool),
+    SetupAxisToggle(usize),
     SetupAxisClear(usize),
     SetupCommit,
     SetupCancel,
@@ -2186,23 +2294,30 @@ enum Message {
     /// Prompt for and import a `.dxf`/`.dwg` file.
     ImportCad,
     PollCadImport,
+    PollRun,
+    CancelRun,
     CancelCadImport,
-    ConfirmCadImport,
+    NoticeDismissed,
+    NoticeBackdrop,
     ReplaceCadAsset(u64),
     CadReplacementChosen(u64, Option<PathBuf>),
     RemoveCadAsset(u64),
     CadFilterChanged(CadFilter),
     CadHover(Option<EntityRef>),
     CadPicked(Vec<PickCandidate>),
+    GeometryPick,
+    GeometryRowSelected(usize),
+    GeometryRemove(usize),
+    GeometryClear,
     CadSelect(EntityRef),
     CadSelectThrough(bool),
     CadHideSelected,
     CadIsolateSelected,
+    CadIsolateInstance(InstanceId),
     CadShowAll,
     SetInstanceVisible(InstanceId, bool),
     CadEscape,
     ConfirmCadOperation,
-    CadToolPicked(u32),
     EditCadGeometry(u32),
     CadOverrideTopChanged(String),
     CadOverrideBottomChanged(String),
@@ -2256,13 +2371,21 @@ enum Message {
     ViewportCursor(iced::Point),
     /// Toggle a viewport object-snap on/off during operation picking.
     ToggleSnap(SnapKind),
+    ToggleSnapping,
+    ToggleFeatureHighlights,
+    SetupHover(iced::Point, SetupHover),
+    SetupStockEdgePicked([f64; 3]),
     /// Focus a workpiece origin — makes it active + selects it.
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     SelectOrigin(u32),
     /// Add a new workpiece origin (a reorientation group).
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     AddOrigin,
     /// Delete the workpiece origin with the given index (extras only).
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     DeleteOrigin(u32),
     /// Freeze/unfreeze an origin's operations (drop them from the run/viewport).
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     ToggleOriginDisabled(u32, bool),
     /// Enter/leave single-point "set workpiece origin" pick mode (Edit tab).
     ToggleSetOrigin,
@@ -2270,12 +2393,14 @@ enum Message {
     /// 2nd, Z the midpoint of both.
     ToggleSetOrigin2pt,
     /// Show or hide the workpiece-origin datum marker (View tab).
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     ToggleShowOrigin,
     /// Show / hide the machine-travel envelope around the job.
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     ToggleEnvelope,
     /// A viewport click while setting the origin (either mode): world `(x,y)` +
     /// aperture, resolved to a snapped or free point.
-    OriginPointPicked([f32; 2], f32),
+    OriginPointPicked([f64; 3]),
     /// Structural edits to the selected operation.
     DuplicateOp,
     DeleteOp,
@@ -2286,7 +2411,9 @@ enum Message {
     MoveOp(u32, bool),
     /// Include (`false`) or exclude (`true`) an operation from toolpath output.
     SetOpExcluded(u32, bool),
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     ToggleStock,
+    ToggleTransparentStock,
     /// Relative camera changes reported by dragging in the viewport.
     OrbitBy(f32, f32),
     PanBy([f32; 3]),
@@ -2296,6 +2423,7 @@ enum Message {
     /// Reset to the framed top view.
     ResetView,
     /// Show or hide the orientation cube.
+    #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     ToggleGizmo,
     /// Show or hide hover tooltips (inspector + ribbon icons).
     ToggleTooltips,
@@ -2450,6 +2578,7 @@ fn initial_panes() -> pane_grid::State<Pane> {
 
 impl App {
     fn begin_setup_draft(&mut self) {
+        self.inspector_active = true;
         self.cancel_setup_picks();
         self.setup_tab = SetupEditorTab::Setup;
         self.rebase_setup_draft();
@@ -2466,6 +2595,7 @@ impl App {
             .find(|s| s.id == id)
             .cloned();
         self.setup_values.clear();
+        self.setup_model_selection = None;
     }
 
     fn setup_draft_dirty(&self) -> bool {
@@ -2493,6 +2623,7 @@ impl App {
     }
 
     fn cancel_setup_picks(&mut self) {
+        self.setup_hover = SetupHover::default();
         self.setup_axis_pick = None;
         self.setting_origin = false;
         self.setting_origin_2pt = false;
@@ -2506,18 +2637,16 @@ impl App {
             return Some(error);
         }
         let refs = &setup.frame.references;
-        let entities = [
-            refs.x.as_ref().map(|r| r.entity.clone()),
-            refs.y.as_ref().map(|r| r.entity.clone()),
-            refs.z.as_ref().map(|r| r.entity.clone()),
-        ];
-        let flips = [
-            refs.x.as_ref().is_some_and(|r| r.flipped),
-            refs.y.as_ref().is_some_and(|r| r.flipped),
-            refs.z.as_ref().is_some_and(|r| r.flipped),
-        ];
-        let resolved = if entities.iter().any(Option::is_some) {
-            Some(self.controller.pending_frame_from_edges(entities, flips))
+        let resolved = if refs.x.is_some()
+            || refs.y.is_some()
+            || refs.z.is_some()
+            || refs.stock_axes.iter().any(Option::is_some)
+        {
+            Some(
+                setup
+                    .frame
+                    .resolve_references(self.controller.geometry_state(), refs.clone()),
+            )
         } else {
             refs.model_instance.map(|id| {
                 self.controller
@@ -2547,6 +2676,11 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.inspector_active = true;
+        self.controller.select(Selection::Operation(id));
+        self.operation_geometry = None;
+        self.operation_binding_preview = None;
+        self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
         self.operation_tools.clear();
         self.fields.clear();
@@ -2592,6 +2726,15 @@ impl App {
         let Selection::Operation(id) = self.controller.selection() else {
             return false;
         };
+        if self.operation_geometry.as_ref().is_some_and(|selected| {
+            self.controller
+                .geometry_state()
+                .bindings
+                .get(&id)
+                .is_some_and(|binding| binding.selected != *selected)
+        }) {
+            return true;
+        }
         self.operation_draft.as_ref().is_some_and(|draft| {
             self.controller
                 .operation(id)
@@ -2614,9 +2757,17 @@ impl App {
 
     fn refresh_operation_fields(&mut self) {
         let previous = self.fields.clone();
+        let overrides = (
+            self.cad_override_top.clone(),
+            self.cad_override_bottom.clone(),
+        );
         self.refresh_fields();
+        (self.cad_override_top, self.cad_override_bottom) = overrides;
+        let supported = self.inspector_fields();
         for (field, value) in previous {
-            self.fields.insert(field, value);
+            if supported.contains(&field) {
+                self.fields.insert(field, value);
+            }
         }
     }
 
@@ -2627,121 +2778,100 @@ impl App {
         if axis >= 3 {
             return;
         }
-        let origin = draft.frame.references.origin.clone();
-        let flipped = match axis {
-            0 => draft.frame.references.x.as_ref().is_some_and(|r| r.flipped),
-            1 => draft.frame.references.y.as_ref().is_some_and(|r| r.flipped),
-            _ => draft.frame.references.z.as_ref().is_some_and(|r| r.flipped),
+        let refs = &mut draft.frame.references;
+        let target = match axis {
+            0 => &mut refs.x,
+            1 => &mut refs.y,
+            _ => &mut refs.z,
         };
-        let reference = entity.map(|entity| cam_model::FrameAxisReference { entity, flipped });
+        let flipped = target.as_ref().is_some_and(|r| r.flipped);
+        *target = entity.map(|entity| cam_model::FrameAxisReference { entity, flipped });
+        refs.stock_axes[axis] = None;
+        refs.stock_flipped[axis] = false;
+        refs.model_instance = None;
+        self.resolve_setup_axes();
+    }
+    fn set_setup_stock_axis(&mut self, axis: usize, direction: [f64; 3]) {
+        let Some(draft) = &mut self.setup_draft else {
+            return;
+        };
+        if axis >= 3 {
+            return;
+        }
+        let refs = &mut draft.frame.references;
         match axis {
-            0 => draft.frame.references.x = reference,
-            1 => draft.frame.references.y = reference,
-            _ => draft.frame.references.z = reference,
+            0 => refs.x = None,
+            1 => refs.y = None,
+            _ => refs.z = None,
+        }
+        refs.stock_axes[axis] = Some(direction);
+        refs.stock_flipped[axis] = false;
+        refs.model_instance = None;
+        self.resolve_setup_axes();
+    }
+    fn set_setup_axis_flip(&mut self, axis: usize, flipped: bool) {
+        let Some(draft) = &mut self.setup_draft else {
+            return;
+        };
+        if axis >= 3 {
+            return;
         }
         let refs = &draft.frame.references;
-        let entities = [
-            refs.x.as_ref().map(|r| r.entity.clone()),
-            refs.y.as_ref().map(|r| r.entity.clone()),
-            refs.z.as_ref().map(|r| r.entity.clone()),
-        ];
-        let flips = [
-            refs.x.as_ref().is_some_and(|r| r.flipped),
-            refs.y.as_ref().is_some_and(|r| r.flipped),
-            refs.z.as_ref().is_some_and(|r| r.flipped),
-        ];
-        let count = entities.iter().filter(|e| e.is_some()).count();
-        match self.controller.pending_frame_from_edges(entities, flips) {
-            Ok(mut frame) => {
-                let world_origin = draft.frame.to_world_vector(draft.origin);
-                draft.origin = frame.to_setup_vector(world_origin);
-                if matches!(&origin, cam_model::FrameOrigin::Explicit(_)) {
-                    frame.references.origin = cam_model::FrameOrigin::Explicit(draft.origin);
-                } else {
-                    frame.references.origin = origin;
-                }
-                draft.frame = frame;
-                self.status = "WCS edge reference updated in the setup draft.".into();
-            }
-            Err(_error) if count < 2 => {
-                self.status = "Choose a second perpendicular edge to resolve the setup axes.".into()
-            }
-            Err(error) => self.status = error,
+        let reference = [&refs.x, &refs.y, &refs.z][axis];
+        let current = reference
+            .as_ref()
+            .map_or(refs.stock_flipped[axis], |r| r.flipped);
+        if current == flipped {
+            return;
         }
+        // A sign change on one axis alone mirrors the frame. Rotate by 180°
+        // instead: keep Z when flipping X/Y, and keep X when flipping Z.
+        let companion = if axis == 1 { 0 } else { 1 };
+        let world_origin = draft.frame.to_world_vector(draft.origin);
+        for index in [axis, companion] {
+            for row in &mut draft.frame.world_from_setup.rotation {
+                row[index] = -row[index];
+            }
+            let refs = &mut draft.frame.references;
+            if let Some(reference) = match index {
+                0 => &mut refs.x,
+                1 => &mut refs.y,
+                _ => &mut refs.z,
+            } {
+                reference.flipped = !reference.flipped;
+            } else if refs.stock_axes[index].is_some() {
+                refs.stock_flipped[index] = !refs.stock_flipped[index];
+            }
+            refs.model_instance = None;
+        }
+        draft.origin = draft.frame.to_setup_vector(world_origin);
+        if matches!(
+            draft.frame.references.origin,
+            cam_model::FrameOrigin::Explicit(_)
+        ) {
+            draft.frame.references.origin = cam_model::FrameOrigin::Explicit(draft.origin);
+        }
+        self.resolve_setup_axes();
     }
 
-    fn set_setup_axis_flip(&mut self, axis: usize, flipped: bool) {
-        let Some(draft) = &self.setup_draft else {
+    fn resolve_setup_axes(&mut self) {
+        let Some(draft) = &mut self.setup_draft else {
             return;
         };
-        let entities = [
-            draft.frame.references.x.as_ref().map(|r| r.entity.clone()),
-            draft.frame.references.y.as_ref().map(|r| r.entity.clone()),
-            draft.frame.references.z.as_ref().map(|r| r.entity.clone()),
-        ];
-        let mut flips = [
-            draft.frame.references.x.as_ref().is_some_and(|r| r.flipped),
-            draft.frame.references.y.as_ref().is_some_and(|r| r.flipped),
-            draft.frame.references.z.as_ref().is_some_and(|r| r.flipped),
-        ];
-        if axis >= 3 || entities[axis].is_none() {
-            return;
-        }
-        flips[axis] = flipped;
-        self.set_setup_axis_reference_with_flips(
-            entities,
-            flips,
-            draft.frame.references.origin.clone(),
-        );
-    }
-
-    fn set_setup_axis_reference_with_flips(
-        &mut self,
-        entities: [Option<EntityRef>; 3],
-        flips: [bool; 3],
-        origin: cam_model::FrameOrigin,
-    ) {
-        let count = entities.iter().filter(|e| e.is_some()).count();
-        if let Some(draft) = &mut self.setup_draft {
-            draft.frame.references.x =
-                entities[0]
-                    .clone()
-                    .map(|entity| cam_model::FrameAxisReference {
-                        entity,
-                        flipped: flips[0],
-                    });
-            draft.frame.references.y =
-                entities[1]
-                    .clone()
-                    .map(|entity| cam_model::FrameAxisReference {
-                        entity,
-                        flipped: flips[1],
-                    });
-            draft.frame.references.z =
-                entities[2]
-                    .clone()
-                    .map(|entity| cam_model::FrameAxisReference {
-                        entity,
-                        flipped: flips[2],
-                    });
-            draft.frame.references.origin = origin.clone();
-        }
-        match self.controller.pending_frame_from_edges(entities, flips) {
+        let refs = &draft.frame.references;
+        match draft
+            .frame
+            .resolve_references(self.controller.geometry_state(), refs.clone())
+        {
             Ok(mut frame) => {
-                if let Some(draft) = &mut self.setup_draft {
-                    let world_origin = draft.frame.to_world_vector(draft.origin);
-                    draft.origin = frame.to_setup_vector(world_origin);
-                    frame.references.origin =
-                        if matches!(&origin, cam_model::FrameOrigin::Explicit(_)) {
-                            cam_model::FrameOrigin::Explicit(draft.origin)
-                        } else {
-                            origin
-                        };
-                    draft.frame = frame;
+                let origin = draft.frame.to_world_vector(draft.origin);
+                draft.origin = frame.to_setup_vector(origin);
+                if matches!(frame.references.origin, cam_model::FrameOrigin::Explicit(_)) {
+                    frame.references.origin = cam_model::FrameOrigin::Explicit(draft.origin);
                 }
-            }
-            Err(_error) if count < 2 => {
-                self.status = "Choose a second perpendicular edge to resolve the setup axes.".into()
+                draft.frame = frame;
+                self.setup_values.retain(|key, _| *key > 2);
+                self.status = "WCS edge reference updated in the setup draft.".into();
             }
             Err(error) => self.status = error,
         }
@@ -2771,9 +2901,25 @@ impl App {
         let active_machine = active.name().to_string();
         let mut app = Self {
             controller: AppController::new(active.machine.clone()),
+            notice: None,
+            notice_queue: VecDeque::new(),
             setup_draft: None,
+            setup_model_selection: None,
             setup_values: BTreeMap::new(),
             operation_draft: None,
+            operation_geometry: None,
+            geometry_row_selection: None,
+            geometry_additive: false,
+            operation_binding_preview: None,
+            drawing_editing_op: None,
+            operation_tab: OperationTab::default(),
+            workspace: Workspace::Machining,
+            machining_tab: RibbonTab::Home,
+            show_project_browser: true,
+            planar_selection: Vec::new(),
+            tree_drag: None,
+            tree_hover: None,
+            tree_menu: None,
             operation_tools: Vec::new(),
             setup_tab: SetupEditorTab::Setup,
             setup_axis_pick: None,
@@ -2781,6 +2927,8 @@ impl App {
             hidden_setups: BTreeSet::new(),
             hidden_ops: BTreeSet::new(),
             panes: initial_panes(),
+            inspector_active: false,
+            inspector_enabled: true,
             show_license: false,
             show_prefs: false,
             window: iced::Size::new(1280.0, 800.0),
@@ -2827,6 +2975,7 @@ impl App {
             cad_override_bottom: String::new(),
             snaps: settings.snapping.default_snaps.clone(),
             snap_hover: None,
+            setup_hover: SetupHover::default(),
             snap_aperture: 1.0,
             hover_loop: None,
             setting_origin: false,
@@ -2859,9 +3008,14 @@ impl App {
                  (a copy is beside it as tools.json.bak)."
             );
         }
+        if let Some(project) = app.pane_handle(Pane::Project) {
+            app.panes.close(project);
+        }
         app.controller.select(Selection::Setup);
         app.begin_setup_draft();
+        app.inspector_active = false;
         app.refresh_fields();
+        app.sync_inspector_visibility();
         // Seed the fixed layout against the assumed window size; the first real
         // resize event re-applies it against the true size.
         app.apply_fixed_layout();
@@ -2869,9 +3023,76 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
+        let task = self.update_message(message);
+        self.sync_inspector_visibility();
+        task
+    }
+
+    fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        if self.notice.is_some() {
+            if matches!(&message, Message::CadEscape | Message::Apply) {
+                return self.update(Message::NoticeDismissed);
+            }
+            if !matches!(
+                &message,
+                Message::NoticeDismissed
+                    | Message::NoticeBackdrop
+                    | Message::PollCadImport
+                    | Message::PollRun
+                    | Message::WindowResized(_)
+                    | Message::WindowCursor(_)
+                    | Message::ModifiersChanged(_)
+            ) {
+                return iced::Task::none();
+            }
+        }
+        if self.library_mode()
+            && self.inspector_dirty()
+            && matches!(
+                &message,
+                Message::NewTool
+                    | Message::DeleteTool
+                    | Message::ImportLibrary
+                    | Message::LibMenuSetNumber
+                    | Message::RenumberLibrary
+                    | Message::RenumberConfirmed(true)
+                    | Message::LibraryToImport(Some(_))
+            )
+        {
+            self.status = "OK or Cancel tool changes before changing the library.".into();
+            return iced::Task::none();
+        }
+        if (self.controller.pending_op().is_some()
+            || self.cad_pending_kind.is_some()
+            || self.cad_editing_op.is_some())
+            && matches!(
+                &message,
+                Message::Select(_)
+                    | Message::SelectSetup(_)
+                    | Message::ClickOp(_)
+                    | Message::BeginOp(_)
+                    | Message::SelectOrigin(_)
+                    | Message::SetupNew
+                    | Message::SetupDuplicate(_)
+                    | Message::SetupDelete(_)
+                    | Message::SetupMove(_, _)
+                    | Message::Undo
+                    | Message::Redo
+                    | Message::NewProject
+                    | Message::OpenProject
+                    | Message::OpenSample
+                    | Message::ImportCad
+            )
+        {
+            self.status =
+                "Confirm or Cancel geometry selection before changing the editing context.".into();
+            return iced::Task::none();
+        }
         let operation_settings_dirty =
             matches!(self.controller.selection(), Selection::Operation(_))
-                && self.inspector_dirty();
+                && (self.inspector_dirty()
+                    || self.any_field_invalid()
+                    || !self.operation_height_overrides_valid());
         if (self.setup_draft_dirty() || operation_settings_dirty)
             && matches!(
                 &message,
@@ -2923,14 +3144,144 @@ impl App {
         ) {
             self.cancel_setup_picks();
         }
+        if matches!(
+            &message,
+            Message::SelectSetup(_)
+                | Message::SetupNew
+                | Message::SetupDuplicate(_)
+                | Message::SetupDelete(_)
+        ) {
+            self.cad_inspecting = false;
+            self.cad_editing_op = None;
+            self.cad_hover = None;
+            self.cad_candidates.clear();
+        }
         // Any action other than opening a group-popup closes the open one (so a
         // command picked from a popup, or a click elsewhere, dismisses it).
         if !matches!(message, Message::ToggleRibbonGroup(_)) {
             self.open_group = None;
         }
+        if matches!(
+            &message,
+            Message::BeginOp(_)
+                | Message::CancelOp
+                | Message::ConfirmOp
+                | Message::CancelOperationDraft
+                | Message::CadEscape
+                | Message::ConfirmCadOperation
+                | Message::UseDrawingGeometry
+                | Message::CancelDrawingGeometry
+                | Message::Select(_)
+                | Message::ClickOp(_)
+                | Message::NewProject
+                | Message::OpenSample
+        ) {
+            self.geometry_additive = false;
+            self.geometry_row_selection = None;
+        }
         match message {
+            Message::RunJob => {
+                if self.setup_draft_dirty()
+                    || self.inspector_dirty()
+                    || self.controller.pending_op().is_some()
+                    || self.cad_pending_kind.is_some()
+                    || self.cad_editing_op.is_some()
+                {
+                    self.status =
+                        "OK or Cancel inspector changes and operation selection before running."
+                            .into();
+                } else {
+                    self.rerun();
+                }
+            }
+            Message::WorkspaceChanged(workspace) => self.switch_workspace(workspace),
+            Message::CancelToolDraft => {
+                self.reload_tool_edit();
+                self.status = "Tool changes cancelled.".into();
+            }
+            Message::OperationTabChanged(tab) => self.operation_tab = tab,
+            Message::ProfileCompChanged(comp) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(profile) = op {
+                        profile.comp = comp;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::EngraveClosedChanged(closed) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Engrave(engrave) = op {
+                        engrave.closed = closed;
+                        if !closed {
+                            engrave.start = None;
+                        }
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::OperationStartEnabled(enabled) => {
+                self.edit_operation_draft(|op| operation_tabs::set_operation_start(op, enabled));
+                self.refresh_operation_fields();
+            }
+            Message::OperationToolPicked(index) => {
+                if let (Some(tool), Selection::Operation(id)) = (
+                    self.library.tools.get(index).copied(),
+                    self.controller.selection(),
+                ) {
+                    let Some(op) = self.current_operation(id) else {
+                        return iced::Task::none();
+                    };
+                    if !families_for(AppController::operation_kind(op))
+                        .contains(&ToolKindPick::of(tool.kind))
+                    {
+                        self.status =
+                            "This cutter kind is not supported by the selected operation.".into();
+                        return iced::Task::none();
+                    }
+                    let number = self.stage_operation_tool(tool);
+                    self.edit_operation_draft(|op| op.set_tool(number));
+                    self.refresh_operation_fields();
+                }
+            }
+            Message::EditDrawingGeometry(id) => {
+                if self.current_operation(id).is_some()
+                    && self.controller.reinitialize_operation(id)
+                {
+                    let number = self.current_operation(id).unwrap().tool();
+                    self.controller.set_pending_tool(number);
+                    self.drawing_editing_op = Some(id);
+                    self.status = "Pick the drawing geometry. Ctrl/Command adds compatible features. Use geometry stages it for OK.".into();
+                }
+            }
+            Message::UseDrawingGeometry => {
+                if let Some(id) = self.drawing_editing_op {
+                    if let Some(operation) = self.current_operation(id) {
+                        match self.controller.operation_with_drawing_geometry(
+                            operation,
+                            &self.controller.pending_operation_geometry(),
+                        ) {
+                            Ok(draft) => {
+                                self.operation_draft = Some(draft);
+                                self.controller.cancel_operation();
+                                self.drawing_editing_op = None;
+                                self.refresh_operation_fields();
+                                self.operation_tab = OperationTab::Geometry;
+                                self.status = "Drawing geometry staged. OK commits all tabs; Cancel discards them.".into();
+                            }
+                            Err(error) => self.status = error,
+                        }
+                    }
+                }
+            }
+            Message::CancelDrawingGeometry => {
+                self.controller.cancel_operation();
+                self.drawing_editing_op = None;
+                self.status = "Geometry selection cancelled; other draft edits retained.".into();
+            }
+            Message::Tree(message) => return self.update_tree(message),
             Message::OpenSample => match self.controller.open_dxf(SAMPLE_DXF, "sample.dxf") {
                 Ok(n) => {
+                    self.planar_selection.clear();
                     self.focus_ops.clear();
                     self.controller.select(Selection::Setup);
                     self.begin_setup_draft();
@@ -2947,6 +3298,8 @@ impl App {
                     self.status = error;
                 } else {
                     self.expanded_setups.insert(id);
+                    self.cad_inspecting = false;
+                    self.cad_editing_op = None;
                     self.controller.select(Selection::Setup);
                     self.operation_draft = None;
                     self.begin_setup_draft();
@@ -3048,36 +3401,49 @@ impl App {
                     draft.origin_index = v;
                 }
             }
+            Message::SetupModelSelected(instance) => {
+                if self.setup_draft.as_ref().is_some_and(|draft| {
+                    self.controller
+                        .geometry_state()
+                        .instance(instance)
+                        .is_some()
+                        && (draft.model_instances.is_empty()
+                            || draft.model_instances.contains(&instance))
+                }) {
+                    self.setup_model_selection = Some(instance);
+                }
+            }
             Message::SetupModelToggled(instance, included) => {
+                let all: Vec<_> = self
+                    .controller
+                    .geometry_state()
+                    .instances
+                    .iter()
+                    .map(|item| item.id)
+                    .collect();
+                if !all.contains(&instance) {
+                    return iced::Task::none();
+                }
                 if let Some(draft) = &mut self.setup_draft {
-                    if included {
-                        if !draft.model_instances.is_empty()
-                            && !draft.model_instances.contains(&instance)
-                        {
-                            draft.model_instances.push(instance);
-                        }
+                    let mut models = if draft.model_instances.is_empty() {
+                        all
                     } else {
-                        if draft.model_instances.is_empty() {
-                            let all: Vec<_> = self
-                                .controller
-                                .geometry_state()
-                                .instances
-                                .iter()
-                                .map(|item| item.id)
-                                .collect();
-                            if all.len() <= 1 {
-                                self.status =
-                                    "A setup must target at least one model instance.".into();
-                                return iced::Task::none();
-                            }
-                            draft.model_instances = all;
+                        draft.model_instances.clone()
+                    };
+                    if included {
+                        if !models.contains(&instance) {
+                            models.push(instance);
+                            draft.model_instances = models;
                         }
-                        if draft.model_instances.len() <= 1
-                            && draft.model_instances.contains(&instance)
-                        {
+                        self.setup_model_selection = Some(instance);
+                    } else if let Some(index) = models.iter().position(|id| *id == instance) {
+                        if models.len() <= 1 {
                             self.status = "A setup must target at least one model instance.".into();
                         } else {
-                            draft.model_instances.retain(|id| *id != instance);
+                            models.remove(index);
+                            self.setup_model_selection =
+                                models.get(index.min(models.len() - 1)).copied();
+                            draft.model_instances = models;
                         }
                     }
                 }
@@ -3159,15 +3525,28 @@ impl App {
                 self.setting_origin = false;
                 self.setting_origin_2pt = false;
                 self.origin_first = None;
+                self.setup_hover = SetupHover::default();
                 self.setup_axis_pick = Some(axis);
                 self.cad_candidates.clear();
                 self.cad_filter = CadFilter::Edge;
                 self.status = format!(
-                    "Select a straight model edge for {}.",
+                    "Select a straight model or stock edge for {}.",
                     ["X", "Y", "Z"][axis]
                 );
             }
             Message::SetupAxisFlip(axis, flipped) => self.set_setup_axis_flip(axis, flipped),
+            Message::SetupAxisToggle(axis) => {
+                if let Some(draft) = &self.setup_draft {
+                    if axis < 3 {
+                        let refs = &draft.frame.references;
+                        let flipped = [&refs.x, &refs.y, &refs.z][axis]
+                            .as_ref()
+                            .map_or(refs.stock_flipped[axis], |r| r.flipped);
+                        self.set_setup_axis_flip(axis, !flipped);
+                        self.cancel_setup_picks();
+                    }
+                }
+            }
             Message::SetupAxisClear(axis) => self.set_setup_axis_reference(axis, None),
             Message::SetupCommit => {
                 if self
@@ -3255,6 +3634,8 @@ impl App {
                 self.cad_inspecting = false;
                 self.cad_editing_op = None;
                 self.controller.select(selection);
+                self.inspector_active =
+                    matches!(selection, Selection::Setup | Selection::Operation(_));
                 if let Selection::Operation(id) = selection {
                     self.begin_operation_draft(id);
                 } else {
@@ -3307,6 +3688,8 @@ impl App {
                     self.begin_operation_draft(op_id);
                 } else {
                     self.operation_draft = None;
+                    self.begin_setup_draft();
+                    self.inspector_active = false;
                 }
                 self.refresh_fields();
             }
@@ -3333,13 +3716,39 @@ impl App {
                 self.machine_post_edit = Some(kind);
             }
             Message::Apply => {
+                if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
+                    self.status =
+                        "Use geometry or cancel selection before applying operation changes."
+                            .into();
+                    return iced::Task::none();
+                }
+                if self.creating_operation() {
+                    return self.update(Message::ConfirmOp);
+                }
                 // Blocked while any field is invalid or there is nothing to commit (also
                 // catches Enter-to-apply).
-                if !self.any_field_invalid() && self.inspector_dirty() {
+                if !self.any_field_invalid()
+                    && self.operation_height_overrides_valid()
+                    && self.inspector_dirty()
+                {
                     self.apply_inspector();
                 }
             }
             Message::CancelOperationDraft => {
+                self.drawing_editing_op = None;
+                self.controller.cancel_operation();
+                if let Selection::Operation(id) = self.controller.selection() {
+                    let refs = self
+                        .controller
+                        .geometry_state()
+                        .bindings
+                        .get(&id)
+                        .map(|binding| binding.selected.clone())
+                        .unwrap_or_default();
+                    self.controller.set_cad_selection(refs);
+                }
+                self.operation_geometry = None;
+                self.operation_binding_preview = None;
                 self.operation_draft = None;
                 if let Selection::Operation(id) = self.controller.selection() {
                     self.begin_operation_draft(id);
@@ -3349,6 +3758,7 @@ impl App {
             Message::NewProject => {
                 // The post is *not* touched: a new project does not move you to a
                 // different machine or control, so there is nothing to re-target.
+                self.planar_selection.clear();
                 self.controller.new_project();
                 self.focus_ops.clear();
                 self.controller.select(Selection::Setup);
@@ -3365,6 +3775,7 @@ impl App {
             Message::ProjectToOpen(Some(path)) => {
                 self.status = match self.controller.open_project(&path) {
                     Ok(()) => {
+                        self.planar_selection.clear();
                         // Reconcile the project's tool numbers against the shop library
                         // (TOOLING_PLAN §6): matched tools adopt the shop's numbering.
                         let report = self.controller.reconcile_tools(&self.library.tools);
@@ -3450,19 +3861,7 @@ impl App {
             }
             Message::PollCadImport => {
                 if let Some(result) = self.controller.poll_cad_import() {
-                    self.status = match result {
-                        Ok(n) => {
-                            self.cad_hidden.clear();
-                            self.cad_hover = None;
-                            self.cad_pending_kind = None;
-                            self.view = ViewControls::default();
-                            self.refresh_fields();
-                            format!(
-                                "Ready to import {n} geometry item(s). Review units, dimensions and diagnostics in the project tree."
-                            )
-                        }
-                        Err(error) => format!("Import failed: {error}"),
-                    };
+                    return self.complete_import(result);
                 }
             }
             Message::ReplaceCadAsset(id) => {
@@ -3472,10 +3871,17 @@ impl App {
                 );
             }
             Message::CadReplacementChosen(id, Some(path)) => {
-                self.status=match self.controller.start_cad_replacement(id,path) {
-                    Ok(_)=>"Preparing model replacement; review the preview before replacing. Linked operations will need reselection.".into(),
-                    Err(error)=>error,
-                };
+                match self.controller.start_cad_replacement(id, path) {
+                    Ok(_) => self.status = "Importing replacement model…".into(),
+                    Err(error) => {
+                        self.status = error.clone();
+                        return self.queue_notice(Notice {
+                            title: "Cannot replace model".into(),
+                            detail: error,
+                            error: true,
+                        });
+                    }
+                }
             }
             Message::CadReplacementChosen(_, None) => {}
             Message::RemoveCadAsset(id) => {
@@ -3488,15 +3894,22 @@ impl App {
                             .into();
                 }
             }
-            Message::ConfirmCadImport => {
-                self.status = match self.controller.commit_cad_preview() {
-                    Ok(count) => {
-                        self.view = ViewControls::default();
-                        self.refresh_fields();
-                        format!("Imported {count} geometry item(s).")
+            Message::NoticeBackdrop => {}
+            Message::NoticeDismissed => {
+                self.notice = None;
+                return self.show_next_notice();
+            }
+            Message::PollRun => {
+                if self.controller.poll_run() {
+                    self.report_run();
+                    if let Some(notice) = self.controller.outcome().and_then(notices::job_notice) {
+                        return self.queue_notice(notice);
                     }
-                    Err(error) => format!("Import rejected: {error}"),
-                };
+                }
+            }
+            Message::CancelRun => {
+                self.controller.cancel_run();
+                self.status = "Run cancelled. Run again before exporting.".into();
             }
             Message::CancelCadImport => {
                 self.controller.cancel_cad_import();
@@ -3520,13 +3933,28 @@ impl App {
                     self.status = "No edge was selected. The axis picker is still armed.".into();
                 } else if let Some(candidate) = candidates.first() {
                     self.select_cad_entity(candidate.entity.clone());
-                } else if !self.modifiers.command() && !self.modifiers.shift() {
+                } else if !self.modifiers.command()
+                    && !self.modifiers.control()
+                    && !self.modifiers.shift()
+                {
                     self.controller.set_cad_selection(vec![]);
+                    if !self.creating_operation()
+                        && self.cad_editing_op.is_none()
+                        && !self.setup_draft_dirty()
+                        && !self.inspector_dirty()
+                    {
+                        self.inspector_active = false;
+                        self.focus_ops.clear();
+                    }
                 }
                 if self.setup_axis_pick.is_none() {
                     self.cad_candidates = candidates;
                 }
             }
+            Message::GeometryPick => return self.pick_operation_geometry(),
+            Message::GeometryRowSelected(index) => self.geometry_row_selection = Some(index),
+            Message::GeometryRemove(index) => self.remove_operation_geometry(Some(index)),
+            Message::GeometryClear => self.remove_operation_geometry(None),
             Message::CadSelect(entity) => {
                 if let Some(axis) = self.setup_axis_pick {
                     self.set_setup_axis_reference(axis, Some(entity));
@@ -3546,6 +3974,16 @@ impl App {
                 );
                 self.controller.set_cad_selection(vec![]);
                 self.cad_hover = None;
+            }
+            Message::CadIsolateInstance(id) => {
+                self.cad_hidden = self
+                    .controller
+                    .geometry_state()
+                    .instances
+                    .iter()
+                    .filter(|instance| instance.id != id)
+                    .map(|instance| instance.id)
+                    .collect();
             }
             Message::CadIsolateSelected => {
                 let selected: BTreeSet<_> = self
@@ -3574,6 +4012,9 @@ impl App {
                 }
             }
             Message::CadEscape => {
+                self.cancel_tree_drag();
+                self.drawing_editing_op = None;
+                self.planar_selection.clear();
                 self.cad_inspecting = false;
                 self.cad_editing_op = None;
                 self.cad_pending_kind = None;
@@ -3582,46 +4023,37 @@ impl App {
                 self.controller.set_cad_selection(vec![]);
                 self.controller.cancel_operation();
             }
-            Message::CadToolPicked(number) => self.cad_tool_pick = Some(number),
             Message::ConfirmCadOperation => {
                 if let Some(id) = self.cad_editing_op {
-                    match self
-                        .controller
-                        .edit_cad_geometry(id, self.controller.cad_selection().to_vec())
-                    {
-                        Ok(()) => {
+                    let selected = self.controller.cad_selection().to_vec();
+                    match self.preview_geometry_draft(id, selected.clone()) {
+                        Ok(binding) => {
+                            self.operation_binding_preview = Some(binding);
+                            self.operation_geometry = Some(selected);
                             self.cad_editing_op = None;
                             self.cad_inspecting = false;
-                            self.controller.select(Selection::Operation(id));
-                            self.rebase_setup_draft();
-                            self.refresh_fields();
-                            self.rerun();
-                            self.status = format!("Updated operation {id} geometry.");
+                            self.cad_pending_kind = None;
+                            self.operation_tab = OperationTab::Geometry;
+                            self.status = "Geometry staged. OK commits every operation tab; Cancel discards the changes.".into();
                         }
-                        Err(error) => self.status = format!("Geometry update rejected: {error}"),
+                        Err(error) => self.status = format!("Geometry selection rejected: {error}"),
                     }
                     return iced::Task::none();
                 }
                 if let Some(kind) = self.cad_pending_kind {
-                    // The standard library supplies the same default tool as the
-                    // drawing wizard; the controller validates its compatibility.
-                    let chosen = self
-                        .cad_tool_pick
-                        .and_then(|number| {
-                            self.library
-                                .tools
-                                .iter()
-                                .find(|tool| tool.number == number)
-                                .cloned()
-                        })
-                        .or_else(|| self.library.default_tool_for(kind));
-                    let tool = chosen
-                        .map(|tool| self.controller.use_tool(tool))
-                        .unwrap_or(1);
-                    match self.controller.create_cad_operation_with_tool(
+                    let Some(chosen) = self.wizard_tool() else {
+                        self.status = "Choose a cutter.".into();
+                        return iced::Task::none();
+                    };
+                    let Some(cutting) = self.wizard_cutting() else {
+                        self.status = "Enter valid cutting data.".into();
+                        return iced::Task::none();
+                    };
+                    match self.controller.create_cad_operation_from_tool(
                         kind,
                         self.controller.cad_selection().to_vec(),
-                        tool,
+                        chosen,
+                        cutting,
                     ) {
                         Ok(id) => {
                             self.cad_pending_kind = None;
@@ -3631,7 +4063,7 @@ impl App {
                             self.focus_ops.clear();
                             self.focus_ops.insert(id);
                             self.rebase_setup_draft();
-                            self.refresh_fields();
+                            self.begin_operation_draft(id);
                             self.rerun();
                             self.status = format!("Created operation {id} linked to CAD geometry.");
                         }
@@ -3648,15 +4080,25 @@ impl App {
                         cam_model::ExtractionRecipe::ProfileLoop { .. } => CadFilter::Loop,
                         _ => CadFilter::Face,
                     };
+                    let refs = self.operation_geometry.clone().unwrap_or(refs);
                     self.controller.set_cad_selection(refs);
                     self.cad_inspecting = true;
                     self.cad_editing_op = Some(id);
-                    self.status = "Select replacement geometry and Apply geometry to repair the existing operation.".into();
+                    self.status = "Select replacement geometry, then Use geometry to stage it. The operation OK/Cancel footer commits or discards all tabs.".into();
                 }
             }
             Message::CadOverrideTopChanged(value) => self.cad_override_top = value,
             Message::CadOverrideBottomChanged(value) => self.cad_override_bottom = value,
             Message::ExportNc => {
+                if self.setup_draft_dirty()
+                    || self.inspector_dirty()
+                    || self.controller.pending_op().is_some()
+                    || self.cad_pending_kind.is_some()
+                    || self.cad_editing_op.is_some()
+                {
+                    self.status = "Export blocked: OK or Cancel pending inspector changes and geometry selection first.".into();
+                    return iced::Task::none();
+                }
                 // **Post before opening the dialog.** The refusal used to come *after*
                 // the operator had picked a folder and a filename, which reads as "saved"
                 // — they close the dialog believing the job exported and go looking for a
@@ -3778,6 +4220,7 @@ impl App {
             }
             Message::ToggleSetOrigin => {
                 self.setup_axis_pick = None;
+                self.setup_hover = SetupHover::default();
                 let on = !self.setting_origin;
                 self.setting_origin = on;
                 self.setting_origin_2pt = false;
@@ -3792,6 +4235,7 @@ impl App {
             }
             Message::ToggleSetOrigin2pt => {
                 self.setup_axis_pick = None;
+                self.setup_hover = SetupHover::default();
                 let on = !self.setting_origin_2pt;
                 self.setting_origin_2pt = on;
                 self.setting_origin = false;
@@ -3803,34 +4247,26 @@ impl App {
                     self.status = "Set draft origin: click point 1 (sets X).".to_string();
                 }
             }
-            Message::OriginPointPicked(w, aperture) => {
-                let world = [w[0] as f64, w[1] as f64];
-                let p2 = self
-                    .controller
-                    .snap_at(world, aperture as f64, &self.snaps)
-                    .map(|h| h.point)
-                    .unwrap_or(world);
-                let z = self
-                    .setup_draft
-                    .as_ref()
-                    .map_or(0.0, |setup| setup.heights.top_of_stock);
+            Message::OriginPointPicked(world) => {
                 let p = self
                     .setup_draft
                     .as_ref()
-                    .map_or([p2[0], p2[1], z], |setup| {
-                        setup.frame.to_setup_vector([p2[0], p2[1], z])
-                    });
+                    .map_or(world, |setup| setup.frame.to_setup_vector(world));
+                self.setup_values.retain(|key, _| *key > 2);
+                self.setup_hover = SetupHover::default();
                 self.snap_hover = None;
                 self.hover_loop = None;
                 if self.setting_origin {
                     if let Some(draft) = &mut self.setup_draft {
-                        draft.origin[0] = p[0];
-                        draft.origin[1] = p[1];
+                        draft.origin = p;
                         draft.frame.references.origin =
                             cam_model::FrameOrigin::Explicit(draft.origin);
                     }
                     self.setting_origin = false;
-                    self.status = format!("Draft origin set to X{:.3} Y{:.3}.", p[0], p[1]);
+                    self.status = format!(
+                        "Draft origin set to X{:.3} Y{:.3} Z{:.3}.",
+                        p[0], p[1], p[2]
+                    );
                 } else if let Some(first) = self.origin_first.take() {
                     let origin = [first[0], p[1], (first[2] + p[2]) / 2.0];
                     if let Some(draft) = &mut self.setup_draft {
@@ -3852,33 +4288,67 @@ impl App {
                     && (self.controller.regions().is_empty()
                         || !self.controller.cad_selection().is_empty())
                 {
-                    if matches!(
-                        kind,
-                        OpKind::Pocket | OpKind::Profile | OpKind::Drill | OpKind::Face
-                    ) {
-                        self.cad_pending_kind = Some(kind);
-                        self.cad_tool_pick =
-                            self.library.default_tool_for(kind).map(|tool| tool.number);
-                        self.cad_inspecting = true;
-                        self.cad_editing_op = None;
-                        self.cad_filter = if kind == OpKind::Profile {
-                            CadFilter::Loop
-                        } else {
-                            CadFilter::Face
-                        };
-                        self.controller.cancel_operation();
-                        self.status = "Select the source geometry, review the selection, then Create linked operation.".into();
-                    } else {
-                        self.status =
-                            "CAD selection supports Pocket, Drill, Profile and Face operations."
-                                .into();
+                    self.cancel_setup_picks();
+                    self.cad_pending_kind = Some(kind);
+                    if kind == OpKind::Profile {
+                        let references = self
+                            .controller
+                            .cad_selection()
+                            .iter()
+                            .cloned()
+                            .map(|mut reference| {
+                                if reference.kind == EntityKind::Face {
+                                    if let Some(outer) = self
+                                        .controller
+                                        .geometry_state()
+                                        .asset(reference.asset_id)
+                                        .and_then(|asset| {
+                                            asset.topology.loops.iter().find(|wire| {
+                                                wire.body_id == reference.body_id
+                                                    && wire.face_id == reference.id
+                                                    && wire.is_outer
+                                            })
+                                        })
+                                    {
+                                        reference.kind = EntityKind::Loop;
+                                        reference.id = outer.id;
+                                    }
+                                }
+                                reference
+                            })
+                            .collect();
+                        self.controller.set_cad_selection(references);
                     }
+                    let tool = self.library.default_tool_for(kind);
+                    self.cad_tool_pick = tool.map(|tool| tool.number);
+                    self.wizard_family = tool.map(|tool| ToolKindPick::of(tool.kind));
+                    self.cad_inspecting = false;
+                    self.cad_editing_op = None;
+                    self.cad_filter = if kind == OpKind::Profile {
+                        CadFilter::Loop
+                    } else {
+                        CadFilter::Face
+                    };
+                    self.controller.cancel_operation();
+                    self.refresh_fields();
+                    self.seed_wizard_cutting();
+                    self.status =
+                        "Choose a tool and click the geometry in the viewport, then Confirm."
+                            .into();
                     return iced::Task::none();
                 }
                 self.setting_origin = false;
                 self.setting_origin_2pt = false;
                 self.origin_first = None;
-                self.controller.begin_operation(kind);
+                if self.planar_selection.is_empty() {
+                    self.controller.begin_operation(kind);
+                } else if let Err(error) = self
+                    .controller
+                    .begin_operation_from_selection(kind, &self.planar_selection)
+                {
+                    self.status = error;
+                    return iced::Task::none();
+                }
                 // Seed the op with a sensible default tool so it always has a valid
                 // one; the user can change it in the wizard picker. Face prefers the
                 // largest flat end/face mill (see `ToolLibrary::default_tool_for`).
@@ -3916,33 +4386,142 @@ impl App {
                 self.wizard_family = Some(f);
                 // The previously picked tool is from another family — drop it, and
                 // with it the Confirm gate, rather than leave a stale selection.
-                self.controller.clear_pending_tool();
-                self.controller.prune_unused_tools();
+                if self.cad_pending_kind.is_some() {
+                    self.cad_tool_pick = None;
+                } else {
+                    self.controller.clear_pending_tool();
+                    self.controller.prune_unused_tools();
+                }
+                self.refresh_fields();
             }
             Message::SetPendingLibraryTool(i) => {
                 if let Some(&tool) = self.library.tools.get(i) {
-                    let number = self.controller.use_tool(tool);
-                    self.controller.set_pending_tool(number);
-                    // Re-seed the cutting-data defaults from the newly chosen tool.
+                    if self.cad_pending_kind.is_some() {
+                        self.cad_tool_pick = Some(tool.number);
+                    } else {
+                        let number = self.controller.use_tool(tool);
+                        self.controller.set_pending_tool(number);
+                    }
                     self.seed_wizard_cutting();
                 }
             }
             Message::CancelOp => {
+                self.cad_pending_kind = None;
+                self.cad_tool_pick = None;
+                self.cad_inspecting = false;
+                self.controller.set_cad_selection(vec![]);
                 self.controller.cancel_operation();
                 self.controller.prune_unused_tools();
+                self.refresh_fields();
                 self.status = "Cancelled operation creation.".to_string();
             }
             Message::ConfirmOp => {
+                if self.cad_pending_kind.is_some() {
+                    return self.update(Message::ConfirmCadOperation);
+                }
                 let cutting = self.wizard_cutting();
+                if cutting.is_none() {
+                    self.status = "Choose a cutter and enter valid cutting data.".into();
+                    return iced::Task::none();
+                }
                 if self.controller.confirm_operation(cutting) {
+                    self.planar_selection.clear();
                     self.cursor = None;
                     self.rebase_setup_draft();
+                    self.operation_draft = None;
+                    self.focus_selected_op();
                     self.refresh_fields();
                     self.rerun();
                     self.status = "Operation created.".to_string();
                 }
             }
             Message::PickWorld(w, aperture) => {
+                if self.controller.pending_op().is_none() {
+                    if self.setup_draft_dirty()
+                        || (matches!(self.controller.selection(), Selection::Operation(_))
+                            && self.inspector_dirty())
+                    {
+                        self.status =
+                            "OK or Cancel inspector changes before selecting drawing features."
+                                .into();
+                        return iced::Task::none();
+                    }
+                    self.inspector_active = false;
+                    self.focus_ops.clear();
+                    let Some((feature, _)) = self
+                        .controller
+                        .nearest_drawing_feature(w.map(f64::from), aperture as f64)
+                    else {
+                        if !self.modifiers.command()
+                            && !self.modifiers.control()
+                            && !self.modifiers.shift()
+                        {
+                            self.planar_selection.clear();
+                        }
+                        return iced::Task::none();
+                    };
+                    let additive = self.modifiers.command()
+                        || self.modifiers.control()
+                        || self.modifiers.shift();
+                    let mut selected = if additive {
+                        self.planar_selection.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    if selected
+                        .first()
+                        .is_some_and(|first| first.is_open() != feature.is_open())
+                    {
+                        self.status =
+                            "Open paths and closed boundaries must be selected separately.".into();
+                        return iced::Task::none();
+                    }
+                    if let Some(index) = selected.iter().position(|old| *old == feature) {
+                        selected.remove(index);
+                    } else {
+                        selected.push(feature);
+                    }
+                    self.planar_selection = selected;
+                    self.status = format!(
+                        "{} drawing feature(s) selected. Choose an operation.",
+                        self.planar_selection.len()
+                    );
+                    return iced::Task::none();
+                }
+                let multiple = self.controller.pending_op().is_some_and(|pending| {
+                    op_takes_islands(pending.kind) || op_selects_circles(pending.kind)
+                });
+                if (self.geometry_additive && multiple)
+                    || self.modifiers.command()
+                    || self.modifiers.control()
+                    || self.modifiers.shift()
+                {
+                    if let Some((feature, point)) = self
+                        .controller
+                        .nearest_drawing_feature(w.map(f64::from), aperture as f64)
+                    {
+                        let mut selected = self.controller.pending_operation_geometry();
+                        if let Some(index) = selected.iter().position(|old| *old == feature) {
+                            selected.remove(index);
+                        } else {
+                            selected.push(feature);
+                        }
+                        match self
+                            .controller
+                            .set_pending_operation_geometry(&selected, Some(point))
+                        {
+                            Ok(()) => {
+                                self.status = format!(
+                                "{} compatible feature(s) selected; Confirm creates the operation.",
+                                selected.len()
+                            )
+                            }
+                            Err(error) => self.status = error,
+                        }
+                    }
+                    return iced::Task::none();
+                }
+
                 // Snaps only apply to op kinds with a start; others select by the
                 // nearest point on the loop.
                 let snaps: &[SnapKind] = if self
@@ -3950,7 +4529,11 @@ impl App {
                     .pending_op()
                     .is_some_and(|p| op_uses_snaps(p.kind))
                 {
-                    &self.snaps
+                    if self.settings.snapping.enabled {
+                        &self.snaps
+                    } else {
+                        &[]
+                    }
                 } else {
                     &[]
                 };
@@ -4003,7 +4586,7 @@ impl App {
                         .controller
                         .pending_op()
                         .is_some_and(|p| op_uses_snaps(p.kind));
-                self.snap_hover = if use_snaps {
+                self.snap_hover = if use_snaps && self.settings.snapping.enabled {
                     self.controller.snap_at(
                         [w[0] as f64, w[1] as f64],
                         aperture as f64,
@@ -4032,7 +4615,40 @@ impl App {
                     })
                 };
             }
+            Message::SetupHover(cursor, hover) => {
+                self.cursor = Some(cursor);
+                self.cad_hover = match hover
+                    .snap
+                    .as_ref()
+                    .map(|h| &h.source)
+                    .or(hover.edge.as_ref())
+                {
+                    Some(SetupFeature::Model(entity)) => Some(entity.clone()),
+                    _ => None,
+                };
+                self.setup_hover = hover;
+            }
+            Message::SetupStockEdgePicked(direction) => {
+                if let Some(axis) = self.setup_axis_pick.take() {
+                    self.set_setup_stock_axis(axis, direction);
+                }
+                self.setup_hover = SetupHover::default();
+                self.cad_candidates.clear();
+            }
+            Message::ToggleSnapping => {
+                self.settings.snapping.enabled = !self.settings.snapping.enabled;
+                self.snap_hover = None;
+                self.setup_hover = SetupHover::default();
+                self.remember();
+            }
+            Message::ToggleFeatureHighlights => {
+                self.settings.snapping.highlight_features =
+                    !self.settings.snapping.highlight_features;
+                self.remember();
+            }
             Message::ToggleSnap(kind) => {
+                self.snap_hover = None;
+                self.setup_hover = SetupHover::default();
                 if let Some(pos) = self.snaps.iter().position(|k| *k == kind) {
                     self.snaps.remove(pos);
                 } else {
@@ -4136,10 +4752,20 @@ impl App {
             Message::ToggleStock => {
                 self.show_stock = !self.show_stock;
                 self.status = if self.show_stock {
-                    "Showing simulated stock.".to_string()
+                    "Showing stock material.".to_string()
                 } else {
-                    "Hiding simulated stock.".to_string()
+                    "Hiding stock material.".to_string()
                 };
+                self.remember();
+            }
+            Message::ToggleTransparentStock => {
+                self.settings.view.transparent_stock = !self.settings.view.transparent_stock;
+                self.status = if self.settings.view.transparent_stock {
+                    "Stock material is transparent."
+                } else {
+                    "Stock material is opaque."
+                }
+                .into();
                 self.remember();
             }
             Message::OrbitBy(dyaw, dpitch) => {
@@ -4343,7 +4969,7 @@ impl App {
                     if let Some(t) = self.tool_edit.as_mut() {
                         t.cutting_direction = dir;
                     }
-                    self.refresh_fields();
+                    self.refresh_operation_fields();
                 } else if let Selection::Tool(i) = self.controller.selection() {
                     self.controller.edit_tool(i, |t| t.cutting_direction = dir);
                     self.rerun();
@@ -4370,7 +4996,7 @@ impl App {
                     if let Some(t) = self.tool_edit.as_mut() {
                         set_form(t);
                     }
-                    self.refresh_fields();
+                    self.refresh_operation_fields();
                 } else if let Selection::Tool(i) = self.controller.selection() {
                     self.controller.edit_tool(i, set_form);
                     self.rerun();
@@ -4636,13 +5262,28 @@ impl App {
                 }
             }
             Message::SelectLibraryTool(i) => {
+                if i == self.lib_sel {
+                    return iced::Task::none();
+                }
+                if self.library_mode() && i != self.lib_sel && self.inspector_dirty() {
+                    self.status =
+                        "Apply or Cancel tool changes before selecting another tool.".into();
+                    return iced::Task::none();
+                }
                 self.lib_sel = i;
                 self.reload_tool_edit();
             }
             Message::SetLibraryView(view) => self.library_view = view,
             Message::LibToolMenu(i) => {
-                self.lib_sel = i;
-                self.reload_tool_edit();
+                if self.library_mode() && i != self.lib_sel && self.inspector_dirty() {
+                    self.status =
+                        "Apply or Cancel tool changes before selecting another tool.".into();
+                    return iced::Task::none();
+                }
+                if i != self.lib_sel {
+                    self.lib_sel = i;
+                    self.reload_tool_edit();
+                }
                 self.lib_menu = Some(LibMenu {
                     index: i,
                     input: None,
@@ -4710,32 +5351,29 @@ impl App {
                 self.open_op_menu = Some(id);
                 self.op_menu_pos = self.window_cursor;
             }
-            Message::CloseOpMenu => self.open_op_menu = None,
-            Message::WindowCursor(p) => self.window_cursor = p,
+            Message::CloseOpMenu => {
+                self.open_op_menu = None;
+                self.tree_menu = None;
+            }
+            Message::WindowCursor(p) => {
+                self.window_cursor = p;
+                self.tree_pointer_moved(p);
+            }
             Message::SelectRibbonTab(tab) => {
-                let was_tooling = self.active_tab == RibbonTab::Tooling;
-                let now_tooling = tab == RibbonTab::Tooling;
-                self.active_tab = tab;
-                // Default behaviour: entering the Tooling tab substitutes the Tool
-                // Library pane for the Project pane (and vice versa on leaving). The
-                // user can still re-open either from the Windows tab to see both.
-                if now_tooling && !was_tooling {
-                    self.set_pane_visible(Pane::Project, false);
-                    self.set_pane_visible(Pane::Library, true);
-                } else if was_tooling && !now_tooling {
-                    self.set_pane_visible(Pane::Library, false);
-                    self.set_pane_visible(Pane::Project, true);
+                let target = if tab == RibbonTab::Tooling {
+                    Workspace::Tools
+                } else {
+                    Workspace::Machining
+                };
+                self.switch_workspace(target);
+                if self.workspace != target {
+                    return iced::Task::none();
                 }
-                // Entering Machinery puts the Inspector on the machine, the same idiom
-                // Tooling uses for tools — which is why the tab needs no "Machine" button
-                // of its own: the tab *is* the button.
+                self.active_tab = tab;
                 if tab == RibbonTab::Machinery {
                     self.controller.select(Selection::Machine);
                     self.refresh_fields();
                 }
-                // The Tooling tab turns the Inspector into the library editor, so the
-                // field buffers (and the working-copy baseline) must reload for context.
-                self.reload_tool_edit();
             }
             Message::ToggleRibbonGroup(i) => {
                 self.open_group = if self.open_group == Some(i) {
@@ -4746,6 +5384,7 @@ impl App {
             }
             // The preamble already cleared it; the arm keeps the match exhaustive.
             Message::CloseRibbonPopup => {}
+            Message::SetPaneVisible(Pane::Inspector, show) => self.inspector_enabled = show,
             Message::SetPaneVisible(pane, show) => self.set_pane_visible(pane, show),
         }
         iced::Task::none()
@@ -4753,6 +5392,11 @@ impl App {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::batch([
+            if self.controller.run_needs_poll() {
+                iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::PollRun)
+            } else {
+                iced::Subscription::none()
+            },
             if self.controller.cad_import_pending() {
                 iced::time::every(std::time::Duration::from_millis(100))
                     .map(|_| Message::PollCadImport)
@@ -4764,9 +5408,16 @@ impl App {
             // anchor exactly under the pointer — widget-local positions are offset
             // by the pane's origin, which is what caused the menu to appear astray.
             iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::Tree(TreeMessage::Release)),
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::WindowCursor(position))
                 }
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F8),
+                    ..
+                }) => Some(Message::ToggleStock),
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                     ..
@@ -4818,11 +5469,43 @@ impl App {
             .map(|(h, _)| *h)
     }
 
+    /// Close the pane itself so an idle inspector gives its space to the viewport.
+    /// Creation and geometry picking belong to the active operation editor.
+    fn sync_inspector_visibility(&mut self) {
+        let editing = self.library_mode()
+            || (self.active_tab == RibbonTab::Machinery
+                && self.controller.selection() == Selection::Machine)
+            || self.creating_operation()
+            || self.cad_editing_op.is_some()
+            || self.drawing_editing_op.is_some()
+            || (self.inspector_active
+                && matches!(
+                    self.controller.selection(),
+                    Selection::Setup | Selection::Operation(_)
+                ));
+        let show = self.inspector_enabled && editing;
+        if show != self.pane_handle(Pane::Inspector).is_some() {
+            self.set_pane_visible(Pane::Inspector, show);
+        }
+    }
+
     /// Show or hide a pane. The Viewport is always visible (no-op). Hiding closes a
     /// pane; showing splits it back off an existing pane and docks it to its fixed
     /// edge. Either way the fixed layout is re-derived so the remaining side panes
     /// keep their sizes and the Viewport takes the rest.
     fn set_pane_visible(&mut self, pane: Pane, show: bool) {
+        if pane == Pane::Project {
+            self.show_project_browser = show;
+            return;
+        }
+        if pane == Pane::Library {
+            self.switch_workspace(if show {
+                Workspace::Tools
+            } else {
+                Workspace::Machining
+            });
+            return;
+        }
         if pane == Pane::Viewport {
             return;
         }
@@ -4917,6 +5600,7 @@ impl App {
         self.settings.remember_session(
             crate::ViewPrefs {
                 show_stock: self.show_stock,
+                transparent_stock: self.settings.view.transparent_stock,
                 show_gizmo: self.show_gizmo,
                 show_origin: self.show_origin,
                 show_envelope: self.show_envelope,
@@ -5025,32 +5709,6 @@ impl App {
 
     /// Seed the wizard's editable cutting-data buffers (RPM / feed / plunge) from the
     /// pending operation's chosen tool nominals. A no-op unless a tool is set.
-    fn seed_wizard_cutting(&mut self) {
-        let Some(tool) = self.controller.pending_op().and_then(|p| p.tool) else {
-            return;
-        };
-        let c = self.controller.seeded_cutting_for(tool);
-        self.fields.insert(Field::SpindleRpm, fmt_num(c.rpm));
-        self.fields.insert(Field::Feed, fmt_num(c.feed));
-        self.fields
-            .insert(Field::PlungeFeed, fmt_num(c.plunge_feed));
-    }
-
-    /// The cutting data currently in the wizard buffers, parsed. Missing/blank fields
-    /// fall back to the pending tool's seeded nominals, so a confirm never loses them.
-    fn wizard_cutting(&self) -> Option<CuttingData> {
-        let tool = self.controller.pending_op().and_then(|p| p.tool)?;
-        let seeded = self.controller.seeded_cutting_for(tool);
-        let buf = |f: Field| self.fields.get(&f).and_then(|s| s.parse::<f64>().ok());
-        Some(CuttingData {
-            rpm: buf(Field::SpindleRpm).unwrap_or(seeded.rpm).max(0.0),
-            feed: buf(Field::Feed).unwrap_or(seeded.feed).max(0.0),
-            plunge_feed: buf(Field::PlungeFeed)
-                .unwrap_or(seeded.plunge_feed)
-                .max(0.0),
-        })
-    }
-
     /// Reset the Tooling working copy to the committed library tool — the clean baseline
     /// the dirty check (and thus the Apply button) compares against — and reload the
     /// field buffers from it. Called at every "load" point (tool selection, New, Delete,
@@ -5092,7 +5750,7 @@ impl App {
     /// Whether the Inspector is in tool-library editing mode (driven by the Tooling
     /// ribbon tab, independent of the project selection).
     fn library_mode(&self) -> bool {
-        self.active_tab == RibbonTab::Tooling
+        self.workspace == Workspace::Tools
     }
 
     /// The library indices in the order the bulk renumber will assign 1..N — the same
@@ -5303,6 +5961,23 @@ impl App {
     /// - **Flute length** > 0 everywhere; ≥ corner radius (rounded-edge); ≥ flute radius
     ///   ⌀/2 (ball nose) — the cutting-end feature must fit inside the flute.
     fn field_invalid(&self, field: Field) -> bool {
+        let Some(value) = self
+            .fields
+            .get(&field)
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+        else {
+            return true;
+        };
+        if !self.library_mode() {
+            if let Selection::Operation(id) = self.controller.selection() {
+                if let Some(operation) = self.current_operation(id) {
+                    if operation_tabs::operation_field_invalid(operation, field, value) {
+                        return true;
+                    }
+                }
+            }
+        }
         let buf = |f: Field| self.fields.get(&f).and_then(|s| s.parse::<f64>().ok());
         match field {
             Field::CornerRadius => {
@@ -5402,6 +6077,17 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
+        if !self.library_mode() && !self.creating_operation() {
+            if let Selection::Operation(id) = self.controller.selection() {
+                if matches!(self.current_operation(id), Some(Operation::Thread(_))) {
+                    let value = |field| self.fields.get(&field).and_then(|s| s.parse::<f64>().ok());
+                    if !matches!((value(Field::ThreadTop), value(Field::ThreadBottom)), (Some(top), Some(bottom)) if top > bottom)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
         self.inspector_fields()
             .iter()
             .any(|&f| self.field_invalid(f))
@@ -5479,7 +6165,8 @@ impl App {
                             value.trim().parse::<f64>().ok()
                         }
                     };
-                    if parsed(&self.cad_override_top) != binding.overrides.top
+                    if !self.operation_height_overrides_valid()
+                        || parsed(&self.cad_override_top) != binding.overrides.top
                         || parsed(&self.cad_override_bottom) != binding.overrides.bottom
                     {
                         return true;
@@ -5496,7 +6183,12 @@ impl App {
             });
         }
         match (self.tool_edit, self.library.tools.get(self.lib_sel)) {
-            (Some(edit), Some(saved)) => edit != *saved,
+            (Some(edit), Some(saved)) => {
+                edit != *saved
+                    || fields_are_dirty(&self.inspector_fields(), &self.fields, |field| {
+                        self.field_value(field)
+                    })
+            }
             _ => false,
         }
     }
@@ -5621,6 +6313,9 @@ impl App {
             // in the new field set immediately, without waiting for Apply.
             return tool_fields(self.inspected_tool_kind());
         }
+        if self.creating_operation() {
+            return vec![Field::SpindleRpm, Field::Feed, Field::PlungeFeed];
+        }
         match self.controller.selection() {
             // Ordered top-down by height: tool-change height, clearance, retract, then
             // the stock top at the bottom — the inspector reads like the Z stack.
@@ -5663,6 +6358,15 @@ impl App {
     }
     /// The model value backing a field for the current selection, if any.
     fn field_value(&self, field: Field) -> Option<f64> {
+        if self.creating_operation() {
+            let cutting = self.wizard_seeded_cutting()?;
+            return match field {
+                Field::SpindleRpm => Some(cutting.rpm),
+                Field::Feed => Some(cutting.feed),
+                Field::PlungeFeed => Some(cutting.plunge_feed),
+                _ => None,
+            };
+        }
         if self.library_mode() {
             // Prefer the live working copy so kind/picker edits repopulate from it.
             let t = self
@@ -5826,7 +6530,11 @@ impl App {
     fn apply_inspector(&mut self) {
         self.apply_machine_edit();
         let mut parsed: BTreeMap<Field, f64> = BTreeMap::new();
+        let supported = self.inspector_fields();
         for (&field, text) in &self.fields {
+            if !supported.contains(&field) {
+                continue;
+            }
             match text.trim().parse::<f64>() {
                 Ok(v) => {
                     parsed.insert(field, v);
@@ -5838,10 +6546,26 @@ impl App {
             }
         }
 
+        // Library-tool editing writes to the library file, not the project — an
+        // embedded copy in a project is a snapshot and is left untouched. The working
+        // copy already carries every live edit, so committing is a copy-through; refresh
+        // then resets it as the new clean baseline.
+        if self.library_mode() {
+            if let (Some(edit), Some(slot)) =
+                (self.tool_edit, self.library.tools.get_mut(self.lib_sel))
+            {
+                *slot = edit;
+            }
+            self.library.save();
+            self.reload_tool_edit();
+            return;
+        }
+
         if let Selection::Operation(id) = self.controller.selection() {
             let Some(mut operation) = self
                 .operation_draft
                 .clone()
+                .filter(|draft| draft.id() == id)
                 .or_else(|| self.controller.operation(id).cloned())
             else {
                 self.status = "The selected operation no longer exists.".into();
@@ -5855,8 +6579,10 @@ impl App {
                     value
                         .trim()
                         .parse::<f64>()
+                        .ok()
+                        .filter(|v| v.is_finite())
                         .map(Some)
-                        .map_err(|_| "Linked heights must be numeric or blank.".into())
+                        .ok_or_else(|| "Linked heights must be finite numbers or blank.".into())
                 }
             };
             let overrides = if self.controller.geometry_state().bindings.contains_key(&id) {
@@ -5880,35 +6606,24 @@ impl App {
                 .copied()
                 .filter(|tool| used_tools.contains(&tool.number))
                 .collect();
-            match self
-                .controller
-                .apply_operation_settings_with_tools(operation, overrides, tools)
-            {
+            match self.controller.apply_operation_settings_with_geometry(
+                operation,
+                overrides,
+                tools,
+                self.operation_geometry.clone(),
+            ) {
                 Ok(()) => {
                     self.operation_draft = None;
                     self.operation_tools.clear();
                     self.rebase_setup_draft();
                     self.refresh_fields();
                     self.rerun();
+                    self.operation_geometry = None;
+                    self.operation_binding_preview = None;
                     self.status = format!("Operation {id} settings applied.");
                 }
                 Err(error) => self.status = error,
             }
-            return;
-        }
-
-        // Library-tool editing writes to the library file, not the project — an
-        // embedded copy in a project is a snapshot and is left untouched. The working
-        // copy already carries every live edit, so committing is a copy-through; refresh
-        // then resets it as the new clean baseline.
-        if self.library_mode() {
-            if let (Some(edit), Some(slot)) =
-                (self.tool_edit, self.library.tools.get_mut(self.lib_sel))
-            {
-                *slot = edit;
-            }
-            self.library.save();
-            self.reload_tool_edit();
             return;
         }
 
@@ -5994,30 +6709,6 @@ impl App {
         self.rerun();
     }
 
-    /// Recompute the toolpath for the current document and report the result.
-    fn rerun(&mut self) {
-        if self.controller.document().setup().operations.is_empty() {
-            self.status = "Open a part first.".to_string();
-            return;
-        }
-        let outcome = self.controller.run(&CancelToken::new());
-        let errors = outcome
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
-            .count();
-        self.status = match outcome.completion {
-            JobCompletion::Complete => "Toolpath ready. Export when you like.".to_string(),
-            JobCompletion::Failed => format!("{errors} error(s) — see Output."),
-            JobCompletion::Cancelled => {
-                "Run cancelled. Run the job again before exporting.".to_string()
-            }
-            JobCompletion::Incomplete => {
-                "Run incomplete. Run the job again before exporting.".to_string()
-            }
-        };
-    }
-
     /// Save the project to `path` and report the result.
     fn save_to(&mut self, path: &Path) {
         self.status = match self.controller.save_project(path) {
@@ -6028,8 +6719,17 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |_id, pane, _is_max| {
-            pane_grid::Content::new(self.pane_content(*pane))
-                .title_bar(pane_grid::TitleBar::new(text(pane.name()).size(13)).padding(4))
+            pane_grid::Content::new(self.pane_content(*pane)).title_bar(
+                pane_grid::TitleBar::new(
+                    text(if *pane == Pane::Viewport {
+                        self.workspace.label()
+                    } else {
+                        pane.name()
+                    })
+                    .size(13),
+                )
+                .padding(4),
+            )
         })
         .spacing(4)
         .min_size(PANE_MIN_PX)
@@ -6045,10 +6745,10 @@ impl App {
                 .on_press(Message::CloseRibbonPopup);
             layers = layers.push(catcher).push(popup);
         }
-        if let Some(menu) = self.op_menu_overlay() {
+        if let Some(menu) = self.tree_menu_overlay() {
             // A full-window catcher under the menu so a click off it dismisses.
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
-                .on_press(Message::CloseOpMenu);
+                .on_press(Message::Tree(TreeMessage::Close));
             layers = layers.push(catcher).push(menu);
         }
         if let Some(menu) = self.tool_menu_overlay() {
@@ -6074,6 +6774,9 @@ impl App {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::CloseLicense);
             layers = layers.push(catcher).push(card);
+        }
+        if let Some(dialog) = self.notice_overlay() {
+            layers = layers.push(dialog);
         }
         layers.into()
     }
@@ -6422,92 +7125,6 @@ impl App {
     /// anchored exactly under the cursor. `None` unless a menu is open. Reuses the
     /// ribbon-popup overlay pattern: positioned in the top-level view stack over a
     /// click-off catcher.
-    fn op_menu_overlay(&self) -> Option<Element<'_, Message>> {
-        let id = self.open_op_menu?;
-        // The rows are as wide as the widest label, and a "Move to Origin 2 · G55" row
-        // is much wider than "Duplicate". Sized once for the whole menu so the items
-        // stay a column rather than a ragged edge.
-        let origin_targets = self.origin_move_targets_for(id);
-        let setup_targets: Vec<_> = self
-            .controller
-            .setups()
-            .iter()
-            .filter(|setup| !setup.operations.iter().any(|op| op.id() == id))
-            .map(|setup| (setup.id, setup.name.clone()))
-            .collect();
-        let width = if origin_targets.is_empty() && setup_targets.is_empty() {
-            150.0
-        } else {
-            210.0
-        };
-        let item = move |icon: Icon, label: &str, msg: Message| {
-            button(
-                row![icon_svg(icon, 14.0), text(label.to_string()).size(13)]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-            )
-            .width(Length::Fixed(width))
-            .padding(Padding::from([4.0, 8.0]))
-            .on_press(msg)
-            .style(|_theme, status| command_button_style(status))
-        };
-        let mut items = column![
-            item(Icon::Delete, "Delete", Message::DeleteOp),
-            item(Icon::Duplicate, "Duplicate", Message::DuplicateOp),
-            item(Icon::Redo, "Reinitialize", Message::ReinitOp),
-        ]
-        .spacing(2);
-        // Cross-group reassignment. One row per *other* origin — no submenu, because
-        // the list is bounded by what the controls carry (six work offsets on the ISO
-        // families) and a flat list is one click instead of two. Absent entirely on a
-        // single-origin job, where there is nowhere to move to.
-        for index in &origin_targets {
-            items = items.push(item(
-                Icon::SetOrigin,
-                &format!("Move to {}", self.origin_menu_label(*index)),
-                Message::MoveOpToOrigin(*index),
-            ));
-        }
-        for (setup_id, name) in &setup_targets {
-            items = items.push(item(
-                Icon::SetOrigin,
-                &format!("Move to setup {name}"),
-                Message::TransferOpToSetup(*setup_id, false),
-            ));
-            items = items.push(item(
-                Icon::Duplicate,
-                &format!("Copy to setup {name}"),
-                Message::TransferOpToSetup(*setup_id, true),
-            ));
-        }
-        let menu = container(items)
-            .padding(4)
-            .style(|_theme| container::Style {
-                background: Some(Background::Color(palette::RIBBON_BG)),
-                border: Border {
-                    color: palette::BORDER_DARK,
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                ..container::Style::default()
-            });
-        let positioned = container(menu)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Left)
-            .align_y(iced::alignment::Vertical::Top)
-            .padding(Padding {
-                top: self.op_menu_pos.y,
-                left: self.op_menu_pos.x,
-                right: 0.0,
-                bottom: 0.0,
-            });
-        Some(positioned.into())
-    }
-
-    /// The project-tree tool right-click menu — a single "Add to library" action,
-    /// anchored under the cursor. Only opens for a project tool not already in the
-    /// library (the un-numbered rows), so the action is always applicable.
     fn tool_menu_overlay(&self) -> Option<Element<'_, Message>> {
         let number = self.open_tool_menu?;
         let menu = container(
@@ -6604,7 +7221,7 @@ impl App {
         }
         // Once a snap engages, its (bolder) in-scene marker stands in for the
         // pickbox — so the blue aperture square shows only while nothing snaps.
-        if self.snap_hover.is_some() {
+        if self.snap_hover.is_some() || self.setup_hover.snap.is_some() {
             return None;
         }
         let c = self.cursor?;
@@ -6644,7 +7261,7 @@ impl App {
                 .on_press(Message::SelectRibbonTab(tab))
                 .style(move |_theme, status| tab_button_style(active, status))
         };
-        let mut tabs = row![].spacing(6);
+        let mut tabs = row![self.workspace_picker()].spacing(6);
         for tab in RibbonTab::ALL {
             tabs = tabs.push(tab_btn(tab));
         }
@@ -6736,7 +7353,11 @@ impl App {
                     commands: vec![
                         cmd(Icon::Undo, "Undo", Some(Message::Undo)),
                         cmd(Icon::Redo, "Redo", Some(Message::Redo)),
-                        cmd(Icon::Run, "Run", Some(Message::Apply)),
+                        if self.controller.run_pending() {
+                            cmd(Icon::Run, "Cancel run", Some(Message::CancelRun))
+                        } else {
+                            cmd(Icon::Run, "Run", Some(Message::RunJob))
+                        },
                     ],
                 },
             ],
@@ -6885,7 +7506,12 @@ impl App {
     /// title bar keeps the full name.
     fn panes_group(&self) -> Element<'_, Message> {
         let toggle = |pane: Pane| -> Element<'_, Message> {
-            let shown = self.pane_handle(pane).is_some();
+            let shown = match pane {
+                Pane::Project => self.show_project_browser,
+                Pane::Library => self.workspace == Workspace::Tools,
+                Pane::Inspector => self.inspector_enabled,
+                _ => self.pane_handle(pane).is_some(),
+            };
             row![
                 checkbox(shown)
                     .size(15)
@@ -6967,49 +7593,14 @@ impl App {
         let inner: Element<'_, Message> = match pane {
             Pane::Project => self.project_tree(),
             Pane::Library => self.library_pane(),
-            Pane::Viewport => {
-                let hidden_ops: Vec<u32> = self
-                    .controller
-                    .setups()
-                    .iter()
-                    .flat_map(|setup| {
-                        let setup_hidden = self.hidden_setups.contains(&setup.id);
-                        setup
-                            .operations
-                            .iter()
-                            .map(move |op| op.id())
-                            .filter(move |id| setup_hidden || self.hidden_ops.contains(id))
-                    })
-                    .collect();
-                container(
-                    shader(Viewport::new(
-                        &self.controller,
-                        self.cad_filter.kind(),
-                        self.cad_hover.as_ref(),
-                        &self.cad_hidden,
-                        self.cad_select_through,
-                        false,
-                        self.view,
-                        false,
-                        self.gizmo_size,
-                        &self.settings,
-                        &self.focus_ops.iter().copied().collect::<Vec<_>>(),
-                        &hidden_ops,
-                        self.snap_hover.map(|h| (h, self.snap_aperture)),
-                        self.hover_loop,
-                        self.in_origin_pick(),
-                        false,
-                        None,
-                        None,
-                    ))
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            Pane::Viewport => self.workspace_main(),
+            Pane::Inspector => {
+                if self.library_mode() {
+                    self.tools_inspector()
+                } else {
+                    self.inspector()
+                }
             }
-            Pane::Inspector => self.inspector(),
             Pane::Output => self.output(),
         };
         // A bordered panel so the gaps between panes read as visible separators.
@@ -7044,6 +7635,7 @@ impl App {
     /// row. A post with no word for this datum (a seventh fixture on an ISO control,
     /// which carries only `G54`-`G59`) is marked ⚠ here rather than left to fail at
     /// export, after the job has been built.
+    #[allow(dead_code)] // Legacy origin-group view retained for M1a context commands.
     fn origin_header_row(&self, index: u32) -> Element<'_, Message> {
         let pos = self.controller.origin_position(index);
         let disabled = self.controller.is_origin_disabled(index);
@@ -7098,515 +7690,39 @@ impl App {
     }
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
-        self.cad_inspecting = true;
-        let mut selected = if self.modifiers.command() || self.modifiers.shift() {
-            self.controller.cad_selection().to_vec()
-        } else {
-            vec![]
-        };
-        if let Some(index) = selected.iter().position(|r| *r == entity) {
-            selected.remove(index);
-        } else {
-            selected.push(entity);
+        if self.cad_editing_op.is_none()
+            && self.cad_pending_kind.is_none()
+            && (self.setup_draft_dirty()
+                || (matches!(self.controller.selection(), Selection::Operation(_))
+                    && self.inspector_dirty()))
+        {
+            self.status = "OK or Cancel inspector changes before selecting new geometry.".into();
+            return;
         }
-        self.controller.set_cad_selection(selected);
-        self.focus_ops.clear();
-        self.status = format!(
-            "{} CAD entity(s) selected.",
-            self.controller.cad_selection().len()
-        );
-    }
-
-    fn project_tree(&self) -> Element<'_, Message> {
-        // Workpiece origins live as group headers in the operation list below (H1
-        // above the first op, added origins each heading their own group), not as a
-        // node here — an origin *is* the datum a group of operations runs under.
-        let mut list = column![tree_header("Models")].spacing(2);
-
-        if self.controller.cad_import_pending() {
-            list = list.push(text("Importing CAD…").size(12));
-            list = list.push(button("Cancel import").on_press(Message::CancelCadImport));
-        }
-        if let Some(preview) = self.controller.cad_import_preview() {
-            list = list.push(tree_header("Import preview"));
-            list = list.push(
-                text(format!(
-                    "{}\n{} item(s) · {:?} → mm\n{:.3} × {:.3} × {:.3} mm",
-                    preview.name,
-                    preview.items,
-                    preview.source_units,
-                    preview.dimensions_mm[0],
-                    preview.dimensions_mm[1],
-                    preview.dimensions_mm[2]
-                ))
-                .size(12),
-            );
-            for diagnostic in preview.diagnostics {
-                list = list.push(text(diagnostic).size(11));
-            }
-            list = list.push(
-                row![
-                    button(if self.controller.cad_import_replacement().is_some() {
-                        "Replace model"
-                    } else {
-                        "Add to project"
-                    })
-                    .on_press(Message::ConfirmCadImport),
-                    button("Cancel").on_press(Message::CancelCadImport)
-                ]
-                .spacing(4),
-            );
-        }
-        if !self.controller.geometry_state().instances.is_empty() {
-            list = list.push(tree_header("CAD geometry · select / filter"));
-            list = list.push(
-                pick_list(
-                    &CadFilter::ALL[..],
-                    Some(self.cad_filter),
-                    Message::CadFilterChanged,
-                )
-                .text_size(12),
-            );
-            list = list.push(
-                checkbox(self.cad_select_through)
-                    .label("Select through solids")
-                    .on_toggle(Message::CadSelectThrough)
-                    .text_size(12),
-            );
-            list = list.push(
-                row![
-                    button("Hide").on_press(Message::CadHideSelected),
-                    button("Isolate").on_press(Message::CadIsolateSelected),
-                    button("Show all").on_press(Message::CadShowAll)
-                ]
-                .spacing(3),
-            );
-            for instance in &self.controller.geometry_state().instances {
-                let Some(asset) = self.controller.geometry_state().asset(instance.asset_id) else {
-                    continue;
-                };
-                let hidden = !instance.visible || self.cad_hidden.contains(&instance.id);
-                list = list.push(
-                    row![
-                        checkbox(!hidden).size(14).on_toggle(move |visible| {
-                            Message::SetInstanceVisible(instance.id, visible)
-                        }),
-                        text(format!("{} · {}", asset.name, instance.name)).size(12),
-                    ]
-                    .spacing(4)
-                    .align_y(Alignment::Center),
-                );
-                let ids: Vec<_> = match self.cad_filter.kind() {
-                    EntityKind::Body => vec![instance.body_id],
-                    EntityKind::Face => asset
-                        .topology
-                        .faces
-                        .iter()
-                        .filter(|e| e.body_id == instance.body_id)
-                        .map(|e| e.id)
-                        .collect(),
-                    EntityKind::Edge => asset
-                        .topology
-                        .edges
-                        .iter()
-                        .filter(|e| e.body_id == instance.body_id)
-                        .map(|e| e.id)
-                        .collect(),
-                    EntityKind::Loop => asset
-                        .topology
-                        .loops
-                        .iter()
-                        .filter(|e| e.body_id == instance.body_id)
-                        .map(|e| e.id)
-                        .collect(),
-                    EntityKind::Vertex => asset
-                        .topology
-                        .vertices
-                        .iter()
-                        .filter(|e| e.body_id == instance.body_id)
-                        .map(|e| e.id)
-                        .collect(),
-                };
-                for id in ids {
-                    let entity = EntityRef {
-                        asset_id: asset.id,
-                        revision: asset.revision,
-                        instance_id: instance.id,
-                        body_id: instance.body_id,
-                        kind: self.cad_filter.kind(),
-                        id,
-                    };
-                    list = list.push(select_row(
-                        format!("    {} {id}", self.cad_filter),
-                        self.controller.cad_selection().contains(&entity),
-                        Message::CadSelect(entity),
-                    ));
+        self.cad_inspecting = self.cad_editing_op.is_some();
+        let multiple = self.cad_pending_kind == Some(OpKind::Drill)
+            || self
+                .cad_editing_op
+                .and_then(|id| self.current_operation(id))
+                .is_some_and(|op| matches!(op, Operation::Drill(_)));
+        let additive = (self.geometry_additive && multiple)
+            || self.modifiers.command()
+            || self.modifiers.control()
+            || self.modifiers.shift();
+        self.geometry_row_selection = None;
+        match self.controller.toggle_cad_selection(entity, additive) {
+            Ok(()) => {
+                if !self.creating_operation() && self.cad_editing_op.is_none() {
+                    self.inspector_active = false;
                 }
-            }
-        }
-
-        // Tools in use. A tool that matches the shop library shows its **shop number**
-        // (`T4 …`); one that isn't in the library shows **no number** — the simple,
-        // clear signal that it's project-local. Right-clicking an un-numbered tool
-        // offers "Add to library" (which registers it and gives it a number).
-        list = list.push(tree_header("Tools (in use)"));
-        let used = self.controller.used_tools();
-        if used.is_empty() {
-            list = list.push(tree_note("none yet — set up an operation"));
-        }
-        for t in used {
-            let in_library = self
-                .library
-                .tools
-                .iter()
-                .any(|lt| lt.identity() == t.identity());
-            // Numbered ⇒ in the library; un-numbered ⇒ project-local. The number goes
-            // at the *end* (`⌀6 End mill (T5)`) so descriptions align left; a
-            // project-local tool has no `(Tn)` at all — the presence of the number *is*
-            // the distinction (kept deliberately simple).
-            let label = if in_library {
-                format!("⌀{} {} (T{})", fmt_num(t.diameter), t.kind, t.number)
-            } else {
-                format!("⌀{} {}", fmt_num(t.diameter), t.kind)
-            };
-            let row = container(text(label).size(13).color(if in_library {
-                palette::LABEL_COLOR
-            } else {
-                palette::GROUP_LABEL
-            }))
-            .padding(Padding::from([3.0, 6.0]));
-            if in_library {
-                list = list.push(row);
-            } else {
-                // Only un-numbered (not-in-library) tools carry the right-click menu.
-                list = list.push(mouse_area(row).on_right_press(Message::ToolMenu(t.number)));
-            }
-        }
-
-        list = list.push(tree_header("Setups"));
-        list = list.push(
-            row![
-                button(text("+ New").size(12))
-                    .padding(Padding::from([3.0, 5.0]))
-                    .on_press(Message::SetupNew),
-                button(text("Duplicate").size(12))
-                    .padding(Padding::from([3.0, 5.0]))
-                    .on_press(Message::SetupDuplicate(self.controller.active_setup_id())),
-            ]
-            .spacing(4),
-        );
-        for (setup_index, setup) in self.controller.setups().iter().enumerate() {
-            let active = setup.id == self.controller.active_setup_id();
-            let expanded = self.expanded_setups.contains(&setup.id);
-            let indicator = if expanded { "▾" } else { "▸" };
-            let status = if !active {
-                " · inactive"
-            } else if setup.operations.is_empty() {
-                " · empty"
-            } else if self.controller.outcome().is_some_and(|outcome| {
-                setup
-                    .operations
-                    .iter()
-                    .filter(|op| !self.controller.is_operation_excluded(op.id()))
-                    .all(|op| {
-                        outcome
-                            .scene
-                            .strips
-                            .iter()
-                            .any(|strip| strip.op == Some(op.id()))
-                    })
-            }) {
-                " · generated"
-            } else if self.controller.outcome().is_some() {
-                " · needs run"
-            } else {
-                " · pending"
-            };
-            let setup_row = row![
-                button(text(indicator).size(11))
-                    .padding(2)
-                    .on_press(Message::ToggleSetupExpanded(setup.id)),
-                checkbox(!self.hidden_setups.contains(&setup.id))
-                    .size(12)
-                    .on_toggle(move |visible| Message::SetSetupVisible(setup.id, visible)),
-                text(if active {
-                    format!("● {}{}", setup.name, status)
-                } else {
-                    format!("{}{}", setup.name, status)
-                })
-                .size(11)
-                .width(Length::Fill),
-            ]
-            .spacing(2)
-            .align_y(Alignment::Center);
-            let row_view = mouse_area(
-                container(setup_row)
-                    .width(Length::Fill)
-                    .padding(Padding::from([2.0, 4.0]))
-                    .style(move |_theme| container::Style {
-                        background: active.then_some(Background::Color(palette::SELECT_BG)),
-                        ..container::Style::default()
-                    }),
-            )
-            .on_press(Message::SelectSetup(setup.id));
-            list = list.push(row_view);
-            if active {
-                let actions = row![
-                    button(text("↑").size(10))
-                        .padding(2)
-                        .on_press_maybe((setup_index > 0).then_some(Message::SetupMove(setup.id, true))),
-                    button(text("↓").size(10))
-                        .padding(2)
-                        .on_press_maybe(
-                            (setup_index + 1 < self.controller.setups().len())
-                                .then_some(Message::SetupMove(setup.id, false))
-                        ),
-                    button(text("⧉ Duplicate").size(10))
-                        .padding(Padding::from([2.0, 4.0]))
-                        .on_press(Message::SetupDuplicate(setup.id)),
-                    button(text("× Delete").size(10))
-                        .padding(Padding::from([2.0, 4.0]))
-                        .on_press(Message::SetupDelete(setup.id)),
-                ]
-                .spacing(3)
-                .align_y(Alignment::Center);
-                list = list.push(container(actions).padding(Padding::from([0.0, 18.0])));
-            }
-            if expanded {
-                if setup.operations.is_empty() {
-                    list = list.push(tree_note("    no operations"));
-                }
-                for (op_index, op) in setup.operations.iter().enumerate() {
-                    let id = op.id();
-                    let focused = self.focus_ops.contains(&id);
-                    let excluded = self.controller.is_operation_excluded(id);
-                    let tool_numbers = op.tools();
-                    let tool_label = if tool_numbers.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            " · T{}",
-                            tool_numbers
-                                .iter()
-                                .map(u32::to_string)
-                                .collect::<Vec<_>>()
-                                .join("/T")
-                        )
-                    };
-                    let generated = self.controller.outcome().is_some_and(|outcome| {
-                        outcome
-                            .scene
-                            .strips
-                            .iter()
-                            .any(|strip| strip.op == Some(id))
-                    });
-                    let state = if excluded {
-                        " · excluded"
-                    } else if !active {
-                        " · inactive"
-                    } else if generated {
-                        " · ready"
-                    } else if self.controller.outcome().is_some() {
-                        " · no path"
-                    } else {
-                        " · pending"
-                    };
-                    let label = format!("{}{}{}", op_kind(op), tool_label, state);
-                    let controls = row![
-                        checkbox(!excluded)
-                            .size(12)
-                            .on_toggle(move |on| Message::SetOpExcluded(id, !on)),
-                        checkbox(!self.hidden_ops.contains(&id))
-                            .size(12)
-                            .on_toggle(move |visible| Message::SetOperationVisible(id, visible)),
-                        text(label).size(10).width(Length::Fill),
-                        button(text("↑").size(9))
-                            .padding(2)
-                            .on_press_maybe((op_index > 0).then_some(Message::MoveOp(id, true))),
-                        button(text("↓").size(9)).padding(2).on_press_maybe(
-                            (op_index + 1 < setup.operations.len()).then_some(Message::MoveOp(id, false))),
-                    ]
-                    .spacing(2)
-                    .align_y(Alignment::Center);
-                    let inner = container(controls)
-                        .width(Length::Fill)
-                        .padding(Padding::from([2.0, 4.0]))
-                        .style(move |_theme| container::Style {
-                            background: focused.then_some(Background::Color(palette::SELECT_BG)),
-                            ..container::Style::default()
-                        });
-                    list = list.push(
-                        mouse_area(inner)
-                            .on_press(Message::ClickOp(id))
-                            .on_right_press(Message::OpMenu(id)),
-                    );
-                }
-            }
-        }
-
-        // The right-click menu anchors to the window-absolute cursor tracked by the
-        // global subscription, so the pane itself needs no cursor tracking.
-        scrollable(list.padding(6))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
-
-    /// The inspector: editable fields for the selected node.
-    /// The new-operation wizard shown in the Inspector while a geometry pick is
-    /// pending: the kind, a tool picker, a prompt, and Cancel.
-    fn op_wizard(&self, pending: PendingOp) -> Element<'_, Message> {
-        let kind = match pending.kind {
-            OpKind::Profile => "Profile",
-            OpKind::Pocket => "Pocket",
-            OpKind::Drill => "Drill",
-            OpKind::Face => "Face",
-            OpKind::Chamfer => "Chamfer",
-            OpKind::Thread => "Thread",
-            OpKind::Engrave => "Engrave",
-            OpKind::Carve => "Carve",
-        };
-        // The tool is chosen in two steps — **family**, then a tool within it — so a
-        // library of hundreds does not have to be scrolled for every operation. The
-        // families offered are bounded by the operation (see `families_for`).
-        let families = families_for(pending.kind);
-        let family = self.wizard_family.filter(|f| families.contains(f));
-        let family_picker = pick_list(families.to_vec(), family, Message::SetPendingFamily)
-            .placeholder("Choose a family")
-            .text_size(13)
-            .width(Length::Fill);
-
-        // Tools of the chosen family only. Nothing is listed until a family is picked.
-        let tools: Vec<ToolChoice> = match family {
-            Some(f) => self
-                .library
-                .tools
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| ToolKindPick::of(t.kind) == f)
-                .map(|(index, t)| ToolChoice {
-                    index,
-                    number: t.number,
-                    diameter: t.diameter,
-                    kind: t.kind,
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        // The current selection is the library entry matching the pending op's
-        // embedded tool (picking embeds a copy into the setup — see `use_tool`).
-        let embedded = pending.tool.and_then(|n| {
-            self.controller
-                .document()
-                .setup()
-                .tools
-                .iter()
-                .find(|t| t.number == n)
-                .copied()
-        });
-        let selected = embedded
-            .and_then(|e| {
-                self.library.tools.iter().position(|l| {
-                    l.diameter == e.diameter
-                        && l.length == e.length
-                        && l.flutes == e.flutes
-                        && l.kind == e.kind
-                })
-            })
-            .and_then(|i| tools.iter().find(|c| c.index == i).copied());
-        let tool_picker = pick_list(tools.clone(), selected, |c| {
-            Message::SetPendingLibraryTool(c.index)
-        })
-        .placeholder(if family.is_some() {
-            "Choose a tool"
-        } else {
-            "Choose a family first"
-        })
-        .text_size(13)
-        .width(Length::Fill);
-
-        let verb = if pending.replacing.is_some() {
-            "Reinitialize"
-        } else {
-            "New"
-        };
-        let mut col = column![
-            text(format!("{verb} {kind} operation")).size(15),
-            text("Tool family").size(12),
-            family_picker,
-            text("Tool").size(12),
-            tool_picker,
-        ]
-        .spacing(6)
-        .padding(8);
-
-        // A family with nothing in it is a dead end now that the wizard has no
-        // "New tool" shortcut — say where to go rather than leaving an empty list.
-        if let Some(f) = family {
-            if tools.is_empty() {
-                col = col.push(
-                    text(format!(
-                        "No {f} in the library — add one in the Tooling tab."
-                    ))
-                    .size(12)
-                    .color(palette::WARN),
+                self.focus_ops.clear();
+                self.status = format!(
+                    "{} CAD feature(s) selected.",
+                    self.controller.cad_selection().len()
                 );
             }
+            Err(error) => self.status = error,
         }
-
-        // Cutting data for the new operation, seeded from the tool's nominals and
-        // editable here (or later in the operation's inspector). Shown once a tool is
-        // chosen — before then there is nothing to seed from.
-        if pending.tool.is_some() {
-            col = col.push(text("Cutting data").size(12));
-            for f in [Field::SpindleRpm, Field::Feed, Field::PlungeFeed] {
-                let value = self.fields.get(&f).cloned().unwrap_or_default();
-                col = col.push(field_row_labeled(
-                    f,
-                    self.field_label(f),
-                    self.field_help(f),
-                    &value,
-                    self.tooltips,
-                    self.field_invalid(f),
-                ));
-            }
-        }
-
-        // Object snaps govern where the start/lead-in lands; show them for the
-        // kinds that carry a start, while still awaiting that (boundary) pick.
-        if op_uses_snaps(pending.kind) && pending.boundary.is_none() {
-            col = col.push(self.snap_toolbar());
-        }
-
-        // Progress, then the one commit point. Tool and geometry may be chosen in
-        // either order; Confirm stays disabled until both are settled.
-        col = col.push(
-            text(match (pending.tool.is_some(), pending.boundary.is_some()) {
-                (false, false) => {
-                    "Choose a tool and click the geometry in the viewport.".to_string()
-                }
-                (true, false) => "Now click the geometry in the viewport.".to_string(),
-                (false, true) => "Geometry selected — now choose a tool.".to_string(),
-                (true, true) if op_takes_islands(pending.kind) => format!(
-                    "Click enclosed areas to exclude ({} selected), then Confirm.",
-                    pending.islands.len()
-                ),
-                (true, true) => "Ready — Confirm to create the operation.".to_string(),
-            })
-            .size(12),
-        );
-        col = col.push(
-            row![
-                button(text("Confirm").size(13)).on_press_maybe(
-                    self.controller
-                        .pending_ready()
-                        .then_some(Message::ConfirmOp)
-                ),
-                button(text("Cancel").size(13)).on_press(Message::CancelOp),
-            ]
-            .spacing(8),
-        );
-        col.into()
     }
 
     /// The object-snap toggle row shown during a pick. Enabled snaps read as
@@ -7646,13 +7762,11 @@ impl App {
                 .on_press(Message::SetLibraryView(view))
                 .style(move |_theme, status| snap_toggle_style(active, status))
         };
-        let mut list = column![
-            row![
-                tab("Ordered", LibraryView::Ordered),
-                tab("Grouped", LibraryView::Grouped),
-            ]
-            .spacing(6)
+        let mut list = column![row![
+            tab("Ordered", LibraryView::Ordered),
+            tab("Grouped", LibraryView::Grouped),
         ]
+        .spacing(6)]
         .spacing(4)
         .padding(6);
 
@@ -7734,7 +7848,7 @@ impl App {
             .preview_tool()
             .map(|t| format!("T{} — ⌀{} {}", t.number, fmt_num(t.diameter), t.kind))
             .unwrap_or_else(|| "Tool Library".to_string());
-        let mut list = column![text(name).size(15)].spacing(8).padding(8);
+        let mut list = column![inspector_heading(name)].spacing(10).padding(14);
 
         for field in self.inspector_fields() {
             let value = self.fields.get(&field).cloned().unwrap_or_default();
@@ -7765,9 +7879,7 @@ impl App {
                 list = list.push(
                     row![
                         help_wrap(
-                            text("Cutting direction")
-                                .width(Length::Fixed(112.0))
-                                .size(13),
+                            text("Cutting direction").width(Length::Fill).size(13),
                             "Down-cut vs up-cut (helix direction); a physical property of the \
                              tool, like the flute count. Square end mills also allow a straight \
                              (axial) flute.",
@@ -7778,7 +7890,9 @@ impl App {
                             Some(t.cutting_direction),
                             Message::ToolCuttingDirChanged
                         )
-                        .text_size(13)
+                        .text_size(12)
+                        .padding([7, 9])
+                        .style(inspector_picker)
                         .width(Length::Fixed(113.0)),
                     ]
                     .spacing(8)
@@ -7795,26 +7909,27 @@ impl App {
                 list = list.push(
                     row![
                         help_wrap(
-                            text("Thread form").width(Length::Fixed(112.0)).size(13),
+                            text("Thread form").width(Length::Fill).size(13),
                             "Single-point mills carry one tooth and cut any pitch by their \
                              helical lead; full-form mills carry a stack of teeth at a fixed \
                              ground pitch.",
                             self.tooltips,
                         ),
                         pick_list(&ThreadForm::ALL[..], Some(form), Message::ThreadFormChanged)
-                            .text_size(13)
+                            .text_size(12)
+                            .padding([7, 9])
+                            .style(inspector_picker)
                             .width(Length::Fixed(113.0)),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
                 );
             }
-            // Short label + fixed-width picker whose right edge lands on the value-box
-            // right edge above (135 label + 8 gap + 90 box = 233), so the boxes align.
+            // Keep the label flexible so long tool types fit a narrow inspector.
             list = list.push(
                 row![
                     help_wrap(
-                        text("Type").width(Length::Fixed(48.0)).size(13),
+                        text("Type").width(Length::Fill).size(12),
                         help::TOOL_TYPE,
                         self.tooltips,
                     ),
@@ -7823,17 +7938,14 @@ impl App {
                         Some(ToolKindPick::of(t.kind)),
                         |p| { Message::ToolKindChanged(p.to_kind()) }
                     )
-                    .text_size(13)
+                    .text_size(12)
+                    .padding([7, 9])
+                    .style(inspector_picker)
                     .width(Length::Fixed(177.0)),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
             );
-            // Apply is live only when an edit is pending and valid — the same rule in
-            // both inspectors, so the button means one thing everywhere.
-            list = list.push(button("Apply").on_press_maybe(
-                (!self.any_field_invalid() && self.inspector_dirty()).then_some(Message::Apply),
-            ));
         }
 
         scrollable(list)
@@ -7845,12 +7957,13 @@ impl App {
     fn cad_inspector(&self) -> Element<'_, Message> {
         let selected = self.controller.cad_selection();
         let mut list = column![
-            text("CAD geometry selection").size(15),
+            inspector_heading("CAD geometry selection"),
             text("Click selects; Ctrl/⌘ or Shift-click toggles. Drag to orbit. Escape cancels.")
                 .size(12)
         ]
-        .spacing(8)
-        .padding(8);
+        .spacing(10)
+        .padding(14);
+        list = list.push(self.geometry_list(cad_geometry_labels(selected)));
         for entity in selected {
             list = list.push(
                 text(format!(
@@ -7908,62 +8021,32 @@ impl App {
         }
         if let Some(id) = self.cad_editing_op {
             list = list.push(text(format!("Repair geometry for operation {id}; its tool and manual overrides are preserved.")).size(12));
-            list = list
-                .push(button("Apply geometry").on_press_maybe(
-                    (!selected.is_empty()).then_some(Message::ConfirmCadOperation),
-                ));
-        } else if let Some(kind) = self.cad_pending_kind {
-            list = list.push(text(format!("Create {kind:?} from the selections above. Boundaries and absolute cutting heights are resolved from exact CAD topology.")).size(12));
-            let preview = self.controller.preview_cad_operation(kind, selected);
-            match &preview {
-                Ok(input) => {
-                    list = list.push(text(format!("Top Z {:.3} → bottom Z {:.3} mm\n{} region(s), {} preserved island(s), {} hole(s)",input.heights.top,input.heights.bottom,input.regions.len(),input.regions.iter().map(|r|r.holes().len()).sum::<usize>(),input.holes.len())).size(12));
-                    for hole in &input.holes {
-                        list = list.push(
-                            text(format!(
-                                "Hole Ø{:.3} at X{:.3} Y{:.3}",
-                                hole.diameter, hole.center.x, hole.center.y
-                            ))
-                            .size(11),
-                        );
-                    }
-                    for diagnostic in &input.diagnostics {
-                        list = list.push(text(diagnostic.clone()).size(11));
-                    }
-                }
-                Err(reason) => {
-                    list = list.push(text(format!("Selection incompatible: {reason}")).size(12))
-                }
-            }
-            list = list.push(text("Tool from library").size(13));
-            for tool in &self.library.tools {
-                list = list.push(
-                    iced::widget::radio(
-                        format!("T{} · {} Ø{:.3}", tool.number, tool.kind, tool.diameter),
-                        tool.number,
-                        self.cad_tool_pick,
-                        Message::CadToolPicked,
-                    )
-                    .size(12),
-                );
-            }
+            let preview = self.preview_geometry_draft(id, selected.to_vec());
             list = list.push(
-                button("Create linked operation")
+                inspector_button("Use geometry")
+                    .style(inspector_primary)
                     .on_press_maybe(preview.is_ok().then_some(Message::ConfirmCadOperation)),
             );
+            if let Err(reason) = preview {
+                list = list.push(
+                    text(reason)
+                        .size(12)
+                        .color(Color::from_rgb(0.95, 0.55, 0.45)),
+                );
+            }
         } else {
             list = list.push(text("Create operation from selection").size(13));
             list = list.push(
                 row![
-                    button("Pocket").on_press(Message::BeginOp(OpKind::Pocket)),
-                    button("Drill").on_press(Message::BeginOp(OpKind::Drill))
+                    inspector_button("Pocket").on_press(Message::BeginOp(OpKind::Pocket)),
+                    inspector_button("Drill").on_press(Message::BeginOp(OpKind::Drill))
                 ]
                 .spacing(4),
             );
             list = list.push(
                 row![
-                    button("Profile").on_press(Message::BeginOp(OpKind::Profile)),
-                    button("Face").on_press(Message::BeginOp(OpKind::Face))
+                    inspector_button("Profile").on_press(Message::BeginOp(OpKind::Profile)),
+                    inspector_button("Face").on_press(Message::BeginOp(OpKind::Face))
                 ]
                 .spacing(4),
             );
@@ -7973,1252 +8056,14 @@ impl App {
             let id = *assets.iter().next().unwrap();
             list = list.push(
                 row![
-                    button("Replace model…").on_press(Message::ReplaceCadAsset(id)),
-                    button("Remove model").on_press(Message::RemoveCadAsset(id))
+                    inspector_button("Replace model…").on_press(Message::ReplaceCadAsset(id)),
+                    inspector_button("Remove model").on_press(Message::RemoveCadAsset(id))
                 ]
                 .spacing(4),
             );
         }
-        list = list.push(button("Cancel selection").on_press(Message::CadEscape));
+        list = list.push(inspector_button("Cancel selection").on_press(Message::CadEscape));
         scrollable(list).into()
-    }
-
-    fn inspector(&self) -> Element<'_, Message> {
-        if self.cad_inspecting || self.cad_pending_kind.is_some() || self.cad_editing_op.is_some() {
-            return self.cad_inspector();
-        }
-        // While a new-operation wizard is active, the inspector is the wizard.
-        if let Some(pending) = self.controller.pending_op() {
-            return self.op_wizard(pending);
-        }
-        // The Tooling tab turns the Inspector into the tool-library editor.
-        if self.library_mode() {
-            return self.library_editor();
-        }
-        if self.controller.selection() == Selection::Setup {
-            return self.setup_editor();
-        }
-        let heading = match self.controller.selection() {
-            Selection::Setup => "Setup".to_string(),
-            Selection::Origin => {
-                let index = self.controller.active_origin();
-                match self.controller.datum_label(index) {
-                    Some(d) => format!("Workpiece origin {index} · {d}"),
-                    None => format!("Workpiece origin {index} · no work offset"),
-                }
-            }
-            Selection::Stock => "Stock".to_string(),
-            Selection::Machine => "Machine".to_string(),
-            Selection::Tool(i) => format!("Tool {}", i + 1),
-            Selection::Operation(id) => match self.current_operation(id) {
-                Some(op) => format!("Operation {id} — {}", op_kind(op)),
-                None => "Operation".to_string(),
-            },
-        };
-
-        let mut list = column![text(heading).size(15)].spacing(8).padding(8);
-        if let Selection::Operation(id) = self.controller.selection() {
-            if let Some(binding) = self.controller.geometry_state().bindings.get(&id) {
-                let heights = binding.effective_heights();
-                list = list.push(
-                    text(format!(
-                        "CAD sources: {} · {:?}\nLinked top Z {:.3} / bottom Z {:.3}",
-                        binding.selected.len(),
-                        binding.status,
-                        heights.top,
-                        heights.bottom
-                    ))
-                    .size(12),
-                );
-                list = list
-                    .push(button("Edit / repair geometry").on_press(Message::EditCadGeometry(id)));
-                list = list
-                    .push(text("Absolute cutting heights (mm). Blank follows geometry.").size(11));
-                list = list.push(
-                    text_input(
-                        &format!("Linked top Z {:.3}", binding.heights.top),
-                        &self.cad_override_top,
-                    )
-                    .on_input(Message::CadOverrideTopChanged)
-                    .size(12),
-                );
-                list = list.push(
-                    text_input(
-                        &format!("Linked bottom Z {:.3}", binding.heights.bottom),
-                        &self.cad_override_bottom,
-                    )
-                    .on_input(Message::CadOverrideBottomChanged)
-                    .size(12),
-                );
-            }
-        }
-
-        // An operation's tool is fixed once created: it is chosen in the creation
-        // wizard alongside the geometry, and changing it afterwards is done by
-        // right-click -> Reinitialize in the Project pane, which re-runs the whole
-        // pick. No tool control belongs in the inspector.
-        if let Selection::Stock = self.controller.selection() {
-            // The concrete block the offsets/heights resolve to, as read-only
-            // context above the editable fields.
-            let (min, max) = self.controller.stock_box();
-            list = list.push(
-                text(format!(
-                    "Resolved box\n  X {:.1}…{:.1}   Y {:.1}…{:.1}   Z {:.1}…{:.1}",
-                    min[0], max[0], min[1], max[1], min[2], max[2]
-                ))
-                .size(11)
-                .color(palette::GROUP_LABEL),
-            );
-        }
-
-        if let Selection::Machine = self.controller.selection() {
-            // Which machine is active — above its own fields, because everything below
-            // edits *this* one. The library is local: a machine is a property of your
-            // shop, and a project file records the one it was built for as provenance
-            // only (it can never set yours, or it could disarm the travel check).
-            list = list.push(
-                row![
-                    label_help("Active", help::ACTIVE_MACHINE, self.tooltips),
-                    pick_list(
-                        self.machines.names(),
-                        Some(self.active_machine.clone()),
-                        Message::ActiveMachineChanged,
-                    )
-                    .text_size(12)
-                    .width(INSPECTOR_PICKER_W),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
-            // Machine name (a free-text tag), above the travel fields. Committed on
-            // change so multiple machines can be told apart later.
-            list = list.push(
-                row![
-                    label_help("Name", help::MACHINE_NAME, self.tooltips),
-                    text_input(
-                        "machine",
-                        self.machine_name_edit
-                            .as_deref()
-                            .unwrap_or(&self.controller.machine().name),
-                    )
-                    .on_input(Message::MachineNameChanged)
-                    .width(Length::Fixed(120.0)),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
-            // The post/controller dialect used on export.
-            list = list.push(profile_picker_w(
-                "Post",
-                help::POST,
-                self.tooltips,
-                self.machine_post_edit
-                    .unwrap_or(self.controller.post_kind()),
-                &PostKind::ALL[..],
-                Message::PostKindChanged,
-                INSPECTOR_PICKER_W,
-            ));
-            list = list.push(
-                text("Dry-run / air-cut generated code on your control before cutting.")
-                    .size(11)
-                    .color(palette::GROUP_LABEL),
-            );
-        }
-
-        let ordered = self.inspector_fields();
-        if ordered.is_empty() {
-            list = list.push(text("Nothing to edit here yet.").size(12));
-        }
-        for field in ordered {
-            if matches!(self.controller.selection(),Selection::Operation(id) if self.controller.geometry_state().bindings.contains_key(&id))
-                && matches!(
-                    field,
-                    Field::Depth | Field::DrillStartOffset | Field::FaceStartOffset
-                )
-            {
-                continue;
-            }
-            // Clearing-pass fields render in their own section (below), not mixed in here.
-            if is_clear_field(field) {
-                continue;
-            }
-            let value = self.fields.get(&field).cloned().unwrap_or_default();
-            list = list.push(field_row_labeled(
-                field,
-                self.field_label(field),
-                self.field_help(field),
-                &value,
-                self.tooltips,
-                self.field_invalid(field),
-            ));
-        }
-        // A non-base origin is a reorientation: note the operator stop so the part can be
-        // re-fixtured. The `H index` / position fields render in the generic loop above.
-        if let Selection::Origin = self.controller.selection() {
-            if self.controller.active_origin() != self.controller.base_origin_index() {
-                list = list.push(
-                    text(
-                        "Teach this G15 H<n> on the control to the point set here. A stop \
-                         (M00) precedes this group so you can re-fixture the part.",
-                    )
-                    .size(11)
-                    .color(palette::GROUP_LABEL),
-                );
-            }
-        }
-        // The tool geometry class is an enum, so it gets a picker (committed
-        // immediately) rather than a text field.
-        if let Selection::Tool(i) = self.controller.selection() {
-            if let Some(tool) = self.controller.document().setup().tools.get(i) {
-                list = list.push(
-                    row![
-                        help_wrap(
-                            text("Type").width(Length::Fixed(48.0)).size(13),
-                            help::TOOL_TYPE,
-                            self.tooltips,
-                        ),
-                        pick_list(
-                            &ToolKindPick::ALL[..],
-                            Some(ToolKindPick::of(tool.kind)),
-                            |p| Message::ToolKindChanged(p.to_kind())
-                        )
-                        .text_size(13)
-                        .width(Length::Fixed(177.0)),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                );
-            }
-        }
-        // Lead / plunge strategy pickers (their numeric parameters appear as fields
-        // above when the kind uses them). Profiles get lead-in/out + plunge; pockets
-        // get plunge only.
-        if let Selection::Operation(id) = self.controller.selection() {
-            match self.current_operation(id) {
-                Some(Operation::Profile(p)) => {
-                    list = list.push(profile_picker(
-                        "Side",
-                        help::SIDE,
-                        self.tooltips,
-                        p.side,
-                        &Side::ALL[..],
-                        Message::SideChanged,
-                    ));
-                    list = list.push(profile_picker(
-                        "Lead-in",
-                        help::LEAD_IN,
-                        self.tooltips,
-                        LeadKind::of(p.lead_in),
-                        &LeadKind::ALL[..],
-                        Message::LeadInKindChanged,
-                    ));
-                    list = list.push(profile_picker(
-                        "Lead-out",
-                        help::LEAD_OUT,
-                        self.tooltips,
-                        LeadKind::of(p.lead_out),
-                        &LeadKind::ALL[..],
-                        Message::LeadOutKindChanged,
-                    ));
-                    list = list.push(profile_picker(
-                        "Plunge",
-                        help::PLUNGE,
-                        self.tooltips,
-                        PlungeKind::of(p.plunge),
-                        &PlungeKind::ALL[..],
-                        Message::PlungeKindChanged,
-                    ));
-                    // Climb/conventional applies to outside-roughing clearing only.
-                    if p.side == Side::Outside {
-                        list = list.push(
-                            row![
-                                label_help("Climb", help::CLIMB, self.tooltips),
-                                checkbox(p.clearing.climb)
-                                    .size(15)
-                                    .on_toggle(Message::ClearingClimbToggled),
-                            ]
-                            .spacing(8)
-                            .align_y(Alignment::Center),
-                        );
-                    }
-                }
-                Some(Operation::Pocket(p)) => {
-                    list = list.push(profile_picker(
-                        "Plunge",
-                        help::PLUNGE,
-                        self.tooltips,
-                        PlungeKind::of(p.clear.plunge),
-                        &PlungeKind::ALL[..],
-                        Message::PlungeKindChanged,
-                    ));
-                    list = list.push(
-                        row![
-                            label_help("Climb", help::CLIMB, self.tooltips),
-                            checkbox(p.clear.clearing.climb)
-                                .size(15)
-                                .on_toggle(Message::ClearingClimbToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    );
-                    list = list.push(profile_picker(
-                        "Wall lead-in",
-                        help::LEAD_IN,
-                        self.tooltips,
-                        LeadKind::of(p.clear.lead_in),
-                        &LeadKind::ALL[..],
-                        Message::LeadInKindChanged,
-                    ));
-                    list = list.push(profile_picker(
-                        "Wall lead-out",
-                        help::LEAD_OUT,
-                        self.tooltips,
-                        LeadKind::of(p.clear.lead_out),
-                        &LeadKind::ALL[..],
-                        Message::LeadOutKindChanged,
-                    ));
-                }
-                Some(Operation::Face(f)) => {
-                    list = list.push(profile_picker(
-                        "Direction",
-                        help::FACE_DIRECTION,
-                        self.tooltips,
-                        f.direction,
-                        &Axis::ALL[..],
-                        Message::FaceDirectionChanged,
-                    ));
-                }
-                Some(Operation::Chamfer(c)) => {
-                    list = list.push(profile_picker(
-                        "Side",
-                        help::SIDE,
-                        self.tooltips,
-                        c.side,
-                        &Side::ALL[..],
-                        Message::SideChanged,
-                    ));
-                    list = list.push(profile_picker(
-                        "Lead-in",
-                        help::LEAD_IN,
-                        self.tooltips,
-                        LeadKind::of(c.lead_in),
-                        &LeadKind::ALL[..],
-                        Message::LeadInKindChanged,
-                    ));
-                    list = list.push(profile_picker(
-                        "Lead-out",
-                        help::LEAD_OUT,
-                        self.tooltips,
-                        LeadKind::of(c.lead_out),
-                        &LeadKind::ALL[..],
-                        Message::LeadOutKindChanged,
-                    ));
-                    // Gradual stepping (equal material per pass) — only meaningful
-                    // when the chamfer is cut in multiple passes.
-                    list = list.push(
-                        row![
-                            label_help("Gradual", help::CHAMFER_GRADUAL, self.tooltips),
-                            checkbox(c.gradual)
-                                .size(15)
-                                .on_toggle(Message::ChamferGradualToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    );
-                }
-                Some(Operation::Thread(t)) => {
-                    list = list.push(profile_picker(
-                        "Bore",
-                        help::BORE,
-                        self.tooltips,
-                        Bore::of(t.internal),
-                        &Bore::ALL[..],
-                        |b| Message::ThreadInternalChanged(b == Bore::Internal),
-                    ));
-                    list = list.push(profile_picker_w(
-                        "Hand",
-                        help::HAND,
-                        self.tooltips,
-                        t.hand,
-                        &Hand::ALL[..],
-                        Message::ThreadHandChanged,
-                        INSPECTOR_PICKER_W,
-                    ));
-                    list = list.push(profile_picker_w(
-                        "Cut",
-                        help::THREAD_CUT,
-                        self.tooltips,
-                        CutStyle::of(t.climb),
-                        &CutStyle::ALL[..],
-                        |c| Message::ThreadClimbChanged(c == CutStyle::Climb),
-                        INSPECTOR_PICKER_W,
-                    ));
-                    // Equal material per infeed pass — only meaningful with more than one.
-                    list = list.push(
-                        row![
-                            label_help("Gradual", help::THREAD_GRADUAL, self.tooltips),
-                            checkbox(t.gradual)
-                                .size(15)
-                                .on_toggle(Message::ThreadGradualToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    );
-                }
-                Some(Operation::Carve(c)) => {
-                    // The V-bit's own entry. The clearing pass has its own picker far
-                    // below, under the tool it belongs to — they are different tools
-                    // cutting different things, and only one of them can plunge freely.
-                    list = list.push(profile_picker(
-                        "Plunge",
-                        help::CARVE_PLUNGE,
-                        self.tooltips,
-                        PlungeKind::of(c.plunge),
-                        &PlungeKind::ALL[..],
-                        Message::PlungeKindChanged,
-                    ));
-                    list = list.push(
-                        row![
-                            label_help("Stay down", help::CARVE_STAY_DOWN, self.tooltips),
-                            checkbox(c.stay_down)
-                                .size(15)
-                                .on_toggle(Message::CarveStayDownToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    );
-
-                    // What the shape itself allows, computed live from region + tool +
-                    // depth — no run needed. This is the line that tells the operator
-                    // whether to deepen, accept, or add the second tool.
-                    let shape = self
-                        .controller
-                        .document()
-                        .setup()
-                        .tools
-                        .iter()
-                        .find(|t| t.number == c.tool)
-                        .and_then(|t| cam_toolpath::carve_shape(c, t));
-                    if let Some(sh) = shape {
-                        let reach = if sh.full_depth > sh.tool_max_depth + 1e-9 {
-                            format!(", past tool {}'s {:.2} mm limit", c.tool, sh.tool_max_depth)
-                        } else {
-                            String::new()
-                        };
-                        let line = if sh.flat_areas == 0 {
-                            format!(
-                                "Carves out at {:.2} mm{reach} — no flat areas.",
-                                sh.full_depth
-                            )
-                        } else if sh.flat_areas == 1 {
-                            format!(
-                                "Full depth for this shape is {:.2} mm{reach}; this cap \
-                                 leaves 1 flat area.",
-                                sh.full_depth
-                            )
-                        } else {
-                            format!(
-                                "Full depth for this shape is {:.2} mm{reach}; this cap \
-                                 leaves {} flat areas.",
-                                sh.full_depth, sh.flat_areas
-                            )
-                        };
-                        list = list.push(text(line).size(12).color(palette::GROUP_LABEL));
-
-                        // The clearing tool is offered only when there is something for
-                        // it to clear — otherwise it buys a tool change and nothing else.
-                        if sh.flat_areas > 0 {
-                            // Everything below this line belongs to the *other* tool.
-                            // Two tools in one operation is unusual enough that the
-                            // inspector has to say where one ends and the next begins.
-                            list = list.push(iced::widget::rule::horizontal(1));
-                            list = list.push(
-                                text("Clearing pass (end mill)")
-                                    .size(12)
-                                    .color(palette::GROUP_LABEL),
-                            );
-                            list = list.push(
-                                row![
-                                    label_help(
-                                        "Clear flat areas",
-                                        help::CARVE_CLEAR,
-                                        self.tooltips
-                                    ),
-                                    checkbox(c.clear.is_some())
-                                        .size(15)
-                                        .on_toggle(Message::CarveClearToggled),
-                                ]
-                                .spacing(8)
-                                .align_y(Alignment::Center),
-                            );
-                            if let Some(cl) = &c.clear {
-                                // Flat-bottomed families only: the clearing pass exists
-                                // to leave a flat floor, and the strategy errors on a
-                                // tool that cannot.
-                                let choices: Vec<ToolChoice> = self
-                                    .library
-                                    .tools
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, t)| {
-                                        matches!(
-                                            t.kind,
-                                            ToolKind::EndMill | ToolKind::BullNose { .. }
-                                        )
-                                    })
-                                    .map(|(index, t)| ToolChoice {
-                                        index,
-                                        number: t.number,
-                                        diameter: t.diameter,
-                                        kind: t.kind,
-                                    })
-                                    .collect();
-                                let current = Some(cl.tool).and_then(|n| {
-                                    let embedded = self
-                                        .controller
-                                        .document()
-                                        .setup()
-                                        .tools
-                                        .iter()
-                                        .find(|t| t.number == n)
-                                        .copied()?;
-                                    let i = self.library.tools.iter().position(|l| {
-                                        l.diameter == embedded.diameter
-                                            && l.length == embedded.length
-                                            && l.flutes == embedded.flutes
-                                            && l.kind == embedded.kind
-                                    })?;
-                                    choices.iter().find(|ch| ch.index == i).cloned()
-                                });
-                                list = list.push(
-                                    row![
-                                        label_help(
-                                            "Clearing tool",
-                                            help::CARVE_CLEAR,
-                                            self.tooltips
-                                        ),
-                                        pick_list(choices, current, |ch| {
-                                            Message::CarveClearToolChanged(ch.index)
-                                        })
-                                        .placeholder("Choose an end mill")
-                                        .text_size(13)
-                                        .width(Length::Fixed(INSPECTOR_TOOL_PICKER_W)),
-                                    ]
-                                    .spacing(8)
-                                    .align_y(Alignment::Center),
-                                );
-                                // A pocket's controls, because that is what this pass is
-                                // — held back from the main field block above so they sit
-                                // under the tool they belong to.
-                                for f in self.inspector_fields() {
-                                    if !is_clear_field(f) {
-                                        continue;
-                                    }
-                                    let value = self.fields.get(&f).cloned().unwrap_or_default();
-                                    list = list.push(field_row_labeled(
-                                        f,
-                                        self.field_label(f),
-                                        self.field_help(f),
-                                        &value,
-                                        self.tooltips,
-                                        self.field_invalid(f),
-                                    ));
-                                }
-                                list = list.push(profile_picker(
-                                    "Clearing plunge",
-                                    help::CARVE_CLEAR_PLUNGE,
-                                    self.tooltips,
-                                    PlungeKind::of(cl.params.plunge),
-                                    &PlungeKind::ALL[..],
-                                    Message::CarveClearPlungeChanged,
-                                ));
-                                list = list.push(
-                                    row![
-                                        label_help("Clearing climb", help::CLIMB, self.tooltips),
-                                        checkbox(cl.params.clearing.climb)
-                                            .size(15)
-                                            .on_toggle(Message::CarveClearClimbToggled),
-                                    ]
-                                    .spacing(8)
-                                    .align_y(Alignment::Center),
-                                );
-                                list = list.push(profile_picker(
-                                    "Clearing lead-in",
-                                    help::LEAD_IN,
-                                    self.tooltips,
-                                    LeadKind::of(cl.params.lead_in),
-                                    &LeadKind::ALL[..],
-                                    Message::CarveClearLeadInChanged,
-                                ));
-                                list = list.push(profile_picker(
-                                    "Clearing lead-out",
-                                    help::LEAD_OUT,
-                                    self.tooltips,
-                                    LeadKind::of(cl.params.lead_out),
-                                    &LeadKind::ALL[..],
-                                    Message::CarveClearLeadOutChanged,
-                                ));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let operation_footer: Option<Element<'_, Message>> =
-            if matches!(self.controller.selection(), Selection::Operation(_)) {
-                let overrides_valid = self.cad_override_top.trim().is_empty()
-                    || self.cad_override_top.trim().parse::<f64>().is_ok();
-                let overrides_valid = overrides_valid
-                    && (self.cad_override_bottom.trim().is_empty()
-                        || self.cad_override_bottom.trim().parse::<f64>().is_ok());
-                Some(
-                    column![
-                        row![
-                            button("OK").on_press_maybe(
-                                (!self.any_field_invalid()
-                                    && overrides_valid
-                                    && self.inspector_dirty())
-                                .then_some(Message::Apply)
-                            ),
-                            button("Cancel").on_press(Message::CancelOperationDraft),
-                        ]
-                        .spacing(6),
-                        text("Operation parameters and linked heights commit together.")
-                            .size(11)
-                            .color(palette::GROUP_LABEL),
-                    ]
-                    .spacing(4)
-                    .padding(8)
-                    .into(),
-                )
-            } else {
-                list = list.push(button("Apply").on_press_maybe(
-                    (!self.any_field_invalid() && self.inspector_dirty()).then_some(Message::Apply),
-                ));
-                list = list.push(
-                text(
-                    "Applies typed values. Drop-downs and checkboxes take effect as you set them.",
-                )
-                .size(11)
-                .color(palette::GROUP_LABEL),
-            );
-                None
-            };
-
-        let body = scrollable(list).width(Length::Fill).height(Length::Fill);
-        if let Some(footer) = operation_footer {
-            column![body, footer]
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        } else {
-            body.into()
-        }
-    }
-
-    fn setup_editor(&self) -> Element<'_, Message> {
-        let Some(draft) = &self.setup_draft else {
-            return column![
-                text("Setup").size(15),
-                text("Select a setup to edit its settings.").size(12)
-            ]
-            .padding(8)
-            .into();
-        };
-        let tabs = row(SetupEditorTab::ALL.into_iter().map(|tab| {
-            let b = button(text(tab.to_string()).size(12));
-            if tab == self.setup_tab {
-                b.into()
-            } else {
-                b.on_press(Message::SetupTabChanged(tab)).into()
-            }
-        }))
-        .spacing(4);
-        let header = column![
-            text(format!("{} · Setup {}", draft.name, draft.id)).size(15),
-            tabs
-        ]
-        .spacing(8)
-        .padding(8);
-        let mut list = column![].spacing(8).padding(8);
-        match self.setup_tab {
-            SetupEditorTab::Setup => {
-                list = list.push(text("Identity and machining frame").size(12));
-                list = list.push(
-                    text_input("Setup name", &draft.name)
-                        .on_input(Message::SetupNameChanged)
-                        .size(12),
-                );
-                list = list.push(text("Geometry selection").size(12));
-                list = list.push(
-                    pick_list(
-                        &CadFilter::ALL[..],
-                        Some(self.cad_filter),
-                        Message::CadFilterChanged,
-                    )
-                    .text_size(12),
-                );
-                list = list.push(
-                    checkbox(self.cad_select_through)
-                        .label("Select through solids")
-                        .on_toggle(Message::CadSelectThrough)
-                        .text_size(12),
-                );
-                list = list.push(
-                    row![
-                        button("Hide selected").on_press(Message::CadHideSelected),
-                        button("Isolate").on_press(Message::CadIsolateSelected),
-                        button("Show all").on_press(Message::CadShowAll)
-                    ]
-                    .spacing(4),
-                );
-                for instance in &self.controller.geometry_state().instances {
-                    let label = self
-                        .controller
-                        .geometry_state()
-                        .asset(instance.asset_id)
-                        .map(|a| format!("{} · {}", a.name, instance.name))
-                        .unwrap_or_else(|| instance.name.clone());
-                    list = list.push(
-                        checkbox(
-                            draft.model_instances.is_empty()
-                                || draft.model_instances.contains(&instance.id),
-                        )
-                        .label(label)
-                        .on_toggle(move |on| Message::SetupModelToggled(instance.id, on))
-                        .text_size(12),
-                    );
-                }
-                if let Some(instance) = draft.model_instances.first().copied().or_else(|| {
-                    self.controller
-                        .geometry_state()
-                        .instances
-                        .first()
-                        .map(|i| i.id)
-                }) {
-                    list = list.push(
-                        text(if draft.frame.references.model_instance.is_some() {
-                            "WCS mode · model coordinates"
-                        } else {
-                            "WCS mode · selected edges"
-                        })
-                        .size(11)
-                        .color(palette::GROUP_LABEL),
-                    );
-                    list = list.push(
-                        button("Use model coordinate system")
-                            .on_press(Message::SetupUseModelFrame(instance)),
-                    );
-                    list = list.push(
-                        button("Use model origin as datum")
-                            .on_press(Message::SetupUseModelOrigin(instance)),
-                    );
-                }
-                list = list.push(
-                    text(if self.setup_axis_pick.is_some() {
-                        "Pick an edge in the viewport…"
-                    } else {
-                        "Selected model edges"
-                    })
-                    .size(12),
-                );
-                if self.cad_candidates.len() > 1 && self.setup_axis_pick.is_some() {
-                    list = list.push(text("Overlapping edge candidates").size(11));
-                    for candidate in &self.cad_candidates {
-                        list = list.push(
-                            button(text(format!(
-                                "Edge {} · instance {}{}",
-                                candidate.entity.id,
-                                candidate.entity.instance_id,
-                                if candidate.occluded { " · behind" } else { "" }
-                            )))
-                            .on_press(Message::CadSelect(candidate.entity.clone())),
-                        );
-                    }
-                }
-                for (axis, reference) in [
-                    &draft.frame.references.x,
-                    &draft.frame.references.y,
-                    &draft.frame.references.z,
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let name = ["X", "Y", "Z"][axis];
-                    let label = reference
-                        .as_ref()
-                        .map(|r| format!("{} edge · {}", name, r.entity.id))
-                        .unwrap_or_else(|| format!("{} edge · unspecified", name));
-                    let mut line = row![
-                        text(label).size(12).width(Length::Fill),
-                        button("Select edge").on_press(Message::SetupAxisPick(axis))
-                    ]
-                    .spacing(4)
-                    .align_y(Alignment::Center);
-                    if let Some(reference) = reference {
-                        line = line.push(
-                            checkbox(reference.flipped)
-                                .label("Flip")
-                                .on_toggle(move |on| Message::SetupAxisFlip(axis, on))
-                                .text_size(11),
-                        );
-                        line = line.push(button("Clear").on_press(Message::SetupAxisClear(axis)));
-                    }
-                    list = list.push(line);
-                }
-                list = list.push(
-                    text(format!(
-                        "Origin (mm)  X {:.3}  Y {:.3}  Z {:.3}",
-                        draft.origin[0], draft.origin[1], draft.origin[2]
-                    ))
-                    .size(11),
-                );
-                list = list.push(
-                    row![
-                        button(if self.setting_origin {
-                            "Cancel point pick"
-                        } else {
-                            "Pick origin point"
-                        })
-                        .on_press(Message::ToggleSetOrigin),
-                        button(if self.setting_origin_2pt {
-                            "Cancel two-point pick"
-                        } else {
-                            "Pick origin from two points"
-                        })
-                        .on_press(Message::ToggleSetOrigin2pt),
-                    ]
-                    .spacing(4),
-                );
-                for i in 0..3 {
-                    let value = self.setup_value(i, fmt_num(draft.origin[i]));
-                    list = list.push(
-                        row![
-                            text(["Origin X", "Origin Y", "Origin Z"][i])
-                                .size(11)
-                                .width(Length::Fixed(86.0)),
-                            text_input("mm", &value)
-                                .on_input(move |v| Message::SetupOriginChanged(i, v))
-                                .size(11)
-                        ]
-                        .spacing(5),
-                    );
-                }
-                for (label, index, value) in [
-                    ("Clearance", 0, draft.heights.clearance),
-                    ("Retract", 1, draft.heights.retract),
-                    ("Top of stock", 2, draft.heights.top_of_stock),
-                ] {
-                    let value = self.setup_value(10 + index, fmt_num(value));
-                    list = list.push(
-                        row![
-                            text(label).size(11).width(Length::Fixed(90.0)),
-                            text_input("mm", &value)
-                                .on_input(move |v| Message::SetupHeightChanged(index, v))
-                                .size(11)
-                        ]
-                        .spacing(5),
-                    );
-                }
-                if let Some(error) = self.setup_frame_issue(draft) {
-                    list = list.push(text(error).size(11).color(palette::ERROR));
-                }
-            }
-            SetupEditorTab::Stock => {
-                list = list.push(
-                    text_input("Material", &draft.material)
-                        .on_input(Message::SetupMaterialChanged)
-                        .size(12),
-                );
-                let kind = match draft.stock {
-                    cam_model::Stock::FixedBox { .. } => StockEditorKind::FixedBox,
-                    cam_model::Stock::RelativeBox { .. } => StockEditorKind::RelativeBox,
-                    cam_model::Stock::BoundingBox { .. } => StockEditorKind::LegacyBox,
-                };
-                list = list.push(
-                    pick_list(
-                        &StockEditorKind::ALL[..],
-                        Some(kind),
-                        Message::SetupStockKindChanged,
-                    )
-                    .text_size(12),
-                );
-                match draft.stock {
-                    cam_model::Stock::FixedBox {
-                        size,
-                        model_position,
-                    } => {
-                        list = list.push(text("Fixed stock size and placement").size(12));
-                        for i in 0..3 {
-                            let size_value = self.setup_value(20 + i, fmt_num(size[i]));
-                            list = list.push(
-                                row![
-                                    text(["X", "Y", "Z"][i]).size(11).width(Length::Fixed(22.0)),
-                                    text_input("size (mm)", &size_value)
-                                        .on_input(move |v| Message::SetupStockNumberChanged(i, v))
-                                        .size(11),
-                                    pick_list(
-                                        &BoxAnchor::ALL[..],
-                                        Some(BoxAnchor::of(model_position[i])),
-                                        move |anchor| Message::SetupStockPositionChanged(i, anchor)
-                                    )
-                                    .text_size(11)
-                                ]
-                                .spacing(4),
-                            );
-                        }
-                    }
-                    cam_model::Stock::RelativeBox { offsets } => {
-                        list = list.push(text("Allowance on each side (mm)").size(12));
-                        for side in 0..2 {
-                            for axis in 0..3 {
-                                let i = side * 3 + axis;
-                                let value = self.setup_value(20 + i, fmt_num(offsets[side][axis]));
-                                list = list.push(
-                                    row![
-                                        text(format!(
-                                            "{} {}",
-                                            if side == 0 { "−" } else { "+" },
-                                            ["X", "Y", "Z"][axis]
-                                        ))
-                                        .size(11)
-                                        .width(Length::Fixed(42.0)),
-                                        text_input("mm", &value)
-                                            .on_input(move |v| Message::SetupStockNumberChanged(
-                                                i, v
-                                            ))
-                                            .size(11)
-                                    ]
-                                    .spacing(4),
-                                );
-                            }
-                        }
-                    }
-                    cam_model::Stock::BoundingBox {
-                        x_offset,
-                        y_offset,
-                        top,
-                        thickness,
-                    } => {
-                        list = list.push(text("Existing stock dimensions (mm)").size(12));
-                        for (label, key, value) in [
-                            ("X allowance", 50, x_offset),
-                            ("Y allowance", 51, y_offset),
-                            ("Top Z", 52, top),
-                            ("Thickness", 53, thickness),
-                        ] {
-                            let value = self.setup_value(20 + key, fmt_num(value));
-                            list = list.push(
-                                row![
-                                    text(label).size(11).width(Length::Fixed(90.0)),
-                                    text_input("mm", &value)
-                                        .on_input(move |v| Message::SetupStockNumberChanged(key, v))
-                                        .size(11)
-                                ]
-                                .spacing(4),
-                            );
-                        }
-                    }
-                }
-                let (model_min, model_max) = self.controller.pending_setup_model_bounds(draft);
-                let dimensions = std::array::from_fn::<_, 3, _>(|i| model_max[i] - model_min[i]);
-                list = list.push(
-                    text(format!(
-                        "Model in setup axes: {:.3} × {:.3} × {:.3} mm",
-                        dimensions[0], dimensions[1], dimensions[2]
-                    ))
-                    .size(11),
-                );
-                let (stock_min, stock_max) = draft.stock.resolve_bounds(model_min, model_max);
-                if (0..3).any(|i| {
-                    stock_min[i] > model_min[i] + 1e-6 || stock_max[i] < model_max[i] - 1e-6
-                }) {
-                    list = list.push(
-                        text("Stock does not contain the selected machining model.")
-                            .size(11)
-                            .color(palette::ERROR),
-                    );
-                }
-            }
-            SetupEditorTab::Postprocess => {
-                let offset = self.setup_value(40, draft.origin_index.to_string());
-                list = list.push(
-                    row![
-                        text("Work offset").size(12).width(Length::Fixed(100.0)),
-                        text_input("1", &offset)
-                            .on_input(Message::SetupWorkOffsetChanged)
-                            .size(12)
-                    ]
-                    .spacing(6),
-                );
-                list = list.push(
-                    row![
-                        text("Program name / number")
-                            .size(12)
-                            .width(Length::Fixed(130.0)),
-                        text_input("setup program", &draft.program_name)
-                            .on_input(Message::SetupProgramChanged)
-                            .size(12)
-                    ]
-                    .spacing(6),
-                );
-                list = list.push(
-                    text("Each physical setup exports as a separate NC program.")
-                        .size(11)
-                        .color(palette::GROUP_LABEL),
-                );
-            }
-        }
-        let numbers_valid = self
-            .setup_values
-            .values()
-            .all(|v| v.trim().parse::<f64>().is_ok())
-            && self
-                .setup_values
-                .get(&40)
-                .is_none_or(|v| v.trim().parse::<u32>().is_ok());
-        let can_commit = numbers_valid && self.setup_frame_issue(draft).is_none();
-        let footer = row![
-            button("OK").on_press_maybe(can_commit.then_some(Message::SetupCommit)),
-            button("Cancel").on_press(Message::SetupCancel)
-        ]
-        .spacing(6)
-        .padding(8);
-        column![
-            header,
-            scrollable(list).width(Length::Fill).height(Length::Fill),
-            footer
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    /// The output dock: run diagnostics and the status line.
-    fn output(&self) -> Element<'_, Message> {
-        let mut list = column![text(self.status.clone()).size(13)]
-            .spacing(4)
-            .padding(8);
-        if let Some(outcome) = self.controller.outcome() {
-            if outcome.diagnostics.is_empty() {
-                list = list.push(text("No diagnostics.").size(12));
-            } else {
-                list = list.push(text("Diagnostics:").size(13));
-                for d in &outcome.diagnostics {
-                    list = list.push(text(format!("• {:?}: {}", d.severity, d.message)).size(12));
-                }
-            }
-            // Material-removal simulation results: collisions a backplot can't show.
-            if outcome.collisions.is_empty() {
-                list = list.push(text("Simulation: no collisions.").size(12));
-            } else {
-                list =
-                    list.push(text(format!("Collisions ({}):", outcome.collisions.len())).size(13));
-                for c in &outcome.collisions {
-                    list = list.push(text(format!("⚠ {:?}: {}", c.kind, c.message)).size(12));
-                }
-            }
-        }
-        scrollable(list)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
-}
-
-/// The numeric parameters the inspector shows for an operation, in display order.
-///
-/// A free function taking only the operation, so the list can be checked without
-/// standing up a GUI — `visible_fields` is a method on the iced `App` and nothing
-/// headless can reach it. The same reason `origin_move_targets` was extracted: a
-/// rule the tests cannot see is a rule that drifts, and this one silently governs
-/// whether an operation's parameter is reachable by the operator at all.
-fn operation_fields(op: &Operation) -> Vec<Field> {
-    match op {
-        Operation::Profile(p) => {
-            let mut fields = vec![Field::Depth, Field::Stepdown];
-            // Radial roughing (stepover) is outside-only; an inner profile is
-            // a single-pass wall finish (rough the pocket first).
-            if p.side == Side::Outside {
-                fields.push(Field::Stepover);
-                fields.push(Field::Engagement);
-            }
-            fields.extend([
-                Field::ProfileOffset,
-                Field::SpindleRpm,
-                Field::Feed,
-                Field::PlungeFeed,
-            ]);
-            // Lead/plunge sizes appear only when the kind uses them.
-            if p.lead_in != Lead::None {
-                fields.push(Field::LeadInSize);
-            }
-            if p.lead_out != Lead::None {
-                fields.push(Field::LeadOutSize);
-            }
-            fields.push(Field::LeadOverlap);
-            match p.plunge {
-                Plunge::Straight => {}
-                Plunge::Ramp { .. } => fields.push(Field::PlungeA),
-                Plunge::Helix { .. } | Plunge::ZigZag { .. } => {
-                    fields.push(Field::PlungeA);
-                    fields.push(Field::PlungeB);
-                }
-            }
-            fields
-        }
-        Operation::Pocket(p) => {
-            let mut fields = vec![
-                Field::Depth,
-                Field::Stepdown,
-                Field::Overlap,
-                Field::Engagement,
-                Field::ProfileOffset,
-                Field::SpindleRpm,
-                Field::Feed,
-                Field::PlungeFeed,
-                Field::LeadOverlap,
-            ];
-            if p.clear.lead_in != Lead::None {
-                fields.push(Field::LeadInSize);
-            }
-            if p.clear.lead_out != Lead::None {
-                fields.push(Field::LeadOutSize);
-            }
-            match p.clear.plunge {
-                Plunge::Straight => {}
-                Plunge::Ramp { .. } => fields.push(Field::PlungeA),
-                Plunge::Helix { .. } | Plunge::ZigZag { .. } => {
-                    fields.push(Field::PlungeA);
-                    fields.push(Field::PlungeB);
-                }
-            }
-            fields
-        }
-        Operation::Face(_) => vec![
-            Field::FaceStartOffset,
-            Field::Depth,
-            Field::Stepdown,
-            Field::Overlap,
-            Field::FaceOvershoot,
-            Field::SpindleRpm,
-            Field::Feed,
-            Field::PlungeFeed,
-        ],
-        Operation::Drill(_) => vec![
-            Field::Depth,
-            Field::DrillStartOffset,
-            Field::Peck,
-            Field::Dwell,
-            Field::SpindleRpm,
-            Field::Feed,
-        ],
-        Operation::Chamfer(c) => {
-            let mut fields = vec![
-                // Heights first and top-down, as the Setup inspector reads.
-                Field::ChamferTop,
-                Field::ChamferWidth,
-                Field::ChamferDepth,
-                Field::ChamferStep,
-                Field::SpindleRpm,
-                Field::Feed,
-                Field::PlungeFeed,
-            ];
-            if c.lead_in != Lead::None {
-                fields.push(Field::LeadInSize);
-            }
-            if c.lead_out != Lead::None {
-                fields.push(Field::LeadOutSize);
-            }
-            fields.push(Field::LeadOverlap);
-            fields
-        }
-        Operation::Engrave(_) => {
-            vec![
-                Field::Depth,
-                Field::Stepdown,
-                Field::SpindleRpm,
-                Field::Feed,
-                Field::PlungeFeed,
-            ]
-        }
-        // Carve has no stepdown (single-pass, deferred) and no stepover: its
-        // ring spacing plays that role, and `Depth` is a *cap* the shape may
-        // not reach.
-        Operation::Carve(c) => {
-            let mut fields = vec![
-                Field::Depth,
-                Field::ProfileOffset,
-                Field::RingStep,
-                Field::Scallop,
-                Field::SpindleRpm,
-                Field::Feed,
-                Field::PlungeFeed,
-            ];
-            // The V-bit's own entry parameters, exactly as a profile's.
-            match c.plunge {
-                Plunge::Straight => {}
-                Plunge::Ramp { .. } => fields.push(Field::PlungeA),
-                Plunge::Helix { .. } | Plunge::ZigZag { .. } => {
-                    fields.push(Field::PlungeA);
-                    fields.push(Field::PlungeB);
-                }
-            }
-            // The clearing pass is a pocket over a derived region, so it gets a
-            // pocket's controls -- all but two. `Depth` is not its own (the
-            // carve's cap sets it), and a wall finishing allowance would leave a
-            // full-depth ridge at the wall/floor junction, since the V-bit's
-            // innermost ring runs along that boundary rather than beside it.
-            if let Some(cl) = &c.clear {
-                fields.extend([
-                    Field::ClearStepdown,
-                    Field::ClearOverlap,
-                    Field::ClearOffset,
-                    Field::ClearEngagement,
-                    Field::ClearFeed,
-                    Field::ClearPlungeFeed,
-                    Field::ClearLeadOverlap,
-                ]);
-                if cl.params.lead_in != Lead::None {
-                    fields.push(Field::ClearLeadInSize);
-                }
-                if cl.params.lead_out != Lead::None {
-                    fields.push(Field::ClearLeadOutSize);
-                }
-                match cl.params.plunge {
-                    Plunge::Straight => {}
-                    Plunge::Ramp { .. } => fields.push(Field::ClearPlungeA),
-                    Plunge::Helix { .. } | Plunge::ZigZag { .. } => {
-                        fields.push(Field::ClearPlungeA);
-                        fields.push(Field::ClearPlungeB);
-                    }
-                }
-            }
-            fields
-        }
-        Operation::Thread(t) => {
-            let mut fields = vec![
-                Field::MajorDia,
-                Field::Pitch,
-                Field::ThreadTop,
-                Field::ThreadBottom,
-                Field::ThreadPasses,
-                Field::ThreadSpringPasses,
-            ];
-            // Blind-hole fields only for internal threads (a boss has no bore).
-            if t.internal {
-                fields.push(Field::ThreadDrillClearance);
-                if t.drill_clearance > 0.0 {
-                    fields.push(Field::ThreadBlindAllowance);
-                }
-            }
-            fields.push(Field::SpindleRpm);
-            fields.push(Field::Feed);
-            fields.push(Field::PlungeFeed);
-            fields
-        }
     }
 }
 
@@ -9679,6 +8524,10 @@ fn op_kind(op: &Operation) -> &'static str {
 /// Read an operation's value for a given field, if the op has it.
 fn op_field(op: &Operation, field: Field) -> Option<f64> {
     match (op, field) {
+        (op, Field::StartX) => operation_tabs::operation_start(op).map(|point| point[0]),
+        (op, Field::StartY) => operation_tabs::operation_start(op).map(|point| point[1]),
+        (Operation::Engrave(op), Field::OperationTop) => Some(op.top),
+        (Operation::Carve(op), Field::OperationTop) => Some(op.top),
         // Spindle speed is common to every operation kind.
         (op, Field::SpindleRpm) => Some(op.spindle_rpm()),
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
@@ -9769,6 +8618,19 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
     // Spindle speed is common to every operation kind.
     if let Some(v) = get(Field::SpindleRpm) {
         op.set_spindle_rpm(v.max(0.0));
+    }
+    if let Some(&value) = parsed.get(&Field::StartX) {
+        operation_tabs::set_operation_start_coordinate(op, 0, value);
+    }
+    if let Some(&value) = parsed.get(&Field::StartY) {
+        operation_tabs::set_operation_start_coordinate(op, 1, value);
+    }
+    if let Some(&value) = parsed.get(&Field::OperationTop) {
+        match op {
+            Operation::Engrave(op) => op.top = value,
+            Operation::Carve(op) => op.top = value,
+            _ => {}
+        }
     }
     match op {
         Operation::Profile(o) => {
@@ -10165,11 +9027,6 @@ const INSPECTOR_INPUT_W: f32 = 90.0;
 /// introduced, kept unchanged for the ones that were already right.
 const INSPECTOR_PICKER_W: f32 = 120.0;
 
-/// Width for a tool picker. Narrower than its longest entry on purpose: the text wraps,
-/// which costs a line, where sizing to content would move the column every time the
-/// selection changed.
-const INSPECTOR_TOOL_PICKER_W: f32 = 140.0;
-
 /// An inspector field row: an explicit label + tooltip and a numeric text input bound to
 /// `field`, drawn **invalid** (red border + value) when `invalid` — the thicker border
 /// carries the signal by weight, not hue alone. The explicit label lets a field be
@@ -10183,13 +9040,14 @@ fn field_row_labeled<'a>(
     show: bool,
     invalid: bool,
 ) -> Element<'a, Message> {
-    let mut input = text_input("", value)
+    let mut input = inspector_input("", value)
+        .align_x(iced::alignment::Horizontal::Right)
         .on_input(move |v| Message::FieldChanged(field, v))
         .on_submit(Message::Apply)
         .width(Length::Fixed(INSPECTOR_INPUT_W));
     if invalid {
         input = input.style(|theme, status| {
-            let mut s = iced::widget::text_input::default(theme, status);
+            let mut s = inspector_input_style(theme, status);
             s.border.color = palette::ERROR;
             s.border.width = 1.5;
             s.value = palette::ERROR;
@@ -10244,7 +9102,9 @@ where
     row![
         label_help(label.to_string(), help, show),
         pick_list(options, Some(selected), on_select)
-            .text_size(13)
+            .text_size(12)
+            .padding([7, 9])
+            .style(inspector_picker)
             .width(Length::Fixed(width)),
     ]
     .spacing(8)
@@ -10289,6 +9149,7 @@ struct ViewportState {
     /// rotation that merely *begins* over the cube orbits instead of snapping.
     gizmo_arm: Option<(f32, f32)>,
     cad_arm: Option<Vec<PickCandidate>>,
+    planar_arm: Option<([f32; 2], f32)>,
     /// Where the (armed) press began, to measure click-vs-drag travel.
     press: Option<iced::Point>,
 }
@@ -10308,6 +9169,14 @@ const RESIZE_BAND: f32 = PANE_RESIZE_LEEWAY + 2.0;
 
 /// Whether `pos` (absolute) is within [`RESIZE_BAND`] of any edge of `bounds` —
 /// i.e. where a press likely means "drag the pane divider", not "orbit".
+fn browser_contains(point: iced::Point, bounds: iced::Rectangle, width: f32) -> bool {
+    width > 0.
+        && point.x >= bounds.x + 8.
+        && point.x <= bounds.x + width + 8.
+        && point.y >= bounds.y + 8.
+        && point.y <= bounds.y + bounds.height - 8.
+}
+
 fn in_resize_band(pos: iced::Point, bounds: iced::Rectangle) -> bool {
     pos.x - bounds.x < RESIZE_BAND
         || bounds.x + bounds.width - pos.x < RESIZE_BAND
@@ -10382,12 +9251,25 @@ impl std::fmt::Display for CadFilter {
 }
 
 struct Viewport {
+    setup_geometry: SetupPickGeometry,
+    setup_axis: bool,
+    setup_hover: SetupHover,
+    setup_snaps: Vec<SnapKind>,
+    highlight_features: bool,
+    snap_marker_scale: f32,
+    browser_overlay_width: f32,
+    planar_features: Vec<LoopRef>,
+    planar_outlines: Vec<(LoopRef, Vec<Vertex>)>,
     vertices: Arc<Vec<Vertex>>,
     mesh_vertices: Arc<Vec<MeshVertex>>,
     mesh_indices: Arc<Vec<u32>>,
+    transparent_stock_vertices: Arc<Vec<MeshVertex>>,
+    transparent_stock_indices: Arc<Vec<u32>>,
+    show_stock: bool,
     cad_edges: Arc<Vec<Vertex>>,
     cad_scene: Arc<CadScene>,
     cad_filter: EntityKind,
+    cad_operation_kind: Option<OpKind>,
     cad_select_through: bool,
     /// Scene extent (backplot + overlays) — used to *size* markers to the view.
     bounds: Option<([f32; 3], [f32; 3])>,
@@ -10511,7 +9393,11 @@ impl Viewport {
             if let Some((pts, closed)) = pending.boundary.and_then(|b| controller.loop_points(b)) {
                 add_path_highlight(&mut scene, &pts, closed, PICK_BOUNDARY);
             }
-            for island in &pending.islands {
+            for island in pending
+                .islands
+                .iter()
+                .chain(pending.additional_holes.iter())
+            {
                 if let Some((pts, closed)) = controller.loop_points(*island) {
                     add_path_highlight(&mut scene, &pts, closed, PICK_ISLAND);
                 }
@@ -10528,7 +9414,11 @@ impl Viewport {
                 // (the one the pick flow and inspector edit) is drawn larger, so it
                 // reads without relying on colour.
                 for idx in controller.origin_indices() {
-                    let pos = controller.origin_position(idx);
+                    let pos = controller
+                        .document()
+                        .setup()
+                        .frame
+                        .to_world_vector(controller.origin_position(idx));
                     let r = if idx == active { base_r } else { base_r * 0.65 };
                     add_origin_marker(&mut scene, pos, pick_z, r);
                 }
@@ -10542,7 +9432,7 @@ impl Viewport {
                         .max(1.0)
                 })
                 .unwrap_or(3.0);
-            add_origin_marker(&mut scene, first, pick_z, r);
+            add_origin_marker(&mut scene, first, first[2] as f32, r);
         }
         // The machine's travel, around the job. Added *after* `bounds` was captured, so a
         // large machine cannot re-frame the camera and shrink the part — the box is
@@ -10574,14 +9464,28 @@ impl Viewport {
         // toolpath so the focused ones stand out — vital when a part has dozens of
         // ops. An empty focus set leaves everything vivid.
         scene.focus_operations(focus_ops);
-        // The simulated stock is drawn under the backplot, only when toggled on
-        // and available (a run has produced it).
-        let (mut mesh_vertices, mut mesh_indices) = match controller.outcome() {
-            Some(outcome) if show_stock => (
+        // Before a run show the uncut setup box; afterwards use remaining stock.
+        // Transparent stock is drawn separately after the opaque CAD surfaces.
+        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, controller.outcome()) {
+            (true, Some(outcome))
+                if outcome.completion == JobCompletion::Complete
+                    || !outcome.stock_indices.is_empty() => (
                 outcome.stock_vertices.clone(),
                 outcome.stock_indices.clone(),
             ),
+            (true, _) => workspace_view::uncut_stock_mesh(controller),
             _ => (Vec::new(), Vec::new()),
+        };
+        let (transparent_stock_vertices, transparent_stock_indices) = if prefs.view.transparent_stock {
+            for vertex in &mut mesh_vertices {
+                vertex.color[3] = 0.25;
+            }
+            (
+                std::mem::take(&mut mesh_vertices),
+                std::mem::take(&mut mesh_indices),
+            )
+        } else {
+            (Vec::new(), Vec::new())
         };
         let (cad_vertices, cad_indices) = cad_scene.mesh(&cad_selected, cad_hover);
         let offset = mesh_vertices.len() as u32;
@@ -10590,24 +9494,58 @@ impl Viewport {
         // Frame on the stock (stable across parameter edits) so the part keeps a
         // constant on-screen size; fall back to the scene extent before any
         // geometry is loaded.
-        let frame_bounds = if cad_scene.bounds().is_some() {
-            cad_scene.bounds()
-        } else if !controller.has_geometry() {
-            bounds
+        let frame_bounds = if controller.has_geometry() {
+            union_bounds(
+                workspace_view::stock_world_bounds(controller),
+                cad_scene.bounds(),
+            )
         } else {
-            let (mn, mx) = controller.stock_box();
-            Some((
-                [mn[0] as f32, mn[1] as f32, mn[2] as f32],
-                [mx[0] as f32, mx[1] as f32, mx[2] as f32],
-            ))
+            Some(([-50., -50., 0.], [50., 50., 0.]))
         };
         Self {
+            setup_geometry: SetupPickGeometry::new(
+                controller,
+                controller.document().setup(),
+                cad_hidden,
+            ),
+            setup_axis: false,
+            setup_hover: SetupHover::default(),
+            setup_snaps: if prefs.snapping.enabled {
+                prefs.snapping.default_snaps.clone()
+            } else {
+                vec![]
+            },
+            highlight_features: prefs.snapping.highlight_features,
+            snap_marker_scale: prefs.snapping.marker_scale,
+            browser_overlay_width: 0.,
+            planar_features: Vec::new(),
+            planar_outlines: controller
+                .regions()
+                .iter()
+                .enumerate()
+                .flat_map(|(region, polygon)| {
+                    std::iter::once(LoopRef::outer(region)).chain(
+                        (0..polygon.holes().len()).map(move |hole| LoopRef::hole(region, hole)),
+                    )
+                })
+                .chain((0..controller.open_paths().len()).map(LoopRef::open))
+                .filter_map(|reference| {
+                    let (points, closed) = controller.loop_points(reference)?;
+                    let mut highlight = Scene::new();
+                    add_path_highlight(&mut highlight, &points, closed, PICK_BOUNDARY);
+                    Some((reference, highlight.line_vertices()))
+                })
+                .collect(),
             vertices: Arc::new(scene.line_vertices()),
             mesh_vertices: Arc::new(mesh_vertices),
             mesh_indices: Arc::new(mesh_indices),
+            transparent_stock_vertices: Arc::new(transparent_stock_vertices),
+            transparent_stock_indices: Arc::new(transparent_stock_indices),
+            show_stock,
             cad_edges,
             cad_scene: Arc::new(cad_scene),
             cad_filter,
+            cad_operation_kind: None,
             cad_select_through,
             bounds,
             frame_bounds,
@@ -10623,6 +9561,34 @@ impl Viewport {
         }
     }
 
+    fn setup_hover_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> SetupHover {
+        if bounds.width <= 0. || bounds.height <= 0. {
+            return SetupHover::default();
+        }
+        self.setup_geometry.query(
+            self.camera(),
+            bounds,
+            pos,
+            &self.setup_snaps,
+            self.setup_axis,
+            &self.cad_scene,
+            self.cad_select_through,
+            0.5 * self.snap_catch_px,
+        )
+    }
+    fn origin_point_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Option<[f64; 3]> {
+        if let Some(hit) = self.setup_hover_at(pos, bounds).snap {
+            return Some(hit.point);
+        }
+        let u = 2. * (pos.x - bounds.x) / bounds.width - 1.;
+        let v = 1. - 2. * (pos.y - bounds.y) / bounds.height;
+        self.setup_geometry.fallback(self.camera().pick_ray(
+            u,
+            v,
+            bounds.width / bounds.height.max(1.),
+        ))
+    }
+
     fn cad_candidates_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Vec<PickCandidate> {
         if bounds.width <= 0.0 || bounds.height <= 0.0 {
             return vec![];
@@ -10634,12 +9600,32 @@ impl Viewport {
         // Portrait framing grows the vertical half extent; use the actual pixel scale.
         let aperture =
             0.5 * self.snap_catch_px * camera.world_per_pixel(bounds.height) / aspect.min(1.0);
-        self.cad_scene.pick_candidates(
-            camera.pick_ray(u, v, aspect),
-            self.cad_filter,
-            aperture as f64,
-            self.cad_select_through,
-        )
+        let ray = camera.pick_ray(u, v, aspect);
+        match if self.setup_axis {
+            None
+        } else {
+            self.cad_operation_kind
+        } {
+            Some(OpKind::Profile) => self.cad_scene.pick_profile_candidates(
+                ray,
+                aperture as f64,
+                self.cad_select_through,
+            ),
+            Some(OpKind::Drill) => {
+                self.cad_scene
+                    .pick_drill_candidates(ray, aperture as f64, self.cad_select_through)
+            }
+            _ => self.cad_scene.pick_candidates(
+                ray,
+                if self.setup_axis {
+                    EntityKind::Edge
+                } else {
+                    self.cad_filter
+                },
+                aperture as f64,
+                self.cad_select_through,
+            ),
+        }
     }
 
     /// The orbit camera framed on the stable stock box, with the current controls.
@@ -10702,6 +9688,21 @@ impl shader::Program<Message> for Viewport {
             return None;
         };
         use iced::mouse::{Button, Event as Mouse, ScrollDelta};
+        let position = match mouse_event {
+            Mouse::CursorMoved { position } => Some(*position),
+            _ => cursor.position(),
+        };
+        if position
+            .is_some_and(|position| browser_contains(position, bounds, self.browser_overlay_width))
+        {
+            state.drag = None;
+            state.last = None;
+            state.press = None;
+            state.cad_arm = None;
+            state.planar_arm = None;
+            state.gizmo_arm = None;
+            return Some(shader::Action::capture());
+        }
         match mouse_event {
             Mouse::ButtonPressed(button) => {
                 let pos = cursor.position_over(bounds)?;
@@ -10718,6 +9719,31 @@ impl shader::Program<Message> for Viewport {
                         return Some(shader::Action::capture());
                     }
                 }
+                if matches!(button, Button::Left) && self.set_origin {
+                    return Some(match self.origin_point_at(pos, bounds) {
+                        Some(point) => {
+                            shader::Action::publish(Message::OriginPointPicked(point)).and_capture()
+                        }
+                        None => shader::Action::capture(),
+                    });
+                }
+                if matches!(button, Button::Left) && self.setup_axis {
+                    let hover = self.setup_hover_at(pos, bounds);
+                    let message = match hover.edge {
+                        Some(source @ SetupFeature::Stock(_)) => self
+                            .setup_geometry
+                            .direction(&source)
+                            .map(Message::SetupStockEdgePicked),
+                        Some(SetupFeature::Model(_)) => {
+                            Some(Message::CadPicked(self.cad_candidates_at(pos, bounds)))
+                        }
+                        _ => Some(Message::CadPicked(vec![])),
+                    };
+                    return Some(match message {
+                        Some(m) => shader::Action::publish(m).and_capture(),
+                        None => shader::Action::capture(),
+                    });
+                }
                 // In geometry-pick mode a left-click selects geometry (projected
                 // onto the stock-top plane) instead of orbiting; the pickbox
                 // half-size becomes the world-space snap aperture.
@@ -10733,11 +9759,7 @@ impl shader::Program<Message> for Viewport {
                     if let Some(w) = cam.pick_plane(u, v, aspect, self.pick_z) {
                         let aperture =
                             0.5 * self.snap_catch_px * cam.world_per_pixel(bounds.height);
-                        let msg = if self.set_origin {
-                            Message::OriginPointPicked(w, aperture)
-                        } else {
-                            Message::PickWorld(w, aperture)
-                        };
+                        let msg = Message::PickWorld(w, aperture);
                         return Some(shader::Action::publish(msg).and_capture());
                     }
                     return Some(shader::Action::capture());
@@ -10758,6 +9780,22 @@ impl shader::Program<Message> for Viewport {
                     state.press = Some(pos);
                     return Some(shader::Action::capture());
                 }
+                if matches!(button, Button::Left)
+                    && self.cad_scene.bounds().is_none()
+                    && !self.set_origin
+                    && !self.picking
+                {
+                    let aspect = bounds.width / bounds.height.max(1.);
+                    let u = 2. * (pos.x - bounds.x) / bounds.width - 1.;
+                    let v = 1. - 2. * (pos.y - bounds.y) / bounds.height;
+                    if let Some(point) = self.camera().pick_plane(u, v, aspect, self.pick_z) {
+                        state.planar_arm = Some((
+                            point,
+                            0.5 * self.snap_catch_px * self.camera().world_per_pixel(bounds.height),
+                        ));
+                        state.press = Some(pos);
+                    }
+                }
                 let mode = match button {
                     Button::Left => DragMode::Orbit,
                     Button::Right => DragMode::Pan,
@@ -10773,15 +9811,19 @@ impl shader::Program<Message> for Viewport {
                     // still counts as a click, but travel past the slop commits to
                     // an orbit and drops the snap.
                     if let Some(press) = state.press {
-                        if state.gizmo_arm.is_some() || state.cad_arm.is_some() {
+                        if state.gizmo_arm.is_some()
+                            || state.cad_arm.is_some()
+                            || state.planar_arm.is_some()
+                        {
                             let moved = (position.x - press.x).hypot(position.y - press.y);
                             if moved < GIZMO_CLICK_SLOP {
                                 return Some(shader::Action::capture());
                             }
                             state.gizmo_arm = None;
                             state.cad_arm = None;
-                            state.last = Some(*position); // orbit from here, no jump
-                            return Some(shader::Action::capture());
+                            state.planar_arm = None;
+                            // Apply this movement too: a fast drag may have only one
+                            // move event before release. The slop already excludes clicks.
                         }
                     }
                     let (dx, dy) = (position.x - last.x, position.y - last.y);
@@ -10802,6 +9844,16 @@ impl shader::Program<Message> for Viewport {
                         }
                     };
                     return Some(shader::Action::publish(message).and_capture());
+                }
+                if self.set_origin || self.setup_axis {
+                    let hover = if cursor.position_over(bounds).is_some() {
+                        self.setup_hover_at(*position, bounds)
+                    } else {
+                        SetupHover::default()
+                    };
+                    return Some(shader::Action::publish(Message::SetupHover(
+                        *position, hover,
+                    )));
                 }
                 if !self.set_origin && self.cad_scene.bounds().is_some() {
                     let candidate = cursor.position_over(bounds).and_then(|p| {
@@ -10834,6 +9886,14 @@ impl shader::Program<Message> for Viewport {
                 }
             }
             Mouse::ButtonReleased(_) => {
+                if let Some((point, aperture)) = state.planar_arm.take() {
+                    state.drag = None;
+                    state.last = None;
+                    state.press = None;
+                    return Some(
+                        shader::Action::publish(Message::PickWorld(point, aperture)).and_capture(),
+                    );
+                }
                 if let Some(candidates) = state.cad_arm.take() {
                     state.drag = None;
                     state.last = None;
@@ -10897,10 +9957,58 @@ impl shader::Program<Message> for Viewport {
             }
             Arc::new(v)
         };
+        let vertices = if self.planar_features.is_empty() {
+            vertices
+        } else {
+            let mut highlighted = (*vertices).clone();
+            for reference in &self.planar_features {
+                // Rendering data was captured from the same controller snapshot.
+                if let Some(points) = self
+                    .planar_outlines
+                    .iter()
+                    .find(|(r, _)| r == reference)
+                    .map(|(_, points)| points)
+                {
+                    highlighted.extend(points.iter().copied());
+                }
+            }
+            Arc::new(highlighted)
+        };
+        let mut setup_scene = Scene::new();
+        if self.show_stock {
+            for (_, edge) in self.setup_geometry.stock_lines() {
+                setup_scene.add_strip(
+                    edge.iter().map(|p| p.map(|v| v as f32)).collect(),
+                    [0.45, 0.49, 0.54, 1.],
+                );
+            }
+        }
+        if self.set_origin || self.setup_axis {
+            self.setup_geometry.overlays(
+                &mut setup_scene,
+                self.camera(),
+                bounds,
+                &self.setup_hover,
+                &self.setup_snaps,
+                self.highlight_features,
+                self.set_origin,
+                self.snap_marker_scale,
+                &self.cad_scene,
+                self.cad_select_through,
+            );
+        }
+        let mut vertices = (*vertices).clone();
+        vertices.extend(setup_scene.line_vertices());
+        let vertices = Arc::new(vertices);
         ScenePrimitive {
+            grid_vertices: Arc::new(
+                grid_view::GridLayout::new(self.camera(), bounds.size()).vertices(),
+            ),
             vertices,
             mesh_vertices: self.mesh_vertices.clone(),
             mesh_indices: self.mesh_indices.clone(),
+            transparent_stock_vertices: self.transparent_stock_vertices.clone(),
+            transparent_stock_indices: self.transparent_stock_indices.clone(),
             cad_edges: self.cad_edges.clone(),
             view_proj: self.camera().view_proj(aspect),
             gizmo_view_proj: self.gizmo_camera().view_proj(1.0),
@@ -10917,10 +10025,10 @@ impl shader::Program<Message> for Viewport {
         cursor: iced::mouse::Cursor,
     ) -> iced::mouse::Interaction {
         let over = cursor.position_over(bounds).is_some();
-        if (self.picking || self.set_origin) && over {
+        if (self.picking || self.set_origin || self.setup_axis) && over {
             // Aiming a pick: a crosshair, but a plain arrow once a snap engages so
             // its marker reads on its own. Never the orbit "hand" while picking.
-            if self.snap_engaged {
+            if self.snap_engaged || self.setup_hover.snap.is_some() {
                 iced::mouse::Interaction::default()
             } else {
                 iced::mouse::Interaction::Crosshair
@@ -10947,8 +10055,10 @@ struct DepthTarget {
 /// backplot lines over it) and a depth buffer so the rotated solid occludes
 /// itself correctly.
 struct ViewportPipeline {
+    grid: cam_render::LineRenderer,
     lines: cam_render::LineRenderer,
     mesh: cam_render::MeshRenderer,
+    transparent_stock: cam_render::MeshRenderer,
     cad_edges: cam_render::LineRenderer,
     gizmo: cam_render::GizmoRenderer,
     depth: Option<DepthTarget>,
@@ -10959,6 +10069,8 @@ impl shader::Pipeline for ViewportPipeline {
         ViewportPipeline {
             lines: cam_render::LineRenderer::new(device, format),
             mesh: cam_render::MeshRenderer::new(device, format),
+            transparent_stock: cam_render::MeshRenderer::new_transparent(device, format),
+            grid: cam_render::LineRenderer::new_depth_tested(device, format),
             cad_edges: cam_render::LineRenderer::new_depth_tested(device, format),
             gizmo: cam_render::GizmoRenderer::new(device, queue, format),
             depth: None,
@@ -10997,9 +10109,12 @@ impl ViewportPipeline {
 
 #[derive(Debug)]
 struct ScenePrimitive {
+    grid_vertices: Arc<Vec<Vertex>>,
     vertices: Arc<Vec<Vertex>>,
     mesh_vertices: Arc<Vec<MeshVertex>>,
     mesh_indices: Arc<Vec<u32>>,
+    transparent_stock_vertices: Arc<Vec<MeshVertex>>,
+    transparent_stock_indices: Arc<Vec<u32>>,
     cad_edges: Arc<Vec<Vertex>>,
     view_proj: [[f32; 4]; 4],
     /// The orientation cube's view-projection (same rotation, its own framing).
@@ -11024,11 +10139,20 @@ impl shader::Primitive for ScenePrimitive {
         _bounds: &iced::Rectangle,
         viewport: &shader::Viewport,
     ) {
+        pipeline.grid.upload(device, &self.grid_vertices);
+        pipeline.grid.set_camera(queue, self.view_proj);
         pipeline.lines.upload(device, &self.vertices);
         pipeline
             .mesh
             .upload(device, &self.mesh_vertices, &self.mesh_indices);
         pipeline.cad_edges.upload(device, &self.cad_edges);
+        pipeline.transparent_stock.upload_transparent(
+            device,
+            &self.transparent_stock_vertices,
+            &self.transparent_stock_indices,
+            self.view_proj,
+        );
+        pipeline.transparent_stock.set_camera(queue, self.view_proj);
         pipeline.cad_edges.set_camera(queue, self.view_proj);
         pipeline.lines.set_camera(queue, self.view_proj);
         pipeline.mesh.set_camera(queue, self.view_proj);
@@ -11089,8 +10213,10 @@ impl shader::Primitive for ScenePrimitive {
             clip_bounds.width,
             clip_bounds.height,
         );
+        pipeline.grid.draw(&mut pass);
         pipeline.mesh.draw(&mut pass);
         pipeline.cad_edges.draw(&mut pass);
+        pipeline.transparent_stock.draw(&mut pass);
         pipeline.lines.draw(&mut pass);
         drop(pass);
 
@@ -11154,6 +10280,7 @@ impl shader::Primitive for ScenePrimitive {
 /// thicker line and **non-cutting** (shank/neck/top) as a thin **dashed** line — the
 /// distinction is by *linestyle, never hue* (colour-blind-safe). A few dimension labels
 /// annotate the driving values.
+#[allow(dead_code)] // Existing 2D preview retained alongside the main 3D tool view.
 struct ToolCanvas {
     profile: cam_geo::Profile2D,
     diameter: f64,
@@ -11175,6 +10302,7 @@ struct ToolCanvas {
 }
 
 impl ToolCanvas {
+    #[allow(dead_code)] // Constructor for the retained 2D preview.
     fn new(tool: &cam_model::Tool) -> Self {
         let profile = tool.profile();
         // The flute helix spans the actual cutting region — the flute length for an end
@@ -11558,6 +10686,100 @@ mod multi_setup_draft_tests {
         let id = app.controller.document().setup().operations[0].id();
         app.begin_operation_draft(id);
         (app, id)
+    }
+
+    fn model_list_app() -> App {
+        use cam_model::*;
+        let mut app = blank_app();
+        app.controller
+            .add_cad_asset(
+                GeometryAsset {
+                    id: 1,
+                    revision: 1,
+                    name: "Model".into(),
+                    source_format: CadFormat::Step,
+                    source_data: vec![].into(),
+                    import_options: None,
+                    import_diagnostics: vec![],
+                    source_fingerprint: String::new(),
+                    source_units: SourceUnits::Millimetres,
+                    backend: "analytic test fixture".into(),
+                    topology: TopologySnapshot {
+                        bodies: vec![CadBody {
+                            id: 1,
+                            name: "Body".into(),
+                            valid_solid: true,
+                            bounds: [[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]],
+                        }],
+                        ..Default::default()
+                    }
+                    .into(),
+                },
+                (1..=3)
+                    .map(|id| GeometryInstance {
+                        id,
+                        asset_id: 1,
+                        body_id: 1,
+                        name: format!("Body {id}"),
+                        placement: Default::default(),
+                        visible: true,
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        app.begin_setup_draft();
+        app
+    }
+
+    #[test]
+    fn model_list_add_remove_and_cancel_are_staged_in_one_setup_draft() {
+        let mut app = model_list_app();
+        let (min, max) = app.controller.stock_box();
+        assert!(
+            min[2] < 0.0 && max[2] > 10.0,
+            "default stock contains the entire imported model with allowance"
+        );
+        let before = app.controller.document().clone();
+        // Legacy empty lists mean all instances; removing one makes the set explicit.
+        send(&mut app, Message::SetupModelSelected(2));
+        assert!(
+            !app.setup_draft_dirty(),
+            "list selection is only navigation"
+        );
+        send(&mut app, Message::SetupModelToggled(2, false));
+        assert_eq!(
+            app.setup_draft.as_ref().unwrap().model_instances,
+            vec![1, 3]
+        );
+        assert_eq!(app.controller.document(), &before);
+        send(&mut app, Message::SetupModelToggled(2, true));
+        send(&mut app, Message::SetupModelToggled(2, true));
+        assert_eq!(
+            app.setup_draft.as_ref().unwrap().model_instances,
+            vec![1, 3, 2]
+        );
+        assert_eq!(app.setup_model_selection, Some(2));
+        send(&mut app, Message::SetupCancel);
+        assert_eq!(app.controller.document(), &before);
+        assert!(app.setup_model_selection.is_none());
+        assert!(!app.setup_draft_dirty());
+    }
+
+    #[test]
+    fn model_list_rejects_unknown_ids_and_keeps_a_machining_model() {
+        let mut app = model_list_app();
+        send(&mut app, Message::SetupModelToggled(3, false));
+        send(&mut app, Message::SetupModelToggled(2, false));
+        send(&mut app, Message::SetupModelToggled(1, false));
+        send(&mut app, Message::SetupModelToggled(99, true));
+        send(&mut app, Message::SetupModelToggled(99, false));
+        send(&mut app, Message::SetupModelSelected(99));
+        assert_eq!(app.setup_draft.as_ref().unwrap().model_instances, vec![1]);
+        assert_eq!(app.setup_model_selection, Some(1));
+        send(&mut app, Message::SetupCommit);
+        assert_eq!(app.controller.document().setup().model_instances, vec![1]);
+        assert!(app.controller.undo());
+        assert!(app.controller.document().setup().model_instances.is_empty());
     }
 
     #[test]

@@ -8,13 +8,18 @@ surface machining or B-rep collision verification.
 ## Available workflow
 
 Build with `gui,occt` and OCCT **7.9.3**. Home → Import accepts STEP/STP and the
-existing DXF/DWG inputs. Translation runs off the UI thread. Review source units,
-normalized dimensions, instance count and diagnostics before **Add to project**.
-Cancel leaves the project intact. Edits during translation or after preview
-invalidate the import request. Drawing imports now add geometry and preserve
+existing DXF/DWG inputs. Translation runs off the UI thread and successful imports
+are used immediately; there is no Add to project step. Warnings and errors appear
+in an in-app dialog over the project window. An import failure leaves the project
+intact. Edits or active geometry drafts during translation reject the request
+without discarding those changes. Drawing imports add geometry and preserve
 existing operations/tools; their addition can be undone.
 
-Select Body, Face, Edge, Loop or Vertex in the geometry tree or shaded viewport.
+Models contains one visibility row per model instance. Feature lists and filters
+are absent from the project tree. Select geometry in the shaded viewport; setup
+filters remain in the right inspector. Profile accepts a face interior as its
+outer boundary, and Drill accepts cylindrical faces and their visible circular
+rims. STEP and DXF use the same creation controls and five-tab operation editor.
 Hover and selection highlight semantic geometry. Ctrl/Command or Shift-click
 changes multi-selection. Overlapping candidates and explicit select-through are
 available. Hide/isolate/show-all are view state. Select a planar face and choose
@@ -36,8 +41,9 @@ entries. Existing projects migrate to explicit embedded geometry; no CAD
 associations are guessed. Saving validates a temporary file and atomically
 replaces the destination. Reopening does not need the source file or CAD SDK.
 
-The selection inspector provides explicit remove/replace model commands, with
-a background replacement preview. The controller also exposes these commands. Replacements
+Model context menus provide explicit remove/replace commands. Replacement runs
+in the background and commits directly, then warns when linked operations need
+review. The controller retains its staged preview API for headless callers. Replacements
 require reselection, preserve overrides, and invalidate runs. Missing, changed or
 unresolved included sources block generation/export. Excluded operations are not
 resolved or machined. Every run derives new planar inputs from exact curves;
@@ -47,17 +53,34 @@ matching resolved fingerprint.
 ## Qualified geometry subset
 
 - Pocket: one upward planar floor; closed vertical walls and constant opening
-  elevation; raised islands retained. Slopes, blends, overhangs, ambiguous walls
-  and bores through the selected floor are rejected conservatively.
+  elevation; raised islands retained. Walls require full-height trims and planar
+  opening rims with unambiguous void/island adjacency. Slopes, blends on the
+  selected walls, overhangs, ambiguous trims and bores through the selected floor
+  are rejected conservatively. Unrelated curved surfaces elsewhere are allowed.
 - Drill: inward analytic cylinders aligned with machining Z, complete rims and
   planar entry/termination. Split seam faces are merged. Bore diameter, entry and
   depth must agree within a group; the tool diameter must match. Circular edges
   alone cannot establish a hole. Conical tips and breakthrough are not inferred.
 - Profile: an exterior coplanar loop with vertical supporting walls, a certified
-  whole-body silhouette and an outside computed-compensation cut. Other sides,
-  control compensation and radial roughing require further qualification.
-- Face: a rectangular whole-body planar top without holes, bosses or protected
-  material. The selected extent drives the existing rectangular facing strategy.
+  whole-body silhouette and an outside computed-compensation cut. A circular
+  blind-bore floor also supports an inside cut: its inward cylindrical wall,
+  complete circular rims and planar disk floor certify the local feature. Its
+  entry must be at the top of the body in setup Z, excluding material above it.
+  Unrelated blends elsewhere do not block this local bore profile. Creation
+  derives the inside/outside side from the selected boundary. Cylinder trim loops
+  containing seams require selection of the planar floor loop instead. Other
+  inside profiles, control compensation and radial roughing remain unsupported.
+- Face: an upward planar target at the body's highest setup Z. Conservative exact
+  body bounds drive a rectangular stock-facing region, including above holes and
+  curved boundaries below the target. Bosses above the target remain blocked.
+
+Pocket and Drill certify the local constant-section void and check vertical
+access above its opening using transformed exact face bounds. Unknown curved
+surfaces overlapping that approach remain blocked; disjoint surfaces and curves
+below the opening do not invalidate a qualified feature. Outside Profile checks
+that remaining faces are enclosed by the selected silhouette, using conservative
+bounds or supported exact planar boundaries. No operation requires every face
+of an otherwise unrelated part of the body to be an analytic extrusion.
 
 Pocket/profile strategies run in a local Z frame using the explicit physical
 cutting interval and then return world coordinates. Drill/Face share the same

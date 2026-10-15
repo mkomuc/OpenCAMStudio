@@ -171,9 +171,23 @@ impl Scene {
     /// Build a backplot from a CL-data program: one colored segment per motion,
     /// arcs flattened, colored by [`MoveKind`].
     pub fn from_program(program: &Program) -> Scene {
+        Self::from_program_controlled(program, &|| false).unwrap()
+    }
+
+    /// Prepare a backplot off-thread, aborting between motions.
+    pub fn from_program_controlled(
+        program: &Program,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<Scene> {
+        if cancelled() {
+            return None;
+        }
         let mut scene = Scene::new();
         let mut cur: Option<Point3> = None;
         for step in program.steps() {
+            if cancelled() {
+                return None;
+            }
             match step {
                 Step::Rapid { to, tag } => {
                     push_segment(&mut scene, cur, *to, tag.kind, tag.op_id);
@@ -191,15 +205,7 @@ impl Scene {
                     ..
                 } => {
                     if let Some(start) = cur {
-                        push_arc(
-                            &mut scene,
-                            start,
-                            *end,
-                            *center,
-                            *dir,
-                            tag.kind,
-                            tag.op_id,
-                        );
+                        push_arc(&mut scene, start, *end, *center, *dir, tag.kind, tag.op_id);
                     }
                     cur = Some(*end);
                 }
@@ -224,7 +230,7 @@ impl Scene {
                 _ => {}
             }
         }
-        scene
+        Some(scene)
     }
 
     /// Fade every operation's strips except those in `focus` toward a muted grey,
@@ -566,18 +572,17 @@ mod tests {
         // coincident dimmed ones (the duplicate-on-original case).
         let mut scene = Scene::from_program(&three_op_program());
         scene.focus_operations(&[0]);
-        let focused: Vec<bool> = scene
-            .strips
-            .iter()
-            .map(|s| s.op == Some(0))
-            .collect();
+        let focused: Vec<bool> = scene.strips.iter().map(|s| s.op == Some(0)).collect();
         // Once we reach the first focused strip, all remaining are focused too.
         let first_focused = focused.iter().position(|&f| f).unwrap();
         assert!(
             focused[first_focused..].iter().all(|&f| f),
             "focused strips are contiguous at the end: {focused:?}"
         );
-        assert!(focused.last().copied().unwrap_or(false), "last strip is focused");
+        assert!(
+            focused.last().copied().unwrap_or(false),
+            "last strip is focused"
+        );
     }
 
     #[test]
@@ -620,7 +625,12 @@ mod tests {
     fn a_dashed_strip_draws_the_duty_fraction_of_its_length() {
         let mut scene = Scene::new();
         // 100 mm along X, dashed at a 10 mm period ⇒ 10 dashes of 6 mm = 60 mm drawn.
-        scene.add_strip_styled(vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]], TRAVERSE, Some(0), true);
+        scene.add_strip_styled(
+            vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]],
+            TRAVERSE,
+            Some(0),
+            true,
+        );
         let vs = scene.line_vertices_dashed(10.0);
         assert_eq!(vs.len(), 20, "10 dashes ⇒ 10 segments ⇒ 20 vertices");
         assert!(
@@ -629,7 +639,9 @@ mod tests {
             drawn_length(&vs)
         );
         // Every dash must lie on the line it came from.
-        assert!(vs.iter().all(|v| v.position[1] == 0.0 && v.position[2] == 0.0));
+        assert!(vs
+            .iter()
+            .all(|v| v.position[1] == 0.0 && v.position[2] == 0.0));
     }
 
     #[test]
@@ -646,7 +658,10 @@ mod tests {
         );
         let drawn = drawn_length(&scene.line_vertices_dashed(4.0));
         // 10 mm at period 4, duty 0.6: dashes at [0,2.4] [4,6.4] [8,10] = 2.4+2.4+2 = 6.8.
-        assert!((drawn - 6.8).abs() < 1e-3, "phase did not carry: drew {drawn}");
+        assert!(
+            (drawn - 6.8).abs() < 1e-3,
+            "phase did not carry: drew {drawn}"
+        );
     }
 
     /// A same-orientation tool change must stay **connected** in the backplot: lift,
@@ -715,7 +730,11 @@ mod tests {
                 && (s.points[0][2] - s.points[1][2]).abs() < 1e-6
                 && (s.points[0][0] - s.points[1][0]).abs() > 1e-6
         });
-        assert!(!horizontal, "a reorientation's cross must stay broken: {:?}", scene.strips);
+        assert!(
+            !horizontal,
+            "a reorientation's cross must stay broken: {:?}",
+            scene.strips
+        );
     }
 
     /// The envelope is a **size** comparison centred on the job, not a claim about where
@@ -729,8 +748,14 @@ mod tests {
         scene.add_envelope([100.0, 60.0, 50.0], about, ENVELOPE);
 
         assert_eq!(scene.strips.len(), 12, "twelve edges of a box");
-        assert!(scene.strips.iter().all(|s| s.dashed), "a reference frame, not geometry");
-        assert!(scene.strips.iter().all(|s| s.op.is_none()), "belongs to no operation");
+        assert!(
+            scene.strips.iter().all(|s| s.dashed),
+            "a reference frame, not geometry"
+        );
+        assert!(
+            scene.strips.iter().all(|s| s.op.is_none()),
+            "belongs to no operation"
+        );
 
         let (lo, hi) = scene.bounds().unwrap();
         // Travel-sized…
@@ -751,7 +776,10 @@ mod tests {
         let about = ([0.0, 0.0, 0.0], [200.0, 10.0, 5.0]);
         scene.add_envelope([100.0, 60.0, 50.0], about, ENVELOPE_OVER);
         let (lo, hi) = scene.bounds().unwrap();
-        assert!(lo[0] > 0.0 && hi[0] < 200.0, "the 200 mm job outruns the 100 mm box");
+        assert!(
+            lo[0] > 0.0 && hi[0] < 200.0,
+            "the 200 mm job outruns the 100 mm box"
+        );
     }
 
     /// The two tests above pick their periods by hand, and both happen to be periods
@@ -821,7 +849,12 @@ mod tests {
         );
         // 1000 mm at a 1 µm period would be a million dashes.
         let vs = scene.line_vertices_dashed(0.001);
-        assert_eq!(vs.len(), 2, "expected the solid fallback, got {} verts", vs.len());
+        assert_eq!(
+            vs.len(),
+            2,
+            "expected the solid fallback, got {} verts",
+            vs.len()
+        );
         assert!((drawn_length(&vs) - 1000.0).abs() < 1e-3);
     }
 
@@ -842,14 +875,25 @@ mod tests {
                 "only the traverse may be dashed: {s:?}"
             );
         }
-        assert!(scene.strips.iter().any(|s| s.dashed), "the traverse must be dashed");
+        assert!(
+            scene.strips.iter().any(|s| s.dashed),
+            "the traverse must be dashed"
+        );
 
         // A solid strip yields exactly two vertices per segment, as it always has —
         // dashing must not have leaked into the ordinary path.
-        let solid: usize = scene.strips.iter().filter(|s| !s.dashed).map(|s| s.points.len() - 1).sum();
+        let solid: usize = scene
+            .strips
+            .iter()
+            .filter(|s| !s.dashed)
+            .map(|s| s.points.len() - 1)
+            .sum();
         let vs = scene.line_vertices();
         let dashed_vs = vs.len() - solid * 2;
-        assert!(dashed_vs > 0 && vs.len() > solid * 2, "the dashed strips added segments");
+        assert!(
+            dashed_vs > 0 && vs.len() > solid * 2,
+            "the dashed strips added segments"
+        );
     }
 
     #[test]
@@ -857,7 +901,12 @@ mod tests {
         // The fallback that keeps a degenerate scene (a single point, no extent) from
         // producing an empty or infinite loop rather than a line.
         let mut scene = Scene::new();
-        scene.add_strip_styled(vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], TRAVERSE, Some(0), true);
+        scene.add_strip_styled(
+            vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            TRAVERSE,
+            Some(0),
+            true,
+        );
         for period in [0.0, -1.0, f32::NAN, f32::INFINITY] {
             let vs = scene.line_vertices_dashed(period);
             assert_eq!(vs.len(), 2, "period {period} must draw solid");
@@ -894,5 +943,26 @@ mod tests {
         let (min, max) = scene.bounds().unwrap();
         assert_eq!(min, [0.0, 0.0, -2.0]);
         assert_eq!(max, [10.0, 5.0, 3.0]);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use cam_cldata::ProgramBuilder;
+    use std::cell::Cell;
+    #[test]
+    fn backplot_preparation_cancels_between_motions() {
+        let mut builder = ProgramBuilder::new();
+        for x in 0..100 {
+            builder = builder.rapid(Point3::new(x as f64, 0., 5.), MoveKind::Link);
+        }
+        let polls = Cell::new(0);
+        assert!(Scene::from_program_controlled(&builder.build(), &|| {
+            polls.set(polls.get() + 1);
+            polls.get() >= 10
+        })
+        .is_none());
+        assert_eq!(polls.get(), 10);
     }
 }

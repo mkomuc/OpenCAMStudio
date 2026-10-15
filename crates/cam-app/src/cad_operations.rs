@@ -163,12 +163,16 @@ pub(crate) fn prepare_import(path: &Path) -> Result<PreparedImport, String> {
         }
     }
 }
-pub(crate) fn recipe(kind: OpKind) -> Result<ExtractionRecipe, String> {
+pub(crate) fn recipe(
+    kind: OpKind,
+    geometry: &GeometryState,
+    selected: &[EntityRef],
+) -> Result<ExtractionRecipe, String> {
     Ok(match kind {
         OpKind::Pocket => ExtractionRecipe::PocketFloor,
         OpKind::Drill => ExtractionRecipe::DrillHoles,
         OpKind::Profile => ExtractionRecipe::ProfileLoop {
-            side: Side::Outside,
+            side: cam_geometry3d::profile_side(geometry, selected)?,
         },
         OpKind::Face => ExtractionRecipe::FaceRegion,
         _ => return Err("CAD selections currently support Pocket, Drill, Profile and Face".into()),
@@ -247,6 +251,38 @@ fn stock_top(document: &Document) -> f64 {
     let (min, max) = model_bounds(&document.geometry, document.setup());
     document.setup().stock.resolve_bounds(min, max).1[2]
 }
+/// Validate the complete selection before strategy extraction. A mixed geometry
+/// field cannot become a valid operation by dropping its incompatible members.
+pub(crate) fn validate_selection(
+    geometry: &GeometryState,
+    selected: &[EntityRef],
+) -> Result<(), String> {
+    let Some(first) = selected.first() else {
+        return Ok(());
+    };
+    if selected.iter().any(|r| !geometry.entity_exists(r)) {
+        return Err("Needs reselection: missing entity or stale asset revision".into());
+    }
+    if selected.iter().any(|r| r.kind != first.kind) {
+        return Err("Select features of the same kind; faces, loops and edges cannot be mixed in one geometry field".into());
+    }
+    if selected.iter().any(|r| {
+        r.asset_id != first.asset_id
+            || r.instance_id != first.instance_id
+            || r.body_id != first.body_id
+    }) {
+        return Err("Machining requires features from one body instance".into());
+    }
+    if selected
+        .iter()
+        .enumerate()
+        .any(|(i, r)| selected[..i].contains(r))
+    {
+        return Err("The same geometry feature was selected more than once".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn create_operation(
     document: &Document,
     kind: OpKind,
@@ -257,10 +293,11 @@ pub(crate) fn create_operation(
     defaults: JobParams,
 ) -> Result<(Operation, GeometryBinding), String> {
     let geometry = geometry_for_setup(document)?;
+    validate_selection(&geometry, &selected)?;
     let binding = cam_geometry3d::resolve_selection(
         &geometry,
         &selected,
-        recipe(kind)?,
+        recipe(kind, &geometry, &selected)?,
         stock_top(document),
     )?;
     let resolved = cam_geometry3d::resolve_binding(&geometry, &binding)?;
@@ -301,7 +338,10 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             chain: boundary()?,
-            side: Side::Outside,
+            side: match binding.recipe {
+                ExtractionRecipe::ProfileLoop { side } => side,
+                _ => unreachable!("Profile uses a profile extraction recipe"),
+            },
             comp: Comp::Computed,
             offset: 0.0,
             depth,
@@ -355,99 +395,129 @@ pub(crate) fn create_operation(
 /// A fresh topology resolution replaces every linked strategy input. Stale
 /// embedded contours are never a fallback after asset replacement or removal.
 pub(crate) fn resolve_document(document: &Document) -> Result<Document, String> {
-    document.geometry.validate()?;
+    resolve_document_checked(document, &|| false).map_err(|diagnostic| diagnostic.message)
+}
+
+/// Typed source ownership is preserved when resolution runs in a worker.
+pub(crate) fn resolve_document_checked(
+    document: &Document,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Document, cam_toolpath::Diagnostic> {
+    let error = |message: String| {
+        cam_toolpath::Diagnostic::error(message)
+            .with_code(cam_toolpath::DiagnosticCode::GeometryUnresolved)
+            .for_setup(document.setup().id)
+    };
+    if cancelled() {
+        return Err(error("Geometry resolution cancelled".into())
+            .with_code(cam_toolpath::DiagnosticCode::Cancelled));
+    }
+    document.geometry.validate().map_err(error)?;
     let mut resolved = document.clone();
-    resolved.geometry = geometry_for_setup(document)?;
+    resolved.geometry = geometry_for_setup(document).map_err(error)?;
     let mut operations = std::mem::take(&mut resolved.setup_mut().operations);
     for operation in &mut operations {
+        if cancelled() {
+            return Err(error("Geometry resolution cancelled".into())
+                .with_code(cam_toolpath::DiagnosticCode::Cancelled));
+        }
         let id = operation.id();
-        let Some(binding) = document.geometry.bindings.get(&id) else {
-            if document.cad_linked_operations.contains(&id) {
-                return Err(format!(
-                    "Operation {id}: linked CAD geometry is missing; reselect its geometry"
-                ));
-            }
-            continue;
-        };
-        if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
-            return Err(format!("Operation {id}: Needs reselection — {reason}"));
-        }
-        let mut current_binding = binding.clone();
-        if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
-            current_binding.heights.top = stock_top(document);
-        }
-        let input = cam_geometry3d::resolve_binding(&resolved.geometry, &current_binding)
-            .map_err(|e| format!("Operation {id}: {e}"))?;
-        let depth = input.heights.depth();
-        let region = || input.regions.first().ok_or("No resolved machining region");
-        match (operation, &binding.recipe) {
-            (Operation::Pocket(p), ExtractionRecipe::PocketFloor) => {
-                p.boundary = region()?.outer().clone();
-                p.islands = region()?.holes().to_vec();
-                p.depth = depth;
-            }
-            (Operation::Profile(p), ExtractionRecipe::ProfileLoop { side }) => {
-                if p.side != *side || p.comp != Comp::Computed || p.offset < 0.0 || p.stepover > 0.0
-                {
-                    return Err(format!("Operation {id}: profile side/compensation/roughing is outside the certified CAD adapter"));
-                }
-                p.chain = region()?.outer().clone();
-                p.depth = depth;
-            }
-            (Operation::Drill(p), ExtractionRecipe::DrillHoles) => {
-                let tool = document
-                    .setup()
-                    .tools
-                    .iter()
-                    .find(|t| t.number == p.tool)
-                    .ok_or("Missing drill tool")?;
-                if input
-                    .holes
-                    .iter()
-                    .any(|h| (h.diameter - tool.diameter).abs() > 1e-3)
-                {
+        let resolved_operation: Result<(), String> = (|| {
+            let Some(binding) = document.geometry.bindings.get(&id) else {
+                if document.cad_linked_operations.contains(&id) {
                     return Err(format!(
-                        "Operation {id}: drill diameter must match the selected bore"
+                        "Operation {id}: linked CAD geometry is missing; reselect its geometry"
                     ));
                 }
-                p.points = input
-                    .holes
-                    .iter()
-                    .map(|h| [h.center.x, h.center.y])
-                    .collect();
-                p.depth = depth;
-                p.start_offset = input.heights.top - document.setup().heights.top_of_stock;
+                return Ok(());
+            };
+            if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
+                return Err(format!("Operation {id}: Needs reselection — {reason}"));
             }
-            (Operation::Face(p), ExtractionRecipe::FaceRegion) => {
-                if p.overshoot < 0.0 {
-                    return Err(format!(
-                        "Operation {id}: negative overshoot is not certified for CAD facing"
-                    ));
+            validate_selection(&resolved.geometry, &binding.selected)
+                .map_err(|e| format!("Operation {id}: {e}"))?;
+            let mut current_binding = binding.clone();
+            if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
+                current_binding.heights.top = stock_top(document);
+            }
+            let input = cam_geometry3d::resolve_binding(&resolved.geometry, &current_binding)
+                .map_err(|e| format!("Operation {id}: {e}"))?;
+            let depth = input.heights.depth();
+            let region = || input.regions.first().ok_or("No resolved machining region");
+            match (operation, &binding.recipe) {
+                (Operation::Pocket(p), ExtractionRecipe::PocketFloor) => {
+                    p.boundary = region()?.outer().clone();
+                    p.islands = region()?.holes().to_vec();
+                    p.depth = depth;
                 }
-                p.boundary = region()?.outer().clone();
-                p.depth = depth;
-                p.start_offset = input.heights.top;
+                (Operation::Profile(p), ExtractionRecipe::ProfileLoop { side }) => {
+                    if p.side != *side
+                        || p.comp != Comp::Computed
+                        || p.offset < 0.0
+                        || p.stepover > 0.0
+                    {
+                        return Err(format!("Operation {id}: profile side/compensation/roughing is outside the certified CAD adapter"));
+                    }
+                    p.chain = region()?.outer().clone();
+                    p.depth = depth;
+                }
+                (Operation::Drill(p), ExtractionRecipe::DrillHoles) => {
+                    let tool = document
+                        .setup()
+                        .tools
+                        .iter()
+                        .find(|t| t.number == p.tool)
+                        .ok_or("Missing drill tool")?;
+                    if input
+                        .holes
+                        .iter()
+                        .any(|h| (h.diameter - tool.diameter).abs() > 1e-3)
+                    {
+                        return Err(format!(
+                            "Operation {id}: drill diameter must match the selected bore"
+                        ));
+                    }
+                    p.points = input
+                        .holes
+                        .iter()
+                        .map(|h| [h.center.x, h.center.y])
+                        .collect();
+                    p.depth = depth;
+                    p.start_offset = input.heights.top - document.setup().heights.top_of_stock;
+                }
+                (Operation::Face(p), ExtractionRecipe::FaceRegion) => {
+                    if p.overshoot < 0.0 {
+                        return Err(format!(
+                            "Operation {id}: negative overshoot is not certified for CAD facing"
+                        ));
+                    }
+                    p.boundary = region()?.outer().clone();
+                    p.depth = depth;
+                    p.start_offset = input.heights.top;
+                }
+                _ => {
+                    return Err(format!(
+                        "Operation {id}: geometry recipe does not match the operation"
+                    ))
+                }
             }
-            _ => {
-                return Err(format!(
-                    "Operation {id}: geometry recipe does not match the operation"
-                ))
-            }
-        }
-        // Planner consumes absolute heights. The extraction service already applied
-        // and certified manual overrides; do not apply them a second time.
-        let cache = resolved.geometry.bindings.get_mut(&id).unwrap();
-        cache.heights = input.heights;
-        cache.overrides = GeometryOverrides::default();
-        let fingerprint = resolved
-            .geometry
-            .binding_fingerprint(&resolved.geometry.bindings[&id]);
-        resolved
-            .geometry
-            .bindings
-            .get_mut(&id)
-            .unwrap()
-            .resolved_fingerprint = Some(fingerprint);
+            // Planner consumes absolute heights. The extraction service already applied
+            // and certified manual overrides; do not apply them a second time.
+            let cache = resolved.geometry.bindings.get_mut(&id).unwrap();
+            cache.heights = input.heights;
+            cache.overrides = GeometryOverrides::default();
+            let fingerprint = resolved
+                .geometry
+                .binding_fingerprint(&resolved.geometry.bindings[&id]);
+            resolved
+                .geometry
+                .bindings
+                .get_mut(&id)
+                .unwrap()
+                .resolved_fingerprint = Some(fingerprint);
+            Ok(())
+        })();
+        resolved_operation.map_err(|message| error(message).for_op(id))?;
     }
     resolved.setup_mut().operations = operations;
     Ok(resolved)
@@ -514,9 +584,8 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
     let operation = resolved
         .setup()
         .operations
-        .iter()
+        .first()
         .cloned()
-        .next()
         .ok_or("Missing operation")?;
     let slot = document
         .setup_mut()

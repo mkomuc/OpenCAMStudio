@@ -294,6 +294,20 @@ pub struct MeshRenderer {
 impl MeshRenderer {
     /// Create the renderer for a surface of the given `format`.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::with_transparency(device, format, false)
+    }
+
+    /// Blend a translucent mesh over opaque geometry without hiding that geometry
+    /// in the depth buffer. Draw after opaque surfaces, with sorted triangles.
+    pub fn new_transparent(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::with_transparency(device, format, true)
+    }
+
+    fn with_transparency(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        transparent: bool,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cam-render mesh shader"),
             source: wgpu::ShaderSource::Wgsl(MESH_SHADER.into()),
@@ -343,7 +357,7 @@ impl MeshRenderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    blend: transparent.then_some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -355,7 +369,10 @@ impl MeshRenderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(mesh_depth()),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                depth_write_enabled: !transparent,
+                ..mesh_depth()
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -373,6 +390,19 @@ impl MeshRenderer {
     /// Upload the camera view-projection (column-major).
     pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
         self.camera.set(queue, view_proj);
+    }
+
+    /// Sort translucent triangles from far to near for the current camera before
+    /// blending. Re-sort on orbit so stock remains readable from every side.
+    pub fn upload_transparent(
+        &mut self,
+        device: &wgpu::Device,
+        vertices: &[MeshVertex],
+        indices: &[u32],
+        view_proj: [[f32; 4]; 4],
+    ) {
+        let sorted = crate::mesh::transparent_indices(vertices, indices, view_proj);
+        self.upload(device, vertices, &sorted);
     }
 
     /// Upload the mesh (interleaved position+normal vertices and triangle

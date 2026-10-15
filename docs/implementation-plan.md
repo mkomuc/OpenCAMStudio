@@ -1,6 +1,12 @@
-# Implementation plan: qualified milling and industrial CAM evolution
+# Implementation plan: machining workflow and qualified milling
 
-Date: **2026-10-13**. Baseline: [`5c510b504fe39f4e40700ff3b1e331d0309fcad3`](https://github.com/pr0m1th3as/OpenCAMStudio/tree/5c510b504fe39f4e40700ff3b1e331d0309fcad3). Read the [architecture assessment](architecture-analysis.md) and [validation evidence](architecture-validation.md) first. Work below is proposed except the explicitly reported completed packages and reusable components.
+Updated: **2026-10-14** after reviewing [high-level functions](high-level-functions.md).
+The architectural review baseline remains **2026-10-13** at
+[`5c510b504fe39f4e40700ff3b1e331d0309fcad3`](https://github.com/pr0m1th3as/OpenCAMStudio/tree/5c510b504fe39f4e40700ff3b1e331d0309fcad3).
+Read the [requirements analysis and backend parameter inventory](high-level-requirements-analysis.md),
+[architecture assessment](architecture-analysis.md) and [validation evidence](architecture-validation.md).
+Work below is proposed except the explicitly reported completed packages and reusable components.
+Historical test counts below are evidence from those packages, not a new test run.
 
 **Progress on the fork (2026-10-13):** the four clearing regressions have been diagnosed and fixed on `codex/fix-adaptive-clearing`; the headless suite reports 677 passed and no failures, and clippy passes with warnings denied. See the [fix report](adaptive-clearing-fix.md).
 
@@ -19,6 +25,15 @@ Continue with shared drill-cycle traversal and verification (A03), then controll
 tool-change/TLO policy. Tool/register reference resolution and broader document
 input validation remain open parts of M0 item 2.
 
+**Reusable workflow baseline (reviewed 2026-10-14):** schema 15 already provides
+ordered independent setups, model-body selection, model/edge frames, fixed and
+relative box stock, shared setup drafts, STEP picking and four qualified linked
+operations, and separate setup NC output. See [CAD import](cad-import-implementation.md)
+and [multi-setup implementation](multi-setup-implementation.md). These satisfy
+parts of M1/M3, not their entire acceptance gates. Fixture roles/checks,
+material-linked presets, setup installation binding and previous-setup stock
+remain open. The current library/preview supports eight cutter kinds.
+
 ## 1. Product scope and sequencing
 
 Target the first qualified release at **fixed-axis three-axis milling**, including multi-tool/ATC jobs on configured installations, programmable posts, CAD/mesh surface machining, fixtures and holder collision checks, and independently checked exported NC. Start with a small declared controller/machine matrix. Do not claim every controller or arbitrary macro is supported.
@@ -26,6 +41,20 @@ Target the first qualified release at **fixed-axis three-axis milling**, includi
 The existing 2.5D workflow must continue to work during development. Preserve built-in strategies, integer planar geometry, headless tests, the neutral IR and existing post-family implementations. Use schema migrations and adapters instead of a new application rewrite.
 
 Prioritize demonstrable end-to-end slices. Full 5-axis, turning and mill-turn follow separate gates. Native third-party plugins are deferred until the model is stable; user-programmable post definitions can be delivered earlier through a controlled runtime.
+
+The next product increments make **Machining the default workspace**, with a
+full main viewport, dimensioned XY grid and left project-tree overlay. Rows expose
+visibility/status; commands live in context menus and execution order changes
+through drag/drop. Setup, tool and operation forms stay in the right inspector.
+Tools replaces the main model view with the library and reuses the existing tool
+visualization. Stock, model bounds, snapping and WCS overlays are now required in
+Machining; this supersedes the earlier model-only center in the setup UI draft.
+
+Keep the existing eight cutter kinds. Adapt the richer
+[tool-library reference](tool-library-implementation-reference.md) to those types,
+local/document libraries and manufacturer Fusion library import. New cutter
+families and cloud providers are later scope. Operation tabs expose supported
+backend parameters; copying every visible Fusion control is outside this increment.
 
 Milestone dependencies:
 
@@ -49,7 +78,33 @@ flowchart TD
     M9 --> M10[M10: simultaneous axes and further processes]
 ```
 
-These are implementation milestones, not replacements for the repository's historical P0–P8 phases. Parallel development streams are possible after contracts stabilize; they share integration gates. Estimates should be made after M0 and the geometry/collision spikes, using measured team capacity and the actual qualification machine matrix.
+The diagram retains the industrial integration milestones. The following smaller
+gates add the requested workflow without renumbering M0–M10 or replacing the
+repository's historical P0–P8 phases:
+
+| Gate | Deliverable | Dependencies | Requirement coverage |
+| --- | --- | --- | --- |
+| M1a | Machining/Tools workspace and overlay tree | Existing commands; relevant M1 command/history contracts | H01/H02/H13 |
+| M3a | Complete fixed-axis setup editor, placement, WCS picking and setup machine/post binding | M1a; existing M3 frames/assets; M2a for material preset integration | H03/H04/H06–H11 |
+| M1b | Backend-driven operation tabs and both selection workflows | M1a; M3a frame/picker contracts; M2a for preset selector integration | H15/H16 |
+| M2a | Eight-type tool aggregate, inspector tabs, material presets and assembly preview | M1a; M1 identity/draft contracts; M2 length/assembly contracts | H10/H13 |
+| M2b | Manufacturer Fusion library import | M2a storage/type/quantity contracts | H14 |
+| M3b | Persistent fixture body assignments | M3a; M3 asset/transform contracts; checking completes at M5 | H06/H12 |
+| M7a | Verified stock transfer from previous setup | M3a; M1 dependency/invalidation contracts; M0 motion traversal; stock snapshots/backend capability | H05 |
+
+H identifiers map to the [requirements analysis](high-level-requirements-analysis.md).
+M1a starts with the reusable controller; it does not wait for every industrial
+M1 service. Likewise, M2a catalog editing does not wait for full ATC qualification.
+Independent UI/schema work can proceed while remaining M0 fixes are completed;
+M0 remains mandatory for release/export qualification. M7a is extracted from the
+stock portion of M6/M7 and does not depend on full-machine simulation.
+These sub-gates do not declare the parent milestone complete.
+
+Recommended delivery order: **M1a → M3a core → M1b core**, alongside
+**M2a → M2b**; then integrate material/preset selectors into M3a/M1b and deliver
+**M3b → M5**. Define M7a snapshots early, then qualify its stock backend before
+enabling previous-setup stock. Estimates follow measured capacity, stock/collision
+spikes and the actual qualification machine matrix.
 
 ## 2. Target module boundaries
 
@@ -82,7 +137,9 @@ Project
   schema_version, project_id, revision
   geometry_assets[]: stable asset ID + revision + source units + content hash
   cutter_definitions[], holder_definitions[], assembly_snapshots[]
-  setups[]: SetupId, rigid transforms, WCS selection, stock, fixtures, operations
+  setups[]: SetupId, rigid transforms, WCS origin/axis references,
+            target body instances, stock/placement/material, fixtures,
+            installation binding, ordered operations
   manufacturing suppressions, operation dependencies, intended output targets
   provenance: authoring machine/post/config fingerprints
 
@@ -109,6 +166,19 @@ VerificationReport
 
 ExportArtifact
   exact NC bytes + hash, source map, setup/tool sheets, report, provenance
+
+ToolRecord
+  stable ID/revision, metadata, one of the eight supported cutter kinds
+  dimensioned geometry, shaft segments, holder/assembly snapshot
+  named cutting presets + material associations + raw/resolved quantities
+  catalog post metadata, independent of local installation assignments
+
+OperationToolBinding
+  resolved tool/preset revisions, explicit manual overrides and input fingerprint
+
+PreviousSetupStock
+  source SetupId + completed result fingerprint + remaining-stock snapshot
+  source-to-destination transform, representation/accuracy, dependency edge
 ```
 
 Use named IDs rather than interchangeable integers for tool, assembly, setup, body and operation identities. Revisions and content hashes prevent stale results from silently reusing changed assets. Distinguish nominal modeled geometry from measured machine offsets; do not overwrite controller measurements with library defaults.
@@ -136,6 +206,15 @@ Deliver small focused changes:
 
 ### M1 — Domain contracts, services and asynchronous jobs
 
+**Status:** parent domain/services/job package implemented 2026-10-14. See
+[M1 implementation and acceptance evidence](m1-domain-services.md): schema-16
+suppression and identity marks, bounded history/cache, immutable revision-stamped
+workers, cancellation/progress and stale-result rejection. Validation: 778
+headless tests, 227 GUI-feature tests, and both strict clippy configurations.
+M1a/M1b core workflow implementation is recorded in
+[M1a/M1b acceptance evidence](m1-workspaces-operation-tabs.md). DXF/native STEP desktop smoke checks pass; remaining M0 qualification is still
+required for release.
+
 **Dependencies:** M0. **Addresses:** A11, A14–A16; foundations for A09/A10/A12.
 
 Extract controller services for document commands, geometry selection, job execution and export. Split GUI modules by coherent views and inspectors, reusing shared operation metadata to reduce repeated dispatch. Keep typed first-party operation parameters; a registry need not replace every exhaustive match immediately.
@@ -145,6 +224,65 @@ Introduce stable IDs/revisions and immutable asset handles. Define result comple
 Move generation, verification and render preparation onto worker tasks. GUI submits an immutable `JobRequest`; edits increment revision and cancel superseded jobs. Accept a result only if request ID and input fingerprint still match. Add per-operation caching and explicit dependencies; any reordering, stock change, tool assembly change, setup transform, post policy or machine assignment must invalidate the appropriate artifacts.
 
 **Acceptance gate:** a deliberately long job leaves UI interactions responsive; cancellation stops all involved services; an old job finishing after a new edit never replaces current geometry or enables export. Headless controller tests remain possible without a graphics stack. Undo/redo restores manufacturing state and invalidates exactly the affected results.
+
+#### M1a — Machining and Tools workspace shell
+
+**Status:** implemented 2026-10-14; automated acceptance and DXF/native STEP
+workspace smoke checks pass. See [implementation evidence](m1-workspaces-operation-tabs.md).
+**Dependencies:** as listed in the workflow gate table. **Addresses:** H01/H02/H13.
+
+Start in Machining. Render the model/drawing across the main viewport, with a
+dimensioned XY reference grid and a left overlay browser. Preserve navigation,
+semantic selection and orientation cube; overlay hit testing must not trigger
+model picking or camera movement underneath it. Keep forms in the right inspector.
+
+Move tree commands (create/edit/duplicate/delete, inclusion/suppression, transfers
+and related actions) to context menus. Apart from disclosure/selection, rows expose
+only visibility and status. Implement setup/operation drag/drop through document
+commands, preserving stable IDs, undo and execution order. Reject invalid targets
+and, once stock dependencies exist, dependency-breaking reorders. A cross-setup
+move must use the existing re-resolution/validation path.
+
+Switching to Tools shows the library table/preset browser in the main area and
+the existing generated tool visualization with editing in the right inspector.
+Returning to Machining restores setup, camera and selection. Retain a coherent
+OK/Cancel draft policy when switching contexts.
+
+**Acceptance gate:** fresh launch opens Machining; DXF and STEP appear with labeled
+grid units; overlay clicks never pick through. Context actions remain reachable;
+dragging an operation changes actual planning order, persists and is undoable.
+Visibility never changes machining inclusion. Tools occupies the main area and
+returning restores machining context.
+
+#### M1b — Operation tabs backed by supported parameters
+
+**Status:** supported backend core implemented 2026-10-14; automated acceptance
+passes. Material presets remain M2a integration. See
+[implementation evidence](m1-workspaces-operation-tabs.md).
+**Addresses:** H15/H16. **Dependencies:** workflow gate table.
+
+Implement **Tool / Geometry / Heights / Passes / Linking** inspector tabs with
+one transactional draft and persistent OK/Cancel. Use the
+[backend inventory](high-level-requirements-analysis.md#backend-parameter-inventory-for-operation-inspectors)
+to define fields, units, inheritance, validators and availability for each of the
+eight operations. Omit the Multi-axis tab until M9/M10. Separate setup-level
+clearance/retract from operation cutting heights, and derived CAD values from
+manual overrides. Do not add unused per-operation height or feed controls.
+
+Support select features → choose ribbon operation and choose ribbon operation →
+pick features. Ctrl permits several features of the same kind for the active
+geometry field; validate their combined topology and strategy eligibility. Retain
+platform Command equivalents. Do not assume that selecting unrelated chains is
+supported by a single-chain backend. Preserve the current STEP qualification
+restrictions; unsupported bindings explain their rejection.
+
+**Acceptance gate:** each displayed editable field round-trips to its real backend
+parameter and affects the resolved job where applicable. A representative edit
+for each operation family generates the expected semantic change. Tab switches
+retain drafts; Cancel discards all tabs; OK is one undoable change. Both creation
+orders yield equivalent inputs, incompatible/mixed selections receive a reason,
+and unresolved geometry cannot generate/export. Integrate material presets after
+M2a without overwriting manual feed/RPM overrides.
 
 ### M2 — Tool assemblies and installation-specific ATC
 
@@ -162,19 +300,142 @@ Refactor compound operations to emit typed tool-use sections or requests that th
 
 **Demo:** a job reopens on another shop installation, reports provenance mismatch, binds assemblies to that installation and regenerates verified NC with its T/H/D/pocket mapping.
 
+#### M2a — Eight-type tool library, assemblies and material presets
+
+**Status:** proposed; the native library, cutter types and preview already exist.
+**Addresses:** H10/H13. **Dependencies:** workflow gate table.
+
+Add a versioned tool aggregate with metadata, supported typed cutter geometry,
+ordered shaft segments, optional holder snapshot, named cutting presets,
+material associations and catalog post settings. Define overall length, stickout,
+shoulder and gauge references before migration; the current `Tool.length` is
+stickout. Keep library records, immutable project inputs and installation T/H/D
+assignments distinct. Migrate nominal cutting defaults into a default preset.
+
+Place **General / Tool / Shaft / Holder / Cutting Data / Postprocessor** tabs in
+the inspector. Reuse and extend the current visualization/geometry builder rather
+than introducing another preview model. Add local/document scope, search/filter,
+tool/preset selection and the reference's validation/Problems feedback. All tabs
+share a draft; only a successful complete save announces success.
+
+Use dimension-aware, bounded expressions and explicit driving values for derived
+surface speed/chip load. Add stable material IDs and tool/material preset links.
+When selecting a tool, prefer its matching stock-material preset and show the
+fallback when none matches. Preserve operation overrides and snapshot revisions;
+source changes require explicit application and invalidate affected results.
+
+Store the reference's coolant choices and post metadata with capability-aware
+application. The current planner's fixed flood coolant and shared operation RPM
+require adapter work before promising independent motion feeds, coolant behavior
+or clearing-tool RPM. Holder geometry feeds M5; preview alone is not verification.
+Additional cutter kinds and cloud synchronization remain deferred.
+
+**Acceptance gate:** all eight existing kinds retain their geometry/guards after
+migration. A flat mill with metadata, a shaft segment, optional holder and two
+independent presets survives save/reopen. The 6 mm/3-flute reference fixture
+recalculates correctly; invalid expressions block commit and can be corrected
+without losing drafts. Stock material preselects an associated preset; explicit
+overrides survive material changes. Write failure commits no partial aggregate.
+No unsupported machine setting silently becomes executable NC.
+
+#### M2b — Manufacturer Fusion tool-library import
+
+**Status:** proposed. **Addresses:** H14. **Dependencies:** M2a.
+
+Inspect real manufacturer Fusion library files and document a supported format
+subset/version before writing mappings. Stage import with provenance, unit
+normalization, supported type mapping, geometry, shaft/holder, cutting presets and
+catalog metadata. Present accepted/rejected records, unsupported fields and
+duplicate handling before an atomic commit. Do not coerce new types into existing
+ones or claim full Fusion expression/format parity. Preserve native exchange.
+
+**Acceptance gate:** at least two independent manufacturer fixtures cover supported
+types, units and presets, with independently checked dimensions. An unsupported
+type and malformed record produce actionable diagnostics and cannot corrupt the
+library. Imported supported fields survive native save/reopen and seed an actual
+operation; unsupported expressions/coolant/post effects cannot execute silently.
+
 ### M3 — Multiple setups, fixtures and geometry assets
 
 **Dependencies:** M1; coordinate contracts shared with M2. **Addresses:** A09/A12/A13.
 
-Migrate the single setup into a setup collection. Distinguish WCS selectors from setup transitions and physical re-fixturing. Add rigid part/setup/fixture/machine transforms, canonical units and typed frame references. Existing origins migrate without inventing orientation data: ambiguous historical reorientation semantics require an explicit assumption/diagnostic.
+The schema-15 setup collection and legacy migration are implemented; reuse them.
+Complete the remaining rigid part/setup/fixture/machine transform and typed-frame
+contracts. Distinguish WCS selectors from setup transitions and physical
+re-fixturing. Preserve legacy origins without inventing orientation data: ambiguous
+historical reorientation semantics require an explicit assumption/diagnostic.
 
 Add target part assets, mesh/primitive stock definitions, fixture/clamp bodies and per-setup enabled states. Persist manufacturing exclusions and setup choices; keep highlighting, viewport visibility and selection as presentation state. Preserve local machine selection versus authoring provenance; project placement/config requests must resolve against the local installation rather than silently installing foreign safety limits.
 
-Implement mesh import with units, scale, normals, degeneracy/nonmanifold diagnostics, spatial indexing and selection. Add a geometry query interface that can later be backed by CAD surfaces. Run a bounded backend spike for STEP/B-rep import and tessellation; select a backend using fixture files and concrete failure reporting. Do not implement a general CAD editor first.
+The optional OCCT STEP adapter, exact topology, display tessellation and semantic
+selection already exist for a qualified subset; complete the documented native
+release/format qualification work rather than repeating backend selection.
+Add mesh import with units, scale, normals, degeneracy/nonmanifold diagnostics,
+spatial indexing and selection where needed. Keep geometry queries backend-neutral
+and separate display tessellation from machining/collision geometry. Do not
+implement a general CAD editor first.
 
 Create crash-safe saves: temporary file in the destination directory, validated serialization, platform-appropriate flush/rename and recovery handling. Surface critical project/library save failures. Store large immutable assets outside per-edit snapshots, either in a versioned package or content-addressed project assets; keep `.ocam` migration support.
 
 **Acceptance gate:** a two-sided part has explicit orientation transforms and independently placed clamps; operations select the intended surfaces after reload. Units cannot silently change scale. Unknown datum/asset references fail validation. Interrupted save preserves either the previous complete project or the new complete one. Legacy projects reopen through tested migrations.
+
+#### M3a — Complete three-axis setup editing and viewport picking
+
+**Status:** partial baseline exists; new requirements remain proposed.
+**Addresses:** H03/H04/H06–H11. **Dependencies:** workflow gate table.
+
+Keep fixed-axis three-axis milling as the available setup type. For one body or
+one drawing choose the obvious target; for multi-body files allow one or more
+explicit body instances. Retain exact setup-axis bounds and shared source placement.
+Extend fixed-box min/center/max positioning with independent XYZ offsets; retain
+relative-box six-side allowances and show containment feedback.
+
+Add origin dropdown modes **Model coordinate system / Point on model / Point on
+stock**. Model-point picking includes vertices and differently colored model
+bounding-box points; stock-point picking includes stock corners/bounds. Highlight
+and snap candidates. Persist origin-source references, so edits recompute or
+invalidate them rather than leaving a stale coordinate.
+
+For point modes require edge-defined orientation, using model or stock edges.
+One direction leaves rotation unresolved; a second independent perpendicular
+direction resolves it, with the third derived and labeled. Preserve optional third
+axis consistency validation. Render stock/model bounds and a WCS triad; clicking
+an arrow reverses that axis direction by 180 degrees and resolves a valid
+right-handed frame or reports the conflict. Never accept a silently left-handed
+or underconstrained frame. Camera movement does not change setup coordinates.
+
+Select stock material from M2a's library. Add a setup-level local machine binding
+that resolves to that machine's configured post for every operation in the setup.
+Keep post/machine references out of the domain dependency cycle and preserve
+local limits versus project provenance. Missing installations require resolution;
+setup changes invalidate affected paths/NC/reports. Preserve separate NC per setup.
+
+**Acceptance gate:** single/multiple-body defaults work; anchor plus offset moves
+the stock/model relationship exactly once; fixed/relative stock survives reopen
+and undo. Model/stock point snapping and edge picks resolve the same coordinates
+in the preview, planner and NC. Invalid/underconstrained/left-handed frames block
+commit; arrow flips preserve a valid frame or give a specific error. Two setups
+can choose different locally resolved machine/post bindings without cache leakage.
+Material defaults integrate without changing explicit operation overrides.
+
+#### M3b — Fixture body assignments
+
+**Status:** proposed. **Addresses:** H06/H12. **Dependencies:** M3a.
+
+Add per-setup fixture roles/references for imported body instances, including their
+placements. Distinguish fixtures from machining targets and viewport visibility.
+Validate role conflicts and missing/replaced sources; undo/save/reopen preserve
+assignments. Changing a fixture invalidates verification. Feed these bodies into
+M5, rather than treating assignment or rendering as completed collision checking.
+
+**Acceptance gate:** a multi-body import uses one body as the target and another
+as a clamp, with independent assignments for the next setup. Hidden clamps still
+appear in the verification input. Replacement/deletion produces a resolvable
+reference error; assignments and transforms survive save/reopen and undo.
+
+**Later integration gate (M5):** swept holder/cutter checks demonstrate an actual
+fixture collision, including with a hidden clamp. M3b's assignment gate can close
+before M5; collision detection is only complete when M5 passes.
 
 ### M4 — Programmable posts and independent NC interpretation
 
@@ -236,6 +497,33 @@ Add simulation playback, pause/scrub, stock checkpoints and deterministic replay
 
 **Acceptance gate:** full-body three-axis machine playback detects a spindle-body/fixture collision and a placed WCS exceeding an absolute axis limit even though the path span fits. Stock survives a defined setup reorientation with reported approximation error. A collision during an explicitly modeled ATC path is detected. Unknown controller-motion segments appear as coverage gaps. Scrubbing reproduces the same stock and events.
 
+#### M7a — Stock from a previous setup
+
+**Status:** proposed; independently deliverable before full-machine simulation.
+**Addresses:** H05. **Dependencies:** workflow gate table.
+
+Persist an explicit source setup and its completed remaining-stock snapshot,
+result fingerprint, source/destination transform and approximation accuracy.
+Do not use the finished CAD target as remaining stock. Reject dependency cycles
+and invalid reorderings. Upstream tool/operation/stock/frame edits invalidate all
+dependent stock, paths, simulation, verification and NC; stale or incomplete
+results cannot supply stock for generation/export.
+
+First qualify an aligned heightfield transfer subset with clear restrictions.
+Arbitrary setup rotation, overhangs and inaccessible surfaces require a
+volume-capable backend from M7's stock work. Keep unsupported transformations
+unavailable with a reason until their material representation is qualified.
+Define snapshot persistence/cache recovery so reopening cannot silently use a
+different upstream run.
+
+**Acceptance gate:** setup B consumes actual remaining material from completed
+setup A; an independent residual comparison verifies transfer within the reported
+error. Upstream edits, cancellation, failure, deletion and cycles cannot leave B
+with exportable stale stock. Save/reopen retains the dependency and either
+restores a matching snapshot or requires regeneration. A flipped setup passes
+only once volume-capable transfer is qualified; unsupported transforms are
+explicitly rejected.
+
 ### M8 — Qualified milling release and operational reliability
 
 **Dependencies:** M4–M7 integration gates; M0 remains mandatory.
@@ -287,22 +575,30 @@ Existing golden NC should be updated only after the semantic behavior change is 
 
 ## 5. Initial issue-sized backlog
 
-These are suitable first changes after agreeing on target scope; each should carry its own acceptance test and source-linked description.
+Use the following order for issue-sized work. Status is based on the documented
+packages and source review; a completed issue does not complete its whole parent
+milestone. Each implementation issue carries the applicable acceptance evidence.
 
-| Order / issue | Deliverable | Blocks |
-|---|---|---|
-| 1. Diagnose clearing regressions | Reproducible toolchain/platform baseline; four failures resolved with documented cause | All later release claims |
-| 2. Reject incomplete jobs | Completion propagated through planner/controller/export; cancellation regression | Background jobs, export assurance |
-| 3. Validate IR and bounds | Finite/positive parameters, arc consistency/extrema, explicit invalid references | Reliable machine checks/posts |
-| 4. Canonical drill execution | Shared supported cycle traversal, final position preserved, unknown-tool failure | Credible stock verification |
-| 5. Correct controller policies | Grbl M6 and length-offset behavior; explicit two-tool change state | ATC qualification |
-| 6. Document actual architecture | Nine-crate inventory; correct machine provenance and synchronous-run status | Contributor understanding |
-| 7. Worker request/result service | Immutable revision-stamped jobs, progress and stale-result rejection | Large paths/3D/simulation |
-| 8. Tool/assembly identity ADR + migration | Stable IDs, project snapshots, T/H/D/pocket mapping design and legacy adapter | ATC/holder collision |
-| 9. Setup/frame ADR + migration | Multiple setups, physical transition vs datum select, placement semantics | Fixtures, real machine checks |
-| 10. Tolerance/coverage contract | Explicit approximation budget and verification statuses | Surface paths, credible collision claims |
-| 11. Geometry and collision spikes | Reference meshes, query backend benchmark, swept holder/clamp prototype | M3/M5/M6 scope estimates |
-| 12. Programmable post contract | Typed events, package metadata, central writer, source-map/interpretation spike | User-defined posts |
+| Order / issue | Status / deliverable | Gate / blocks |
+| --- | --- | --- |
+| 1. Clearing regressions and incomplete jobs | Completed packages: retain their documented regression coverage | M0 baseline |
+| 2. IR and bounds validation | Motion/arc package complete; tool/register references and broader document validation remain open | M0 reliable checks/posts |
+| 3. Canonical drill execution | Shared cycle traversal, final position, unknown-tool errors and coverage | M0; M5/M7a |
+| 4. Controller change/offset policies | Explicit Grbl/manual/ATC/TLO state and two-tool transitions | M0/M2 qualification |
+| 5. Workspace shell | Implemented: default Machining, main Tools view, dimensioned grid and overlay hit testing; desktop smoke checks pass | M1a |
+| 6. Tree commands and drag/drop | Implemented: context menus, visibility/status rows, undoable stable-ID ordering and transfer validation | M1a |
+| 7. Setup placement and WCS references | Extend existing schema-15 setup model with offsets, origin modes, stock/model snap candidates and triad flips | M3a |
+| 8. Setup installation resolution | Per-setup machine/post binding, local limits and cache isolation | M3a; M2/M4 integration |
+| 9. Operation metadata and tabbed draft | Implemented: inventory-backed fields, units, inheritance, qualified geometry predicates and both creation orders; M2a presets deferred | M1b |
+| 10. Tool aggregate ADR + migration | Eight-type identity, length/gauge conventions, snapshots, shaft/holder geometry and material/preset IDs | M2a; M2 ATC/holder checks |
+| 11. Tool inspector and preset integration | Six tabs, expressions/validation, reusable preview, material matching and override preservation | M2a; finishes M3a/M1b presets |
+| 12. Fusion vendor import | Real file fixtures, format/type/unit mappings, staged diagnostics and atomic installation | M2b |
+| 13. Fixture assignments | Persistent body roles, transforms and invalidation | M3b; M5 |
+| 14. Generation/verification workers | Completed M1 package: bounded immutable revision-stamped jobs, progress, cancellation and stale-result rejection; see [acceptance evidence](m1-domain-services.md) | M1; large paths/simulation |
+| 15. Tolerance/coverage and collision spike | Error budget, reference bodies and swept holder/clamp prototype | M5/M6/M7 qualification |
+| 16. Previous-setup stock contract and spike | Snapshot dependency graph, transform restrictions, residual oracle and backend benchmark | M7a; remaining-stock transfer |
+| 17. Programmable post and NC contract | Typed events/packages, writer/source map and independent interpretation | M4 |
+| 18. Stock transfer and release integration | Qualified M7a subset; M5–M8 collision/surface/volume/machine gates remain required | Previous stock and qualified milling release |
 
 Write short architecture decision records for tool identity, frames/setup transitions, stock representation, geometry query API, post runtime, verification/export provenance and extension protocol. Each should record alternatives, compatibility/migration impact and a testable decision, not just an aspirational diagram.
 
@@ -314,5 +610,8 @@ Write short architecture decision records for tool identity, frames/setup transi
 - **Domain migration:** introduce stable IDs and transforms with fixtures and migration tests before implementing feature-specific UI around the old model.
 - **Duplicated semantics:** reuse canonical intent execution for planning/simulation/playback, but keep NC interpretation independent to catch lowering defects.
 - **Scope expansion:** complete and qualify fixed-axis milling before simultaneous axes or other processes. Programmable posts and ATC can deliver value well before an unrestricted plugin ecosystem.
+- **UI/backend mismatch:** expose only consumed parameters for the selected operation/input/post; shared setup heights, single-chain geometry and fixed coolant must not be presented as unsupported independent controls.
+- **Vendor library compatibility:** qualify real manufacturer files and publish the mapped subset; reject unsupported types/expressions and preserve import diagnostics instead of claiming universal Fusion parity.
+- **Remaining stock:** a target part mesh or transformed display heightfield is not evidence of material remaining after a setup. Enable transfer only for a qualified representation and invalidate every dependent result.
 
 Completion is defined by the milestone acceptance gates and the declared qualified capability matrix. “It renders,” “the NC looks plausible,” or “there is a trait for it” are not sufficient completion criteria for the requested industrial functionality.

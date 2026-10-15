@@ -58,6 +58,28 @@ diagnostics, undo, determinism) that P2–P5 must honor.
 
 ## After the slice (unordered candidates)
 
+The active delivery sequence is in the
+[implementation milestones](docs/implementation-plan.md), updated 2026-10-14 from
+the [high-level requirements](docs/high-level-requirements-analysis.md).
+P0–P8 above remain historical phases. M1a/M1b core is implemented;
+[acceptance evidence](docs/m1-workspaces-operation-tabs.md) records automated
+checks and DXF/native STEP desktop smoke tests. The workflow gates are:
+
+| Gate | Outcome |
+| --- | --- |
+| M1a | Implemented: default Machining workspace, dimensioned XY grid, overlay project tree, context commands and drag/drop; Tools occupies the main view |
+| M3a | Extend existing multi-setup/box-stock workflow with XYZ placement offsets, model/stock WCS snapping and triad flips, material and per-setup machine/post selection |
+| M1b | Implemented core: Tool / Geometry / Heights / Passes / Linking inspectors expose the current backend's supported parameters; both feature-first and operation-first creation |
+| M2a → M2b | Eight-type tool library with inspector tabs, shaft/holder geometry and material cutting presets, followed by manufacturer Fusion library import |
+| M3b → M5 | Persistent fixture body assignments followed by actual swept collision verification |
+| M7a | Qualified remaining-stock transfer from a completed previous setup, with dependency invalidation; arbitrary reorientation needs volume stock |
+
+M2a can proceed alongside setup/operation UI work; its material/preset integration
+finishes those gates. M0 export correctness remains mandatory for release. Full
+ATC, programmable posts, 3D machining and machine simulation retain their M2–M8
+acceptance gates; 4/5-axis and turning remain M9/M10 scope. The candidates below
+do not supersede that sequence.
+
 - **User preferences panel + persistence** (no settings file yet): object-snap
   distance (`SNAP_PICK_PX`) & marker size (`SNAP_MARK_SCALE`), orientation-cube
   size/visibility, default snap set, and other view/UX knobs — all currently

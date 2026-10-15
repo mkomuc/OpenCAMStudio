@@ -23,6 +23,29 @@ pub struct ResolvedInput {
     pub diagnostics: Vec<String>,
 }
 
+/// A bore boundary must be cut on its inside. Strategy extraction still checks
+/// the complete selected feature; this only chooses the initial profile side.
+pub fn profile_side(state: &GeometryState, selected: &[EntityRef]) -> Result<Side, String> {
+    let view = View::new(state, selected)?;
+    if selected.len() != 1 || selected[0].kind != EntityKind::Loop {
+        return Err(
+            "Profile requires one closed coplanar loop; select one boundary per operation".into(),
+        );
+    }
+    let wire = view.wire(selected[0].id)?;
+    for usage in &wire.edge_uses {
+        for id in &view.edge(usage.edge_id)?.face_ids {
+            if matches!(
+                view.face(*id)?.surface,
+                CadSurface::Cylinder { inward: true, .. }
+            ) {
+                return Ok(Side::Inside);
+            }
+        }
+    }
+    Ok(Side::Outside)
+}
+
 pub fn resolve_selection(
     state: &GeometryState,
     selected: &[EntityRef],
@@ -158,48 +181,41 @@ impl<'a> View<'a> {
             CadSurface::Plane { origin, normal } => {
                 let n = self.vector(normal);
                 if n[0].abs() > T || n[1].abs() > T {
-                    return Err("selected plane is not aligned with setup Z".into());
+                    return Err("selected plane is not aligned with setup Z; align setup Z with the target face normal".into());
                 }
                 Ok((self.point(origin)[2], n))
             }
             _ => Err("select a planar face".into()),
         }
     }
-    /// Global extrusion certificate: every face is horizontal or a vertical plane/
-    /// cylinder. Blends, slopes, arbitrary surfaces and oblique bores are rejected.
-    fn certify_extrusion(&self) -> Result<(), String> {
-        for f in self
-            .asset
-            .topology
-            .faces
-            .iter()
-            .filter(|f| f.body_id == self.body.id)
-        {
-            match f.surface {
-                CadSurface::Plane { normal, .. } => {
-                    let n = self.vector(normal);
-                    if !(n[2].abs() < T || (n[0].abs() < T && n[1].abs() < T)) {
-                        return Err(
-                            "sloped walls/undercuts are outside the qualified fixed-axis subset"
-                                .into(),
-                        );
+    /// Conservative B-rep bounds in the machining frame. All eight corners are
+    /// needed when the instance or setup is rotated; display meshes are unused.
+    fn bounds(&self, bounds: [[f64; 3]; 2]) -> [[f64; 3]; 2] {
+        let mut result = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+        for x in [bounds[0][0], bounds[1][0]] {
+            for y in [bounds[0][1], bounds[1][1]] {
+                for z in [bounds[0][2], bounds[1][2]] {
+                    let p = self.point([x, y, z]);
+                    for axis in 0..3 {
+                        result[0][axis] = result[0][axis].min(p[axis]);
+                        result[1][axis] = result[1][axis].max(p[axis]);
                     }
-                }
-                CadSurface::Cylinder { axis, .. } => {
-                    let n = self.vector(axis);
-                    if n[0].abs() > T || n[1].abs() > T {
-                        return Err("cylindrical wall axis must align with setup Z".into());
-                    }
-                }
-                _ => {
-                    return Err(
-                        "blends or unsupported curved surfaces prevent a safe feature certificate"
-                            .into(),
-                    )
                 }
             }
         }
-        Ok(())
+        result
+    }
+    fn footprint(&self, bounds: [[f64; 3]; 2]) -> Result<Polygon, String> {
+        // Preserve a conservative enclosure after planar-grid quantization,
+        // including for zero-width projections.
+        let margin = T.max(cam_geo::GRID_MM);
+        Polygon::new(Contour::new(vec![
+            Point::new(bounds[0][0] - margin, bounds[0][1] - margin),
+            Point::new(bounds[1][0] + margin, bounds[0][1] - margin),
+            Point::new(bounds[1][0] + margin, bounds[1][1] + margin),
+            Point::new(bounds[0][0] - margin, bounds[1][1] + margin),
+        ]))
+        .map_err(|e| e.to_string())
     }
     fn vertical(&self, f: &CadFace) -> bool {
         match f.surface {
@@ -369,13 +385,19 @@ impl<'a> View<'a> {
             .map(|id| {
                 let f = self.face(id)?;
                 if !self.vertical(f) {
-                    return Err("boundary needs vertical constant-section walls".into());
+                    return Err(
+                        "sloped or unsupported boundary needs vertical constant-section walls"
+                            .into(),
+                    );
                 }
                 Ok(f)
             })
             .collect()
     }
-    fn roofs_over(&self, region: &Polygon, floor: f64) -> Result<(), String> {
+    /// Certify the open approach above a locally qualified pocket/bore. Curved
+    /// faces elsewhere on the body do not matter, but overlapping unknown
+    /// surfaces must never be silently treated as empty space.
+    fn roofs_over(&self, region: &Polygon, entry: f64) -> Result<(), String> {
         for f in self
             .asset
             .topology
@@ -383,21 +405,191 @@ impl<'a> View<'a> {
             .iter()
             .filter(|f| f.body_id == self.body.id)
         {
+            let bounds = self.bounds(f.bounds);
+            if bounds[1][2] <= entry + T {
+                continue;
+            }
+            let overlap =
+                cam_geo::intersection(std::slice::from_ref(region), &[self.footprint(bounds)?])
+                    .map_err(|e| e.to_string())?;
+            if overlap.is_empty() {
+                continue;
+            }
+            if self.vertical(f) {
+                continue;
+            }
             if let Ok((z, n)) = self.plane(f) {
-                if z > floor + T && n[2] < 0.0 {
-                    let protected = self.region(f)?;
+                if z <= entry + T || n[2] > 0.0 {
+                    continue;
+                }
+                // A planar roof may have a hole giving access to this feature.
+                // Unknown trim curves remain blocked by their conservative bounds.
+                if let Ok(protected) = self.region(f) {
                     let overlap = cam_geo::intersection(std::slice::from_ref(region), &[protected])
                         .map_err(|e| e.to_string())?;
-                    if overlap.iter().any(|p| p.area() > 0.0) {
-                        return Err(
-                            "overhang/undercut blocks vertical access above the selected region"
-                                .into(),
-                        );
+                    if overlap.is_empty() {
+                        continue;
                     }
+                }
+            }
+            return Err(format!(
+                "overhang/undercut or unsupported surface on face {} blocks vertical access above the selected feature", f.id
+            ));
+        }
+        Ok(())
+    }
+
+    /// Surface type alone is insufficient: a vertical wall with intermediate
+    /// trims can hide a side opening or a roof. Only full-height walls bounded
+    /// by horizontal rims and axial seams establish a constant-section void.
+    fn certify_wall(&self, wall: &CadFace, bottom: f64, top: f64) -> Result<(), String> {
+        if wall.loop_ids.len() != 1
+            && !(matches!(wall.surface, CadSurface::Cylinder { .. }) && wall.loop_ids.len() == 2)
+        {
+            return Err("wall has intermediate openings or ambiguous trims".into());
+        }
+        for id in &wall.loop_ids {
+            for usage in &self.wire(*id)?.edge_uses {
+                let edge = self.edge(usage.edge_id)?;
+                let points = self.curve_points(edge, false, MACHINING_CHORD_TOLERANCE)?;
+                let horizontal = points.iter().all(|p| (p[2] - bottom).abs() < T)
+                    || points.iter().all(|p| (p[2] - top).abs() < T);
+                let axial = matches!(edge.curve, CadCurve::Line { .. })
+                    && points.iter().all(|p| {
+                        (p[0] - points[0][0]).abs() < T && (p[1] - points[0][1]).abs() < T
+                    });
+                if !horizontal && !axial {
+                    return Err(
+                        "wall has intermediate openings or nonconstant-section trims".into(),
+                    );
                 }
             }
         }
         Ok(())
+    }
+
+    fn certify_pocket_rim(
+        &self,
+        wall: &CadFace,
+        floor_wire: &CadLoop,
+        top: f64,
+    ) -> Result<(), String> {
+        let mut found = false;
+        for id in &wall.loop_ids {
+            for usage in &self.wire(*id)?.edge_uses {
+                let edge = self.edge(usage.edge_id)?;
+                let points = self.curve_points(edge, false, MACHINING_CHORD_TOLERANCE)?;
+                if !points.iter().all(|p| (p[2] - top).abs() < T) {
+                    continue;
+                }
+                found = true;
+                let others: Vec<_> = edge.face_ids.iter().filter(|id| **id != wall.id).collect();
+                if others.len() != 1 {
+                    return Err("pocket opening has ambiguous rim adjacency".into());
+                }
+                let entry = self.face(*others[0])?;
+                let (z, normal) = self.plane(entry)?;
+                if (z - top).abs() > T || normal[2] <= 0.0 {
+                    return Err("pocket opening needs an upward planar entry face".into());
+                }
+                let rim = entry
+                    .loop_ids
+                    .iter()
+                    .find_map(|id| {
+                        self.wire(*id)
+                            .ok()
+                            .filter(|w| w.edge_uses.iter().any(|u| u.edge_id == edge.id))
+                    })
+                    .ok_or("pocket entry is missing its rim loop")?;
+                if rim.is_outer == floor_wire.is_outer {
+                    return Err(
+                        "pocket entry covers the selected void or has ambiguous island adjacency"
+                            .into(),
+                    );
+                }
+            }
+        }
+        if !found {
+            return Err("pocket wall has no certified opening rim".into());
+        }
+        Ok(())
+    }
+
+    /// A complete inward cylindrical wall and a disk floor certify the local
+    /// void in a valid solid. Requiring its entry at/above the entire body also
+    /// excludes overhangs, including surfaces outside the analytic subset.
+    fn blind_bore_profile(
+        &self,
+        refs: &[EntityRef],
+    ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+        if refs.len() != 1 || refs[0].kind != EntityKind::Loop {
+            return Err(
+                "Profile requires one closed coplanar loop; select one boundary per operation"
+                    .into(),
+            );
+        }
+        let wire = self.wire(refs[0].id)?;
+        let floor = self.face(wire.face_id)?;
+        if matches!(floor.surface, CadSurface::Cylinder { .. }) {
+            return Err("This loop wraps a cylindrical wall and includes its seam. Select the circular loop on the planar recess floor for an inside Profile".into());
+        }
+        let (floor_z, normal) = self.plane(floor)?;
+        if !wire.is_outer || floor.loop_ids.len() != 1 || normal[2] <= 0.0 {
+            return Err("Inside Profile requires the circular floor boundary of one blind bore facing setup Z".into());
+        }
+        let mut cylinder = None;
+        for usage in &wire.edge_uses {
+            let edge = self.edge(usage.edge_id)?;
+            if !matches!(edge.curve, CadCurve::CircleArc { .. }) {
+                return Err(
+                    "Inside CAD Profile currently requires a circular blind-bore floor".into(),
+                );
+            }
+            for id in &edge.face_ids {
+                if *id == floor.id {
+                    continue;
+                }
+                let face = self.face(*id)?;
+                if !matches!(face.surface, CadSurface::Cylinder { inward: true, .. }) {
+                    return Err(
+                        "The floor boundary must adjoin an inward cylindrical bore wall".into(),
+                    );
+                }
+                cylinder.get_or_insert(face.id);
+            }
+        }
+        let cylinder = cylinder.ok_or("No cylindrical wall adjoining the selected floor")?;
+        let (_, entry_z) = self.extent(self.face(cylinder)?)?;
+        for x in [self.body.bounds[0][0], self.body.bounds[1][0]] {
+            for y in [self.body.bounds[0][1], self.body.bounds[1][1]] {
+                for z in [self.body.bounds[0][2], self.body.bounds[1][2]] {
+                    if self.point([x, y, z])[2] > entry_z + T {
+                        return Err("Material above the bore entry prevents local profile certification; choose a setup with unobstructed access from above the body".into());
+                    }
+                }
+            }
+        }
+        let mut bore = refs[0].clone();
+        bore.kind = EntityKind::Face;
+        bore.id = cylinder;
+        let (_, holes, heights) = derive_holes(self, &[bore])?;
+        if holes.len() != 1 || (heights.bottom - floor_z).abs() > T {
+            return Err("The selected floor does not terminate one constant-diameter bore".into());
+        }
+        let (contour, _) = self.contour(wire)?;
+        let hole = &holes[0];
+        if contour
+            .points()
+            .iter()
+            .any(|p| (p.distance(hole.center) - hole.diameter / 2.0).abs() > T)
+        {
+            return Err("The selected floor boundary does not match its certified bore".into());
+        }
+        Ok((
+            vec![Polygon::new(contour).map_err(|e| e.to_string())?],
+            vec![],
+            heights,
+        ))
     }
 }
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -417,7 +609,12 @@ fn derive(
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
     let view = View::new(state, &binding.selected)?;
-    view.certify_extrusion()?;
+    if matches!(
+        binding.recipe,
+        ExtractionRecipe::ProfileLoop { side: Side::Inside }
+    ) {
+        return view.blind_bore_profile(&binding.selected);
+    }
     let refs = &binding.selected;
     match binding.recipe {
         ExtractionRecipe::PocketFloor => {
@@ -430,6 +627,36 @@ fn derive(
                 return Err("floor normal must face the machining direction".into());
             }
             let region = view.region(f)?;
+            for face in view
+                .asset
+                .topology
+                .faces
+                .iter()
+                .filter(|face| face.body_id == view.body.id)
+            {
+                if let Ok((z, n)) = view.plane(face) {
+                    if z > floor + T && n[2] < 0.0 {
+                        if cam_geo::intersection(
+                            std::slice::from_ref(&region),
+                            &[view.footprint(view.bounds(face.bounds))?],
+                        )
+                        .map_err(|e| e.to_string())?
+                        .is_empty()
+                        {
+                            continue;
+                        }
+                        let protected = view.region(face).map_err(|_| format!(
+                            "unsupported roof boundary on face {} prevents vertical access certification", face.id
+                        ))?;
+                        if !cam_geo::intersection(std::slice::from_ref(&region), &[protected])
+                            .map_err(|e| e.to_string())?
+                            .is_empty()
+                        {
+                            return Err("overhang/undercut blocks vertical access above the selected region".into());
+                        }
+                    }
+                }
+            }
             let mut top: Option<f64> = None;
             for id in &f.loop_ids {
                 for wall in view.walls(view.wire(*id)?)? {
@@ -437,6 +664,8 @@ fn derive(
                     if (lo - floor).abs() > T || hi <= floor + T {
                         return Err("floor boundary is open, has a bore below it, or is not a rising pocket wall".into());
                     }
+                    view.certify_wall(wall, lo, hi)?;
+                    view.certify_pocket_rim(wall, view.wire(*id)?, hi)?;
                     if let Some(z) = top {
                         if (z - hi).abs() > T {
                             return Err("pocket walls have ambiguous or different openings".into());
@@ -446,11 +675,11 @@ fn derive(
                     }
                 }
             }
-            view.roofs_over(&region, floor)?;
             let heights = CuttingHeights {
                 top: top.ok_or("no pocket walls")?,
                 bottom: floor,
             };
+            view.roofs_over(&region, heights.top)?;
             heights.validate()?;
             Ok((vec![region], vec![], heights))
         }
@@ -463,30 +692,60 @@ fn derive(
             if n[2] < 0.0 {
                 return Err("facing target must face setup Z".into());
             }
-            let region = view.region(f)?;
-            if !region.holes().is_empty() || !rectangle(region.outer()) {
-                return Err("initial Face strategy requires a rectangular whole-body top without protected islands or holes".into());
-            }
-            let (x0, x1, y0, y1) = xy_bounds(region.outer());
-            for e in view
-                .asset
-                .topology
-                .edges
-                .iter()
-                .filter(|e| e.body_id == view.body.id)
-            {
-                for p in view.curve_points(e, false, MACHINING_CHORD_TOLERANCE)? {
-                    if p[2] > z + T
-                        || p[0] < x0 - T
-                        || p[0] > x1 + T
-                        || p[1] < y0 - T
-                        || p[1] > y1 + T
-                    {
-                        return Err(
-                            "adjacent bosses/protected material prevent whole-body facing".into(),
-                        );
+            // Bounds come from the native B-rep, never the display mesh or an
+            // approximation of a spline. Transform all eight corners to retain a
+            // conservative enclosure in the active setup, even for curved bodies.
+            let mut min = [f64::INFINITY; 3];
+            let mut max = [f64::NEG_INFINITY; 3];
+            let bounds = std::iter::once(view.body.bounds).chain(
+                view.asset
+                    .topology
+                    .faces
+                    .iter()
+                    .filter(|face| face.body_id == view.body.id)
+                    .map(|face| face.bounds),
+            );
+            for bounds in bounds {
+                for x in [bounds[0][0], bounds[1][0]] {
+                    for y in [bounds[0][1], bounds[1][1]] {
+                        for z in [bounds[0][2], bounds[1][2]] {
+                            let point = view.point([x, y, z]);
+                            for axis in 0..3 {
+                                min[axis] = min[axis].min(point[axis]);
+                                max[axis] = max[axis].max(point[axis]);
+                            }
+                        }
                     }
                 }
+            }
+            for vertex in view
+                .asset
+                .topology
+                .vertices
+                .iter()
+                .filter(|v| v.body_id == view.body.id)
+            {
+                let point = view.point(vertex.point);
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+            }
+            if max[2] > z + T {
+                return Err(
+                    "adjacent bosses/protected material above the target prevent whole-body facing"
+                        .into(),
+                );
+            }
+            let region = Polygon::new(Contour::new(vec![
+                Point::new(min[0], min[1]),
+                Point::new(max[0], min[1]),
+                Point::new(max[0], max[1]),
+                Point::new(min[0], max[1]),
+            ]))
+            .map_err(|error| error.to_string())?;
+            if stock_top <= z {
+                return Err("stock top must be above the facing target; increase the positive Z stock allowance".into());
             }
             let heights = CuttingHeights {
                 top: stock_top,
@@ -509,11 +768,13 @@ fn derive(
             let (c, z) = view.contour(w)?;
             let region = Polygon::new(c).map_err(|e| e.to_string())?;
             let mut bottom: Option<f64> = None;
-            for wall in view.walls(w)? {
+            let walls = view.walls(w)?;
+            for wall in &walls {
                 let (lo, hi) = view.extent(wall)?;
                 if (hi - z).abs() > T || lo >= z - T {
                     return Err("profile loop must be the top of a vertical exterior wall".into());
                 }
+                view.certify_wall(wall, lo, hi)?;
                 if let Some(v) = bottom {
                     if (lo - v).abs() > T {
                         return Err("profile walls have different depths".into());
@@ -522,24 +783,46 @@ fn derive(
                     bottom = Some(lo);
                 }
             }
-            for e in view
+            // Faces enclosed by the silhouette cannot be hit by an outside
+            // profile, regardless of their surface/curve type. Remaining planar
+            // faces can be checked by their exact boundary; unknown exterior
+            // material stays unqualified.
+            for face in view
                 .asset
                 .topology
-                .edges
+                .faces
                 .iter()
-                .filter(|e| e.body_id == view.body.id)
+                .filter(|f| f.body_id == view.body.id)
             {
-                for p in view.curve_points(e, false, MACHINING_CHORD_TOLERANCE)? {
-                    if !region.contains(Point::new(p[0], p[1]))
-                        && !region
-                            .outer()
-                            .points()
-                            .iter()
-                            .any(|q| q.distance(Point::new(p[0], p[1])) < T)
+                if face.id == w.face_id || walls.iter().any(|wall| wall.id == face.id) {
+                    continue;
+                }
+                let bounds = view.bounds(face.bounds);
+                let footprint = Polygon::new(Contour::new(vec![
+                    Point::new(bounds[0][0], bounds[0][1]),
+                    Point::new(bounds[1][0], bounds[0][1]),
+                    Point::new(bounds[1][0], bounds[1][1]),
+                    Point::new(bounds[0][0], bounds[1][1]),
+                ]));
+                if let Ok(footprint) = footprint {
+                    if cam_geo::difference(&[footprint], std::slice::from_ref(&region))
+                        .map_err(|e| e.to_string())?
+                        .is_empty()
                     {
-                        return Err("material outside the selected silhouette prevents safe side certification".into());
+                        continue;
                     }
                 }
+                if view.plane(face).is_ok() {
+                    if let Ok(protected) = view.region(face) {
+                        if cam_geo::difference(&[protected], std::slice::from_ref(&region))
+                            .map_err(|e| e.to_string())?
+                            .is_empty()
+                        {
+                            continue;
+                        }
+                    }
+                }
+                return Err(format!("material on face {} outside the selected silhouette prevents safe side certification", face.id));
             }
             let heights = CuttingHeights {
                 top: z,
@@ -550,27 +833,6 @@ fn derive(
         }
         ExtractionRecipe::DrillHoles => derive_holes(&view, refs),
     }
-}
-fn xy_bounds(c: &Contour) -> (f64, f64, f64, f64) {
-    c.points().iter().fold(
-        (
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-        ),
-        |(a, b, d, e), p| (a.min(p.x), b.max(p.x), d.min(p.y), e.max(p.y)),
-    )
-}
-fn rectangle(c: &Contour) -> bool {
-    if c.len() != 4 {
-        return false;
-    }
-    let (x0, x1, y0, y1) = xy_bounds(c);
-    c.points().iter().all(|p| {
-        ((p.x - x0).abs() < T || (p.x - x1).abs() < T)
-            && ((p.y - y0).abs() < T || (p.y - y1).abs() < T)
-    }) && (c.area() - (x1 - x0) * (y1 - y0)).abs() < T
 }
 fn derive_holes(
     view: &View<'_>,
@@ -679,6 +941,17 @@ fn derive_holes(
                                             .into(),
                                     );
                                 }
+                                if (c[2] - hi).abs() < T {
+                                    let open_rim = adjacent.loop_ids.iter().any(|id| {
+                                        view.wire(*id).is_ok_and(|w| {
+                                            !w.is_outer
+                                                && w.edge_uses.iter().any(|u| u.edge_id == edge.id)
+                                        })
+                                    });
+                                    if !open_rim {
+                                        return Err("bore entry is capped or lacks a certified inner opening rim".into());
+                                    }
+                                }
                                 terminations += 1;
                             }
                             if terminations != 1 {
@@ -715,8 +988,8 @@ fn derive_holes(
                 .map(|i| {
                     let angle = TAU * i as f64 / 128.;
                     Point::new(
-                        center[0] + radius * angle.cos(),
-                        center[1] + radius * angle.sin(),
+                        center[0] + radius / (std::f64::consts::PI / 128.).cos() * angle.cos(),
+                        center[1] + radius / (std::f64::consts::PI / 128.).cos() * angle.sin(),
                     )
                 })
                 .collect(),
@@ -1042,6 +1315,210 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn exterior_profile_allows_enclosed_curves_but_rejects_unknown_material_outside() {
+        let mut fixture = Fixture::new();
+        let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+        fixture.walls(0., 20., 0., 20., -5., 0.);
+        fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+        let curved = fixture.face(vec![square(5., 7., 5., 7., -1.)], [0., 0., 1.]);
+        fixture
+            .t
+            .faces
+            .iter_mut()
+            .find(|f| f.id == curved)
+            .unwrap()
+            .surface = CadSurface::Unsupported {
+            description: "enclosed blend".into(),
+        };
+        let edge = fixture
+            .t
+            .loops
+            .iter()
+            .find(|w| w.face_id == curved)
+            .unwrap()
+            .edge_uses[0]
+            .edge_id;
+        fixture
+            .t
+            .edges
+            .iter_mut()
+            .find(|e| e.id == edge)
+            .unwrap()
+            .curve = CadCurve::Unsupported {
+            description: "enclosed spline".into(),
+        };
+        let wire = fixture
+            .t
+            .faces
+            .iter()
+            .find(|f| f.id == top)
+            .unwrap()
+            .loop_ids[0];
+        let mut state = fixture.state();
+        let selected = [reference(wire, EntityKind::Loop)];
+        let recipe = ExtractionRecipe::ProfileLoop {
+            side: Side::Outside,
+        };
+        let binding = resolve_selection(&state, &selected, recipe.clone(), 0.).unwrap();
+        assert_eq!(
+            resolve_binding(&state, &binding).unwrap().heights.bottom,
+            -5.
+        );
+        // Check the enclosure in setup coordinates rather than asset coordinates.
+        state.instances[0].placement.translation = [100., -50., 40.];
+        let binding = resolve_selection(&state, &selected, recipe.clone(), 40.).unwrap();
+        assert_eq!(
+            resolve_binding(&state, &binding).unwrap().heights.bottom,
+            35.
+        );
+        std::sync::Arc::make_mut(&mut state.assets[0].topology)
+            .faces
+            .iter_mut()
+            .find(|f| f.id == curved)
+            .unwrap()
+            .bounds[1][0] = 21.;
+        assert!(resolve_selection(&state, &selected, recipe, 40.)
+            .unwrap_err()
+            .contains("outside the selected silhouette"));
+    }
+
+    #[test]
+    fn pocket_walls_with_intermediate_trims_and_capped_entries_are_rejected() {
+        for defect in ["intermediate trim", "capped entry"] {
+            let (mut state, selected) = pocket();
+            let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+            let floor = topology.faces.iter().find(|f| f.id == selected.id).unwrap();
+            let wire = topology
+                .loops
+                .iter()
+                .find(|w| w.id == floor.loop_ids[0])
+                .unwrap();
+            let wall_id = topology
+                .edges
+                .iter()
+                .find(|e| e.id == wire.edge_uses[0].edge_id)
+                .unwrap()
+                .face_ids
+                .iter()
+                .copied()
+                .find(|id| *id != selected.id)
+                .unwrap();
+            let wall = topology.faces.iter().find(|f| f.id == wall_id).unwrap();
+            let wall_wire = topology
+                .loops
+                .iter()
+                .find(|w| w.id == wall.loop_ids[0])
+                .unwrap();
+            let top_edge = wall_wire
+                .edge_uses
+                .iter()
+                .map(|u| u.edge_id)
+                .find(|id| {
+                    matches!(topology.edges.iter().find(|e| e.id == *id).unwrap().curve,
+                    CadCurve::Line { start, end } if start[2] == 0. && end[2] == 0.)
+                })
+                .unwrap();
+            if defect == "intermediate trim" {
+                let edge = topology
+                    .edges
+                    .iter_mut()
+                    .find(|e| e.id == top_edge)
+                    .unwrap();
+                if let CadCurve::Line { end, .. } = &mut edge.curve {
+                    end[2] = -1.;
+                }
+            } else {
+                let entry_id = topology
+                    .edges
+                    .iter()
+                    .find(|e| e.id == top_edge)
+                    .unwrap()
+                    .face_ids
+                    .iter()
+                    .copied()
+                    .find(|id| *id != wall_id)
+                    .unwrap();
+                topology
+                    .loops
+                    .iter_mut()
+                    .find(|w| {
+                        w.face_id == entry_id && w.edge_uses.iter().any(|u| u.edge_id == top_edge)
+                    })
+                    .unwrap()
+                    .is_outer = true;
+            }
+            let error = resolve_selection(&state, &[selected], ExtractionRecipe::PocketFloor, 0.)
+                .unwrap_err();
+            assert!(
+                error.contains(if defect == "intermediate trim" {
+                    "trims"
+                } else {
+                    "covers the selected void"
+                }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn facing_uses_exact_body_bounds_despite_splines_holes_and_blends_below_the_target() {
+        let mut fixture = Fixture::new();
+        let target = fixture.face(
+            vec![
+                vec![[0., 0., 0.], [20., 0., 0.], [18., 20., 0.], [0., 16., 0.]],
+                square(5., 7., 5., 7., 0.),
+            ],
+            [0., 0., 1.],
+        );
+        fixture.t.edges[0].curve = CadCurve::Unsupported {
+            description: "exact spline retained in B-rep".into(),
+        };
+        let side = fixture.face(vec![square(0., 20., 0., 20., -2.)], [0., 0., -1.]);
+        fixture
+            .t
+            .faces
+            .iter_mut()
+            .find(|face| face.id == side)
+            .unwrap()
+            .surface = CadSurface::Unsupported {
+            description: "blend below target".into(),
+        };
+        let state = fixture.state();
+        let selected = [reference(target, EntityKind::Face)];
+        let binding =
+            resolve_selection(&state, &selected, ExtractionRecipe::FaceRegion, 1.).unwrap();
+        let input = resolve_binding(&state, &binding).unwrap();
+        assert_eq!(
+            input.heights,
+            CuttingHeights {
+                top: 1.,
+                bottom: 0.
+            }
+        );
+        assert_eq!(input.regions[0].area(), 400.);
+        assert!(
+            input.regions[0].holes().is_empty(),
+            "facing clears stock above the body, including above holes"
+        );
+        assert!(
+            resolve_selection(&state, &selected, ExtractionRecipe::PocketFloor, 1.).is_err(),
+            "pocket certification is unchanged"
+        );
+        let mut boss = state;
+        std::sync::Arc::make_mut(&mut boss.assets[0].topology)
+            .faces
+            .iter_mut()
+            .find(|face| face.id == side)
+            .unwrap()
+            .bounds[1][2] = 2.;
+        assert!(
+            resolve_selection(&boss, &selected, ExtractionRecipe::FaceRegion, 3.)
+                .unwrap_err()
+                .contains("protected material")
+        );
+    }
+
     #[test]
     fn circular_edges_alone_do_not_establish_holes() {
         let (state, r) = pocket();

@@ -71,7 +71,8 @@ use crate::Tool;
 /// v14: persistent CAD assets, exact topology snapshots, instances and operation
 /// bindings. Legacy operations retain their explicit embedded geometry.
 /// v15: projects contain independently framed setups; old single setups are wrapped.
-pub const SCHEMA_VERSION: u32 = 15;
+/// v16: manufacturing suppression and stable ID high-water marks persist.
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// The safety planes for a setup, all **absolute Z in millimetres**. By
 /// convention WCS Z0 is the top of stock, so `top_of_stock` is usually `0.0`.
@@ -117,7 +118,10 @@ pub enum Stock {
         thickness: f64,
     },
     /// A fixed-size box positioned against the model bounds on each axis.
-    FixedBox { size: [f64; 3], model_position: [f64; 3] },
+    FixedBox {
+        size: [f64; 3],
+        model_position: [f64; 3],
+    },
     /// A box grown independently on the negative and positive side of each axis.
     RelativeBox { offsets: [[f64; 3]; 2] },
 }
@@ -144,12 +148,22 @@ impl Stock {
     /// Resolve stock against all three model bounds in setup coordinates.
     pub fn resolve_bounds(&self, min: [f64; 3], max: [f64; 3]) -> ([f64; 3], [f64; 3]) {
         match *self {
-            Self::BoundingBox { x_offset, y_offset, top, thickness } => (
+            Self::BoundingBox {
+                x_offset,
+                y_offset,
+                top,
+                thickness,
+            } => (
                 [min[0] - x_offset, min[1] - y_offset, top - thickness],
                 [max[0] + x_offset, max[1] + y_offset, top],
             ),
-            Self::FixedBox { size, model_position } => {
-                let lo = std::array::from_fn(|i| min[i] - model_position[i] * (size[i] - (max[i] - min[i])));
+            Self::FixedBox {
+                size,
+                model_position,
+            } => {
+                let lo = std::array::from_fn(|i| {
+                    min[i] - model_position[i] * (size[i] - (max[i] - min[i]))
+                });
                 (lo, std::array::from_fn(|i| lo[i] + size[i]))
             }
             Self::RelativeBox { offsets } => (
@@ -1319,6 +1333,21 @@ pub struct Document {
     /// silently turn a linked operation into an explicit-contour operation.
     #[serde(default)]
     pub cad_linked_operations: std::collections::BTreeSet<u32>,
+    /// Suppression changes manufacturing inclusion, independently of visibility.
+    #[serde(default)]
+    pub excluded_operations: std::collections::BTreeSet<u32>,
+    /// Disabled work datums scoped to a physical setup.
+    #[serde(default)]
+    pub disabled_origins: std::collections::BTreeMap<u64, std::collections::BTreeSet<u32>>,
+    /// IDs below these marks are never reused after deletion.
+    #[serde(default)]
+    pub operation_id_floor: u32,
+    #[serde(default)]
+    pub setup_id_floor: u64,
+    #[serde(default)]
+    pub asset_id_floor: u64,
+    #[serde(default)]
+    pub instance_id_floor: u64,
 }
 
 // Active setup is session/view state: it is intentionally omitted from the wire
@@ -1329,6 +1358,12 @@ impl PartialEq for Document {
             && self.setups == other.setups
             && self.geometry == other.geometry
             && self.cad_linked_operations == other.cad_linked_operations
+            && self.excluded_operations == other.excluded_operations
+            && self.disabled_origins == other.disabled_origins
+            && self.operation_id_floor == other.operation_id_floor
+            && self.setup_id_floor == other.setup_id_floor
+            && self.asset_id_floor == other.asset_id_floor
+            && self.instance_id_floor == other.instance_id_floor
     }
 }
 
@@ -1336,24 +1371,81 @@ impl Document {
     /// Wrap a setup in a document stamped with the current [`SCHEMA_VERSION`].
     pub fn new(setup: Setup) -> Self {
         let mut setup = setup;
-        if setup.id == 0 { setup.id = 1; }
+        if setup.id == 0 {
+            setup.id = 1;
+        }
         Self {
             schema_version: SCHEMA_VERSION,
             active_setup_id: setup.id,
             setups: vec![setup],
             geometry: crate::GeometryState::default(),
             cad_linked_operations: Default::default(),
+            excluded_operations: Default::default(),
+            disabled_origins: Default::default(),
+            operation_id_floor: 0,
+            setup_id_floor: 0,
+            asset_id_floor: 0,
+            instance_id_floor: 0,
         }
     }
     pub fn setup(&self) -> &Setup {
-        self.setups.iter().find(|s| s.id == self.active_setup_id).or_else(|| self.setups.first()).expect("document must contain a setup")
+        self.setups
+            .iter()
+            .find(|s| s.id == self.active_setup_id)
+            .or_else(|| self.setups.first())
+            .expect("document must contain a setup")
     }
     pub fn setup_mut(&mut self) -> &mut Setup {
         let id = self.active_setup_id;
         let index = self.setups.iter().position(|s| s.id == id).unwrap_or(0);
-        self.setups.get_mut(index).expect("document must contain a setup")
+        self.setups
+            .get_mut(index)
+            .expect("document must contain a setup")
     }
-    pub fn next_setup_id(&self) -> u64 { self.setups.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1).max(1) }
+    pub fn next_setup_id(&self) -> u64 {
+        self.setups
+            .iter()
+            .map(|s| s.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1)
+            .max(self.setup_id_floor)
+    }
+    /// Record allocated IDs before an edit can delete them.
+    pub fn record_ids(&mut self) {
+        self.asset_id_floor = self.asset_id_floor.max(
+            self.geometry
+                .assets
+                .iter()
+                .map(|a| a.id.saturating_add(1))
+                .max()
+                .unwrap_or(1),
+        );
+        self.instance_id_floor = self.instance_id_floor.max(
+            self.geometry
+                .instances
+                .iter()
+                .map(|i| i.id.saturating_add(1))
+                .max()
+                .unwrap_or(1),
+        );
+        self.operation_id_floor = self.operation_id_floor.max(
+            self.setups
+                .iter()
+                .flat_map(|s| &s.operations)
+                .map(|o| o.id().saturating_add(1))
+                .max()
+                .unwrap_or(0),
+        );
+        self.setup_id_floor = self.setup_id_floor.max(
+            self.setups
+                .iter()
+                .map(|s| s.id.saturating_add(1))
+                .max()
+                .unwrap_or(1),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1520,11 +1612,22 @@ mod tests {
 
     #[test]
     fn fixed_and_relative_stock_resolve_all_three_axes() {
-        let bounds=([10.0,20.0,30.0],[40.0,60.0,50.0]);
-        let fixed=Stock::FixedBox{size:[50.0,60.0,40.0],model_position:[0.5,0.0,1.0]};
-        assert_eq!(fixed.resolve_bounds(bounds.0,bounds.1),([-0.0,20.0,10.0],[50.0,80.0,50.0]));
-        let relative=Stock::RelativeBox{offsets:[[1.0,2.0,3.0],[4.0,5.0,6.0]]};
-        assert_eq!(relative.resolve_bounds(bounds.0,bounds.1),([9.0,18.0,27.0],[44.0,65.0,56.0]));
+        let bounds = ([10.0, 20.0, 30.0], [40.0, 60.0, 50.0]);
+        let fixed = Stock::FixedBox {
+            size: [50.0, 60.0, 40.0],
+            model_position: [0.5, 0.0, 1.0],
+        };
+        assert_eq!(
+            fixed.resolve_bounds(bounds.0, bounds.1),
+            ([-0.0, 20.0, 10.0], [50.0, 80.0, 50.0])
+        );
+        let relative = Stock::RelativeBox {
+            offsets: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        };
+        assert_eq!(
+            relative.resolve_bounds(bounds.0, bounds.1),
+            ([9.0, 18.0, 27.0], [44.0, 65.0, 56.0])
+        );
     }
 
     #[test]

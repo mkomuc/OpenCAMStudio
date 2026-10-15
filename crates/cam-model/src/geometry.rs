@@ -90,79 +90,300 @@ impl RigidTransform {
 
 /// Persisted work coordinate frame. `world_from_setup` carries rotation only;
 /// the setup's `origin` remains the datum point and is subtracted by posting.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SetupFrame {
     #[serde(default)]
     pub world_from_setup: RigidTransform,
     #[serde(default)]
     pub references: FrameReferences,
 }
-impl Default for SetupFrame {
-    fn default() -> Self { Self { world_from_setup: RigidTransform::default(), references: FrameReferences::default() } }
-}
 impl SetupFrame {
     pub fn to_setup_vector(&self, world: [f64; 3]) -> [f64; 3] {
-        std::array::from_fn(|i| (0..3).map(|j| self.world_from_setup.rotation[j][i] * world[j]).sum())
+        std::array::from_fn(|i| {
+            (0..3)
+                .map(|j| self.world_from_setup.rotation[j][i] * world[j])
+                .sum()
+        })
     }
-    pub fn to_world_vector(&self, local: [f64; 3]) -> [f64; 3] { self.world_from_setup.transform_vector(local) }
+    pub fn to_world_vector(&self, local: [f64; 3]) -> [f64; 3] {
+        self.world_from_setup.transform_vector(local)
+    }
     pub fn validate(&self) -> Result<(), String> {
-        if self.world_from_setup.translation.iter().any(|x| x.abs() > 1e-9) { return Err("setup frame must not contain a translation; use the setup origin".into()); }
-        if !self.world_from_setup.is_rigid() { return Err("setup axes must form a right-handed orthonormal frame".into()); }
+        if self
+            .world_from_setup
+            .translation
+            .iter()
+            .any(|x| x.abs() > 1e-9)
+        {
+            return Err("setup frame must not contain a translation; use the setup origin".into());
+        }
+        if !self.world_from_setup.is_rigid() {
+            return Err("setup axes must form a right-handed orthonormal frame".into());
+        }
         Ok(())
     }
     /// Build the frame from X/Y directions. Z is derived as X cross Y.
-    pub fn from_xy(x: [f64;3], y: [f64;3]) -> Result<Self, String> { Self::from_axes(Some(x), Some(y), None) }
+    pub fn from_xy(x: [f64; 3], y: [f64; 3]) -> Result<Self, String> {
+        Self::from_axes(Some(x), Some(y), None)
+    }
     /// Build a right-handed orthonormal frame from supplied directions. One missing
     /// axis may be derived; supplied directions are never silently adjusted.
-    pub fn from_axes(x: Option<[f64;3]>, y: Option<[f64;3]>, z: Option<[f64;3]>) -> Result<Self, String> {
-        fn unit(v:[f64;3], name:&str)->Result<[f64;3],String>{ let n=v.iter().map(|x|x*x).sum::<f64>().sqrt(); if !n.is_finite() || n < 1e-10 {return Err(format!("{name} reference is degenerate"))} Ok(v.map(|x|x/n)) }
-        fn dot(a:[f64;3],b:[f64;3])->f64{(0..3).map(|i|a[i]*b[i]).sum()}
-        fn cross(a:[f64;3],b:[f64;3])->[f64;3]{[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]}
-        let (x,y,z)=match (x,y,z) {
-            (Some(x),Some(y),None)=>{let x=unit(x,"X")?;let y=unit(y,"Y")?; if dot(x,y).abs()>FRAME_REFERENCE_TOLERANCE{return Err("X and Y references must be perpendicular".into())}(x,y,unit(cross(x,y),"Z")?)},
-            (Some(x),None,Some(z))=>{let x=unit(x,"X")?;let z=unit(z,"Z")?;if dot(x,z).abs()>FRAME_REFERENCE_TOLERANCE{return Err("X and Z references must be perpendicular".into())}(x,unit(cross(z,x),"Y")?,z)},
-            (None,Some(y),Some(z))=>{let y=unit(y,"Y")?;let z=unit(z,"Z")?;if dot(y,z).abs()>FRAME_REFERENCE_TOLERANCE{return Err("Y and Z references must be perpendicular".into())}(unit(cross(y,z),"X")?,y,z)},
-            (Some(x),Some(y),Some(z))=>{let (x,y,z)=(unit(x,"X")?,unit(y,"Y")?,unit(z,"Z")?);if dot(x,y).abs()>FRAME_REFERENCE_TOLERANCE{return Err("X and Y references must be perpendicular".into())}if dot(x,z).abs()>FRAME_REFERENCE_TOLERANCE{return Err("X and Z references must be perpendicular".into())}if dot(y,z).abs()>FRAME_REFERENCE_TOLERANCE{return Err("Y and Z references must be perpendicular".into())}if dot(cross(x,y),z)<1.-FRAME_REFERENCE_TOLERANCE{return Err("selected axes do not form a right-handed frame".into())}(x,y,z)},
-            _=>return Err("select at least two perpendicular axis references".into()),
+    pub fn from_axes(
+        x: Option<[f64; 3]>,
+        y: Option<[f64; 3]>,
+        z: Option<[f64; 3]>,
+    ) -> Result<Self, String> {
+        fn unit(v: [f64; 3], name: &str) -> Result<[f64; 3], String> {
+            let n = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if !n.is_finite() || n < 1e-10 {
+                return Err(format!("{name} reference is degenerate"));
+            }
+            Ok(v.map(|x| x / n))
+        }
+        fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+            (0..3).map(|i| a[i] * b[i]).sum()
+        }
+        fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        }
+        let (x, y, z) = match (x, y, z) {
+            (Some(x), Some(y), None) => {
+                let x = unit(x, "X")?;
+                let y = unit(y, "Y")?;
+                if dot(x, y).abs() > FRAME_REFERENCE_TOLERANCE {
+                    return Err("X and Y references must be perpendicular".into());
+                }
+                (x, y, unit(cross(x, y), "Z")?)
+            }
+            (Some(x), None, Some(z)) => {
+                let x = unit(x, "X")?;
+                let z = unit(z, "Z")?;
+                if dot(x, z).abs() > FRAME_REFERENCE_TOLERANCE {
+                    return Err("X and Z references must be perpendicular".into());
+                }
+                (x, unit(cross(z, x), "Y")?, z)
+            }
+            (None, Some(y), Some(z)) => {
+                let y = unit(y, "Y")?;
+                let z = unit(z, "Z")?;
+                if dot(y, z).abs() > FRAME_REFERENCE_TOLERANCE {
+                    return Err("Y and Z references must be perpendicular".into());
+                }
+                (unit(cross(y, z), "X")?, y, z)
+            }
+            (Some(x), Some(y), Some(z)) => {
+                let (x, y, z) = (unit(x, "X")?, unit(y, "Y")?, unit(z, "Z")?);
+                if dot(x, y).abs() > FRAME_REFERENCE_TOLERANCE {
+                    return Err("X and Y references must be perpendicular".into());
+                }
+                if dot(x, z).abs() > FRAME_REFERENCE_TOLERANCE {
+                    return Err("X and Z references must be perpendicular".into());
+                }
+                if dot(y, z).abs() > FRAME_REFERENCE_TOLERANCE {
+                    return Err("Y and Z references must be perpendicular".into());
+                }
+                if dot(cross(x, y), z) < 1. - FRAME_REFERENCE_TOLERANCE {
+                    return Err("selected axes do not form a right-handed frame".into());
+                }
+                (x, y, z)
+            }
+            _ => return Err("select at least two perpendicular axis references".into()),
         };
-        let frame=Self { world_from_setup: RigidTransform { rotation:[[x[0],y[0],z[0]],[x[1],y[1],z[1]],[x[2],y[2],z[2]]], translation:[0.;3]}, references:FrameReferences::default() }; frame.validate()?; Ok(frame)
+        let frame = Self {
+            world_from_setup: RigidTransform {
+                rotation: [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]],
+                translation: [0.; 3],
+            },
+            references: FrameReferences::default(),
+        };
+        frame.validate()?;
+        Ok(frame)
     }
-    pub fn from_model_instance(state:&GeometryState, instance_id:u64)->Result<Self,String>{
-        let instance=state.instance(instance_id).ok_or("model instance missing")?;
-        let mut f=Self::default(); f.world_from_setup.rotation=instance.placement.rotation; f.references.model_instance=Some(instance_id); f.validate()?; Ok(f)
+    pub fn from_model_instance(state: &GeometryState, instance_id: u64) -> Result<Self, String> {
+        let instance = state
+            .instance(instance_id)
+            .ok_or("model instance missing")?;
+        let mut f = Self::default();
+        f.world_from_setup.rotation = instance.placement.rotation;
+        f.references.model_instance = Some(instance_id);
+        f.validate()?;
+        Ok(f)
     }
-    pub fn from_model_coordinate_system(state:&GeometryState, instance_id:u64)->Result<Self,String>{ Self::from_model_instance(state, instance_id) }
+    pub fn from_model_coordinate_system(
+        state: &GeometryState,
+        instance_id: u64,
+    ) -> Result<Self, String> {
+        Self::from_model_instance(state, instance_id)
+    }
     /// Resolve selected straight edges to world directions, apply explicit flips,
     /// and validate/derive a right-handed frame. References are retained for editing.
-    pub fn from_edge_references(state:&GeometryState, x:Option<FrameAxisReference>, y:Option<FrameAxisReference>, z:Option<FrameAxisReference>)->Result<Self,String>{
-        fn direction(state:&GeometryState, axis:Option<&FrameAxisReference>, label:&str)->Result<Option<[f64;3]>,String>{
-            let Some(reference)=axis else{return Ok(None)};
-            if reference.entity.kind != EntityKind::Edge { return Err(format!("{label} reference must be a straight edge")); }
-            if !state.entity_exists(&reference.entity) { return Err(format!("{label} reference is stale or missing")); }
-            let asset=state.asset(reference.entity.asset_id).ok_or_else(||format!("{label} reference asset is missing"))?;
-            let edge=asset.topology.edges.iter().find(|e|e.id==reference.entity.id&&e.body_id==reference.entity.body_id).ok_or_else(||format!("{label} reference edge is missing"))?;
-            let CadCurve::Line{start,end}=&edge.curve else{return Err(format!("{label} reference must be straight"))};
-            let instance=state.instance(reference.entity.instance_id).ok_or_else(||format!("{label} reference instance is missing"))?;
-            let a=instance.placement.transform_point(*start); let b=instance.placement.transform_point(*end);
-            let mut v=std::array::from_fn(|i|b[i]-a[i]); if reference.flipped {v=v.map(|c|-c)} Ok(Some(v))
+    pub fn from_edge_references(
+        state: &GeometryState,
+        x: Option<FrameAxisReference>,
+        y: Option<FrameAxisReference>,
+        z: Option<FrameAxisReference>,
+    ) -> Result<Self, String> {
+        Self::from_references(
+            state,
+            FrameReferences {
+                x,
+                y,
+                z,
+                ..Default::default()
+            },
+        )
+    }
+    /// Stock edge directions are captured in world coordinates, so resizing or
+    /// reorienting the stock cannot make a selected reference follow itself.
+    pub fn from_references(
+        state: &GeometryState,
+        references: FrameReferences,
+    ) -> Result<Self, String> {
+        Self::default().resolve_references(state, references)
+    }
+    /// Resolve axis picks using this frame's orientation for unassigned axes.
+    /// A single pick fixes its axis and projects an existing transverse axis
+    /// onto its perpendicular plane; two or three picks retain strict validation.
+    pub fn resolve_references(
+        &self,
+        state: &GeometryState,
+        references: FrameReferences,
+    ) -> Result<Self, String> {
+        self.validate()?;
+        fn direction(
+            state: &GeometryState,
+            axis: Option<&FrameAxisReference>,
+            label: &str,
+        ) -> Result<Option<[f64; 3]>, String> {
+            let Some(reference) = axis else {
+                return Ok(None);
+            };
+            if reference.entity.kind != EntityKind::Edge {
+                return Err(format!("{label} reference must be a straight edge"));
+            }
+            if !state.entity_exists(&reference.entity) {
+                return Err(format!("{label} reference is stale or missing"));
+            }
+            let asset = state
+                .asset(reference.entity.asset_id)
+                .ok_or_else(|| format!("{label} reference asset is missing"))?;
+            let edge = asset
+                .topology
+                .edges
+                .iter()
+                .find(|e| e.id == reference.entity.id && e.body_id == reference.entity.body_id)
+                .ok_or_else(|| format!("{label} reference edge is missing"))?;
+            let CadCurve::Line { start, end } = &edge.curve else {
+                return Err(format!("{label} reference must be straight"));
+            };
+            let instance = state
+                .instance(reference.entity.instance_id)
+                .ok_or_else(|| format!("{label} reference instance is missing"))?;
+            let mut v = instance
+                .placement
+                .transform_vector(std::array::from_fn(|i| end[i] - start[i]));
+            if reference.flipped {
+                v = v.map(|c| -c)
+            }
+            Ok(Some(v))
         }
-        let dx=direction(state,x.as_ref(),"X")?; let dy=direction(state,y.as_ref(),"Y")?; let dz=direction(state,z.as_ref(),"Z")?;
-        let mut frame=Self::from_axes(dx,dy,dz)?;
-        frame.references=FrameReferences{x,y,z,origin:FrameOrigin::ModelOrigin,model_instance:None}; Ok(frame)
+        let mut axes = [None; 3];
+        for (i, (edge, label)) in [
+            (&references.x, "X"),
+            (&references.y, "Y"),
+            (&references.z, "Z"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if edge.is_some() && references.stock_axes[i].is_some() {
+                return Err(format!("{label} has both a model and stock reference"));
+            }
+            axes[i] = direction(state, edge.as_ref(), label)?.or_else(|| {
+                references.stock_axes[i].map(|v| {
+                    if references.stock_flipped[i] {
+                        v.map(|c| -c)
+                    } else {
+                        v
+                    }
+                })
+            });
+        }
+        let count = axes.iter().filter(|axis| axis.is_some()).count();
+        if count == 1 {
+            let primary = axes.iter().position(Option::is_some).unwrap();
+            let direction = axes[primary].unwrap();
+            let length = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if !length.is_finite() || length < 1e-10 {
+                return Err(format!(
+                    "{} reference is degenerate",
+                    ["X", "Y", "Z"][primary]
+                ));
+            }
+            let direction = direction.map(|v| v / length);
+            axes[primary] = Some(direction);
+            for secondary in [(primary + 1) % 3, (primary + 2) % 3] {
+                let current =
+                    self.to_world_vector(std::array::from_fn(
+                        |i| {
+                            if i == secondary {
+                                1.
+                            } else {
+                                0.
+                            }
+                        },
+                    ));
+                let dot: f64 = (0..3).map(|i| current[i] * direction[i]).sum();
+                let projected: [f64; 3] = std::array::from_fn(|i| current[i] - dot * direction[i]);
+                let length = projected.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if length > 1e-10 {
+                    axes[secondary] = Some(projected.map(|v| v / length));
+                    break;
+                }
+            }
+        }
+        let mut frame = if count == 0 {
+            self.clone()
+        } else {
+            Self::from_axes(axes[0], axes[1], axes[2])?
+        };
+        frame.references = references;
+        Ok(frame)
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FrameAxisReference { pub entity: EntityRef, #[serde(default)] pub flipped: bool }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum FrameOrigin { ModelOrigin, Explicit([f64;3]) }
-impl Default for FrameOrigin { fn default()->Self { Self::ModelOrigin } }
+pub struct FrameAxisReference {
+    pub entity: EntityRef,
+    #[serde(default)]
+    pub flipped: bool,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum FrameOrigin {
+    #[default]
+    ModelOrigin,
+    Explicit([f64; 3]),
+}
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FrameReferences {
-    #[serde(default)] pub x:Option<FrameAxisReference>,
-    #[serde(default)] pub y:Option<FrameAxisReference>,
-    #[serde(default)] pub z:Option<FrameAxisReference>,
-    #[serde(default)] pub origin:FrameOrigin,
-    #[serde(default)] pub model_instance:Option<u64>,
+    /// Explicit world directions captured from stock edges; no CAD entity is needed.
+    #[serde(default)]
+    pub stock_axes: [Option<[f64; 3]>; 3],
+    #[serde(default)]
+    pub stock_flipped: [bool; 3],
+    #[serde(default)]
+    pub x: Option<FrameAxisReference>,
+    #[serde(default)]
+    pub y: Option<FrameAxisReference>,
+    #[serde(default)]
+    pub z: Option<FrameAxisReference>,
+    #[serde(default)]
+    pub origin: FrameOrigin,
+    #[serde(default)]
+    pub model_instance: Option<u64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GeometryImportOptions {
@@ -419,11 +640,19 @@ impl GeometryState {
         let mut out = self.clone();
         let r = frame.world_from_setup.rotation;
         for instance in &mut out.instances {
-            if !instance.placement.is_rigid() { return Err("invalid model instance placement".into()); }
+            if !instance.placement.is_rigid() {
+                return Err("invalid model instance placement".into());
+            }
             let old = instance.placement;
-            let rotation = std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| r[k][i] * old.rotation[k][j]).sum()));
-            let translation = std::array::from_fn(|i| (0..3).map(|k| r[k][i] * old.translation[k]).sum());
-            instance.placement = RigidTransform { rotation, translation };
+            let rotation = std::array::from_fn(|i| {
+                std::array::from_fn(|j| (0..3).map(|k| r[k][i] * old.rotation[k][j]).sum())
+            });
+            let translation =
+                std::array::from_fn(|i| (0..3).map(|k| r[k][i] * old.translation[k]).sum());
+            instance.placement = RigidTransform {
+                rotation,
+                translation,
+            };
         }
         Ok(out)
     }
@@ -707,12 +936,86 @@ mod tests {
 
     #[test]
     fn setup_frame_derives_missing_axis_and_rejects_bad_handedness() {
-        let f=SetupFrame::from_axes(Some([0.,1.,0.]),Some([-1.,0.,0.]),None).unwrap();
-        assert_eq!(f.to_setup_vector([0.,1.,0.]),[1.,0.,0.]);
-        assert!(SetupFrame::from_axes(Some([1.,0.,0.]),Some([0.,1.,0.]),Some([0.,0.,-1.])).is_err());
-        assert!(SetupFrame::from_axes(Some([1.,0.,0.]),Some([1.,1.,0.]),None).is_err());
-        assert!(SetupFrame::from_axes(Some([1.,0.,0.]),Some([1e-10,1.,0.]),None).is_ok(), "roundoff sized deviation is accepted and produces a rigid frame");
-        assert!(SetupFrame::from_axes(Some([1.,0.,0.]),Some([1e-7,1.,0.]),None).is_err(), "a deviation outside frame rigidity tolerance is rejected");
+        let f = SetupFrame::from_axes(Some([0., 1., 0.]), Some([-1., 0., 0.]), None).unwrap();
+        assert_eq!(f.to_setup_vector([0., 1., 0.]), [1., 0., 0.]);
+        assert!(
+            SetupFrame::from_axes(Some([1., 0., 0.]), Some([0., 1., 0.]), Some([0., 0., -1.]))
+                .is_err()
+        );
+        assert!(SetupFrame::from_axes(Some([1., 0., 0.]), Some([1., 1., 0.]), None).is_err());
+        assert!(
+            SetupFrame::from_axes(Some([1., 0., 0.]), Some([1e-10, 1., 0.]), None).is_ok(),
+            "roundoff sized deviation is accepted and produces a rigid frame"
+        );
+        assert!(
+            SetupFrame::from_axes(Some([1., 0., 0.]), Some([1e-7, 1., 0.]), None).is_err(),
+            "a deviation outside frame rigidity tolerance is rejected"
+        );
+    }
+    #[test]
+    fn partial_references_preserve_orientation_and_complete_a_rigid_frame() {
+        let state = GeometryState::default();
+        let current = SetupFrame::from_xy([0., 1., 0.], [0., 0., 1.]).unwrap();
+        assert_eq!(
+            current
+                .resolve_references(&state, FrameReferences::default())
+                .unwrap(),
+            current
+        );
+        for axis in 0..3 {
+            for direction in [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.], [-1., -2., -3.]] {
+                let mut refs = FrameReferences::default();
+                refs.stock_axes[axis] = Some(direction);
+                let frame = current.resolve_references(&state, refs.clone()).unwrap();
+                frame.validate().unwrap();
+                let selected =
+                    frame.to_world_vector(std::array::from_fn(|i| if i == axis { 1. } else { 0. }));
+                let length = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+                assert!((0..3).all(|i| (selected[i] - direction[i] / length).abs() < 1e-9));
+                let repeated = frame.resolve_references(&state, refs.clone()).unwrap();
+                assert!(
+                    (0..3).all(|i| (0..3).all(|j| (frame.world_from_setup.rotation[i][j]
+                        - repeated.world_from_setup.rotation[i][j])
+                        .abs()
+                        < 1e-9))
+                );
+                refs.stock_flipped[axis] = true;
+                let flipped = current.resolve_references(&state, refs).unwrap();
+                flipped.validate().unwrap();
+                let selected =
+                    flipped
+                        .to_world_vector(std::array::from_fn(|i| if i == axis { 1. } else { 0. }));
+                assert!((0..3).all(|i| (selected[i] + direction[i] / length).abs() < 1e-9));
+            }
+        }
+        let mut refs = FrameReferences::default();
+        refs.stock_axes[2] = Some([1., 0., 0.]);
+        // Z is aligned with current X: use current Y in its own axis slot.
+        let frame = SetupFrame::default()
+            .resolve_references(&state, refs)
+            .unwrap();
+        assert_eq!(frame.to_world_vector([1., 0., 0.]), [0., 0., -1.]);
+        assert_eq!(frame.to_world_vector([0., 1., 0.]), [0., 1., 0.]);
+    }
+    #[test]
+    fn partial_references_still_reject_invalid_picks() {
+        let state = GeometryState::default();
+        for direction in [[0.; 3], [f64::NAN, 0., 0.], [f64::INFINITY, 0., 0.]] {
+            let mut refs = FrameReferences::default();
+            refs.stock_axes[2] = Some(direction);
+            assert!(SetupFrame::default()
+                .resolve_references(&state, refs)
+                .is_err());
+        }
+        let mut refs = FrameReferences::default();
+        refs.stock_axes = [Some([1., 0., 0.]), Some([1., 0., 0.]), None];
+        assert!(SetupFrame::default()
+            .resolve_references(&state, refs.clone())
+            .is_err());
+        refs.stock_axes = [Some([1., 0., 0.]), Some([0., 1., 0.]), Some([0., 0., -1.])];
+        assert!(SetupFrame::default()
+            .resolve_references(&state, refs)
+            .is_err());
     }
     fn state() -> GeometryState {
         GeometryState {

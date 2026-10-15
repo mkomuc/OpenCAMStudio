@@ -17,10 +17,19 @@ Source units must be known and homogeneous. Assemblies are flattened to placed
 solid occurrences with distinct body identity; product names, colours, component
 paths, unresolved external dependencies and XDE sharing are not yet qualified.
 Surface-only STEP is rejected. No additional healing is performed beyond OCCT's
-translator using the declared import precision. Saved source bytes plus the
-versioned exact subset snapshot support reopening without the original file.
+translator using the STEP file's declared uncertainty. The import precision is a
+fallback for files without uncertainty; it does not clamp source tolerances.
+Forcing a finer precision can falsely invalidate otherwise valid spline joins.
+Solid validation and the independent machining eligibility checks still apply.
+Saved source bytes plus the versioned exact subset snapshot support reopening
+without the original file.
 The snapshot preserves the supported machining subset, not arbitrary native B-rep;
 unsupported curved surfaces remain inspectable through their display mesh only.
+
+The feature resolver can profile a circular blind-bore floor even when the body
+has unrelated blends. This uses the analytic bore wall and complete planar floor
+boundary, with an entry at the body's top in setup Z; it does not derive a cut
+from unsupported surfaces or display triangles.
 
 Native tests require a locally installed SDK. Before release, build and run the
 fixture corpus on each desktop target, audit the SDK packaging/licence notices,

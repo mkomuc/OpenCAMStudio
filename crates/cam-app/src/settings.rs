@@ -106,6 +106,8 @@ pub struct Settings {
 #[serde(default)]
 pub struct ViewPrefs {
     pub show_stock: bool,
+    /// Blend the stock surface so the model or drawing remains visible inside it.
+    pub transparent_stock: bool,
     pub show_gizmo: bool,
     pub show_origin: bool,
     /// Draw the active machine's travel as a box around the job.
@@ -128,6 +130,10 @@ pub struct ViewPrefs {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SnapPrefs {
+    /// Master switch for viewport object snapping.
+    pub enabled: bool,
+    /// Show eligible features and the edge under the setup picker.
+    pub highlight_features: bool,
     /// The pickbox aperture, logical px. **The exposed knob** (Andreas,
     /// 2026-08-01): the vertex-snap tolerance is its half-size, and the object-snap
     /// catch distance is [`SNAP_CATCH_MULTIPLE`] times it.
@@ -218,6 +224,7 @@ impl Default for ViewPrefs {
     fn default() -> Self {
         Self {
             show_stock: false,
+            transparent_stock: false,
             show_gizmo: true,
             show_origin: true,
             // Off by default: it is a check you reach for, not something to look past
@@ -234,6 +241,8 @@ impl Default for ViewPrefs {
 impl Default for SnapPrefs {
     fn default() -> Self {
         Self {
+            enabled: true,
+            highlight_features: true,
             pickbox_px: 12.0,
             marker_scale: 1.2,
             // End + Mid + Quadrant on by default; Nearest is opt-in (AutoCAD-style).
@@ -404,7 +413,11 @@ impl Settings {
                 self.extra.remove("defaults");
             }
             if step == 2 {
-                if let Some(obj) = self.extra.get_mut("session").and_then(|v| v.as_object_mut()) {
+                if let Some(obj) = self
+                    .extra
+                    .get_mut("session")
+                    .and_then(|v| v.as_object_mut())
+                {
                     obj.remove("post");
                 }
             }
@@ -489,7 +502,10 @@ mod tests {
         assert!(!d.view.show_envelope);
         assert!(d.view.tooltips);
         assert_eq!(d.view.gizmo_size, 110.0);
-        assert_eq!(d.view.origin_marker_scale, 1.0, "the shipped marker size is 1x");
+        assert_eq!(
+            d.view.origin_marker_scale, 1.0,
+            "the shipped marker size is 1x"
+        );
 
         assert_eq!(d.snapping.pickbox_px, 12.0);
         assert_eq!(d.snapping.marker_scale, 1.2);
@@ -510,7 +526,10 @@ mod tests {
         assert_eq!(d.panes.min_inspector_px, 240.0);
         assert_eq!(d.panes.min_output_px, 60.0);
 
-        assert_eq!(d.session.machine, None, "nothing selected until there is a library");
+        assert_eq!(
+            d.session.machine, None,
+            "nothing selected until there is a library"
+        );
     }
 
     #[test]
@@ -597,7 +616,10 @@ mod tests {
 
         got.save_to(&s.file("settings.json")).unwrap();
         let text = std::fs::read_to_string(s.file("settings.json")).unwrap();
-        assert!(text.contains("future_thing"), "top-level key dropped: {text}");
+        assert!(
+            text.contains("future_thing"),
+            "top-level key dropped: {text}"
+        );
         assert!(text.contains("future_toggle"), "nested key dropped: {text}");
     }
 
@@ -626,14 +648,21 @@ mod tests {
     #[test]
     fn remembering_a_session_keeps_unknown_keys_and_the_pane_minimums() {
         let mut s = Settings::default();
-        s.view.extra.insert("future_toggle".into(), serde_json::json!(true));
-        s.panes.extra.insert("future_pane".into(), serde_json::json!(7));
+        s.view
+            .extra
+            .insert("future_toggle".into(), serde_json::json!(true));
+        s.panes
+            .extra
+            .insert("future_pane".into(), serde_json::json!(7));
         s.panes.min_inspector_px = 180.0; // a value the user had set
 
-        s.session.extra.insert("future_session".into(), serde_json::json!("x"));
+        s.session
+            .extra
+            .insert("future_session".into(), serde_json::json!("x"));
         s.remember_session(
             ViewPrefs {
                 tooltips: false,
+                transparent_stock: true,
                 gizmo_size: 175.0,
                 ..Default::default()
             },
@@ -649,6 +678,9 @@ mod tests {
         );
 
         assert!(!s.view.tooltips);
+        assert!(s.view.transparent_stock);
+        let reloaded: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(reloaded.view.transparent_stock);
         assert_eq!(s.view.gizmo_size, 175.0);
         assert_eq!(s.snapping.default_snaps, vec![SnapKind::End]);
         assert_eq!(s.panes.project_px, 310.0);
@@ -656,7 +688,11 @@ mod tests {
             s.panes.min_inspector_px, 180.0,
             "remembering the session must not reset the user's pane minimums"
         );
-        assert_eq!(s.session.machine.as_deref(), Some("Mill"), "the machine is remembered");
+        assert_eq!(
+            s.session.machine.as_deref(),
+            Some("Mill"),
+            "the machine is remembered"
+        );
         assert!(
             s.view.extra.contains_key("future_toggle")
                 && s.panes.extra.contains_key("future_pane")
@@ -722,13 +758,20 @@ mod tests {
 
         // What the panel's button does.
         let restored = Settings::default();
-        assert_eq!(restored.panes, PanePrefs::default(), "pane sizes AND minimums");
+        assert_eq!(
+            restored.panes,
+            PanePrefs::default(),
+            "pane sizes AND minimums"
+        );
         assert_eq!(restored.snapping, SnapPrefs::default());
         assert_eq!(restored.view, ViewPrefs::default());
         let side = restored.panes.min_project_px
             + restored.panes.min_inspector_px
             + restored.panes.min_viewport_px;
-        assert!(side <= 1366.0, "the recovered layout must fit a modest screen");
+        assert!(
+            side <= 1366.0,
+            "the recovered layout must fit a modest screen"
+        );
     }
 
     /// **The migrate hook's first real use.** `schema_version` was written into every

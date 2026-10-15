@@ -115,6 +115,68 @@ impl Fixture {
             [-1., 0., 0.],
         );
     }
+    fn bore(&mut self, center: [f64; 2], radius: f64, top: u64, bottom: u64) -> u64 {
+        let face = self.id();
+        let mut loop_ids = vec![];
+        for (z, adjacent) in [(0., top), (-5., bottom)] {
+            let vertex = self.vertex([center[0] + radius, center[1], z]);
+            let edge = self.id();
+            self.t.edges.push(CadEdge {
+                id: edge,
+                body_id: 1,
+                vertices: [vertex, vertex],
+                face_ids: vec![face, adjacent],
+                curve: CadCurve::CircleArc {
+                    center: [center[0], center[1], z],
+                    normal: [0., 0., 1.],
+                    x_axis: [1., 0., 0.],
+                    radius,
+                    start_angle: 0.,
+                    end_angle: std::f64::consts::TAU,
+                },
+            });
+            for owner in [face, adjacent] {
+                let wire = self.id();
+                self.t.loops.push(CadLoop {
+                    id: wire,
+                    body_id: 1,
+                    face_id: owner,
+                    edge_uses: vec![EdgeUse {
+                        edge_id: edge,
+                        reversed: owner == adjacent,
+                    }],
+                    is_outer: owner == face,
+                });
+                if owner == face {
+                    loop_ids.push(wire);
+                } else {
+                    self.t
+                        .faces
+                        .iter_mut()
+                        .find(|f| f.id == owner)
+                        .unwrap()
+                        .loop_ids
+                        .push(wire);
+                }
+            }
+        }
+        self.t.faces.push(CadFace {
+            id: face,
+            body_id: 1,
+            surface: CadSurface::Cylinder {
+                origin: [center[0], center[1], 0.],
+                axis: [0., 0., 1.],
+                radius,
+                inward: true,
+            },
+            loop_ids,
+            bounds: [
+                [center[0] - radius, center[1] - radius, -5.],
+                [center[0] + radius, center[1] + radius, 0.],
+            ],
+        });
+        face
+    }
     fn state(self) -> GeometryState {
         GeometryState {
             assets: vec![GeometryAsset {
@@ -186,6 +248,143 @@ fn install_pocket(app: &mut AppController) -> EntityRef {
         .unwrap();
     r
 }
+
+fn blind_bore_with_unrelated_surface() -> (GeometryState, EntityRef) {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let floor = fixture.face(vec![square(6., 14., 6., 14., -5.)], [0., 0., 1.]);
+    fixture.bore([10., 10.], 4., top, floor);
+    let floor_wire = fixture
+        .t
+        .faces
+        .iter()
+        .find(|f| f.id == floor)
+        .unwrap()
+        .loop_ids[1];
+    fixture
+        .t
+        .faces
+        .iter_mut()
+        .find(|f| f.id == floor)
+        .unwrap()
+        .loop_ids = vec![floor_wire];
+    fixture
+        .t
+        .loops
+        .iter_mut()
+        .find(|w| w.id == floor_wire)
+        .unwrap()
+        .is_outer = true;
+    let blend = fixture.face(vec![square(18., 20., 18., 20., -1.)], [0., 0., 1.]);
+    fixture
+        .t
+        .faces
+        .iter_mut()
+        .find(|f| f.id == blend)
+        .unwrap()
+        .surface = CadSurface::Unsupported {
+        description: "unrelated blend away from the bore".into(),
+    };
+    (fixture.state(), reference(floor_wire, EntityKind::Loop))
+}
+
+#[test]
+fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
+    let (state, selected) = blind_bore_with_unrelated_surface();
+    let mut app = controller();
+    app.edit_tool(0, |t| t.flute_length = 10.);
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    app.toggle_cad_selection(selected.clone(), false).unwrap();
+    let preview = app.cad_operation_eligibility(OpKind::Profile).unwrap();
+    assert_eq!(
+        preview.heights,
+        CuttingHeights {
+            top: 0.,
+            bottom: -5.
+        }
+    );
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![selected])
+        .unwrap();
+    assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.side == Side::Inside));
+    let before = app.document().clone();
+    assert!(app
+        .override_cad_heights(id, None, Some(-6.))
+        .unwrap_err()
+        .contains("certified"));
+    assert_eq!(app.document(), &before);
+}
+
+#[test]
+fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() {
+    for defect in [
+        "blocked entry",
+        "invalid solid",
+        "partial rim",
+        "protected island",
+        "wrong setup",
+    ] {
+        let (mut state, selected) = blind_bore_with_unrelated_surface();
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        let reason = match defect {
+            "blocked entry" => {
+                topology.bodies[0].bounds[1][2] = 1.;
+                "above the bore entry"
+            }
+            "invalid solid" => {
+                topology.bodies[0].valid_solid = false;
+                "invalid/open solid"
+            }
+            "partial rim" => {
+                let wire = topology.loops.iter().find(|w| w.id == selected.id).unwrap();
+                let edge = topology
+                    .edges
+                    .iter_mut()
+                    .find(|e| e.id == wire.edge_uses[0].edge_id)
+                    .unwrap();
+                if let CadCurve::CircleArc { end_angle, .. } = &mut edge.curve {
+                    *end_angle = std::f64::consts::PI;
+                }
+                "complete constant-diameter bore"
+            }
+            "protected island" => {
+                let floor_id = topology
+                    .loops
+                    .iter()
+                    .find(|w| w.id == selected.id)
+                    .unwrap()
+                    .face_id;
+                let floor = topology
+                    .faces
+                    .iter_mut()
+                    .find(|f| f.id == floor_id)
+                    .unwrap();
+                let other_loop = topology
+                    .loops
+                    .iter()
+                    .find(|w| w.face_id == floor_id && w.id != selected.id)
+                    .unwrap();
+                floor.loop_ids.push(other_loop.id);
+                "circular floor boundary"
+            }
+            _ => {
+                state.instances[0].placement.rotation = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]];
+                "not aligned with setup Z"
+            }
+        };
+        let mut app = controller();
+        app.add_cad_asset(state.assets[0].clone(), state.instances)
+            .unwrap();
+        let before = app.document().clone();
+        let error = app
+            .create_cad_operation(OpKind::Profile, vec![selected])
+            .unwrap_err();
+        assert!(error.contains(reason), "{defect}: {error}");
+        assert_eq!(app.document(), &before);
+    }
+}
+
 fn cuts(program: &cam_cldata::Program) -> Vec<cam_cldata::Step> {
     program
         .steps()
@@ -568,7 +767,11 @@ fn replacement_requires_review_and_undo_restores_links_and_export_eligibility() 
         app.document().geometry.bindings[&id].status,
         ResolutionStatus::NeedsReselection { .. }
     ));
-    assert!(app.undo()); // undo replacement (suppression is session state)
+    assert!(app.undo()); // undo re-inclusion
+    assert!(app.is_operation_excluded(id));
+    assert!(app.undo()); // undo suppression
+    assert!(!app.is_operation_excluded(id));
+    assert!(app.undo()); // undo replacement
     assert_eq!(app.document().geometry.assets[0].revision, 1);
     assert_eq!(
         app.run(&CancelToken::new()).completion,
@@ -723,4 +926,415 @@ fn background_import_previews_cancel_and_reject_project_edits_without_losing_wor
     assert!(app.commit_cad_preview().is_err());
     assert!(app.open_paths().is_empty());
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn deleted_asset_id_is_never_reused_for_an_unrelated_import() {
+    let mut app = controller();
+    let reference = install_pocket(&mut app);
+    let asset = app.geometry_state().assets[0].clone();
+    let instances = app.geometry_state().instances.clone();
+    assert!(app.remove_cad_asset(asset.id));
+    app.add_cad_asset(asset, instances).unwrap();
+    assert_eq!(app.geometry_state().assets[0].id, 2);
+    assert!(!app.geometry_state().entity_exists(&reference));
+    assert_eq!(app.geometry_state().instances[0].id, 2);
+}
+
+#[test]
+fn cad_feature_and_operation_first_resolve_and_create_equivalent_inputs() {
+    let mut feature_first = controller();
+    let feature = install_pocket(&mut feature_first);
+    feature_first
+        .toggle_cad_selection(feature.clone(), false)
+        .unwrap();
+    let kind = OpKind::Pocket;
+    let before = feature_first.cad_operation_eligibility(kind).unwrap();
+    let first_id = feature_first
+        .create_cad_operation_with_tool(kind, feature_first.cad_selection().to_vec(), 1)
+        .unwrap();
+
+    let mut operation_first = controller();
+    install_pocket(&mut operation_first);
+    assert!(operation_first
+        .cad_operation_eligibility(kind)
+        .unwrap_err()
+        .contains("select geometry"));
+    operation_first
+        .toggle_cad_selection(feature, false)
+        .unwrap();
+    assert_eq!(
+        before,
+        operation_first.cad_operation_eligibility(kind).unwrap()
+    );
+    let second_id = operation_first
+        .create_cad_operation_with_tool(kind, operation_first.cad_selection().to_vec(), 1)
+        .unwrap();
+    assert_eq!(
+        feature_first.operation(first_id),
+        operation_first.operation(second_id)
+    );
+    assert_eq!(
+        feature_first.geometry_state().bindings[&first_id],
+        operation_first.geometry_state().bindings[&second_id]
+    );
+    assert_eq!(
+        cuts(&feature_first.run(&CancelToken::new()).program),
+        cuts(&operation_first.run(&CancelToken::new()).program)
+    );
+}
+
+#[test]
+fn cad_multi_selection_is_homogeneous_and_rejections_preserve_every_reference() {
+    let mut app = controller();
+    let floor = install_pocket(&mut app);
+    let topology = &app.geometry_state().assets[0].topology;
+    let other = reference(
+        topology.faces.iter().find(|f| f.id != floor.id).unwrap().id,
+        EntityKind::Face,
+    );
+    let edge = reference(topology.edges[0].id, EntityKind::Edge);
+    app.toggle_cad_selection(floor.clone(), false).unwrap();
+    assert!(app
+        .toggle_cad_selection(edge, true)
+        .unwrap_err()
+        .contains("same kind"));
+    assert_eq!(app.cad_selection(), std::slice::from_ref(&floor));
+    app.toggle_cad_selection(other.clone(), true).unwrap();
+    assert_eq!(app.cad_selection(), &[floor.clone(), other]);
+    let before = app.document().clone();
+    assert!(app
+        .cad_operation_eligibility(OpKind::Pocket)
+        .unwrap_err()
+        .contains("one planar floor"));
+    assert!(app
+        .create_cad_operation(OpKind::Pocket, app.cad_selection().to_vec())
+        .is_err());
+    assert_eq!(app.document(), &before);
+    let mut stale = floor.clone();
+    stale.revision += 1;
+    assert!(app
+        .toggle_cad_selection(stale.clone(), true)
+        .unwrap_err()
+        .contains("stale"));
+    assert_eq!(app.cad_selection().len(), 2);
+    app.set_cad_selection(vec![floor, stale]);
+    assert_eq!(
+        app.cad_selection().len(),
+        2,
+        "invalid members are never silently dropped"
+    );
+    assert!(app
+        .cad_operation_eligibility(OpKind::Pocket)
+        .unwrap_err()
+        .contains("stale"));
+    for kind in [
+        OpKind::Chamfer,
+        OpKind::Thread,
+        OpKind::Engrave,
+        OpKind::Carve,
+    ] {
+        assert!(app
+            .preview_cad_operation(kind, &app.cad_selection()[..1])
+            .unwrap_err()
+            .contains("currently support"));
+    }
+}
+
+#[test]
+fn a_different_body_instance_cannot_be_added_to_the_geometry_field() {
+    let mut app = controller();
+    let floor = install_pocket(&mut app);
+    let mut second = app.geometry_state().instances[0].clone();
+    second.id = 2;
+    let mut asset = app.geometry_state().assets[0].clone();
+    asset.id = 2;
+    second.asset_id = 2;
+    app.add_cad_asset(asset, vec![second]).unwrap();
+    let mut second_floor = floor.clone();
+    second_floor.asset_id = 2;
+    second_floor.instance_id = 2;
+    app.toggle_cad_selection(floor.clone(), false).unwrap();
+    assert!(app
+        .toggle_cad_selection(second_floor, true)
+        .unwrap_err()
+        .contains("one body instance"));
+    assert_eq!(app.cad_selection(), &[floor]);
+}
+
+#[test]
+fn persisted_mixed_geometry_cannot_generate_or_export_using_cached_contours() {
+    let mut app = controller();
+    let floor = install_pocket(&mut app);
+    let edge = reference(
+        app.geometry_state().assets[0].topology.edges[0].id,
+        EntityKind::Edge,
+    );
+    let id = app
+        .create_cad_operation(OpKind::Pocket, vec![floor])
+        .unwrap();
+    assert_eq!(
+        app.run(&CancelToken::new()).completion,
+        JobCompletion::Complete
+    );
+    let path =
+        std::env::temp_dir().join(format!("cad-mixed-selection-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    project["document"]["geometry"]["bindings"][id.to_string()]["selected"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(edge).unwrap());
+    std::fs::write(&path, project.to_string()).unwrap();
+    let mut reopened = controller();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let outcome = reopened.run(&CancelToken::new());
+    assert_eq!(outcome.completion, JobCompletion::Failed);
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("same kind")));
+    assert!(cuts(&outcome.program).is_empty());
+    assert!(matches!(reopened.export_nc(), Err(ExportError::HasErrors)));
+}
+
+#[test]
+fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let bottom = fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    let old_bore = reference(fixture.bore([5., 10.], 3., top, bottom), EntityKind::Face);
+    let new_bore = reference(fixture.bore([15., 10.], 4., top, bottom), EntityKind::Face);
+    let state = fixture.state();
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    let old_tool = app.use_tool(Tool {
+        number: 10,
+        diameter: 6.,
+        length: 30.,
+        flute_length: 20.,
+        kind: ToolKind::Drill {
+            point_angle_deg: 118.,
+        },
+        ..Default::default()
+    });
+    let id = app
+        .create_cad_operation_with_tool(OpKind::Drill, vec![old_bore], old_tool)
+        .unwrap();
+    let before = app.document().clone();
+    let revision = app.revision();
+    let mut staged_tool = *app
+        .document()
+        .setup()
+        .tools
+        .iter()
+        .find(|t| t.number == old_tool)
+        .unwrap();
+    staged_tool.number = app
+        .document()
+        .setup()
+        .tools
+        .iter()
+        .map(|t| t.number)
+        .max()
+        .unwrap()
+        + 1;
+    staged_tool.diameter = 8.;
+    let mut draft = app.operation(id).unwrap().clone();
+    if let Operation::Drill(operation) = &mut draft {
+        operation.tool = staged_tool.number;
+        operation.feed = 173.;
+    } else {
+        panic!("expected linked drill");
+    }
+    let overrides = Some(GeometryOverrides {
+        top: None,
+        bottom: Some(-4.),
+    });
+    // The committed cutter cannot qualify the replacement bore by itself.
+    assert!(app
+        .preview_operation_geometry(id, vec![new_bore.clone()])
+        .unwrap_err()
+        .contains("diameter"));
+    let binding = app
+        .preview_operation_settings_with_geometry(
+            draft.clone(),
+            overrides.clone(),
+            vec![staged_tool],
+            vec![new_bore.clone()],
+        )
+        .unwrap();
+    assert_eq!(binding.selected, vec![new_bore.clone()]);
+    assert_eq!(binding.effective_heights().bottom, -4.);
+    assert_eq!(
+        app.document(),
+        &before,
+        "preview never publishes draft state"
+    );
+    assert_eq!(app.revision(), revision);
+    assert!(app
+        .apply_operation_settings_with_geometry(
+            draft.clone(),
+            overrides.clone(),
+            vec![],
+            Some(vec![new_bore.clone()]),
+        )
+        .unwrap_err()
+        .contains("missing tool"));
+    assert_eq!(app.document(), &before, "rejected transaction is atomic");
+    app.apply_operation_settings_with_geometry(
+        draft,
+        overrides,
+        vec![staged_tool],
+        Some(vec![new_bore.clone()]),
+    )
+    .unwrap();
+    let Operation::Drill(committed) = app.operation(id).unwrap() else {
+        panic!("expected linked drill");
+    };
+    assert_eq!(committed.tool, staged_tool.number);
+    assert_eq!(committed.points, vec![[15., 10.]]);
+    assert_eq!(committed.depth, 4.);
+    assert_eq!(committed.feed, 173.);
+    assert_eq!(app.geometry_state().bindings[&id].selected, vec![new_bore]);
+    assert!(app.document().setup().tools.contains(&staged_tool));
+    assert!(app.undo());
+    assert_eq!(
+        app.document(),
+        &before,
+        "one undo restores cutter, source and all tabs"
+    );
+}
+
+#[test]
+fn single_model_edge_uses_current_orientation_and_applies_without_other_axis_picks() {
+    for axis in 0..3 {
+        let mut app = controller();
+        install_pocket(&mut app);
+        let mut settings = app.document().setup().clone();
+        settings.frame = SetupFrame::from_xy([0., 1., 0.], [0., 0., 1.]).unwrap();
+        app.apply_setup_settings(settings).unwrap();
+        let previous = app.document().setup().clone();
+        let geometry = app.geometry_state().clone();
+        let edge = geometry.assets[0].topology.edges[0].clone();
+        let selected = reference(edge.id, EntityKind::Edge);
+        let mut picks = [None, None, None];
+        picks[axis] = Some(selected.clone());
+        let frame = app.pending_frame_from_edges(picks, [false; 3]).unwrap();
+        frame.validate().unwrap();
+        let CadCurve::Line { start, end } = edge.curve else {
+            panic!("fixture edge must be straight")
+        };
+        let direction: [f64; 3] = std::array::from_fn(|i| end[i] - start[i]);
+        let length = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let actual =
+            frame.to_world_vector(std::array::from_fn(|i| if i == axis { 1. } else { 0. }));
+        assert!((0..3).all(|i| (actual[i] - direction[i] / length).abs() < 1e-9));
+        let mut setup = previous.clone();
+        setup.frame = frame;
+        app.apply_setup_settings(setup.clone()).unwrap();
+        assert_eq!(app.document().setup(), &setup);
+        assert_eq!(app.geometry_state(), &geometry);
+        let loaded: Document =
+            serde_json::from_str(&serde_json::to_string(app.document()).unwrap()).unwrap();
+        assert_eq!(loaded.setup().frame, setup.frame);
+        assert!(app.undo());
+        assert_eq!(app.document().setup(), &previous);
+        assert!(app.redo());
+        assert_eq!(app.document().setup(), &setup);
+    }
+}
+
+#[test]
+fn pocket_and_drill_ignore_unrelated_blends_but_reject_obstructed_approaches() {
+    for kind in [OpKind::Pocket, OpKind::Drill] {
+        let (state, floor_loop) = blind_bore_with_unrelated_surface();
+        let wire = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|w| w.id == floor_loop.id)
+            .unwrap();
+        let id = if kind == OpKind::Pocket {
+            wire.face_id
+        } else {
+            state.assets[0]
+                .topology
+                .faces
+                .iter()
+                .find(|f| matches!(f.surface, CadSurface::Cylinder { inward: true, .. }))
+                .unwrap()
+                .id
+        };
+        let selected = reference(id, EntityKind::Face);
+        let mut app = controller();
+        app.edit_tool(0, |t| t.flute_length = 10.);
+        app.add_cad_asset(state.assets[0].clone(), state.instances.clone())
+            .unwrap();
+        let preview = app
+            .preview_cad_operation(kind, std::slice::from_ref(&selected))
+            .unwrap();
+        assert_eq!(
+            preview.heights,
+            CuttingHeights {
+                top: 0.,
+                bottom: -5.
+            }
+        );
+        let tool = if kind == OpKind::Drill {
+            app.use_tool(Tool {
+                number: 7,
+                diameter: 8.,
+                length: 30.,
+                flute_length: 10.,
+                kind: ToolKind::Drill {
+                    point_angle_deg: 118.,
+                },
+                ..Default::default()
+            })
+        } else {
+            1
+        };
+        app.create_cad_operation_with_tool(kind, vec![selected.clone()], tool)
+            .unwrap();
+        assert_eq!(
+            app.run(&CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
+        assert!(app.export_nc().is_ok());
+
+        // An unknown curved roof is ignored only when its exact conservative
+        // bounds prove it cannot block this feature, including after rotation.
+        for blocked in [false, true] {
+            let mut state = state.clone();
+            let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+            let blend = topology
+                .faces
+                .iter_mut()
+                .find(|f| matches!(f.surface, CadSurface::Unsupported { .. }))
+                .unwrap();
+            blend.bounds = if blocked {
+                [[9., 9., 1.], [11., 11., 2.]]
+            } else {
+                [[18., 18., 1.], [20., 20., 2.]]
+            };
+            state.instances[0].placement = RigidTransform {
+                rotation: [[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]],
+                translation: [100., -50., 40.],
+            };
+            let mut app = controller();
+            app.add_cad_asset(state.assets[0].clone(), state.instances)
+                .unwrap();
+            let result = app.preview_cad_operation(kind, std::slice::from_ref(&selected));
+            if blocked {
+                assert!(result.unwrap_err().contains("blocks vertical access"));
+            } else {
+                assert!(result.is_ok(), "{result:?}");
+            }
+        }
+    }
 }

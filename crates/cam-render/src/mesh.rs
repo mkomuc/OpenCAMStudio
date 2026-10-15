@@ -37,9 +37,60 @@ pub fn mesh_vertices(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<MeshVe
         .collect()
 }
 
+/// Back-to-front triangle order in clip depth for the viewport's orthographic camera.
+#[cfg(any(feature = "gpu", test))]
+pub(crate) fn transparent_indices(
+    vertices: &[MeshVertex],
+    indices: &[u32],
+    view_proj: [[f32; 4]; 4],
+) -> Vec<u32> {
+    let mut triangles: Vec<_> = indices
+        .chunks_exact(3)
+        .map(|triangle| {
+            let depth: f32 = triangle
+                .iter()
+                .map(|&index| {
+                    let p = vertices[index as usize].position;
+                    view_proj[0][2] * p[0]
+                        + view_proj[1][2] * p[1]
+                        + view_proj[2][2] * p[2]
+                        + view_proj[3][2]
+                })
+                .sum();
+            (depth, [triangle[0], triangle[1], triangle[2]])
+        })
+        .collect();
+    triangles.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+    triangles
+        .into_iter()
+        .flat_map(|(_, triangle)| triangle)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transparent_triangles_follow_camera_depth_when_orbiting() {
+        let positions = [
+            [0., 0., 1.],
+            [1., 0., 1.],
+            [0., 1., 1.],
+            [0., 0., 3.],
+            [1., 0., 3.],
+            [0., 1., 3.],
+        ];
+        let vertices = mesh_vertices(&positions, &[[0., 0., 1.]; 6]);
+        let indices = [0, 1, 2, 3, 4, 5];
+        assert_eq!(
+            transparent_indices(&vertices, &indices, crate::IDENTITY),
+            [3, 4, 5, 0, 1, 2]
+        );
+        let mut reversed = crate::IDENTITY;
+        reversed[2][2] = -1.;
+        assert_eq!(transparent_indices(&vertices, &indices, reversed), indices);
+    }
 
     #[test]
     fn mesh_vertices_interleaves_position_and_normal() {

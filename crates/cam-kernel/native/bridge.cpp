@@ -90,9 +90,12 @@ std::string translate(const char* path,double deflection,double precision) {
     STEPControl_Reader reader;
     // Legacy OCCT parameters are process-global; Rust's service mutex serializes calls.
     Interface_Static::SetCVal("xstep.cascade.unit","MM");
-    Interface_Static::SetIVal("read.precision.mode",1);
+    // Use the STEP uncertainty when provided, with precision as the fallback.
+    // Forcing a finer precision and clamping tolerances can turn valid tolerant
+    // spline joins into apparent self-intersections (e.g. 0.01 mm source data).
+    Interface_Static::SetIVal("read.precision.mode",0);
     Interface_Static::SetRVal("read.precision.val",precision);
-    Interface_Static::SetIVal("read.maxprecision.mode",1);
+    Interface_Static::SetIVal("read.maxprecision.mode",0);
     Interface_Static::SetRVal("read.maxprecision.val",precision);
     if(reader.ReadFile(path)!=IFSelect_RetDone) throw std::runtime_error("OCCT could not read STEP data");
     TColStd_SequenceOfAsciiString length,angle,solidangle; reader.FileUnits(length,angle,solidangle);
@@ -164,7 +167,7 @@ std::string translate(const char* path,double deflection,double precision) {
         }
     }
     if(bodycount==0) throw std::runtime_error("STEP contains no solid bodies; surface-only models are not qualified");
-    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":[\"Assemblies are flattened to placed solid instances; names, colours and external references are not qualified. OCCT translation repairs use the declared import precision; no additional healing is applied.\"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
+    return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":[\"Assemblies are flattened to placed solid instances; names, colours and external references are not qualified. STEP source tolerances are preserved; import precision is a fallback, not a tolerance clamp. No additional healing is applied.\"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
 }
 }
 extern "C" char* cam_occt_step(const char* path,double display,double precision,char** error) noexcept {

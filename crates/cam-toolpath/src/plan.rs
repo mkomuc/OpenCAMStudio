@@ -60,7 +60,46 @@ pub fn build_job(
     tool_change_height: f64,
     cancel: &CancelToken,
 ) -> JobResult {
-    build_job_with_compute(doc, spindle_rpm, dir, stock, tool_change_height, cancel, compute)
+    build_job_with_compute(
+        doc,
+        spindle_rpm,
+        dir,
+        stock,
+        tool_change_height,
+        cancel,
+        compute,
+    )
+}
+
+/// Immutable planning configuration, shared by synchronous and worker callers.
+pub struct PlanRequest<'a> {
+    pub document: &'a Document,
+    pub spindle_rpm: f64,
+    pub dir: SpindleDir,
+    pub stock: Option<([f64; 2], [f64; 2])>,
+    pub tool_change_height: f64,
+}
+
+/// Reuse only matching operation fragments. Linking is always rebuilt in order.
+pub fn build_job_cached(
+    request: PlanRequest<'_>,
+    cancel: &CancelToken,
+    cache: &mut crate::OperationCache,
+    mut progress: impl FnMut(u32),
+) -> JobResult {
+    cache.reset_stats();
+    build_job_with_compute(
+        request.document,
+        request.spindle_rpm,
+        request.dir,
+        request.stock,
+        request.tool_change_height,
+        cancel,
+        |op, env, token| {
+            progress(op.id());
+            cache.compute(op, env, token, || compute(op, env, token))
+        },
+    )
 }
 
 fn build_job_with_compute(
@@ -110,6 +149,14 @@ fn build_job_with_compute(
     // post re-references each group to its origin.
     let mut planned: Vec<Planned> = Vec::new();
     for operation in &setup.operations {
+        if doc.excluded_operations.contains(&operation.id())
+            || doc
+                .disabled_origins
+                .get(&setup.id)
+                .is_some_and(|set| set.contains(&operation.work_offset()))
+        {
+            continue;
+        }
         if cancel.is_cancelled() {
             completion = JobCompletion::Cancelled;
             break;
@@ -120,26 +167,38 @@ fn build_job_with_compute(
             StrategyResult {
                 diagnostics: vec![Diagnostic::error(
                     "Linked CAD geometry binding is missing; reselect the source geometry before planning",
-                )],
+                ).with_code(crate::DiagnosticCode::GeometryUnresolved)],
                 ..Default::default()
             }
         } else if let Some(binding) = doc.geometry.bindings.get(&operation.id()) {
             match &binding.status {
                 cam_model::ResolutionStatus::NeedsReselection { reason } => StrategyResult {
-                    diagnostics: vec![Diagnostic::error(format!("Needs reselection: {reason}"))],
+                    diagnostics: vec![Diagnostic::error(format!("Needs reselection: {reason}"))
+                        .with_code(crate::DiagnosticCode::GeometryUnresolved)],
                     ..Default::default()
                 },
                 cam_model::ResolutionStatus::Resolved => {
-                    if !binding.selected.iter().all(|r| doc.geometry.entity_exists(r))
-                        || binding.resolved_fingerprint.as_ref() != Some(&doc.geometry.binding_fingerprint(binding)) {
+                    if !binding
+                        .selected
+                        .iter()
+                        .all(|r| doc.geometry.entity_exists(r))
+                        || binding.resolved_fingerprint.as_ref()
+                            != Some(&doc.geometry.binding_fingerprint(binding))
+                    {
                         StrategyResult {
-                            diagnostics: vec![Diagnostic::error("Linked CAD geometry has no matching resolved snapshot; resolve it before planning")],
+                            diagnostics: vec![Diagnostic::error("Linked CAD geometry has no matching resolved snapshot; resolve it before planning").with_code(crate::DiagnosticCode::GeometryUnresolved)],
                             ..Default::default()
                         }
                     } else {
-                        compute_at_heights(operation, &env, binding.effective_heights(), cancel, &mut compute)
+                        compute_at_heights(
+                            operation,
+                            &env,
+                            binding.effective_heights(),
+                            cancel,
+                            &mut compute,
+                        )
                     }
-                },
+                }
             }
         } else {
             compute(operation, &env, cancel)
@@ -152,7 +211,7 @@ fn build_job_with_compute(
             result
                 .diagnostics
                 .into_iter()
-                .map(|d| d.for_op(operation.id())),
+                .map(|d| d.for_op(operation.id()).for_setup(setup.id)),
         );
         if cancelled {
             // Discard the unfinished fragment, including cancellation in the last
@@ -205,7 +264,14 @@ fn build_job_with_compute(
     // to the tool-change height and descending to clearance (a reorientation adds the
     // `M00` operator stop for re-fixturing); the emitter handles that.
     let mut st = EmitState::new();
+    // A cancelled planning run retains its completed prefix as a non-exportable
+    // preview. Cancellation first arriving during assembly stops at a boundary.
+    let cancelled_before_assembly = cancel.is_cancelled();
     for pl in &planned {
+        if !cancelled_before_assembly && cancel.is_cancelled() {
+            completion = JobCompletion::Cancelled;
+            break;
+        }
         emit_instance(
             &mut program,
             pl,
@@ -235,12 +301,21 @@ fn build_job_with_compute(
         if let Some(op) = error.op {
             diagnostic = diagnostic.for_op(op);
         }
-        diagnostics.push(diagnostic);
+        diagnostics.push(
+            diagnostic
+                .with_code(crate::DiagnosticCode::InvalidMotion)
+                .for_setup(setup.id)
+                .for_segment(error.step),
+        );
         if completion != JobCompletion::Cancelled {
             completion = JobCompletion::Failed;
         }
     }
-    JobResult { program, diagnostics, completion }
+    JobResult {
+        program,
+        diagnostics,
+        completion,
+    }
 }
 
 /// Adapt the legacy strategies to an explicit absolute cutting interval. Pocket
@@ -262,43 +337,71 @@ fn compute_at_heights(
     }
     if env.heights.clearance <= heights.top || env.heights.retract <= heights.top {
         return StrategyResult {
-            diagnostics: vec![Diagnostic::error(
-                "Clearance and retract must be above the linked cutting top; review setup heights",
-            )],
+            diagnostics: vec![Diagnostic::error(format!(
+                "Clearance Z{:.3} mm and retract Z{:.3} mm must both be above the linked \
+                 cutting top Z{:.3} mm. In Setup > Safe heights, enter absolute Z heights \
+                 in setup coordinates above Z{:.3} mm",
+                env.heights.clearance, env.heights.retract, heights.top, heights.top,
+            ))],
             ..Default::default()
         };
     }
     let mut op = operation.clone();
     let depth = heights.top - heights.bottom;
     let shift = match &mut op {
-        Operation::Pocket(p) => { p.depth = depth; heights.top },
-        Operation::Profile(p) => { p.depth = depth; heights.top },
+        Operation::Pocket(p) => {
+            p.depth = depth;
+            heights.top
+        }
+        Operation::Profile(p) => {
+            p.depth = depth;
+            heights.top
+        }
         Operation::Drill(p) => {
             p.depth = depth;
             p.start_offset = 0.0;
             0.0
-        },
-        Operation::Face(p) => { p.depth = depth; p.start_offset = heights.top; 0.0 },
-        _ => return StrategyResult {
-            diagnostics: vec![Diagnostic::error("This operation does not support linked CAD geometry")],
-            ..Default::default()
-        },
+        }
+        Operation::Face(p) => {
+            p.depth = depth;
+            p.start_offset = heights.top;
+            0.0
+        }
+        _ => {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(
+                    "This operation does not support linked CAD geometry",
+                )],
+                ..Default::default()
+            }
+        }
     };
     let local = JobEnv {
         heights: cam_model::Heights::new(
-            env.heights.clearance - shift, env.heights.retract - shift,
+            env.heights.clearance - shift,
+            env.heights.retract - shift,
             if shift != 0.0 || matches!(op, Operation::Pocket(_) | Operation::Profile(_)) {
                 0.0
-            } else if matches!(op, Operation::Drill(_)) { heights.top } else { env.heights.top_of_stock },
+            } else if matches!(op, Operation::Drill(_)) {
+                heights.top
+            } else {
+                env.heights.top_of_stock
+            },
         ),
         tools: env.tools,
         // The existing facing strategy sweeps a rectangle. Its resolver only
         // certifies whole-body rectangular top faces; use that selected extent.
-        stock: if matches!(op, Operation::Face(_)) { None } else { env.stock },
+        stock: if matches!(op, Operation::Face(_)) {
+            None
+        } else {
+            env.stock
+        },
         spindle: env.spindle,
     };
     let mut result = compute(&op, &local, cancel);
-    if shift != 0.0 { result.program = result.program.translated([0.0, 0.0, shift]); }
+    if shift != 0.0 {
+        result.program = result.program.translated([0.0, 0.0, shift]);
+    }
     result
 }
 
@@ -386,7 +489,10 @@ fn emit_instance(
         program.push(Step::ToolChange { tool: pl.tool });
         st.current_tool = Some(pl.tool);
     }
-    if st.current_rpm.is_none_or(|c| (c - pl.rpm).abs() > f64::EPSILON) {
+    if st
+        .current_rpm
+        .is_none_or(|c| (c - pl.rpm).abs() > f64::EPSILON)
+    {
         program.push(Step::Spindle { rpm: pl.rpm, dir });
         st.current_rpm = Some(pl.rpm);
     }
@@ -476,7 +582,10 @@ fn first_position(program: &Program) -> Option<Point3> {
     program.steps().iter().find_map(|s| match s {
         Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
         Step::Arc { end, .. } => Some(*end),
-        Step::Drill(c) => c.points.first().map(|[x, y]| Point3::new(*x, *y, c.retract)),
+        Step::Drill(c) => c
+            .points
+            .first()
+            .map(|[x, y]| Point3::new(*x, *y, c.retract)),
         _ => None,
     })
 }
@@ -519,21 +628,70 @@ mod tests {
             name: "completion test".into(),
             heights: Heights::new(5.0, 2.0, 0.0),
             stock: Stock::BoundingBox {
-                x_offset: 0.0, y_offset: 0.0, top: 0.0, thickness: 10.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                top: 0.0,
+                thickness: 10.0,
             },
             tools: vec![Tool {
-                number: 1, diameter: 3.0, length: 30.0,
-                kind: ToolKind::Drill { point_angle_deg: 118.0 },
+                number: 1,
+                diameter: 3.0,
+                length: 30.0,
+                kind: ToolKind::Drill {
+                    point_angle_deg: 118.0,
+                },
                 ..Default::default()
             }],
-            operations: (0..operations).map(|id| Operation::Drill(DrillOp {
-                id, tool: 1, points: vec![[10.0 + id as f64, 10.0]],
-                depth: 1.0, start_offset: 0.0, peck: None, dwell: None,
-                spindle_rpm: 1000.0, work_offset: 1, feed: 100.0,
-            })).collect(),
-            origin: [0.0; 3], extra_origins: Vec::new(), origin_index: 1,
+            operations: (0..operations)
+                .map(|id| {
+                    Operation::Drill(DrillOp {
+                        id,
+                        tool: 1,
+                        points: vec![[10.0 + id as f64, 10.0]],
+                        depth: 1.0,
+                        start_offset: 0.0,
+                        peck: None,
+                        dwell: None,
+                        spindle_rpm: 1000.0,
+                        work_offset: 1,
+                        feed: 100.0,
+                    })
+                })
+                .collect(),
+            origin: [0.0; 3],
+            extra_origins: Vec::new(),
+            origin_index: 1,
             tool_change_height: None,
         })
+    }
+
+    #[test]
+    fn headless_planning_honors_persistent_manufacturing_suppression() {
+        let mut doc = document(2);
+        doc.excluded_operations.insert(0);
+        let result = build_job(&doc, 1000., SpindleDir::Cw, None, 50., &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Complete);
+        assert!(!result
+            .program
+            .steps()
+            .iter()
+            .any(|step| matches!(step, Step::Drill(cycle) if cycle.tag.op_id == 0)));
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|step| matches!(step, Step::Drill(cycle) if cycle.tag.op_id == 1)));
+        doc.disabled_origins
+            .entry(doc.setup().id)
+            .or_default()
+            .insert(1);
+        let result = build_job(&doc, 1000., SpindleDir::Cw, None, 50., &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Complete);
+        assert!(!result
+            .program
+            .steps()
+            .iter()
+            .any(|step| matches!(step, Step::Drill(_))));
     }
 
     fn fragment(operation: &Operation) -> StrategyResult {
@@ -547,7 +705,10 @@ mod tests {
             feed: 100.0,
             tag: Tag::new(operation.id(), MoveKind::Cutting),
         });
-        StrategyResult { program, ..Default::default() }
+        StrategyResult {
+            program,
+            ..Default::default()
+        }
     }
 
     fn contains_cut(job: &JobResult, op: u32) -> bool {
@@ -572,7 +733,10 @@ mod tests {
         );
         assert_eq!(job.completion, JobCompletion::Failed);
         assert!(!contains_cut(&job, 0));
-        assert!(job.diagnostics.iter().any(|d| d.message.contains("binding is missing")));
+        assert!(job
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("binding is missing")));
     }
 
     #[test]
@@ -603,7 +767,12 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         let job = build_job_with_compute(
-            &document(1), 1000.0, SpindleDir::Cw, None, 50.0, &token,
+            &document(1),
+            1000.0,
+            SpindleDir::Cw,
+            None,
+            50.0,
+            &token,
             |_, _, _| panic!("cancelled work must not begin"),
         );
         assert_eq!(job.completion, JobCompletion::Cancelled);
@@ -615,13 +784,24 @@ mod tests {
         let token = CancelToken::new();
         let mut called = Vec::new();
         let job = build_job_with_compute(
-            &document(2), 1000.0, SpindleDir::Cw, None, 50.0, &token,
+            &document(2),
+            1000.0,
+            SpindleDir::Cw,
+            None,
+            50.0,
+            &token,
             |op, _, _| {
                 called.push(op.id());
-                StrategyResult { cancelled: true, ..fragment(op) }
+                StrategyResult {
+                    cancelled: true,
+                    ..fragment(op)
+                }
             },
         );
-        assert!(!token.is_cancelled(), "the strategy's own flag must propagate");
+        assert!(
+            !token.is_cancelled(),
+            "the strategy's own flag must propagate"
+        );
         assert_eq!(called, [0]);
         assert_eq!(job.completion, JobCompletion::Cancelled);
         assert!(!contains_cut(&job, 0));
@@ -632,7 +812,12 @@ mod tests {
     fn cancellation_during_the_last_operation_retains_only_completed_fragments() {
         let token = CancelToken::new();
         let job = build_job_with_compute(
-            &document(2), 1000.0, SpindleDir::Cw, None, 50.0, &token,
+            &document(2),
+            1000.0,
+            SpindleDir::Cw,
+            None,
+            50.0,
+            &token,
             |op, _, token| {
                 if op.id() == 1 {
                     token.cancel();
@@ -650,12 +835,19 @@ mod tests {
     fn failed_fragments_are_omitted_while_diagnostics_and_other_operations_continue() {
         let mut called = Vec::new();
         let job = build_job_with_compute(
-            &document(2), 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new(),
+            &document(2),
+            1000.0,
+            SpindleDir::Cw,
+            None,
+            50.0,
+            &CancelToken::new(),
             |op, _, _| {
                 called.push(op.id());
                 let mut result = fragment(op);
                 if op.id() == 0 {
-                    result.diagnostics.push(Diagnostic::error("cannot finish this operation"));
+                    result
+                        .diagnostics
+                        .push(Diagnostic::error("cannot finish this operation"));
                 }
                 result
             },
@@ -670,7 +862,12 @@ mod tests {
     #[test]
     fn warnings_do_not_make_successful_empty_operations_incomplete() {
         let job = build_job_with_compute(
-            &document(1), 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new(),
+            &document(1),
+            1000.0,
+            SpindleDir::Cw,
+            None,
+            50.0,
+            &CancelToken::new(),
             |_, _, _| StrategyResult {
                 diagnostics: vec![Diagnostic::warning("nothing to cut")],
                 ..Default::default()

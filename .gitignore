@@ -12,3 +12,5 @@
 # Cargo.lock IS committed — this is an application workspace.
 
 /screenshots
+/testfiles/Tigerente.step
+.obsidian

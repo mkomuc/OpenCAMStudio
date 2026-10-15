@@ -477,7 +477,10 @@ can be hidden, and a refusal is the one message that must not be missable.
   OpenCAMStudio cannot know where G54 sits on your machine. The box is therefore centred
   on the job rather than drawn at machine coordinates, which would be a fiction. What it
   tells you is whether the job fits, and how much room is left.
-- **View → Show stock** overlays the *simulated* stock surface under the backplot.
+- The **bottom viewport toolbar** has **Show stock** (**F8**) and **Transparent
+  stock** toggles. Show stock displays the raw setup box before a run and the
+  remaining simulated material afterwards. Transparent stock lets you see the
+  DXF drawing or CAD model through the material. Both settings survive a restart.
   The simulation grid **refines to the narrowest cut in the program**, so a
   sub-millimetre engraved groove is actually visible rather than falling between
   cells; it is capped so refining cannot turn a preview into a hang.

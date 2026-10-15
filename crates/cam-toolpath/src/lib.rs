@@ -18,21 +18,21 @@
 
 mod carve;
 mod chamfer;
-mod engrave;
-mod guards;
 mod clearing;
 mod clearsim;
-mod frontadvance;
 mod drill;
 mod emit;
+mod engrave;
 mod face;
+mod frontadvance;
+mod guards;
 mod leads;
 mod plan;
-mod rings;
-mod steer;
 mod pocket;
 mod profile;
 mod raster;
+mod rings;
+mod steer;
 mod thread;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,12 +41,14 @@ use std::sync::Arc;
 use cam_cldata::{Program, SpindleDir};
 use cam_model::{Heights, Tool};
 
+pub use cache::{CacheStats, OperationCache};
 pub use carve::{carve_shape, CarveShape, CarveStrategy};
 pub use chamfer::ChamferStrategy;
-pub use engrave::EngraveStrategy;
 pub use drill::DrillStrategy;
+pub use engrave::EngraveStrategy;
 pub use face::FaceStrategy;
-pub use plan::{build_job, JobCompletion, JobResult};
+pub use plan::{build_job, build_job_cached, JobCompletion, JobResult, PlanRequest};
+mod cache;
 pub use pocket::PocketStrategy;
 pub use profile::ProfileStrategy;
 pub use thread::ThreadStrategy;
@@ -76,6 +78,26 @@ pub enum Severity {
     Error,
 }
 
+/// Stable machine-readable diagnostic categories; message text is presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticCode {
+    InvalidInput,
+    GeometryUnresolved,
+    InvalidMotion,
+    StrategyWarning,
+    Information,
+    WorkerFailed,
+    Cancelled,
+}
+
+/// Source ownership survives worker/service boundaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourceRef {
+    pub setup: Option<u64>,
+    pub operation: Option<u32>,
+    pub segment: Option<usize>,
+}
+
 /// A typed message from a strategy, referencing what went wrong. (Geometry
 /// references — a specific vertex or chain — will attach here as the model
 /// grows; for now it carries a human-readable message.)
@@ -83,6 +105,8 @@ pub enum Severity {
 pub struct Diagnostic {
     /// How serious the diagnostic is.
     pub severity: Severity,
+    pub code: DiagnosticCode,
+    pub source: SourceRef,
     /// Human-readable description.
     pub message: String,
     /// The operation this diagnostic belongs to, when known. Strategies do not set
@@ -97,6 +121,8 @@ impl Diagnostic {
     pub fn error(message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
+            code: DiagnosticCode::InvalidInput,
+            source: SourceRef::default(),
             message: message.into(),
             op: None,
         }
@@ -105,6 +131,20 @@ impl Diagnostic {
     /// Attach the operation this diagnostic came from.
     pub fn for_op(mut self, id: u32) -> Self {
         self.op = Some(id);
+        self.source.operation = Some(id);
+        self
+    }
+
+    pub fn for_segment(mut self, index: usize) -> Self {
+        self.source.segment = Some(index);
+        self
+    }
+    pub fn with_code(mut self, code: DiagnosticCode) -> Self {
+        self.code = code;
+        self
+    }
+    pub fn for_setup(mut self, id: u64) -> Self {
+        self.source.setup = Some(id);
         self
     }
 
@@ -112,6 +152,8 @@ impl Diagnostic {
     pub fn warning(message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
+            code: DiagnosticCode::StrategyWarning,
+            source: SourceRef::default(),
             message: message.into(),
             op: None,
         }
@@ -121,6 +163,8 @@ impl Diagnostic {
     pub fn info(message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Info,
+            code: DiagnosticCode::Information,
+            source: SourceRef::default(),
             message: message.into(),
             op: None,
         }

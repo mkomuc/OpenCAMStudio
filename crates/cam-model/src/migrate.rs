@@ -204,6 +204,8 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         // operation contours remain explicit; associations are never guessed.
         13 => Ok(()),
         14 => v14_to_v15(doc),
+        // v16 adds suppression and ID marks with serde defaults.
+        15 => Ok(()),
         _ => Err(MigrationError::MissingStep { from }),
     }
 }
@@ -211,26 +213,63 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
 /// v14→v15 wraps the legacy setup unchanged as the first physical setup. Keeping
 /// the object intact preserves legacy operation order and extra work offsets.
 fn v14_to_v15(doc: &mut Value) -> Result<(), MigrationError> {
-    let obj = doc.as_object_mut().ok_or_else(|| MigrationError::Malformed { step: 14, detail: "document must be an object".into() })?;
-    if obj.contains_key("setups") { return Err(MigrationError::Malformed { step: 14, detail: "legacy document unexpectedly already has setups".into() }); }
-    let mut setup = obj.remove("setup").ok_or_else(|| MigrationError::Malformed { step: 14, detail: "legacy document has no setup".into() })?;
-    let setup_obj = setup.as_object_mut().ok_or_else(|| MigrationError::Malformed { step: 14, detail: "legacy setup must be an object".into() })?;
+    let obj = doc
+        .as_object_mut()
+        .ok_or_else(|| MigrationError::Malformed {
+            step: 14,
+            detail: "document must be an object".into(),
+        })?;
+    if obj.contains_key("setups") {
+        return Err(MigrationError::Malformed {
+            step: 14,
+            detail: "legacy document unexpectedly already has setups".into(),
+        });
+    }
+    let mut setup = obj
+        .remove("setup")
+        .ok_or_else(|| MigrationError::Malformed {
+            step: 14,
+            detail: "legacy document has no setup".into(),
+        })?;
+    let setup_obj = setup
+        .as_object_mut()
+        .ok_or_else(|| MigrationError::Malformed {
+            step: 14,
+            detail: "legacy setup must be an object".into(),
+        })?;
     setup_obj.insert("id".into(), Value::from(1));
     setup_obj.insert("frame".into(), serde_json::json!({"world_from_setup":{"rotation":[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],"translation":[0.0,0.0,0.0]},"references":{"x":null,"y":null,"z":null,"origin":"ModelOrigin"}}));
-    setup_obj.entry("material").or_insert_with(|| Value::String(String::new()));
-    setup_obj.entry("model_instances").or_insert_with(|| Value::Array(Vec::new()));
-    setup_obj.entry("program_name").or_insert_with(|| Value::String(String::new()));
+    setup_obj
+        .entry("material")
+        .or_insert_with(|| Value::String(String::new()));
+    setup_obj
+        .entry("model_instances")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    setup_obj
+        .entry("program_name")
+        .or_insert_with(|| Value::String(String::new()));
     let mut linked = std::collections::BTreeSet::new();
     if let Some(geometry) = obj.get("geometry") {
         if let Some(bindings) = geometry.get("bindings") {
-            let bindings = bindings.as_object().ok_or_else(|| MigrationError::Malformed { step: 14, detail: "geometry bindings must be an object".into() })?;
+            let bindings = bindings
+                .as_object()
+                .ok_or_else(|| MigrationError::Malformed {
+                    step: 14,
+                    detail: "geometry bindings must be an object".into(),
+                })?;
             for key in bindings.keys() {
-                let id = key.parse::<u32>().map_err(|_| MigrationError::Malformed { step: 14, detail: format!("invalid operation binding ID `{key}`") })?;
+                let id = key.parse::<u32>().map_err(|_| MigrationError::Malformed {
+                    step: 14,
+                    detail: format!("invalid operation binding ID `{key}`"),
+                })?;
                 linked.insert(id);
             }
         }
     }
-    obj.insert("cad_linked_operations".into(), Value::Array(linked.into_iter().map(Value::from).collect()));
+    obj.insert(
+        "cad_linked_operations".into(),
+        Value::Array(linked.into_iter().map(Value::from).collect()),
+    );
     obj.insert("setups".into(), Value::Array(vec![setup]));
     Ok(())
 }
@@ -432,9 +471,14 @@ mod tests {
         assert_eq!(parsed.setups.len(), 1);
         assert_eq!(parsed.setups[0].id, 1);
         parsed.active_setup_id = 99;
-        let roundtrip: Document = serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
+        let roundtrip: Document =
+            serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
         assert_eq!(roundtrip.active_setup_id, 0, "active setup is view-only");
-        assert_eq!(roundtrip.setup().id, 1, "accessor falls back to the first setup");
+        assert_eq!(
+            roundtrip.setup().id,
+            1,
+            "accessor falls back to the first setup"
+        );
         assert_eq!(parsed.geometry, crate::GeometryState::default());
         let crate::Operation::Pocket(p) = &parsed.setup().operations[0] else {
             panic!("expected a pocket");

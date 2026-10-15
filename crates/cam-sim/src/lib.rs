@@ -208,6 +208,22 @@ pub fn simulate(
     options: &SimOptions,
     tools: &[SimTool],
 ) -> SimResult {
+    simulate_controlled(program, min, max, options, tools, &|| false, |_, _| {}).unwrap()
+}
+
+/// Cancellable simulation. A stopped traversal has no complete result.
+pub fn simulate_controlled(
+    program: &Program,
+    min: [f64; 3],
+    max: [f64; 3],
+    options: &SimOptions,
+    tools: &[SimTool],
+    cancelled: &dyn Fn() -> bool,
+    mut progress: impl FnMut(usize, usize),
+) -> Option<SimResult> {
+    if cancelled() {
+        return None;
+    }
     let mut field = Heightfield::new(
         [min[0], min[1]],
         [max[0], max[1]],
@@ -219,7 +235,13 @@ pub fn simulate(
     let mut cur: Option<Point3> = None;
     let mut collisions = Vec::new();
 
-    for step in program.steps() {
+    for (index, step) in program.steps().iter().enumerate() {
+        if cancelled() {
+            return None;
+        }
+        if index % 128 == 0 {
+            progress(index, program.steps().len());
+        }
         match step {
             Step::ToolChange { tool: number } => {
                 tool = tools
@@ -246,9 +268,13 @@ pub fn simulate(
                         // surface alongside it. For a flat tool `offset` is zero
                         // everywhere, so this reduces exactly to the old radius test.
                         let tip_z = a.z.min(to.z);
-                        if let Some((intrusion, stock)) =
-                            field.max_intrusion_along([a.x, a.y], [to.x, to.y], tip_z, &tool)
-                        {
+                        if let Some((intrusion, stock)) = field.max_intrusion_along_controlled(
+                            [a.x, a.y],
+                            [to.x, to.y],
+                            tip_z,
+                            &tool,
+                            cancelled,
+                        ) {
                             if intrusion > CLEARANCE_EPS {
                                 collisions.push(Collision {
                                     kind: CollisionKind::RapidThroughStock,
@@ -266,7 +292,12 @@ pub fn simulate(
             }
             Step::Linear { to, .. } => {
                 if let Some(a) = cur {
-                    field.cut_segment_profile([a.x, a.y, a.z], [to.x, to.y, to.z], &tool);
+                    field.cut_segment_profile_controlled(
+                        [a.x, a.y, a.z],
+                        [to.x, to.y, to.z],
+                        &tool,
+                        cancelled,
+                    );
                 }
                 cur = Some(*to);
             }
@@ -276,14 +307,25 @@ pub fn simulate(
                 if let Some(a) = cur {
                     let pts = arc_points(a, *end, *center, *dir);
                     for w in pts.windows(2) {
-                        field.cut_segment_profile(w[0], w[1], &tool);
+                        if cancelled() {
+                            return None;
+                        }
+                        field.cut_segment_profile_controlled(w[0], w[1], &tool, cancelled);
                     }
                 }
                 cur = Some(*end);
             }
             Step::Drill(cycle) => {
                 for &[x, y] in &cycle.points {
-                    field.cut_segment_profile([x, y, cycle.depth], [x, y, cycle.depth], &tool);
+                    if cancelled() {
+                        return None;
+                    }
+                    field.cut_segment_profile_controlled(
+                        [x, y, cycle.depth],
+                        [x, y, cycle.depth],
+                        &tool,
+                        cancelled,
+                    );
                 }
                 cur = None;
             }
@@ -291,12 +333,16 @@ pub fn simulate(
         }
     }
 
+    if cancelled() {
+        return None;
+    }
+    progress(program.steps().len(), program.steps().len());
     let removed_volume = field.removed_volume();
-    SimResult {
+    Some(SimResult {
         field,
         collisions,
         removed_volume,
-    }
+    })
 }
 
 /// Verify a simulated `field` against a desired `target` surface: if the tool cut
@@ -538,7 +584,10 @@ mod tests {
             .rapid(Point3::new(35.0, 20.0, -1.0), MoveKind::Link)
             .build();
         let sim = simulate(&prog, STOCK_MIN, STOCK_MAX, &opts(), &[vee]);
-        assert!(!sim.is_clean(), "a lateral rapid at depth over stock must flag");
+        assert!(
+            !sim.is_clean(),
+            "a lateral rapid at depth over stock must flag"
+        );
         assert_eq!(sim.collisions[0].kind, CollisionKind::RapidThroughStock);
     }
 
@@ -734,5 +783,52 @@ mod tests {
         let side = sim.field.sample(20.0, 21.5);
         assert!((center + 3.0).abs() < 0.3, "slot axis near −3: {center}");
         assert!(side > center + 0.3, "ball tool leaves a rounded slot floor");
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use cam_cldata::{MoveKind, ProgramBuilder};
+    use std::cell::Cell;
+    #[test]
+    fn cancellation_during_a_long_cut_returns_no_completed_simulation() {
+        let program = ProgramBuilder::new()
+            .rapid(Point3::new(1., 1., 5.), MoveKind::Link)
+            .linear(Point3::new(39., 39., -2.), MoveKind::Cutting)
+            .build();
+        let polls = Cell::new(0);
+        let result = simulate_controlled(
+            &program,
+            [0., 0., -4.],
+            [40., 40., 0.],
+            &SimOptions {
+                resolution: 0.05,
+                tool_radius: 2.,
+            },
+            &[],
+            &|| {
+                polls.set(polls.get() + 1);
+                polls.get() > 20
+            },
+            |_, _| {},
+        );
+        assert!(result.is_none());
+        assert!(
+            polls.get() > 20,
+            "the inner cell traversal must observe cancellation"
+        );
+    }
+    #[test]
+    fn stock_mesh_preparation_is_cancellable_inside_rows() {
+        let field = Heightfield::new([0., 0.], [10., 10.], 0.1, 0.);
+        let polls = Cell::new(0);
+        assert!(field
+            .to_solid_mesh_controlled(-4., &|| {
+                polls.set(polls.get() + 1);
+                polls.get() >= 3
+            })
+            .is_none());
+        assert_eq!(polls.get(), 3);
     }
 }

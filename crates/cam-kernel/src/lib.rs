@@ -8,6 +8,8 @@ use std::{fmt, path::Path};
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SolidImportOptions {
     pub display_tolerance: f64,
+    /// Fallback precision in millimetres when STEP does not specify uncertainty.
+    /// Source tolerances needed for consistent topology are preserved.
     pub import_tolerance: f64,
 }
 impl Default for SolidImportOptions {

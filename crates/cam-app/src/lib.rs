@@ -12,6 +12,8 @@
 mod config;
 mod controller;
 mod import_jobs;
+mod jobs;
+pub use jobs::{JobPhase, JobProgress, JobStamp};
 mod cad_operations;
 // Where per-user files live. One resolver, shared by the tool library and the
 // settings file — two copies of a platform convention drift silently.
@@ -27,24 +29,24 @@ mod settings;
 mod tool_library;
 
 pub use cad_operations::CadImportPreview;
+pub use cam_toolpath::JobCompletion;
 pub use controller::{
     op_accepts_open_paths, op_selects_circles, op_takes_islands, AppController, CuttingData,
-    ExportError, ExportToError,
-    JobParams, LoopPart, LoopRef, OpKind, PendingOp, PickResult, ProjectError, RunOutcome,
-    Selection, SnapHit, SnapKind,
+    ExportError, ExportToError, JobParams, LoopPart, LoopRef, OpKind, PendingOp, PickResult,
+    ProjectError, RunOutcome, Selection, SnapHit, SnapKind,
 };
-pub use machines::{default_machine, load as load_machines, load_from as load_machines_from,
-    MachineEntry, MachineLibrary, MachineLoad, MACHINES_VERSION};
+pub use machines::{
+    default_machine, load as load_machines, load_from as load_machines_from, MachineEntry,
+    MachineLibrary, MachineLoad, MACHINES_VERSION,
+};
 pub use project::{OcamFile, Project};
 pub use settings::{
-    load as load_settings, load_from as load_settings_from, settings_path, LoadOutcome,
-    PanePrefs, SessionState, Settings, SnapPrefs, ViewPrefs, GIZMO_SIZE_RANGE,
-    MARKER_SCALE_RANGE, ORIGIN_MARKER_RANGE, PANE_MIN_RANGE, PANE_SIZE_RANGE, PICKBOX_RANGE,
-    SETTINGS_VERSION,
+    load as load_settings, load_from as load_settings_from, settings_path, LoadOutcome, PanePrefs,
+    SessionState, Settings, SnapPrefs, ViewPrefs, GIZMO_SIZE_RANGE, MARKER_SCALE_RANGE,
+    ORIGIN_MARKER_RANGE, PANE_MIN_RANGE, PANE_SIZE_RANGE, PICKBOX_RANGE, SETTINGS_VERSION,
     SNAP_CATCH_MULTIPLE,
 };
 pub use tool_library::{families_for, LibraryLoad, ToolKindPick, ToolLibrary, LIBRARY_VERSION};
-pub use cam_toolpath::JobCompletion;
 
 /// The human-facing version string, including git provenance on a dev build.
 ///
@@ -119,10 +121,7 @@ mod version_tests {
 
     #[test]
     fn dev_build_without_date_still_pins_the_commit() {
-        assert_eq!(
-            format_version("0.1.0", "748f9ea", ""),
-            "0.1.0 (748f9ea)"
-        );
+        assert_eq!(format_version("0.1.0", "748f9ea", ""), "0.1.0 (748f9ea)");
     }
 }
 

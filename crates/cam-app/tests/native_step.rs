@@ -107,6 +107,117 @@ fn new_app() -> AppController {
 }
 #[test]
 #[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn step_source_tolerances_preserve_validity_and_geometry_selection() {
+    let mut app = new_app();
+    app.import_cad(fixture("toleranced-spline-prism-mm.step"))
+        .unwrap();
+    let state = app.geometry_state();
+    state.validate().unwrap();
+    let topology = &state.assets[0].topology;
+    assert_eq!(topology.bodies.len(), 1);
+    assert!(
+        topology.bodies[0].valid_solid,
+        "source tolerances must not be clamped to the import fallback precision"
+    );
+    let face = reference(state, EntityKind::Face, topology.faces[0].id);
+    app.toggle_cad_selection(face.clone(), false).unwrap();
+    assert_eq!(app.cad_selection(), &[face]);
+    // Validity does not imply support for machining arbitrary spline surfaces.
+    let error = app.cad_operation_eligibility(OpKind::Pocket).unwrap_err();
+    assert!(error.contains("planar face"), "{error}");
+}
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
+    let mut app = new_app();
+    app.import_cad(fixture("blended-box-blind-bore-mm.step"))
+        .unwrap();
+    let state = app.geometry_state();
+    let topology = &state.assets[0].topology;
+    assert!(topology.bodies[0].valid_solid);
+    assert!(topology
+        .faces
+        .iter()
+        .any(|f| matches!(f.surface, CadSurface::Unsupported { .. })));
+    let floor = topology.faces.iter().find(|f| matches!(f.surface,
+        CadSurface::Plane { origin, normal } if (origin[2] + 2.0).abs() < 1e-6 && normal[2] > 0.99
+    )).expect("blind-bore floor");
+    let selected = reference(state, EntityKind::Loop, floor.loop_ids[0]);
+    let cylinder = topology
+        .faces
+        .iter()
+        .find(|f| matches!(f.surface, CadSurface::Cylinder { inward: true, .. }))
+        .unwrap();
+    let trim = reference(state, EntityKind::Loop, cylinder.loop_ids[0]);
+    assert!(app
+        .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&trim))
+        .unwrap_err()
+        .contains("seam"));
+    assert!(app
+        .preview_cad_operation(OpKind::Profile, &[trim, selected.clone()])
+        .unwrap_err()
+        .contains("one boundary per operation"));
+    let preview = app
+        .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&selected))
+        .unwrap();
+    assert_eq!(
+        preview.heights,
+        CuttingHeights {
+            top: 0.0,
+            bottom: -2.0
+        }
+    );
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![selected.clone()])
+        .unwrap();
+    assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.side == Side::Inside));
+    assert_eq!(app.geometry_state().bindings[&id].selected, vec![selected]);
+    assert_eq!(
+        app.geometry_state().bindings[&id].recipe,
+        ExtractionRecipe::ProfileLoop { side: Side::Inside }
+    );
+    let run = app.run(&CancelToken::new());
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
+    let program = run.program.clone();
+    let (lo, hi) = cutting_z_range(&program);
+    assert!((lo + 2.0).abs() < 1e-6 && hi <= 0.0);
+    let tool_radius = 1.5;
+    for step in program.steps() {
+        let point = match step {
+            cam_cldata::Step::Linear { to, tag, .. }
+                if tag.kind == cam_cldata::MoveKind::Cutting =>
+            {
+                Some(to)
+            }
+            cam_cldata::Step::Arc { end, tag, .. } if tag.kind == cam_cldata::MoveKind::Cutting => {
+                Some(end)
+            }
+            _ => None,
+        };
+        if let Some(point) = point {
+            assert!(
+                (point.x - 30.0).hypot(point.y - 20.0) + tool_radius <= 4.001,
+                "inside compensation must keep the cutter within the bore: {point:?}"
+            );
+        }
+    }
+    let nc = app.export_nc().unwrap().to_owned();
+    let path =
+        std::env::temp_dir().join(format!("native-bore-profile-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.run(&CancelToken::new()).program, program);
+    assert_eq!(reopened.export_nc().unwrap(), nc);
+}
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
 fn step_plate_floor_island_four_holes_profile_generates_and_reopens_without_source() {
     let mut app = new_app();
     let source = std::env::temp_dir().join(format!("native-source-{}.step", std::process::id()));
@@ -521,4 +632,110 @@ fn facing_uses_actual_stock_top_and_rederives_it_after_stock_edits() {
         JobCompletion::Complete
     );
     assert!(app.run(&CancelToken::new()).program.steps().iter().any(|s|matches!(s,cam_cldata::Step::Linear{to,tag,..}if tag.kind==cam_cldata::MoveKind::Cutting&&to.z.abs()<1e-9)));
+}
+
+#[test]
+#[ignore = "requires OCCT SDK and local testfiles/Tigerente.step"]
+fn tigerente_face_32_can_face_stock_above_spline_boundaries_and_blends() {
+    assert!(cam_kernel::backend_available());
+    let mut machine = default_machine();
+    machine.envelope = Envelope::new(
+        cam_cldata::Point3::new(-500., -500., -100.),
+        cam_cldata::Point3::new(500., 500., 200.),
+    );
+    let mut app = AppController::new(machine);
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente.step");
+    app.import_cad(&path).unwrap();
+    let target = reference(app.geometry_state(), EntityKind::Face, 32);
+    assert!(app
+        .preview_cad_operation(OpKind::Face, std::slice::from_ref(&target))
+        .unwrap_err()
+        .contains("align setup Z"));
+    let mut setup = app.document().setup().clone();
+    setup.frame = SetupFrame::from_axes(Some([1., 0., 0.]), Some([0., 0., 1.]), None).unwrap();
+    app.apply_setup_settings(setup).unwrap();
+    let preview = app
+        .preview_cad_operation(OpKind::Face, std::slice::from_ref(&target))
+        .unwrap();
+    assert!((preview.heights.bottom - 0.).abs() < 1e-6);
+    assert!(preview.heights.top > 0.99);
+    let id = app
+        .create_cad_operation(OpKind::Face, vec![target])
+        .unwrap();
+    let outcome = app.run(&CancelToken::new());
+    assert_eq!(
+        outcome.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        outcome.diagnostics
+    );
+    assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+    assert!(!outcome.program.is_empty());
+    let nc = app.export_nc().unwrap();
+    assert!(nc.contains("M30"));
+    assert!(app.geometry_state().bindings.contains_key(&id));
+}
+
+#[test]
+#[ignore = "requires OCCT SDK and local testfiles/Tigerente.step"]
+fn tigerente_blind_pockets_and_drills_use_local_certificates_in_both_setups() {
+    for (floor_id, bore_id, setup_y, bottom, top) in [
+        (14, 13, [0., 0., -1.], 28., 30.),
+        (27, 26, [0., 0., 1.], -2., 0.),
+    ] {
+        let mut app = new_app();
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente.step");
+        app.import_cad(&path).unwrap();
+        let floor = reference(app.geometry_state(), EntityKind::Face, floor_id);
+        let bore = reference(app.geometry_state(), EntityKind::Face, bore_id);
+        // A wrong setup still fails for the selected feature, regardless of
+        // which unrelated curved face happens to appear first in the B-rep.
+        assert!(app
+            .preview_cad_operation(OpKind::Pocket, std::slice::from_ref(&floor))
+            .unwrap_err()
+            .contains("align setup Z"));
+        let mut setup = app.document().setup().clone();
+        setup.frame = SetupFrame::from_xy([1., 0., 0.], setup_y).unwrap();
+        setup.stock = Stock::RelativeBox {
+            offsets: [[1.; 3]; 2],
+        };
+        setup.heights = Heights::new(top + 6., top + 3., top + 1.);
+        app.apply_setup_settings(setup).unwrap();
+        let preview = app
+            .preview_cad_operation(OpKind::Pocket, std::slice::from_ref(&floor))
+            .unwrap();
+        assert!((preview.heights.bottom - bottom).abs() < 1e-6);
+        assert!((preview.heights.top - top).abs() < 1e-6);
+        app.create_cad_operation(OpKind::Pocket, vec![floor])
+            .unwrap();
+        let drill_preview = app
+            .preview_cad_operation(OpKind::Drill, std::slice::from_ref(&bore))
+            .unwrap();
+        assert_eq!(preview.heights, drill_preview.heights);
+        let drill = app.use_tool(Tool {
+            number: 7,
+            diameter: 8.,
+            length: 30.,
+            flute_length: 12.,
+            kind: ToolKind::Drill {
+                point_angle_deg: 118.,
+            },
+            ..Default::default()
+        });
+        app.create_cad_operation_with_tool(OpKind::Drill, vec![bore], drill)
+            .unwrap();
+        let outcome = app.run(&CancelToken::new());
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            outcome.diagnostics
+        );
+        let (min_z, _) = cutting_z_range(&outcome.program);
+        assert!((min_z - bottom).abs() < 1e-6, "{min_z}");
+        assert!(!outcome.program.is_empty());
+        assert!(app.export_nc().unwrap().contains("M30"));
+    }
 }

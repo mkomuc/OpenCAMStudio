@@ -116,11 +116,24 @@ impl Heightfield {
     /// `offset` at its radial distance from the axis (so a ball mill leaves a
     /// rounded floor, a V mill a groove, and a flat mill a flat floor).
     pub fn cut_segment_profile(&mut self, a: [f64; 3], b: [f64; 3], tool: &ToolProfile) {
+        self.cut_segment_profile_controlled(a, b, tool, &|| false);
+    }
+
+    pub(crate) fn cut_segment_profile_controlled(
+        &mut self,
+        a: [f64; 3],
+        b: [f64; 3],
+        tool: &ToolProfile,
+        cancelled: &dyn Fn() -> bool,
+    ) {
         let radius = tool.radius;
         let (ix0, ix1) = self.index_range(a[0].min(b[0]) - radius, a[0].max(b[0]) + radius, 0);
         let (iy0, iy1) = self.index_range(a[1].min(b[1]) - radius, a[1].max(b[1]) + radius, 1);
         let r2 = radius * radius;
         for iy in iy0..=iy1 {
+            if cancelled() {
+                return;
+            }
             for ix in ix0..=ix1 {
                 let (cx, cy) = self.center(ix, iy);
                 let (t, dist2) = project(cx, cy, [a[0], a[1]], [b[0], b[1]]);
@@ -187,12 +200,26 @@ impl Heightfield {
         tip_z: f64,
         tool: &ToolProfile,
     ) -> Option<(f32, f32)> {
+        self.max_intrusion_along_controlled(a, b, tip_z, tool, &|| false)
+    }
+
+    pub(crate) fn max_intrusion_along_controlled(
+        &self,
+        a: [f64; 2],
+        b: [f64; 2],
+        tip_z: f64,
+        tool: &ToolProfile,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<(f32, f32)> {
         let radius = tool.radius;
         let (ix0, ix1) = self.index_range(a[0].min(b[0]) - radius, a[0].max(b[0]) + radius, 0);
         let (iy0, iy1) = self.index_range(a[1].min(b[1]) - radius, a[1].max(b[1]) + radius, 1);
         let r2 = radius * radius;
         let mut worst: Option<(f32, f32)> = None;
         for iy in iy0..=iy1 {
+            if cancelled() {
+                return None;
+            }
             for ix in ix0..=ix1 {
                 let (cx, cy) = self.center(ix, iy);
                 let dist2 = project(cx, cy, a, b).1;
@@ -333,6 +360,14 @@ impl Heightfield {
     /// axis-aligned and looks unchanged. This smooths the *shading*; the stepped
     /// silhouette is a heightfield limit deferred to the 3D-milling/kernel work.
     pub fn to_solid_mesh(&self, floor: f64) -> SurfaceMesh {
+        self.to_solid_mesh_controlled(floor, &|| false).unwrap()
+    }
+
+    pub fn to_solid_mesh_controlled(
+        &self,
+        floor: f64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<SurfaceMesh> {
         let f = floor as f32;
         let res = self.res as f32;
         let (ox, oy) = (self.origin[0] as f32, self.origin[1] as f32);
@@ -376,6 +411,9 @@ impl Heightfield {
         };
 
         for iy in 0..self.ny {
+            if cancelled() {
+                return None;
+            }
             for ix in 0..self.nx {
                 let z = self.z[iy * self.nx + ix];
                 if z <= f + 1e-4 {
@@ -417,8 +455,14 @@ impl Heightfield {
                 // hole. Falls back to the geometric wall direction if it cancels.
                 let mut g = [0.0f32, 0.0];
                 for (dx, dy, nb) in [
-                    (1, 0, e), (-1, 0, w), (0, 1, n_), (0, -1, s),
-                    (1, 1, ne), (-1, 1, nw), (1, -1, se), (-1, -1, sw),
+                    (1, 0, e),
+                    (-1, 0, w),
+                    (0, 1, n_),
+                    (0, -1, s),
+                    (1, 1, ne),
+                    (-1, 1, nw),
+                    (1, -1, se),
+                    (-1, -1, sw),
                 ] {
                     if open(nb) {
                         let l = ((dx * dx + dy * dy) as f32).sqrt();
@@ -433,34 +477,59 @@ impl Heightfield {
                 // this cell's two edge corners down to the neighbour level (clamped
                 // to the floor). Shaded by the gradient normal, or the face axis.
                 let level = |nb: Option<f32>| nb.map_or(f, |v| v.max(f));
-                let mut wall = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], axis: [f32; 3]| {
-                    let n = grad.unwrap_or(axis);
-                    tri(a, b, c, n);
-                    tri(a, c, d, n);
-                };
+                let mut wall =
+                    |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], axis: [f32; 3]| {
+                        let n = grad.unwrap_or(axis);
+                        tri(a, b, c, n);
+                        tri(a, c, d, n);
+                    };
                 if open(w) {
                     let l = level(w);
-                    wall([x0, y0, c_sw], [x0, y1, c_nw], [x0, y1, l], [x0, y0, l], [-1.0, 0.0, 0.0]);
+                    wall(
+                        [x0, y0, c_sw],
+                        [x0, y1, c_nw],
+                        [x0, y1, l],
+                        [x0, y0, l],
+                        [-1.0, 0.0, 0.0],
+                    );
                 }
                 if open(e) {
                     let l = level(e);
-                    wall([x1, y1, c_ne], [x1, y0, c_se], [x1, y0, l], [x1, y1, l], [1.0, 0.0, 0.0]);
+                    wall(
+                        [x1, y1, c_ne],
+                        [x1, y0, c_se],
+                        [x1, y0, l],
+                        [x1, y1, l],
+                        [1.0, 0.0, 0.0],
+                    );
                 }
                 if open(s) {
                     let l = level(s);
-                    wall([x1, y0, c_se], [x0, y0, c_sw], [x0, y0, l], [x1, y0, l], [0.0, -1.0, 0.0]);
+                    wall(
+                        [x1, y0, c_se],
+                        [x0, y0, c_sw],
+                        [x0, y0, l],
+                        [x1, y0, l],
+                        [0.0, -1.0, 0.0],
+                    );
                 }
                 if open(n_) {
                     let l = level(n_);
-                    wall([x0, y1, c_nw], [x1, y1, c_ne], [x1, y1, l], [x0, y1, l], [0.0, 1.0, 0.0]);
+                    wall(
+                        [x0, y1, c_nw],
+                        [x1, y1, c_ne],
+                        [x1, y1, l],
+                        [x0, y1, l],
+                        [0.0, 1.0, 0.0],
+                    );
                 }
             }
         }
-        SurfaceMesh {
+        Some(SurfaceMesh {
             positions,
             normals,
             indices,
-        }
+        })
     }
 
     /// Centre of cell `(ix, iy)`.
@@ -605,13 +674,19 @@ mod tests {
         // Uncut 10×10 block, top 0, floor -5.
         let hf = Heightfield::new([0.0, 0.0], [10.0, 10.0], 1.0, 0.0);
         let mesh = hf.to_solid_mesh(-5.0);
-        assert!(mesh.indices.iter().all(|&i| (i as usize) < mesh.positions.len()));
+        assert!(mesh
+            .indices
+            .iter()
+            .all(|&i| (i as usize) < mesh.positions.len()));
         // Must carry top (+Z), bottom (−Z) and side-wall (horizontal) faces — a
         // sheet would have only +Z.
         let has = |pred: fn(&[f32; 3]) -> bool| mesh.normals.iter().any(pred);
         assert!(has(|n| n[2] > 0.9), "has a top");
         assert!(has(|n| n[2] < -0.9), "has a bottom");
-        assert!(has(|n| n[0].abs() > 0.9 || n[1].abs() > 0.9), "has perimeter walls");
+        assert!(
+            has(|n| n[0].abs() > 0.9 || n[1].abs() > 0.9),
+            "has perimeter walls"
+        );
         // No geometry ever dips below the floor.
         assert!(mesh.positions.iter().all(|p| p[2] >= -5.0 - 1e-4));
     }
@@ -675,6 +750,9 @@ mod tests {
         // Cut the centre cell past the floor.
         hf.cut_segment([1.3, 1.5, -6.0], [1.7, 1.5, -6.0], 0.3);
         assert!(hf.sample(1.5, 1.5) <= -5.9, "centre cell cut through");
-        assert!(tops(&hf) < before, "the through-cut cell has no top ⇒ open hole");
+        assert!(
+            tops(&hf) < before,
+            "the through-cut cell has no top ⇒ open hole"
+        );
     }
 }

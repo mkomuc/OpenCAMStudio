@@ -1,8 +1,8 @@
 //! Semantic CAD display/picking. All geometry tests use f64 world coordinates;
 //! conversion to f32 happens only while preparing the display buffers.
 use crate::{Color, MeshVertex, Ray, Scene};
-use cam_model::{CadCurve, EntityKind, EntityRef, GeometryState, InstanceId};
-use std::collections::BTreeSet;
+use cam_model::{CadCurve, CadSurface, EntityKind, EntityRef, GeometryState, InstanceId};
+use std::collections::{BTreeMap, BTreeSet};
 
 type Point = [f64; 3];
 #[derive(Clone, Debug)]
@@ -43,6 +43,9 @@ pub struct CadScene {
     paths: Vec<Path>,
     vertices: Vec<Vertex>,
     nodes: Vec<Node>,
+    face_outer_loops: BTreeMap<EntityRef, EntityRef>,
+    cylindrical_faces: BTreeSet<EntityRef>,
+    bore_rims: BTreeMap<EntityRef, Vec<EntityRef>>,
 }
 
 impl CadScene {
@@ -66,6 +69,45 @@ impl CadScene {
                 kind,
                 id,
             };
+            for face in topology
+                .faces
+                .iter()
+                .filter(|face| face.body_id == instance.body_id)
+            {
+                let face_ref = entity(EntityKind::Face, face.id);
+                if let Some(wire) = topology
+                    .loops
+                    .iter()
+                    .find(|wire| wire.face_id == face.id && wire.is_outer)
+                {
+                    scene
+                        .face_outer_loops
+                        .insert(face_ref.clone(), entity(EntityKind::Loop, wire.id));
+                }
+                if matches!(face.surface, CadSurface::Cylinder { .. }) {
+                    scene.cylindrical_faces.insert(face_ref);
+                }
+            }
+            for edge in topology.edges.iter().filter(|edge| {
+                edge.body_id == instance.body_id && matches!(edge.curve, CadCurve::CircleArc { .. })
+            }) {
+                let cylinders: Vec<_> = edge
+                    .face_ids
+                    .iter()
+                    .filter_map(|id| {
+                        let candidate = entity(EntityKind::Face, *id);
+                        scene
+                            .cylindrical_faces
+                            .contains(&candidate)
+                            .then_some(candidate)
+                    })
+                    .collect();
+                if !cylinders.is_empty() {
+                    scene
+                        .bore_rims
+                        .insert(entity(EntityKind::Edge, edge.id), cylinders);
+                }
+            }
             for (indices, face_id) in topology
                 .mesh
                 .triangles
@@ -227,6 +269,29 @@ impl CadScene {
         }
     }
 
+    fn nearest_depth_at(&self, ray: Ray, point: Point, depth: f64) -> f64 {
+        // The aperture can catch a feature beside the cursor ray. Test visibility
+        // on its own parallel ray: the solid under the cursor is not its occluder.
+        let ray = Ray {
+            origin: sub(point, scale(ray.direction, depth)),
+            direction: ray.direction,
+        };
+        let mut hits = vec![];
+        if !self.nodes.is_empty() {
+            self.ray_hits(ray, 0, &mut hits);
+        }
+        hits.into_iter()
+            .map(|(_, depth)| depth)
+            .min_by(f64::total_cmp)
+            .unwrap_or(f64::INFINITY)
+    }
+
+    /// Whether a world feature is in front of the model on its own camera ray.
+    pub fn point_visible(&self, ray: Ray, point: Point) -> bool {
+        let depth = dot(sub(point, ray.origin), ray.direction);
+        depth >= 0. && depth <= self.nearest_depth_at(ray, point, depth) + 1e-6
+    }
+
     /// Candidates ordered front to back, deduplicated by semantic entity. The
     /// closest solid remains the occluder even under edge/loop/vertex filters.
     /// `aperture` is a screen-derived world distance for narrow geometry.
@@ -269,7 +334,7 @@ impl CadScene {
             * 1e-7)
             .max(1e-6);
         let mut candidates = vec![];
-        let mut push = |entity: EntityRef, depth: f64| {
+        let mut push = |entity: EntityRef, depth: f64, nearest: f64| {
             let occluded = depth > nearest + epsilon;
             if depth >= 0. && (select_through || !occluded) {
                 candidates.push(PickCandidate {
@@ -287,15 +352,19 @@ impl CadScene {
                         entity.kind = EntityKind::Body;
                         entity.id = entity.body_id;
                     }
-                    push(entity, depth);
+                    push(entity, depth, nearest);
                 }
             }
             EntityKind::Edge | EntityKind::Loop => {
                 for path in self.paths.iter().filter(|p| p.entity.kind == filter) {
                     for segment in path.points.windows(2) {
-                        let (distance, depth) = ray_segment(ray, segment[0], segment[1]);
+                        let (distance, depth, point) = ray_segment(ray, segment[0], segment[1]);
                         if distance <= aperture {
-                            push(path.entity.clone(), depth);
+                            push(
+                                path.entity.clone(),
+                                depth,
+                                self.nearest_depth_at(ray, point, depth),
+                            );
                         }
                     }
                 }
@@ -306,7 +375,11 @@ impl CadScene {
                     let depth = dot(delta, ray.direction);
                     let distance = length(sub(delta, scale(ray.direction, depth)));
                     if distance <= aperture {
-                        push(vertex.entity.clone(), depth);
+                        push(
+                            vertex.entity.clone(),
+                            depth,
+                            self.nearest_depth_at(ray, vertex.point, depth),
+                        );
                     }
                 }
             }
@@ -318,6 +391,56 @@ impl CadScene {
         });
         let mut seen = BTreeSet::new();
         candidates.retain(|c| seen.insert(c.entity.clone()));
+        candidates
+    }
+
+    /// Profile geometry uses an outer loop. A face-interior click identifies
+    /// that loop when the perimeter is outside the screen catch aperture.
+    pub fn pick_profile_candidates(
+        &self,
+        ray: Ray,
+        aperture: f64,
+        select_through: bool,
+    ) -> Vec<PickCandidate> {
+        let loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
+        if !loops.is_empty() {
+            return loops;
+        }
+        let mut candidates: Vec<_> = self
+            .pick_candidates(ray, EntityKind::Face, aperture, select_through)
+            .into_iter()
+            .filter_map(|mut candidate| {
+                candidate.entity = self.face_outer_loops.get(&candidate.entity)?.clone();
+                Some(candidate)
+            })
+            .collect();
+        deduplicate_candidates(&mut candidates);
+        candidates
+    }
+
+    /// Drill geometry uses cylindrical faces, including when a visible circular
+    /// rim is easier to click than the bore wall. Planar entry faces are not holes.
+    pub fn pick_drill_candidates(
+        &self,
+        ray: Ray,
+        aperture: f64,
+        select_through: bool,
+    ) -> Vec<PickCandidate> {
+        let mut candidates: Vec<_> = self
+            .pick_candidates(ray, EntityKind::Face, aperture, select_through)
+            .into_iter()
+            .filter(|candidate| self.cylindrical_faces.contains(&candidate.entity))
+            .collect();
+        for rim in self.pick_candidates(ray, EntityKind::Edge, aperture, select_through) {
+            if let Some(faces) = self.bore_rims.get(&rim.entity) {
+                candidates.extend(faces.iter().map(|face| PickCandidate {
+                    entity: face.clone(),
+                    depth: rim.depth,
+                    occluded: rim.occluded,
+                }));
+            }
+        }
+        deduplicate_candidates(&mut candidates);
         candidates
     }
 
@@ -406,6 +529,16 @@ impl CadScene {
     }
 }
 
+fn deduplicate_candidates(candidates: &mut Vec<PickCandidate>) {
+    candidates.sort_by(|a, b| {
+        a.depth
+            .total_cmp(&b.depth)
+            .then_with(|| a.entity.cmp(&b.entity))
+    });
+    let mut seen = BTreeSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.entity.clone()));
+}
+
 fn matches_body(a: &EntityRef, b: &EntityRef) -> bool {
     a.kind == EntityKind::Body
         && a.asset_id == b.asset_id
@@ -483,7 +616,7 @@ fn ray_triangle(ray: Ray, p: [Point; 3]) -> Option<f64> {
     let t = dot(e2, q) * inv;
     (t >= 0.).then_some(t)
 }
-fn ray_segment(ray: Ray, a: Point, b: Point) -> (f64, f64) {
+fn ray_segment(ray: Ray, a: Point, b: Point) -> (f64, f64, Point) {
     let edge = sub(b, a);
     let w = sub(a, ray.origin);
     let projected = sub(edge, scale(ray.direction, dot(edge, ray.direction)));
@@ -496,7 +629,11 @@ fn ray_segment(ray: Ray, a: Point, b: Point) -> (f64, f64) {
     };
     let delta = std::array::from_fn(|i| w[i] + fraction * edge[i]);
     let depth = dot(delta, ray.direction);
-    (length(sub(delta, scale(ray.direction, depth))), depth)
+    (
+        length(sub(delta, scale(ray.direction, depth))),
+        depth,
+        std::array::from_fn(|i| a[i] + fraction * edge[i]),
+    )
 }
 fn curve_points(curve: &CadCurve) -> Vec<Point> {
     match curve {
@@ -633,6 +770,113 @@ mod tests {
         assert!(hits[1].occluded);
     }
     #[test]
+    fn profile_face_interior_selects_its_outer_loop_with_instance_identity() {
+        let mut geometry = geometry();
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        topology
+            .faces
+            .iter_mut()
+            .find(|face| face.id == 10)
+            .unwrap()
+            .loop_ids
+            .push(60);
+        topology.loops.push(CadLoop {
+            id: 60,
+            body_id: 1,
+            face_id: 10,
+            edge_uses: vec![],
+            is_outer: true,
+        });
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        assert!(scene
+            .pick_candidates(down(), EntityKind::Loop, 0.1, false)
+            .is_empty());
+        let hits = scene.pick_profile_candidates(down(), 0.1, false);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entity.kind, EntityKind::Loop);
+        assert_eq!(hits[0].entity.id, 60);
+        assert_eq!(hits[0].entity.instance_id, 1);
+        assert_eq!(hits[0].entity.revision, 1);
+        assert!(!hits[0].occluded);
+        let hidden = CadScene::from_geometry(&geometry, &BTreeSet::from([1]));
+        assert!(hidden
+            .pick_profile_candidates(down(), 0.1, false)
+            .is_empty());
+    }
+    #[test]
+    fn drill_picks_cylinders_from_visible_rims_and_excludes_planar_entry_faces() {
+        let mut geometry = geometry();
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        topology.faces.push(CadFace {
+            id: 70,
+            body_id: 1,
+            surface: CadSurface::Cylinder {
+                origin: [0., 0., 0.],
+                axis: [0., 0., 1.],
+                radius: 0.5,
+                inward: true,
+            },
+            loop_ids: vec![],
+            bounds: [[-0.5, -0.5, 0.], [0.5, 0.5, 2.]],
+        });
+        topology.vertices.push(CadVertex {
+            id: 90,
+            body_id: 1,
+            point: [0.5, 0., 2.],
+        });
+        topology.edges.push(CadEdge {
+            id: 80,
+            body_id: 1,
+            vertices: [90, 90],
+            face_ids: vec![10, 70],
+            curve: CadCurve::CircleArc {
+                center: [0., 0., 2.],
+                normal: [0., 0., 1.],
+                x_axis: [1., 0., 0.],
+                radius: 0.5,
+                start_angle: 0.,
+                end_angle: std::f64::consts::TAU,
+            },
+        });
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        assert!(
+            scene.pick_drill_candidates(down(), 0.1, false).is_empty(),
+            "planar face interiors are not drill sources"
+        );
+        let ray = Ray {
+            origin: [0.55, 0., 5.],
+            direction: [0., 0., -1.],
+        };
+        let hits = scene.pick_drill_candidates(ray, 0.1, false);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entity.kind, EntityKind::Face);
+        assert_eq!(hits[0].entity.id, 70);
+        assert!(!hits[0].occluded);
+        // An occluded rim cannot turn its hidden cylindrical face into a visible pick.
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        let edge = topology
+            .edges
+            .iter_mut()
+            .find(|edge| edge.id == 80)
+            .unwrap();
+        if let CadCurve::CircleArc { center, .. } = &mut edge.curve {
+            center[2] = 0.;
+        }
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        assert!(scene.pick_drill_candidates(ray, 0.1, false).is_empty());
+        let hits = scene.pick_drill_candidates(ray, 0.1, true);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].occluded);
+        // A wall's own mesh also remains selectable without needing a rim hit.
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        topology.mesh.triangle_faces[0] = 70;
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        assert_eq!(
+            scene.pick_drill_candidates(down(), 0.1, false)[0].entity.id,
+            70
+        );
+    }
+    #[test]
     fn filters_do_not_expose_edges_loops_or_vertices_through_solid() {
         let scene = CadScene::from_geometry(&geometry(), &BTreeSet::new());
         for filter in [EntityKind::Edge, EntityKind::Loop, EntityKind::Vertex] {
@@ -641,6 +885,72 @@ mod tests {
             assert_eq!(through.len(), 1);
             assert!(through[0].occluded);
         }
+    }
+    #[test]
+    fn aperture_selects_visible_features_on_a_sloped_face_without_exposing_back_edges() {
+        let face = EntityRef {
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Face,
+            id: 10,
+        };
+        let mut scene = CadScene {
+            triangles: vec![
+                Triangle {
+                    points: [[0., 0., 0.], [10., 0., 10.], [10., 10., 10.]],
+                    face: face.clone(),
+                },
+                Triangle {
+                    points: [[0., 0., 0.], [10., 10., 10.], [0., 10., 0.]],
+                    face: face.clone(),
+                },
+            ],
+            ..Default::default()
+        };
+        for kind in [EntityKind::Edge, EntityKind::Loop] {
+            scene.paths.push(Path {
+                points: vec![[0., 0., 0.], [0., 10., 0.]],
+                entity: EntityRef {
+                    kind,
+                    id: 20,
+                    ..face.clone()
+                },
+            });
+            scene.paths.push(Path {
+                points: vec![[0., 0., -1.], [0., 10., -1.]],
+                entity: EntityRef {
+                    kind,
+                    id: 30,
+                    ..face.clone()
+                },
+            });
+        }
+        scene.vertices.push(Vertex {
+            point: [0., 5., 0.],
+            entity: EntityRef {
+                kind: EntityKind::Vertex,
+                id: 40,
+                ..face
+            },
+        });
+        scene.build_node(vec![0, 1]);
+        // The cursor is slightly inside the face. Its surface is higher than the
+        // visible edge caught by the aperture, but does not cover that edge.
+        let ray = Ray {
+            origin: [0.1, 5., 20.],
+            direction: [0., 0., -1.],
+        };
+        for kind in [EntityKind::Edge, EntityKind::Loop, EntityKind::Vertex] {
+            let picks = scene.pick_candidates(ray, kind, 0.2, false);
+            assert_eq!(picks.len(), 1, "visible {kind:?} must remain selectable");
+            assert!(!picks[0].occluded);
+        }
+        let through = scene.pick_candidates(ray, EntityKind::Edge, 0.2, true);
+        assert_eq!(through.len(), 2);
+        assert!(!through[0].occluded);
+        assert!(through[1].occluded);
     }
     #[test]
     fn repeated_instances_have_distinct_ids_and_hidden_instances_cannot_pick() {

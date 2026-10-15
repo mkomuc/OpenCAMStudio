@@ -21,7 +21,6 @@ impl AppController {
         self.active_setup_id = id;
         self.document.update_view(|doc| doc.active_setup_id = id);
         self.active_origin = self.setup().origin_index;
-        self.disabled_origins.clear();
         self.pending_op = None;
         self.selection = Selection::Setup;
         self.cad_selection.clear();
@@ -42,13 +41,14 @@ impl AppController {
 
     pub fn add_setup(&mut self) -> u64 {
         let mut setup = self.setup().clone();
-        setup.id = self.document().next_setup_id();
+        setup.id = self.document().next_setup_id().max(self.setup_id_floor);
         setup.name = format!("Setup {}", setup.id);
         setup.program_name = format!("setup-{}", setup.id);
         setup.operations.clear();
+        setup.stock = default_stock(self.defaults.top_of_stock, self.defaults.depth);
         setup.extra_origins.clear();
         let id = setup.id;
-        self.document.edit(move |doc| doc.setups.push(setup));
+        self.edit_document(move |doc| doc.setups.push(setup));
         self.activate_setup(id).expect("new setup exists");
         id
     }
@@ -60,7 +60,7 @@ impl AppController {
             .find(|s| s.id == id)
             .cloned()
             .ok_or("Missing setup")?;
-        copy.id = self.document().next_setup_id();
+        copy.id = self.document().next_setup_id().max(self.setup_id_floor);
         copy.name = format!("{} (copy)", copy.name);
         copy.program_name = format!("setup-{}", copy.id);
         let mut next_id = self.next_op_id();
@@ -80,7 +80,7 @@ impl AppController {
                 .ok_or("Operation ID range exhausted")?;
         }
         let new_id = copy.id;
-        self.document.edit(move |doc| {
+        self.edit_document(move |doc| {
             let at = doc.setups.iter().position(|s| s.id == id).unwrap() + 1;
             doc.setups.insert(at, copy);
             doc.geometry.bindings.extend(bindings);
@@ -100,24 +100,18 @@ impl AppController {
             .find(|s| s.id == id)
             .ok_or("Missing setup")?;
         let ids: BTreeSet<_> = removed.operations.iter().map(Operation::id).collect();
-        self.document.edit(move |doc| {
+        self.edit_document(move |doc| {
             doc.setups.retain(|s| s.id != id);
+            doc.excluded_operations.retain(|op| !ids.contains(op));
+            doc.disabled_origins.remove(&id);
             doc.geometry.bindings.retain(|op, _| !ids.contains(op));
             doc.cad_linked_operations.retain(|op| !ids.contains(op));
         });
         self.restore_active_setup_view();
-        let remaining: BTreeSet<_> = self
-            .setups()
-            .iter()
-            .flat_map(|s| &s.operations)
-            .map(Operation::id)
-            .collect();
-        self.excluded.retain(|id| remaining.contains(id));
         self.active_origin = self.setup().origin_index;
         self.pending_op = None;
         self.selection = Selection::Setup;
         self.cad_selection.clear();
-        self.disabled_origins.clear();
         self.invalidate();
         Ok(())
     }
@@ -132,8 +126,104 @@ impl AppController {
             (at + 1 < self.setups().len()).then_some(at + 1)
         };
         if let Some(next) = next {
-            self.document.edit(|doc| doc.setups.swap(at, next));
+            self.edit_document(|doc| doc.setups.swap(at, next));
+            self.invalidate();
         }
+    }
+
+    /// Put a setup immediately before another stable ID, or last with `None`.
+    /// Invalid targets and unchanged order do not create an undo checkpoint.
+    pub fn reorder_setup_to(&mut self, id: u64, before: Option<u64>) -> Result<(), String> {
+        let from = self
+            .setups()
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or("Missing setup")?;
+        let target = match before {
+            Some(target) => self
+                .setups()
+                .iter()
+                .position(|s| s.id == target)
+                .ok_or("Missing destination setup")?,
+            None => self.setups().len(),
+        };
+        if before == Some(id) {
+            return Ok(());
+        }
+        let at = target - usize::from(from < target);
+        if from == at {
+            return Ok(());
+        }
+        self.edit_document(move |doc| {
+            let setup = doc.setups.remove(from);
+            doc.setups.insert(at, setup);
+        });
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Put an operation before a destination sibling, or append with `None`.
+    /// Cross-setup moves use the same frame, CAD binding and tool validation as
+    /// menu transfers, publishing the transfer and its order as one edit.
+    pub fn reorder_operation_to(
+        &mut self,
+        id: u32,
+        destination: u64,
+        before: Option<u32>,
+    ) -> Result<(), String> {
+        let source = self
+            .setups()
+            .iter()
+            .find(|s| s.operations.iter().any(|op| op.id() == id))
+            .ok_or("Missing operation")?;
+        let target = self
+            .setups()
+            .iter()
+            .find(|s| s.id == destination)
+            .ok_or("Missing destination setup")?;
+        let position = match before {
+            Some(target_id) => target
+                .operations
+                .iter()
+                .position(|op| op.id() == target_id)
+                .ok_or("Drop target is not in the destination setup")?,
+            None => target.operations.len(),
+        };
+        if source.id != destination {
+            self.transfer_operation_to_setup_at(id, destination, false, before)?;
+            return Ok(());
+        }
+        let from = target
+            .operations
+            .iter()
+            .position(|op| op.id() == id)
+            .unwrap();
+        if let Some(anchor) =
+            before.and_then(|anchor| target.operations.iter().find(|op| op.id() == anchor))
+        {
+            if anchor.work_offset() != target.operations[from].work_offset() {
+                return Err("Operations execute in work-origin groups; use Move to Origin before reordering across groups".into());
+            }
+        }
+        if before == Some(id) {
+            return Ok(());
+        }
+        let at = position - usize::from(from < position);
+        if at == from {
+            return Ok(());
+        }
+        self.edit_document(move |doc| {
+            let ops = &mut doc
+                .setups
+                .iter_mut()
+                .find(|s| s.id == destination)
+                .unwrap()
+                .operations;
+            let operation = ops.remove(from);
+            ops.insert(at, operation);
+        });
+        self.invalidate();
+        Ok(())
     }
 
     /// Transfer an operation definition and its CAD link, resolving in the
@@ -143,6 +233,16 @@ impl AppController {
         id: u32,
         destination: u64,
         copy: bool,
+    ) -> Result<u32, String> {
+        self.transfer_operation_to_setup_at(id, destination, copy, None)
+    }
+
+    fn transfer_operation_to_setup_at(
+        &mut self,
+        id: u32,
+        destination: u64,
+        copy: bool,
+        before: Option<u32>,
     ) -> Result<u32, String> {
         let source = self
             .setups()
@@ -154,6 +254,17 @@ impl AppController {
             .iter()
             .find(|s| s.id == destination)
             .ok_or("Missing destination setup")?;
+        let insertion = match before {
+            Some(before) => target
+                .operations
+                .iter()
+                .position(|op| op.id() == before)
+                .ok_or("Drop target is not in the destination setup")?,
+            None => target.operations.len(),
+        };
+        if before.is_some() && target.operations[insertion].work_offset() != target.origin_index {
+            return Err("Transfer to the setup's main work origin first; use Move to Origin for another work-origin group".into());
+        }
         if source.id == destination && !copy {
             return Ok(id);
         }
@@ -232,15 +343,14 @@ impl AppController {
                 target.tools.push(tool);
             }
         }
-        target.operations.push(operation);
+        target.operations.insert(insertion, operation);
         if document.geometry.bindings.contains_key(&new_id) {
             crate::cad_operations::validate_binding_edit(&mut document, new_id)?;
         }
-        self.document.edit(move |current| *current = document);
+        self.edit_document(move |current| *current = document);
         self.active_setup_id = destination;
         self.active_origin = self.setup().origin_index;
         self.pending_op = None;
-        self.disabled_origins.clear();
         self.select(Selection::Operation(new_id));
         self.invalidate();
         Ok(new_id)
@@ -262,6 +372,33 @@ impl AppController {
         overrides: Option<cam_model::GeometryOverrides>,
         tools: Vec<Tool>,
     ) -> Result<(), String> {
+        self.apply_operation_settings_with_geometry(operation, overrides, tools, None)
+    }
+
+    /// Commit every operation tab and its geometry field in one undo transaction.
+    pub fn apply_operation_settings_with_geometry(
+        &mut self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
+    ) -> Result<(), String> {
+        let document = self.prepare_operation_settings(operation, overrides, tools, geometry)?;
+        if document == *self.document() {
+            return Ok(());
+        }
+        self.edit_document(move |current| *current = document);
+        self.invalidate();
+        Ok(())
+    }
+
+    fn prepare_operation_settings(
+        &self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
+    ) -> Result<Document, String> {
         let id = operation.id();
         let old = self
             .operation(id)
@@ -298,6 +435,17 @@ impl AppController {
         }
         let heights = document.setup().heights;
         let before = old.legacy_cutting_heights(&heights);
+        if let Some(selected) = &geometry {
+            crate::cad_operations::validate_selection(&document.geometry, selected)?;
+            let binding = document
+                .geometry
+                .bindings
+                .get_mut(&id)
+                .ok_or("Geometry associations are available only for CAD operations")?;
+            binding.selected = selected.clone();
+            binding.status = cam_model::ResolutionStatus::Resolved;
+            binding.resolved_fingerprint = None;
+        }
         if let Some(binding) = document.geometry.bindings.get_mut(&id) {
             let previous_overrides = binding.overrides.clone();
             crate::cad_operations::capture_height_override(
@@ -326,12 +474,49 @@ impl AppController {
         if document.geometry.bindings.contains_key(&id) {
             crate::cad_operations::validate_binding_edit(&mut document, id)?;
         }
-        if document == *self.document() {
-            return Ok(());
-        }
-        self.document.edit(move |current| *current = document);
-        self.invalidate();
-        Ok(())
+        Ok(document)
+    }
+
+    /// Preview the exact prospective transaction, including staged cutter and heights.
+    pub fn preview_operation_settings_with_geometry(
+        &self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        selected: Vec<EntityRef>,
+    ) -> Result<cam_model::GeometryBinding, String> {
+        let id = operation.id();
+        let document =
+            self.prepare_operation_settings(operation, overrides, tools, Some(selected))?;
+        Ok(document.geometry.bindings[&id].clone())
+    }
+
+    pub fn preview_operation_geometry(
+        &self,
+        id: u32,
+        selected: Vec<EntityRef>,
+    ) -> Result<(), String> {
+        self.preview_operation_binding(id, selected).map(|_| ())
+    }
+
+    /// Resolve replacement sources without changing the document or its history.
+    pub fn preview_operation_binding(
+        &self,
+        id: u32,
+        selected: Vec<EntityRef>,
+    ) -> Result<cam_model::GeometryBinding, String> {
+        crate::cad_operations::validate_selection(self.geometry_state(), &selected)?;
+        let mut document = self.document().clone();
+        let binding = document
+            .geometry
+            .bindings
+            .get_mut(&id)
+            .ok_or("Operation has explicit geometry")?;
+        binding.selected = selected;
+        binding.status = cam_model::ResolutionStatus::Resolved;
+        binding.resolved_fingerprint = None;
+        crate::cad_operations::validate_binding_edit(&mut document, id)?;
+        Ok(document.geometry.bindings[&id].clone())
     }
 
     /// Validate every tab before a single undoable commit. The caller owns the
@@ -446,7 +631,7 @@ impl AppController {
         if *old == setup {
             return Ok(());
         }
-        self.document.edit(move |doc| {
+        self.edit_document(move |doc| {
             let slot = doc.setups.iter_mut().find(|s| s.id == setup.id).unwrap();
             *slot = setup;
             crate::cad_operations::refresh_binding_heights(doc);
@@ -475,33 +660,39 @@ impl AppController {
         flips: [bool; 3],
     ) -> Result<SetupFrame, String> {
         let [x, y, z] = references;
-        SetupFrame::from_edge_references(
+        self.setup().frame.resolve_references(
             self.geometry_state(),
-            x.map(|entity| FrameAxisReference {
-                entity,
-                flipped: flips[0],
-            }),
-            y.map(|entity| FrameAxisReference {
-                entity,
-                flipped: flips[1],
-            }),
-            z.map(|entity| FrameAxisReference {
-                entity,
-                flipped: flips[2],
-            }),
+            cam_model::FrameReferences {
+                x: x.map(|entity| FrameAxisReference {
+                    entity,
+                    flipped: flips[0],
+                }),
+                y: y.map(|entity| FrameAxisReference {
+                    entity,
+                    flipped: flips[1],
+                }),
+                z: z.map(|entity| FrameAxisReference {
+                    entity,
+                    flipped: flips[2],
+                }),
+                ..Default::default()
+            },
         )
     }
 
     pub(super) fn validate_setup_frame(&self, setup: &Setup) -> Result<(), String> {
         setup.frame.validate()?;
         let refs = &setup.frame.references;
-        let linked = if refs.x.is_some() || refs.y.is_some() || refs.z.is_some() {
-            Some(SetupFrame::from_edge_references(
-                self.geometry_state(),
-                refs.x.clone(),
-                refs.y.clone(),
-                refs.z.clone(),
-            )?)
+        let linked = if refs.x.is_some()
+            || refs.y.is_some()
+            || refs.z.is_some()
+            || refs.stock_axes.iter().any(Option::is_some)
+        {
+            Some(
+                setup
+                    .frame
+                    .resolve_references(self.geometry_state(), refs.clone())?,
+            )
         } else if let Some(id) = refs.model_instance {
             Some(SetupFrame::from_model_instance(self.geometry_state(), id)?)
         } else {
@@ -552,6 +743,155 @@ mod tests {
             work_offset: 1,
             feed: 100.,
         })
+    }
+
+    #[test]
+    fn tree_order_uses_stable_ids_and_survives_undo_redo_and_reopen() {
+        let mut app = AppController::new(crate::default_machine());
+        let first = app.active_setup_id();
+        for _ in 0..3 {
+            app.add_operation(drill());
+        }
+        let ids: Vec<_> = app.setup().operations.iter().map(Operation::id).collect();
+        let original = app.document().clone();
+        app.reorder_operation_to(ids[2], first, Some(ids[0]))
+            .unwrap();
+        let order: Vec<_> = app.setup().operations.iter().map(Operation::id).collect();
+        assert_eq!(order, [ids[2], ids[0], ids[1]]);
+        let planned = cam_toolpath::build_job(
+            app.document(),
+            1000.,
+            cam_cldata::SpindleDir::Cw,
+            None,
+            10.,
+            &CancelToken::new(),
+        );
+        assert_eq!(planned.completion, JobCompletion::Complete);
+        let actual: Vec<_> = planned
+            .program
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                cam_cldata::Step::Drill(cycle) => Some(cycle.tag.op_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual, order);
+        assert!(app.undo());
+        assert_eq!(app.document(), &original);
+        assert!(app.redo());
+        let second = app.add_setup();
+        app.reorder_setup_to(second, Some(first)).unwrap();
+        assert_eq!(
+            app.setups().iter().map(|s| s.id).collect::<Vec<_>>(),
+            [second, first]
+        );
+        assert!(app.undo());
+        assert_eq!(app.setups()[0].id, first);
+        assert!(app.redo());
+        let path =
+            std::env::temp_dir().join(format!("opencam-tree-order-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reopened.setups()[0].id, second);
+        assert_eq!(
+            reopened.setups()[1]
+                .operations
+                .iter()
+                .map(Operation::id)
+                .collect::<Vec<_>>(),
+            order
+        );
+    }
+
+    #[test]
+    fn drop_transfer_inserts_and_remaps_tools_in_one_undo_step() {
+        let mut app = AppController::new(crate::default_machine());
+        app.add_operation(drill());
+        let source = app.active_setup_id();
+        let moving = app.setup().operations[0].id();
+        let destination = app.add_setup();
+        app.edit_tool(0, |tool| tool.diameter = 2.);
+        app.add_operation(drill());
+        let anchor = app.setup().operations[0].id();
+        app.activate_setup(source).unwrap();
+        let before = app.document().clone();
+        app.reorder_operation_to(moving, destination, Some(anchor))
+            .unwrap();
+        assert_eq!(
+            app.setup()
+                .operations
+                .iter()
+                .map(Operation::id)
+                .collect::<Vec<_>>(),
+            [moving, anchor]
+        );
+        assert_ne!(
+            app.setup().operations[0].tool(),
+            app.setup().operations[1].tool()
+        );
+        assert!(app
+            .setups()
+            .iter()
+            .find(|s| s.id == source)
+            .unwrap()
+            .operations
+            .is_empty());
+        assert!(app.undo());
+        assert_eq!(app.document(), &before);
+        assert!(app.redo());
+        assert_eq!(app.setup().operations[0].id(), moving);
+    }
+
+    #[test]
+    fn invalid_and_unchanged_drops_preserve_document_and_history() {
+        let mut app = AppController::new(crate::default_machine());
+        app.add_operation(drill());
+        let source = app.active_setup_id();
+        let operation = app.setup().operations[0].id();
+        let destination = app.add_setup();
+        app.edit_setup(|s| {
+            s.frame = SetupFrame::from_axes(Some([1., 0., 0.]), Some([0., -1., 0.]), None).unwrap()
+        });
+        let before = app.document().clone();
+        let checkpoint_count = app.document.undo_len();
+        assert!(app
+            .reorder_operation_to(operation, destination, Some(operation))
+            .is_err());
+        assert!(app
+            .reorder_operation_to(operation, destination, None)
+            .is_err());
+        assert!(app
+            .reorder_operation_to(u32::MAX, destination, None)
+            .is_err());
+        assert!(app.reorder_setup_to(source, Some(u64::MAX)).is_err());
+        app.reorder_setup_to(source, Some(source)).unwrap();
+        app.reorder_operation_to(operation, source, None).unwrap();
+        assert_eq!(app.document(), &before);
+        assert_eq!(app.document.undo_len(), checkpoint_count);
+    }
+
+    #[test]
+    fn cross_origin_drop_is_rejected_instead_of_claiming_an_ignored_order() {
+        let mut app = AppController::new(crate::default_machine());
+        app.add_operation(drill());
+        app.add_operation(drill());
+        let setup = app.active_setup_id();
+        let moving = app.setup().operations[0].id();
+        let anchor = app.setup().operations[1].id();
+        app.add_origin();
+        let origin = app.setup().extra_origins[0].index;
+        app.set_operation_origin(anchor, origin);
+        let before = app.document().clone();
+        let undo_count = app.document.undo_len();
+        let reason = app
+            .reorder_operation_to(moving, setup, Some(anchor))
+            .unwrap_err();
+        assert!(reason.contains("Move to Origin"));
+        assert_eq!(app.document(), &before);
+        assert_eq!(app.document.undo_len(), undo_count);
     }
 
     #[test]

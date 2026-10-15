@@ -1,5 +1,13 @@
 # Multi-setup workflow and UI — discussion draft
 
+**2026-10-14 planning update:** the
+[high-level requirements analysis](high-level-requirements-analysis.md) and
+[M1a/M3a milestones](implementation-plan.md) replace this draft's model-only
+viewport and inline browser-action layout. The new plan requires a left overlay
+tree, context commands/drag ordering and stock/bounds/WCS picking overlays in
+Machining. Forms and transactional OK/Cancel remain in the right inspector.
+The text below records the earlier agreed scope and its implementation baseline.
+
 Agreed scope, 2026-10-13. Implemented in
 [the multi-setup workflow](multi-setup-implementation.md). Confirmed scope: two box-stock modes and
 separate NC output per setup; a right-column editor with Setup / Stock /
