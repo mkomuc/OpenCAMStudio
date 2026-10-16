@@ -3442,6 +3442,18 @@ impl App {
             Message::ProfileTabSelected(index) => {
                 self.profile_tab_selection =
                     (index < self.profile_tab_locations().len()).then_some(index);
+                if self.profile_tab_selection.is_some() {
+                    self.operation_tab = OperationTab::Geometry;
+                    self.height_reference_pick = None;
+                    self.focused_height = None;
+                    return iced::widget::operation::scroll_to(
+                        "profile-tab-locations",
+                        iced::widget::operation::AbsoluteOffset {
+                            x: None,
+                            y: Some((index as f32 * 35. - 48.).max(0.)),
+                        },
+                    );
+                }
             }
             Message::ProfileTabRemove(index) => {
                 self.profile_tab_selection = self.profile_tab_selection.and_then(|selected| {
@@ -3451,13 +3463,34 @@ impl App {
                         Some(if selected > index { selected - 1 } else { selected })
                     }
                 });
-                self.edit_operation_draft(|op| {
-                    if let Operation::Profile(p) = op {
-                        if index < p.tabs.positions.len() {
-                            p.tabs.positions.remove(index);
-                        }
+                let mut positions = self.profile_tab_operation().map(|op| {
+                    if op.tabs.manual {
+                        op.tabs.positions
+                    } else {
+                        // Keep the precise footprints around offset corners when
+                        // converting automatic placements to editable manual tabs.
+                        self.profile_tab_diameter(&op)
+                            .map(|diameter| {
+                                cam_toolpath::profile_tab_preview(
+                                    &op, diameter, cam_cldata::SpindleDir::Cw,
+                                )
+                                .into_iter()
+                                .map(|tab| tab.center)
+                                .collect()
+                            })
+                            .unwrap_or_default()
                     }
-                });
+                }).unwrap_or_default();
+                if index < positions.len() {
+                    positions.remove(index);
+                    self.edit_operation_draft(|op| {
+                        if let Operation::Profile(p) = op {
+                            p.tabs.manual = true;
+                            p.tabs.positions = positions;
+                        }
+                    });
+                    self.refresh_operation_fields();
+                }
             }
             Message::ProfileTabsClear => {
                 self.profile_tab_selection = None;
@@ -3471,6 +3504,9 @@ impl App {
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(profile) = op {
                         profile.comp = comp;
+                        if comp != cam_model::Comp::Computed {
+                            profile.clearing.climb = comp == cam_model::Comp::ControlLeft;
+                        }
                     }
                 });
                 self.refresh_operation_fields();
@@ -5519,7 +5555,16 @@ impl App {
             Message::ClearingClimbToggled(on) => {
                 self.edit_operation_draft(|op| match op {
                     Operation::Pocket(p) => p.clear.clearing.climb = on,
-                    Operation::Profile(p) => p.clearing.climb = on,
+                    Operation::Profile(p) => {
+                        p.clearing.climb = on;
+                        if p.comp != cam_model::Comp::Computed {
+                            p.comp = if on {
+                                cam_model::Comp::ControlLeft
+                            } else {
+                                cam_model::Comp::ControlRight
+                            };
+                        }
+                    }
                     _ => {}
                 });
                 self.refresh_operation_fields();

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="160" viewBox="0 0 440 160">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b4d8f5"/></marker></defs>
+  <g font-family="sans-serif" text-anchor="middle" font-size="12" fill="#dce5ed">
+    <text x="108" y="18">Climb (down milling)</text><text x="332" y="18">Conventional (up milling)</text>
+    <path d="M18 114V87H198V138H18Z M242 114V87H422V138H242Z" fill="#59616c" stroke="#a5b1bc"/>
+    <g fill="#273340" stroke="#dce5ed" stroke-width="2"><circle cx="108" cy="65" r="23"/><circle cx="332" cy="65" r="23"/></g>
+    <g stroke="#b4d8f5" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <path d="M80 50A32 32 0 0 1 139 64 M304 50A32 32 0 0 1 363 64"/>
+      <path d="M162 112H58 M278 112H382"/>
+    </g>
+    <g stroke="#dce5ed"><path d="M85 65H131 M108 42V88 M309 65H355 M332 42V88"/></g>
+    <text x="108" y="129" font-size="10">Workpiece feed</text><text x="332" y="129" font-size="10">Workpiece feed</text>
+    <text x="108" y="155">Chip: thick → thin</text><text x="332" y="155">Chip: thin → thick</text>
+  </g>
+</svg>

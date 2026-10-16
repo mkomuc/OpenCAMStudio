@@ -165,6 +165,37 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
     }
 }
 
+/// The existing Climb checkbox, with illustrated English hover help.
+fn profile_climb_control(climb: bool, show_help: bool) -> Element<'static, Message> {
+    let control = row![
+        text("Climb")
+            .size(12)
+            .width(Length::Fill)
+            .color(INSPECTOR_TEXT),
+        checkbox(climb)
+            .size(15)
+            .on_toggle(Message::ClearingClimbToggled),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if !show_help {
+        return control.into();
+    }
+    let help = column![
+        text("Climb and conventional milling").size(15).font(iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT }),
+        text("Checked: Climb (down milling). The chip starts thick and becomes thinner as the cutting edge exits the material.").size(12),
+        text("Unchecked: Conventional (up milling). The chip starts thin and becomes thicker through the cut.").size(12),
+        iced::widget::svg(iced::widget::svg::Handle::from_memory(include_bytes!("../assets/help/climb-conventional.svg"))).width(440).height(160),
+        text("The profile's travel direction follows this setting, the spindle rotation and the selected Inside/Outside side. It also applies to radial roughing. On-contour slotting engages both sides of the cutter; here the setting reverses travel.").size(12),
+    ].spacing(10).width(440);
+    tooltip(
+        control,
+        container(help).padding(12).style(popup_surface),
+        tooltip::Position::Left,
+    )
+    .into()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Compensation {
     Computed,
@@ -447,7 +478,21 @@ impl App {
                         Message::SideChanged,
                     ));
                     if linked.is_none() {
-                        list = list.push(profile_picker("Compensation", "Computed offsets the geometry; Control uses the machine's G41/G42 cutter compensation.", self.tooltips, Compensation::of(p.comp), Compensation::available(self.controller.post_kind()), |value| Message::ProfileCompChanged(value.value())));
+                        let comp = if p.comp == Comp::Computed {
+                            p.comp
+                        } else if p.clearing.climb {
+                            Comp::ControlLeft
+                        } else {
+                            Comp::ControlRight
+                        };
+                        list = list.push(profile_picker(
+                            "Compensation",
+                            "Computed offsets the geometry; Control uses the machine's G41/G42 cutter compensation. Climb in Passes also determines the compensation side.",
+                            self.tooltips,
+                            Compensation::of(comp),
+                            Compensation::available(self.controller.post_kind()),
+                            |value| Message::ProfileCompChanged(value.value()),
+                        ));
                     } else {
                         list = list.push(
                             text(format!(
@@ -503,19 +548,8 @@ impl App {
                         list = list.push(self.tab_location_controls(p));
                     }
                 }
-                if tab == OperationTab::Passes
-                    && p.side == Side::Outside
-                    && p.comp == Comp::Computed
-                {
-                    list = list.push(
-                        row![
-                            label_help("Climb", help::CLIMB, self.tooltips),
-                            checkbox(p.clearing.climb)
-                                .size(15)
-                                .on_toggle(Message::ClearingClimbToggled)
-                        ]
-                        .spacing(8),
-                    );
+                if tab == OperationTab::Passes {
+                    list = list.push(profile_climb_control(p.clearing.climb, self.tooltips));
                 }
                 if tab == OperationTab::Linking {
                     list = list.push(profile_picker(
@@ -1321,12 +1355,14 @@ mod tests {
         let _ = app.update(Message::FieldChanged(Field::Feed, "432.1".into()));
         let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
         let _ = app.update(Message::SideChanged(Side::Inside));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Passes));
+        let _ = app.update(Message::ClearingClimbToggled(false));
         let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
         let _ = app.update(Message::OperationStartEnabled(true));
         let _ = app.update(Message::FieldChanged(Field::StartX, "-4.5".into()));
         let _ = app.update(Message::Apply);
         assert!(
-            matches!(app.controller.operation(id), Some(Operation::Profile(o)) if o.feed == 432.1 && o.side == Side::Inside && o.start == Some([-4.5, 0.0]))
+            matches!(app.controller.operation(id), Some(Operation::Profile(o)) if o.feed == 432.1 && o.side == Side::Inside && !o.clearing.climb && o.start == Some([-4.5, 0.0]))
         );
         assert!(app.controller.undo());
         assert_eq!(app.controller.document().setup(), &before);

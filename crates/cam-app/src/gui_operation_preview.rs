@@ -160,7 +160,7 @@ impl App {
         }
         self.profile_tab_diameter(&op)
             .map(|diameter| {
-                cam_toolpath::profile_tab_preview(&op, diameter)
+                cam_toolpath::profile_tab_preview(&op, diameter, cam_cldata::SpindleDir::Cw)
                     .into_iter()
                     .map(|tab| tab.position)
                     .collect()
@@ -199,9 +199,10 @@ impl App {
             return (vertices, indices);
         }
         let frame = &self.controller.document().setup().frame;
-        for (index, tab) in cam_toolpath::profile_tab_preview(&op, diameter)
-            .into_iter()
-            .enumerate()
+        for (index, tab) in
+            cam_toolpath::profile_tab_preview(&op, diameter, cam_cldata::SpindleDir::Cw)
+                .into_iter()
+                .enumerate()
         {
             let u = [tab.tangent[0], tab.tangent[1], 0.];
             let v = [-tab.tangent[1], tab.tangent[0], 0.];
@@ -361,6 +362,44 @@ mod tests {
         assert_eq!(app.profile_tab_locations().len(), 1);
         assert_eq!(app.profile_tab_mesh().0.len(), 24);
         assert_eq!(app.profile_tab_selection, None);
+    }
+
+    #[test]
+    fn removing_an_automatic_tab_keeps_the_remaining_locations() {
+        let (mut app, id) = profile_editor();
+        let committed = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::ProfileTabPositioning(
+            profile_tabs::Positioning::ByDistance,
+        ));
+        let _ = app.update(Message::FieldChanged(Field::TabSpacing, "30".into()));
+        let mut locations = app.profile_tab_locations();
+        let op = app.profile_tab_operation().unwrap();
+        let diameter = app.profile_tab_diameter(&op).unwrap();
+        let mut footprints =
+            cam_toolpath::profile_tab_preview(&op, diameter, cam_cldata::SpindleDir::Cw);
+        assert!(locations.len() > 1);
+        let _ = app.update(Message::ProfileTabSelected(1));
+        let _ = app.update(Message::ProfileTabRemove(0));
+        locations.remove(0);
+        footprints.remove(0);
+        let op = app.profile_tab_operation().unwrap();
+        assert!(op.tabs.manual);
+        let remaining =
+            cam_toolpath::profile_tab_preview(&op, diameter, cam_cldata::SpindleDir::Cw);
+        assert_eq!(remaining.len(), footprints.len());
+        for (actual, expected) in remaining.iter().zip(&footprints) {
+            assert!(
+                (actual.center[0] - expected.center[0])
+                    .hypot(actual.center[1] - expected.center[1])
+                    < 1e-6
+            );
+        }
+        assert_eq!(app.profile_tab_locations().len(), locations.len());
+        assert_eq!(app.profile_tab_mesh().0.len(), locations.len() * 24);
+        assert_eq!(app.profile_tab_selection, Some(0));
+        assert_eq!(app.controller.operation(id), Some(&committed));
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.controller.operation(id), Some(&committed));
     }
 
     #[test]

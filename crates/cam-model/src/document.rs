@@ -390,9 +390,9 @@ pub struct ProfileOp {
     pub lead_overlap: f64,
     /// How the tool enters the material in Z at each pass.
     pub plunge: Plunge,
-    /// Constant-engagement clearing parameters for outside-roughing (used when
-    /// `stepover > 0`). `engagement <= 0` (the default) keeps plain concentric
-    /// roughing.
+    /// Milling direction for all profile passes, and constant-engagement settings
+    /// for outside roughing (`stepover > 0`). `engagement <= 0` (the default)
+    /// keeps plain concentric roughing.
     #[serde(default)]
     pub clearing: Clearing,
 }
@@ -458,7 +458,7 @@ pub struct Clearing {
     #[serde(default)]
     pub engagement: f64,
     /// Climb milling (`true`, the default) vs conventional (`false`) for the
-    /// clearing path.
+    /// clearing path and profile finishing passes.
     #[serde(default = "default_true")]
     pub climb: bool,
 }

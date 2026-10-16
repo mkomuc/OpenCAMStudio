@@ -52,19 +52,38 @@ impl App {
                 .width(Length::Fill)
             )
             .width(Length::Fill)
+            .height(32)
             .padding([7, 9])
             .style(move |theme, status| inspector_tab(theme, status, active))
             .on_press(Message::ProfileTabSelected(index))]
             .spacing(4)
             .align_y(Alignment::Center);
-            if op.tabs.manual {
-                item = item.push(inspector_button("×").on_press(Message::ProfileTabRemove(index)));
-            }
+            item = item.push(
+                inspector_button("×")
+                    .height(32)
+                    .on_press(Message::ProfileTabRemove(index)),
+            );
             items = items.push(item);
         }
         let list = column![
             header,
-            container(scrollable(items).height(Length::Shrink)).max_height(160)
+            container(
+                scrollable(items)
+                    .id(iced::widget::Id::from("profile-tab-locations"))
+                    .width(Length::Fill)
+                    .height(136)
+            )
+            .padding(4)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgb(0.12, 0.14, 0.17))),
+                border: Border {
+                    color: Color::from_rgb(0.25, 0.28, 0.32),
+                    width: 1.0,
+                    radius: 5.0.into()
+                },
+                ..Default::default()
+            })
         ]
         .spacing(4);
         list.into()
@@ -164,8 +183,21 @@ impl App {
         if !op.chain.is_valid() {
             return None;
         }
+        let (vertices, indices) = self.profile_tab_mesh();
+        let triangles = indices
+            .chunks_exact(3)
+            .enumerate()
+            .map(|(index, triangle)| {
+                (
+                    index / 12,
+                    std::array::from_fn(|i| vertices[triangle[i] as usize].position.map(f64::from)),
+                )
+            })
+            .collect();
         Some(TabOverlay {
             camera,
+            triangles,
+            scene_mesh: None,
             browser_width,
             points: op.chain.points().iter().map(|p| [p.x, p.y]).collect(),
             positions: self.profile_tab_locations(),
@@ -184,6 +216,8 @@ impl App {
 
 pub(super) struct TabOverlay {
     camera: OrbitCamera,
+    triangles: Vec<(usize, [[f64; 3]; 3])>,
+    scene_mesh: Option<(Arc<Vec<MeshVertex>>, Arc<Vec<u32>>)>,
     browser_width: f32,
     points: Vec<[f64; 2]>,
     positions: Vec<[f64; 2]>,
@@ -195,6 +229,54 @@ pub(super) struct TabOverlay {
     gizmo_size: Option<f32>,
 }
 impl TabOverlay {
+    pub(super) fn with_scene_mesh(
+        mut self,
+        vertices: Arc<Vec<MeshVertex>>,
+        indices: Arc<Vec<u32>>,
+    ) -> Self {
+        self.scene_mesh = Some((vertices, indices));
+        self
+    }
+
+    fn tab_at(&self, point: iced::Point, bounds: iced::Rectangle) -> Option<usize> {
+        let ray = self.camera.pick_ray(
+            2. * point.x / bounds.width - 1.,
+            1. - 2. * point.y / bounds.height,
+            bounds.width / bounds.height.max(1.),
+        );
+        let hit = self
+            .triangles
+            .iter()
+            .filter_map(|(index, triangle)| {
+                triangle_depth(ray.origin, ray.direction, *triangle).map(|depth| (*index, depth))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((index, depth)) = hit {
+            let blocked = self.scene_mesh.as_ref().is_some_and(|(vertices, indices)| {
+                indices.chunks_exact(3).any(|triangle| {
+                    let points = std::array::from_fn(|i| {
+                        vertices[triangle[i] as usize].position.map(f64::from)
+                    });
+                    triangle_depth(ray.origin, ray.direction, points)
+                        .is_some_and(|other| other < depth - 1e-4)
+                })
+            });
+            if !blocked {
+                return Some(index);
+            }
+        }
+        self.positions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &position)| {
+                self.project(position, bounds)
+                    .map(|p| (index, p.distance(point)))
+            })
+            .filter(|(_, distance)| *distance <= 8.)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+    }
+
     fn project(&self, point: [f64; 2], bounds: iced::Rectangle) -> Option<iced::Point> {
         let world = self.frame.to_world_vector([point[0], point[1], self.z]);
         picking_view::project(self.camera, bounds, world)
@@ -253,24 +335,19 @@ impl canvas::Program<Message> for TabOverlay {
         bounds: iced::Rectangle,
         cursor: iced::mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        if !self.picking {
-            return None;
-        }
         let cursor = self.cursor(bounds, cursor)?;
+        let local = iced::Rectangle::with_size(bounds.size());
         if matches!(
             event,
             canvas::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
         ) {
-            let local = iced::Rectangle::with_size(bounds.size());
-            for (index, point) in self.positions.iter().enumerate() {
-                if self
-                    .project(*point, local)
-                    .is_some_and(|p| p.distance(cursor) <= 8.)
-                {
-                    return Some(
-                        canvas::Action::publish(Message::ProfileTabRemove(index)).and_capture(),
-                    );
-                }
+            if let Some(index) = self.tab_at(cursor, local) {
+                return Some(
+                    canvas::Action::publish(Message::ProfileTabSelected(index)).and_capture(),
+                );
+            }
+            if !self.picking {
+                return None;
             }
             return Some(if let Some(point) = self.nearest(cursor, local) {
                 canvas::Action::publish(Message::ProfileTabPicked(point)).and_capture()
@@ -278,12 +355,14 @@ impl canvas::Program<Message> for TabOverlay {
                 canvas::Action::capture()
             });
         }
-        if matches!(
-            event,
-            canvas::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                iced::mouse::Button::Left
-            ))
-        ) {
+        if self.picking
+            && matches!(
+                event,
+                canvas::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left
+                ))
+            )
+        {
             return Some(canvas::Action::capture());
         }
         None
@@ -294,7 +373,12 @@ impl canvas::Program<Message> for TabOverlay {
         bounds: iced::Rectangle,
         cursor: iced::mouse::Cursor,
     ) -> iced::mouse::Interaction {
-        if self.picking && self.cursor(bounds, cursor).is_some() {
+        if self.cursor(bounds, cursor).is_some_and(|point| {
+            self.tab_at(point, iced::Rectangle::with_size(bounds.size()))
+                .is_some()
+        }) {
+            iced::mouse::Interaction::Pointer
+        } else if self.picking && self.cursor(bounds, cursor).is_some() {
             iced::mouse::Interaction::Crosshair
         } else {
             iced::mouse::Interaction::default()
@@ -364,6 +448,38 @@ impl canvas::Program<Message> for TabOverlay {
         }
         vec![frame.into_geometry()]
     }
+}
+
+/// Two-sided ray/triangle intersection for the rendered tab solids.
+fn triangle_depth(origin: [f64; 3], direction: [f64; 3], triangle: [[f64; 3]; 3]) -> Option<f64> {
+    let sub = |a: [f64; 3], b: [f64; 3]| std::array::from_fn::<_, 3, _>(|i| a[i] - b[i]);
+    let dot = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| a[i] * b[i]).sum::<f64>();
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let e1 = sub(triangle[1], triangle[0]);
+    let e2 = sub(triangle[2], triangle[0]);
+    let h = cross(direction, e2);
+    let det = dot(e1, h);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let s = sub(origin, triangle[0]);
+    let u = dot(s, h) / det;
+    if !(-1e-9..=1.0 + 1e-9).contains(&u) {
+        return None;
+    }
+    let q = cross(s, e1);
+    let v = dot(direction, q) / det;
+    if v < -1e-9 || u + v > 1.0 + 1e-9 {
+        return None;
+    }
+    let distance = dot(e2, q) / det;
+    (distance >= 0.).then_some(distance)
 }
 
 #[cfg(test)]
@@ -635,6 +751,8 @@ mod tests {
             frame.world_from_setup.rotation = [[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]];
             let overlay = TabOverlay {
                 camera,
+                triangles: Vec::new(),
+                scene_mesh: None,
                 frame,
                 browser_width: 0.,
                 z: 3.,
@@ -680,7 +798,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 action.into_inner().0,
-                Some(Message::ProfileTabRemove(0))
+                Some(Message::ProfileTabSelected(0))
             ));
             assert!(overlay
                 .nearest(
@@ -688,6 +806,75 @@ mod tests {
                     iced::Rectangle::with_size(bounds.size())
                 )
                 .is_none());
+        }
+    }
+
+    #[test]
+    fn clicking_a_tab_solid_selects_its_row_without_changing_placements() {
+        let (mut app, _) = selected_cad_profile();
+        let _ = app.update(Message::FieldChanged(Field::TabWidth, "4".into()));
+        let _ = app.update(Message::FieldChanged(Field::TabHeight, "2".into()));
+        let _ = app.update(Message::ProfileTabPickToggle);
+        let _ = app.update(Message::ProfileTabPicked([10., 0.]));
+        let _ = app.update(Message::ProfileTabPicked([20., 10.]));
+        let placements = app.profile_tab_operation().unwrap().tabs.positions;
+        let bounds = iced::Rectangle {
+            x: 23.,
+            y: 31.,
+            width: 900.,
+            height: 700.,
+        };
+        for (yaw, pitch) in [(0., 0.), (0.5, 0.7), (-0.4, 1.)] {
+            let mut camera = OrbitCamera::framed([-10., -10., -20.], [30., 30., 30.]);
+            camera.orient = cam_render::orientation(yaw, pitch);
+            for placing in [false, true] {
+                app.profile_tab_picking = placing;
+                let overlay = app.profile_tab_overlay(camera, 0.).unwrap();
+                assert_eq!(overlay.triangles.len(), 24);
+                // Project the top-face centroid of the second solid, away from
+                // its source-plane marker, so this exercises triangle picking.
+                let (_, indices) = app.profile_tab_mesh();
+                let (vertices, _) = app.profile_tab_mesh();
+                let solid = &vertices[24..48];
+                let top = solid
+                    .iter()
+                    .map(|v| v.position[2])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let face = indices[36..]
+                    .chunks_exact(3)
+                    .find(|t| {
+                        t.iter()
+                            .all(|i| (vertices[*i as usize].position[2] - top).abs() < 1e-5)
+                    })
+                    .unwrap();
+                let center: [f64; 3] = std::array::from_fn(|axis| {
+                    face.iter()
+                        .map(|i| vertices[*i as usize].position[axis] as f64)
+                        .sum::<f64>()
+                        / 3.
+                });
+                let screen = picking_view::project(camera, bounds, center).unwrap().0;
+                let action = overlay
+                    .update(
+                        &mut (),
+                        &canvas::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                            iced::mouse::Button::Left,
+                        )),
+                        bounds,
+                        iced::mouse::Cursor::Available(screen),
+                    )
+                    .expect("tab click captured");
+                let message = action.into_inner().0.unwrap();
+                assert!(matches!(message, Message::ProfileTabSelected(1)));
+                app.operation_tab = OperationTab::Passes;
+                let _ = app.update(message);
+                assert_eq!(app.operation_tab, OperationTab::Geometry);
+                assert_eq!(app.profile_tab_selection, Some(1));
+                assert_eq!(
+                    app.profile_tab_operation().unwrap().tabs.positions,
+                    placements
+                );
+            }
         }
     }
 

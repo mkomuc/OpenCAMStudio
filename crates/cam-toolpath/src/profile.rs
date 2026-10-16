@@ -1,7 +1,7 @@
 //! The profiling strategy: follow a closed chain at a tool-radius offset, in
 //! stepdown passes, down to depth.
 
-use cam_cldata::{ArcDir, CutterComp, MoveKind, Point3, Program, Step, Tag};
+use cam_cldata::{ArcDir, CutterComp, MoveKind, Point3, Program, SpindleDir, Step, Tag};
 use cam_geo::{offset, Contour, JoinStyle, Point, Polygon};
 use cam_model::{Comp, Heights, Lead, Plunge, ProfileOp, Side};
 
@@ -17,7 +17,11 @@ pub struct ProfileTabPreview {
 
 /// Resolve tab placements without generating cutting moves. Automatic placement
 /// uses the same compensated loops and start point as the profile strategy.
-pub fn profile_tab_preview(op: &ProfileOp, diameter: f64) -> Vec<ProfileTabPreview> {
+pub fn profile_tab_preview(
+    op: &ProfileOp,
+    diameter: f64,
+    spindle: SpindleDir,
+) -> Vec<ProfileTabPreview> {
     if !op.tabs.enabled || !op.chain.is_valid() || !diameter.is_finite() || diameter <= 0.0 {
         return Vec::new();
     }
@@ -42,7 +46,7 @@ pub fn profile_tab_preview(op: &ProfileOp, diameter: f64) -> Vec<ProfileTabPrevi
     };
     let paths: Vec<_> = loops
         .iter()
-        .map(|p| rotate_to_start(p.outer().points(), op.start))
+        .map(|p| profile_loop_points(p.outer().points(), op, spindle))
         .collect();
     let mut result = Vec::new();
     let mut append = |points: &[Point], distance: f64| {
@@ -254,8 +258,15 @@ impl Strategy for ProfileStrategy {
         };
         let (radius, comp) = match op.comp {
             Comp::Computed => (tool.radius(), None),
-            Comp::ControlLeft => (0.0, Some(CutterComp::Left(op.tool))),
-            Comp::ControlRight => (0.0, Some(CutterComp::Right(op.tool))),
+            Comp::ControlLeft | Comp::ControlRight => {
+                let left = op.clearing.climb == (env.spindle == SpindleDir::Cw);
+                let compensation = if left {
+                    CutterComp::Left(op.tool)
+                } else {
+                    CutterComp::Right(op.tool)
+                };
+                (0.0, Some(compensation))
+            }
         };
         let signed = side_sign * (radius + op.offset);
 
@@ -387,7 +398,7 @@ impl Strategy for ProfileStrategy {
         // between protected spans so entry and exit remain below the tab tops.
         let mut contours: Vec<_> = loops
             .iter()
-            .map(|poly| rotate_to_start(poly.outer().points(), op.start))
+            .map(|poly| profile_loop_points(poly.outer().points(), op, env.spindle))
             .collect();
         let mut assigned = vec![Vec::new(); contours.len()];
         if op.tabs.enabled && op.tabs.manual {
@@ -672,9 +683,11 @@ fn emit_loop_rich(
         // where a descending tool belongs. A lead long enough (or an angle steep
         // enough) to absorb the whole stepdown keeps the wall untouched entirely —
         // which is how the operator controls this.
+        let lead_path = lead_in_path(start, entry, out, lead_in);
+        let lead_end = lead_path.len().saturating_sub(1);
         let ramp = contour_ramp(
             pts,
-            lead_in_path(start, entry, out, lead_in),
+            lead_path,
             op.plunge,
             ramp_top,
             z,
@@ -719,7 +732,13 @@ fn emit_loop_rich(
         }
 
         if let Some((path, _, top)) = &ramp {
-            emit_descending_path(prog, path, *top, z, op.feed, plunge_tag);
+            // Keep the air/material junction explicit: refitting the combined
+            // lead and contour can merge their arcs and cut below the stock top
+            // before the lead reaches the contour.
+            emit_descending_path(
+                prog, &path[..=lead_end], *top, ramp_top, op.feed, plunge_tag,
+            );
+            emit_descending_path(prog, &path[lead_end..], ramp_top, z, op.feed, plunge_tag);
         } else {
             emit_plunge(
                 prog,
@@ -763,6 +782,24 @@ fn emit_loop_rich(
         }
         prev_z = z;
     }
+}
+
+/// Orient material to the correct side for spindle rotation, keeping the seam
+/// anchored so reversing direction does not move automatic tab locations.
+fn profile_loop_points(points: &[Point], op: &ProfileOp, spindle: SpindleDir) -> Vec<Point> {
+    let mut points = points.to_vec();
+    let material_right = op.clearing.climb == (spindle == SpindleDir::Cw);
+    let want_ccw = match op.side {
+        Side::Inside => material_right,
+        Side::Outside => !material_right,
+        // A slot engages both sides; preserve the source direction for CW climb
+        // and reverse it for the opposite choice.
+        Side::On => is_ccw(&points) == material_right,
+    };
+    if is_ccw(&points) != want_ccw && points.len() > 1 {
+        points[1..].reverse();
+    }
+    rotate_to_start(&points, op.start)
 }
 
 fn loop_length(points: &[Point]) -> f64 {
@@ -1962,6 +1999,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn profile_pass_direction_follows_climb_side_and_spindle() {
+        let tools = [Tool {
+            number: 1,
+            diameter: 6.,
+            length: 30.,
+            flutes: 2,
+            kind: ToolKind::EndMill,
+            ..Default::default()
+        }];
+        for side in [Side::Inside, Side::Outside] {
+            for spindle in [SpindleDir::Cw, SpindleDir::Ccw] {
+                for climb in [true, false] {
+                    for reversed in [false, true] {
+                        for controller in [false, true] {
+                            let mut op = outside_rough_op(0.);
+                            op.stepover = 0.;
+                            op.side = side;
+                            op.clearing.climb = climb;
+                            op.start = Some([30., 20.]);
+                            if controller {
+                                op.comp = Comp::ControlLeft;
+                            }
+                            if reversed {
+                                let mut points = op.chain.points().to_vec();
+                                points.reverse();
+                                op.chain = Contour::new(points);
+                            }
+                            let env = JobEnv {
+                                heights: Heights::new(5., 2., 0.),
+                                tools: &tools,
+                                stock: None,
+                                spindle,
+                            };
+                            let result = ProfileStrategy::new(op).compute(&env, &CancelToken::new());
+                            let points: Vec<Point> = result
+                                .program
+                                .steps()
+                                .iter()
+                                .filter_map(|step| match step {
+                                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                                        Some(Point::new(to.x, to.y))
+                                    }
+                                    Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => {
+                                        Some(Point::new(end.x, end.y))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            assert!(points.len() >= 4, "{:?}", result.diagnostics);
+                            let material_right = climb == (spindle == SpindleDir::Cw);
+                            assert_eq!(is_ccw(&points), if side == Side::Inside { material_right } else { !material_right }, "{side:?}, {spindle:?}, climb={climb}, reversed={reversed}, controller={controller}");
+                            assert!(result.program.steps().iter().any(|step| matches!(step, Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting && (to.z + 2.).abs() < 1e-9)));
+                            if controller {
+                                let expected = if material_right {
+                                    CutterComp::Left(1)
+                                } else {
+                                    CutterComp::Right(1)
+                                };
+                                assert!(result.program.steps().contains(&Step::CutterComp(expected)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reversing_a_profile_keeps_the_same_automatic_tab_footprints() {
+        let mut op = outside_rough_op(0.);
+        op.stepover = 0.;
+        op.tabs.enabled = true;
+        op.tabs.spacing = 19.;
+        for side in [Side::Inside, Side::Outside, Side::On] {
+            op.side = side;
+            let climb = profile_tab_preview(&op, 6., SpindleDir::Cw);
+            op.clearing.climb = false;
+            let conventional = profile_tab_preview(&op, 6., SpindleDir::Cw);
+            assert_eq!(climb.len(), conventional.len());
+            for tab in &climb {
+                assert!(conventional
+                    .iter()
+                    .any(|other| (tab.center[0] - other.center[0])
+                        .hypot(tab.center[1] - other.center[1])
+                        < 1e-6));
+            }
+            op.clearing.climb = true;
+        }
+    }
+
     fn tabbed_op() -> ProfileOp {
         let mut op = outside_rough_op(0.0);
         op.side = Side::On;
@@ -1981,7 +2109,7 @@ mod tests {
     #[test]
     fn preview_centers_match_generated_rectangular_tabs() {
         let op = tabbed_op();
-        let previews = profile_tab_preview(&op, 6.0);
+        let previews = profile_tab_preview(&op, 6.0, SpindleDir::Cw);
         assert_eq!(previews.len(), 4);
         let result = run_outside_rough(op);
         let mut previous = Point3::new(0.0, 0.0, 0.0);
@@ -2006,7 +2134,7 @@ mod tests {
         op.tabs.manual = true;
         op.tabs.positions = vec![[40.0, 30.0], [30.0, 20.0]];
         op.side = Side::Outside;
-        let previews = profile_tab_preview(&op, 6.0);
+        let previews = profile_tab_preview(&op, 6.0, SpindleDir::Cw);
         assert_eq!(previews.len(), 2);
         assert!((previews[0].position[0] - 40.0).hypot(previews[0].position[1] - 30.0) < 1e-9);
         assert!((previews[1].position[0] - 30.0).hypot(previews[1].position[1] - 20.0) < 1e-9);
@@ -2213,14 +2341,19 @@ mod tests {
         let mut runs: Vec<f64> = Vec::new();
         let mut cur = 0.0;
         for st in r.program.steps() {
-            let (to, ramping) = match st {
-                Step::Linear { to, tag, .. } => (*to, tag.kind == MoveKind::Plunge),
-                Step::Rapid { to, .. } => (*to, false),
-                Step::Arc { end, .. } => (*end, false),
+            let (to, ramping, length) = match st {
+                Step::Linear { to, tag, .. } => (*to, tag.kind == MoveKind::Plunge, (to.x - pos.x).hypot(to.y - pos.y)),
+                Step::Rapid { to, .. } => (*to, false, 0.),
+                Step::Arc { end, center, dir, tag, .. } => {
+                    let start_angle = (pos.y - center.y).atan2(pos.x - center.x);
+                    let end_angle = (end.y - center.y).atan2(end.x - center.x);
+                    let sweep = if *dir == ArcDir::Ccw { end_angle - start_angle } else { start_angle - end_angle };
+                    (*end, tag.kind == MoveKind::Plunge, (pos.x - center.x).hypot(pos.y - center.y) * sweep.rem_euclid(std::f64::consts::TAU))
+                }
                 _ => continue,
             };
             if ramping && to.z < pos.z - 1e-9 {
-                cur += (to.x - pos.x).hypot(to.y - pos.y);
+                cur += length;
             } else if cur > 0.0 {
                 runs.push(cur);
                 cur = 0.0;
@@ -2270,7 +2403,7 @@ mod tests {
             .program
             .steps()
             .iter()
-            .position(|st| matches!(st, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge))
+            .position(|st| matches!(st, Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge))
             .expect("a ramp");
         // Nothing before the ramp may already be at depth, and the ramp itself must
         // begin away from the contour's corners (it is on the lead arc).
@@ -2281,7 +2414,7 @@ mod tests {
             "nothing may reach cutting depth before the ramp"
         );
         assert!(!on_contour(match &r.program.steps()[first_plunge] {
-            Step::Linear { to, .. } => *to,
+            Step::Linear { to, .. } | Step::Arc { end: to, .. } => *to,
             _ => unreachable!(),
         }), "the ramp's first move should be along the lead, not the contour");
     }

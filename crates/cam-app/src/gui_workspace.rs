@@ -175,6 +175,11 @@ impl App {
         let height_preview = self.height_preview(viewport.camera(), viewport.browser_overlay_width);
         let viewport_camera = viewport.camera();
         let viewport_browser_width = viewport.browser_overlay_width;
+        let tab_overlay = self
+            .profile_tab_overlay(viewport_camera, viewport_browser_width)
+            .map(|overlay| {
+                overlay.with_scene_mesh(viewport.mesh_vertices.clone(), viewport.mesh_indices.clone())
+            });
         let mut layers = iced::widget::stack![
             shader(viewport).width(Length::Fill).height(Length::Fill),
             canvas::Canvas::new(labels)
@@ -195,7 +200,7 @@ impl App {
                     .height(Length::Fill),
             );
         }
-        if let Some(tabs) = self.profile_tab_overlay(viewport_camera, viewport_browser_width) {
+        if let Some(tabs) = tab_overlay {
             layers = layers.push(
                 canvas::Canvas::new(tabs)
                     .width(Length::Fill)
