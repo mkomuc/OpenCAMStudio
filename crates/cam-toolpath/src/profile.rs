@@ -7,6 +7,102 @@ use cam_model::{Comp, Heights, Lead, Plunge, ProfileOp, Side};
 
 use crate::{CancelToken, Diagnostic, JobEnv, Strategy, StrategyResult};
 
+/// A holding tab's source location and its footprint through the cutter slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProfileTabPreview {
+    pub position: [f64; 2],
+    pub center: [f64; 2],
+    pub tangent: [f64; 2],
+}
+
+/// Resolve tab placements without generating cutting moves. Automatic placement
+/// uses the same compensated loops and start point as the profile strategy.
+pub fn profile_tab_preview(op: &ProfileOp, diameter: f64) -> Vec<ProfileTabPreview> {
+    if !op.tabs.enabled || !op.chain.is_valid() || !diameter.is_finite() || diameter <= 0.0 {
+        return Vec::new();
+    }
+    let Ok(region) = Polygon::new(op.chain.clone()) else {
+        return Vec::new();
+    };
+    let sign = match op.side {
+        Side::Outside => 1.0,
+        Side::Inside => -1.0,
+        Side::On => 0.0,
+    };
+    let radius = if op.comp == Comp::Computed {
+        diameter * 0.5
+    } else {
+        0.0
+    };
+    let signed = sign * (radius + op.offset);
+    let loops = if signed == 0.0 {
+        vec![region]
+    } else {
+        offset(&[region], signed, JoinStyle::Round).unwrap_or_default()
+    };
+    let paths: Vec<_> = loops
+        .iter()
+        .map(|p| rotate_to_start(p.outer().points(), op.start))
+        .collect();
+    let mut result = Vec::new();
+    let mut append = |points: &[Point], distance: f64| {
+        let (center, tangent) = point_on_loop(points, distance);
+        let source_distance = nearest_on_loop(op.chain.points(), [center.x, center.y]).0;
+        let (position, _) = point_on_loop(op.chain.points(), source_distance);
+        result.push(ProfileTabPreview {
+            position: [position.x, position.y],
+            center: [center.x, center.y],
+            tangent,
+        });
+    };
+    if op.tabs.manual {
+        for &point in op.tabs.positions.iter().take(10_000) {
+            if point.iter().any(|v| !v.is_finite()) {
+                continue;
+            }
+            let Some(points) = paths.iter().min_by(|a, b| {
+                nearest_on_loop(a, point)
+                    .1
+                    .total_cmp(&nearest_on_loop(b, point).1)
+            }) else {
+                continue;
+            };
+            append(points, nearest_on_loop(points, point).0);
+        }
+    } else if op.tabs.spacing.is_finite() && op.tabs.spacing > 0.0 {
+        for points in &paths {
+            let perimeter = loop_length(points);
+            let count = (perimeter / op.tabs.spacing).ceil().max(1.0);
+            if !count.is_finite() || count > 10_000.0 {
+                continue;
+            }
+            for i in 0..count as usize {
+                append(points, (i as f64 + 0.5) * perimeter / count);
+            }
+        }
+    }
+    result
+}
+
+fn point_on_loop(points: &[Point], distance: f64) -> (Point, [f64; 2]) {
+    let mut distance = distance.rem_euclid(loop_length(points).max(1e-12));
+    for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+        let length = (b.x - a.x).hypot(b.y - a.y);
+        if length <= 1e-12 {
+            continue;
+        }
+        if distance <= length {
+            let t = (distance / length).clamp(0.0, 1.0);
+            return (
+                Point::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y)),
+                [(b.x - a.x) / length, (b.y - a.y) / length],
+            );
+        }
+        distance -= length;
+    }
+    (points[0], [1.0, 0.0])
+}
+
 /// Profiles a single closed chain. Construct from a [`ProfileOp`].
 #[derive(Clone, Debug)]
 pub struct ProfileStrategy {
@@ -1880,6 +1976,41 @@ mod tests {
             ..Default::default()
         };
         op
+    }
+
+    #[test]
+    fn preview_centers_match_generated_rectangular_tabs() {
+        let op = tabbed_op();
+        let previews = profile_tab_preview(&op, 6.0);
+        assert_eq!(previews.len(), 4);
+        let result = run_outside_rough(op);
+        let mut previous = Point3::new(0.0, 0.0, 0.0);
+        let mut centers = Vec::new();
+        for step in result.program.steps() {
+            let to = match step {
+                Step::Linear { to, .. } | Step::Rapid { to, .. } => *to,
+                _ => continue,
+            };
+            if previous.z == -3.0 && to.z == -3.0 && (to.x != previous.x || to.y != previous.y) {
+                centers.push([(previous.x + to.x) * 0.5, (previous.y + to.y) * 0.5]);
+            }
+            previous = to;
+        }
+        assert_eq!(centers.len(), 8);
+        for preview in previews {
+            assert!(centers
+                .iter()
+                .any(|p| (p[0] - preview.center[0]).hypot(p[1] - preview.center[1]) < 1e-9));
+        }
+        let mut op = tabbed_op();
+        op.tabs.manual = true;
+        op.tabs.positions = vec![[40.0, 30.0], [30.0, 20.0]];
+        op.side = Side::Outside;
+        let previews = profile_tab_preview(&op, 6.0);
+        assert_eq!(previews.len(), 2);
+        assert!((previews[0].position[0] - 40.0).hypot(previews[0].position[1] - 30.0) < 1e-9);
+        assert!((previews[1].position[0] - 30.0).hypot(previews[1].position[1] - 20.0) < 1e-9);
+        assert!((previews[0].center[0] - 43.0).abs() < 1e-6);
     }
 
     #[test]

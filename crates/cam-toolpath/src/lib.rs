@@ -50,7 +50,7 @@ pub use face::FaceStrategy;
 pub use plan::{build_job, build_job_cached, JobCompletion, JobResult, PlanRequest};
 mod cache;
 pub use pocket::PocketStrategy;
-pub use profile::ProfileStrategy;
+pub use profile::{profile_tab_preview, ProfileStrategy, ProfileTabPreview};
 pub use thread::ThreadStrategy;
 
 /// `"1 pass"` / `"3 passes"` — correct pluralisation for a program comment.

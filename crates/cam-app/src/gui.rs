@@ -66,6 +66,8 @@ use workspace_view::Workspace;
 #[path = "gui_geometry_selection.rs"]
 mod geometry_selection;
 use geometry_selection::{cad_geometry_labels, drawing_geometry_labels, operation_geometry_labels};
+#[path = "gui_operation_preview.rs"]
+mod operation_preview;
 #[path = "gui_profile_tabs.rs"]
 mod profile_tabs;
 #[path = "gui_creation.rs"]
@@ -1818,6 +1820,7 @@ struct App {
     geometry_row_selection: Option<usize>,
     geometry_additive: bool,
     profile_tab_picking: bool,
+    profile_tab_selection: Option<usize>,
     operation_binding_preview: Option<cam_model::GeometryBinding>,
     drawing_editing_op: Option<u32>,
     operation_tab: OperationTab,
@@ -2272,6 +2275,7 @@ enum Message {
     ProfileTabPickToggle,
     ProfileTabPicked([f64; 2]),
     ProfileTabRemove(usize),
+    ProfileTabSelected(usize),
     ProfileTabsClear,
     EngraveClosedChanged(bool),
     OperationStartEnabled(bool),
@@ -2768,6 +2772,7 @@ impl App {
 
     fn begin_operation_draft(&mut self, id: u32) {
         self.profile_tab_picking = false;
+        self.profile_tab_selection = None;
         self.model_view = None;
         self.end_setup_draft();
         self.inspector_active = true;
@@ -3014,6 +3019,7 @@ impl App {
             geometry_row_selection: None,
             geometry_additive: false,
             profile_tab_picking: false,
+            profile_tab_selection: None,
             operation_binding_preview: None,
             drawing_editing_op: None,
             operation_tab: OperationTab::default(),
@@ -3323,6 +3329,7 @@ impl App {
                 return iced::Task::none();
             }
             self.profile_tab_picking = false;
+            self.profile_tab_selection = None;
         }
         match message {
             Message::SimulationPlayPause => {
@@ -3373,6 +3380,7 @@ impl App {
             }
             Message::ProfileTabsEnabled(enabled) => {
                 self.profile_tab_picking = false;
+                self.profile_tab_selection = None;
                 let values = [Field::TabWidth, Field::TabHeight, Field::TabSpacing]
                     .into_iter()
                     .filter_map(|field| {
@@ -3393,6 +3401,7 @@ impl App {
             }
             Message::ProfileTabPositioning(mode) => {
                 self.profile_tab_picking = false;
+                self.profile_tab_selection = None;
                 let spacing = self
                     .fields
                     .get(&Field::TabSpacing)
@@ -3430,7 +3439,18 @@ impl App {
                     });
                 }
             }
+            Message::ProfileTabSelected(index) => {
+                self.profile_tab_selection =
+                    (index < self.profile_tab_locations().len()).then_some(index);
+            }
             Message::ProfileTabRemove(index) => {
+                self.profile_tab_selection = self.profile_tab_selection.and_then(|selected| {
+                    if selected == index {
+                        None
+                    } else {
+                        Some(if selected > index { selected - 1 } else { selected })
+                    }
+                });
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(p) = op {
                         if index < p.tabs.positions.len() {
@@ -3440,6 +3460,7 @@ impl App {
                 });
             }
             Message::ProfileTabsClear => {
+                self.profile_tab_selection = None;
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(p) = op {
                         p.tabs.positions.clear();
@@ -4036,6 +4057,7 @@ impl App {
                 }
             }
             Message::FieldChanged(field, value) => {
+                if matches!(field, Field::TabSpacing | Field::StartX | Field::StartY) { self.profile_tab_selection = None; }
                 if self.creating_operation() {
                     self.creation_edited_fields.insert(field);
                 }
@@ -9979,6 +10001,7 @@ impl Viewport {
         origin_first: Option<[f64; 3]>,
         // The active machine's travel per axis, when the envelope is shown.
         envelope: Option<[f32; 3]>,
+        editor_geometry: Option<&[EntityRef]>,
     ) -> Self {
         let cad_hover = cad_hover.filter(|reference| {
             !cad_hidden.contains(&reference.instance_id)
@@ -9991,7 +10014,11 @@ impl Viewport {
         let pick_z = controller.document().setup().heights.top_of_stock as f32;
         // After a run, show the full backplot; before it, at least show the
         // imported part outlines so opening a file is visibly reflected.
-        let outcome = preview.or_else(|| controller.outcome());
+        let outcome = if editor_geometry.is_some() {
+            None
+        } else {
+            preview.or_else(|| controller.outcome())
+        };
         let mut scene = match outcome {
             Some(outcome) => outcome.scene.clone(),
             None => {
@@ -10048,12 +10075,17 @@ impl Viewport {
                 .or_else(|| scene.bounds()),
             cad_scene.bounds(),
         );
-        let mut cad_selected = controller.cad_selection().to_vec();
-        for id in focus_ops {
-            if let Some(binding) = controller.geometry_state().bindings.get(id) {
-                cad_selected.extend(binding.selected.iter().cloned());
+        let mut cad_selected = if let Some(selected) = editor_geometry {
+            selected.to_vec()
+        } else {
+            let mut selected = controller.cad_selection().to_vec();
+            for id in focus_ops {
+                if let Some(binding) = controller.geometry_state().bindings.get(id) {
+                    selected.extend(binding.selected.iter().cloned());
+                }
             }
-        }
+            selected
+        };
         cad_selected.retain(|reference| {
             !cad_hidden.contains(&reference.instance_id)
                 && controller

@@ -223,7 +223,7 @@ impl App {
         }
         column![
             layers.width(Length::Fill).height(Length::Fill),
-            self.simulation_controls(),
+            if self.operation_preview_active() { Element::from(Space::new()) } else { self.simulation_controls() },
             self.viewport_pick_toolbar()
         ]
         .width(Length::Fill)
@@ -246,6 +246,8 @@ impl App {
                     .filter(move |id| hidden_setup || self.hidden_ops.contains(id))
             })
             .collect();
+        let editing = self.operation_preview_active();
+        let selected_geometry = self.editor_selected_geometry();
         let mut viewport = Viewport::new(
             &self.controller,
             self.simulation
@@ -282,8 +284,9 @@ impl App {
                 let (x, y, z) = self.controller.machine().envelope.extent();
                 [x as f32, y as f32, z as f32]
             }),
+            editing.then_some(selected_geometry.as_slice()),
         );
-        if let Some(player) = self.simulation.as_ref().filter(|_| !model_view) {
+        if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
             let (vertices, indices) = player.tool_mesh();
             let offset = viewport.mesh_vertices.len() as u32;
             Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
@@ -359,6 +362,14 @@ impl App {
             0.
         };
         viewport.planar_features = self.planar_selection.clone();
+        if editing {
+            let preview = self.operation_geometry_preview();
+            Arc::make_mut(&mut viewport.vertices).extend(preview.line_vertices());
+            let (vertices, indices) = self.profile_tab_mesh();
+            let offset = viewport.mesh_vertices.len() as u32;
+            Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
+            Arc::make_mut(&mut viewport.mesh_indices).extend(indices.into_iter().map(|i| i + offset));
+        }
         viewport
     }
     fn viewport_pick_toolbar(&self) -> Element<'_, Message> {
@@ -1059,6 +1070,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         );
         viewport.browser_overlay_width = 250.;
         let bounds = iced::Rectangle {
@@ -1164,6 +1176,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         );
         let bounds = iced::Rectangle {
             x: 0.,
@@ -1237,6 +1250,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             None,
             None,
         );

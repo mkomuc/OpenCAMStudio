@@ -488,9 +488,7 @@ impl App {
                             if p.tabs.manual { profile_tabs::Positioning::Manual } else { profile_tabs::Positioning::ByDistance },
                             &profile_tabs::Positioning::ALL[..], Message::ProfileTabPositioning,
                         ));
-                        if p.tabs.manual {
-                            list = list.push(self.manual_tab_controls(p));
-                        } else {
+                        if !p.tabs.manual {
                             let field = Field::TabSpacing;
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
                             list = list.push(field_row_labeled(
@@ -502,6 +500,7 @@ impl App {
                                 self.field_invalid(field),
                             ));
                         }
+                        list = list.push(self.tab_location_controls(p));
                     }
                 }
                 if tab == OperationTab::Passes

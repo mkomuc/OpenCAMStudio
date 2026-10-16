@@ -1,0 +1,391 @@
+//! Draft geometry and holding-tab solids, without a generated cutting program.
+use super::*;
+
+impl App {
+    pub(super) fn operation_preview_active(&self) -> bool {
+        self.workspace == Workspace::Machining
+            && self.inspector_enabled
+            && self.inspector_active
+            && (self.creating_operation()
+                || self.operation_draft.as_ref().is_some_and(|draft| {
+                    self.controller.selection() == Selection::Operation(draft.id())
+                }))
+    }
+
+    pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
+        if self.cad_pending_kind.is_some() || self.cad_editing_op.is_some() {
+            return self.controller.cad_selection().to_vec();
+        }
+        let Selection::Operation(id) = self.controller.selection() else {
+            return Vec::new();
+        };
+        self.operation_geometry
+            .clone()
+            .or_else(|| {
+                self.operation_binding_preview
+                    .as_ref()
+                    .or_else(|| self.controller.geometry_state().bindings.get(&id))
+                    .map(|binding| binding.selected.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    pub(super) fn operation_geometry_preview(&self) -> Scene {
+        let mut scene = Scene::new();
+        let (operation, binding) = if self.creating_operation() {
+            match self.creation_operation() {
+                Ok((op, binding)) => (Some(op), binding),
+                Err(_) => (None, None),
+            }
+        } else {
+            let operation = self.operation_draft.clone();
+            let binding = operation
+                .as_ref()
+                .and_then(|op| {
+                    self.operation_binding_preview
+                        .as_ref()
+                        .or_else(|| self.controller.geometry_state().bindings.get(&op.id()))
+                })
+                .cloned();
+            (operation, binding)
+        };
+        let Some(op) = operation else {
+            return scene;
+        };
+        let frame = &self.controller.document().setup().frame;
+        let mut outlines = Vec::new();
+        let mut centers = Vec::new();
+        let mut z = 0.0;
+        if matches!(op, Operation::Profile(_)) {
+            if let Some((profile, source_z)) = self.profile_tab_geometry() {
+                z = source_z;
+                outlines.push((profile.chain.points().to_vec(), true));
+            }
+        } else if let Some(binding) = binding.as_ref() {
+            if let Ok(geometry) =
+                crate::cad_operations::geometry_for_setup(self.controller.document())
+            {
+                if let Ok(resolved) = cam_geometry3d::resolve_binding(&geometry, binding) {
+                    z = if binding
+                        .selected
+                        .iter()
+                        .any(|r| r.kind == EntityKind::Silhouette)
+                    {
+                        0.0
+                    } else if matches!(op, Operation::Drill(_) | Operation::Thread(_)) {
+                        resolved.heights.top
+                    } else {
+                        resolved.heights.bottom
+                    };
+                    for region in resolved.regions {
+                        outlines.push((region.outer().points().to_vec(), true));
+                        outlines.extend(
+                            region
+                                .holes()
+                                .iter()
+                                .map(|hole| (hole.points().to_vec(), true)),
+                        );
+                    }
+                    centers.extend(
+                        resolved
+                            .holes
+                            .into_iter()
+                            .map(|hole| [hole.center.x, hole.center.y]),
+                    );
+                }
+            }
+        } else {
+            match &op {
+                Operation::Pocket(p) => {
+                    outlines.push((p.boundary.points().to_vec(), true));
+                    outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
+                }
+                Operation::Carve(p) => {
+                    outlines.push((p.boundary.points().to_vec(), true));
+                    outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
+                }
+                Operation::Face(p) => outlines.push((p.boundary.points().to_vec(), true)),
+                Operation::Chamfer(p) => outlines.push((p.chain.points().to_vec(), true)),
+                Operation::Engrave(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
+                Operation::Drill(p) => centers.extend(p.points.iter().copied()),
+                Operation::Thread(p) => centers.extend(p.points.iter().copied()),
+                Operation::Profile(_) => {}
+            }
+        }
+        for (points, closed) in outlines {
+            let mut world: Vec<_> = points
+                .iter()
+                .map(|p| frame.to_world_vector([p.x, p.y, z]).map(|v| v as f32))
+                .collect();
+            if closed {
+                if let Some(first) = world.first().copied() {
+                    world.push(first);
+                }
+            }
+            scene.add_strip(world, PICK_BOUNDARY);
+        }
+        for point in centers {
+            for axis in 0..2 {
+                let mut a = [point[0], point[1], z];
+                let mut b = a;
+                a[axis] -= 1.;
+                b[axis] += 1.;
+                scene.add_strip(
+                    vec![
+                        frame.to_world_vector(a).map(|v| v as f32),
+                        frame.to_world_vector(b).map(|v| v as f32),
+                    ],
+                    PICK_BOUNDARY,
+                );
+            }
+        }
+        scene
+    }
+
+    pub(super) fn profile_tab_diameter(&self, op: &cam_model::ProfileOp) -> Option<f64> {
+        self.operation_tools
+            .iter()
+            .chain(self.controller.document().setup().tools.iter())
+            .find(|tool| tool.number == op.tool)
+            .map(|tool| tool.diameter)
+            .or_else(|| self.wizard_tool().map(|tool| tool.diameter))
+    }
+
+    pub(super) fn profile_tab_locations(&self) -> Vec<[f64; 2]> {
+        let Some(op) = self.profile_tab_operation() else {
+            return Vec::new();
+        };
+        if !op.tabs.enabled {
+            return Vec::new();
+        }
+        self.profile_tab_diameter(&op)
+            .map(|diameter| {
+                cam_toolpath::profile_tab_preview(&op, diameter)
+                    .into_iter()
+                    .map(|tab| tab.position)
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                if op.tabs.manual {
+                    op.tabs.positions.clone()
+                } else {
+                    Vec::new()
+                }
+            })
+    }
+
+    pub(super) fn profile_tab_mesh(&self) -> (Vec<MeshVertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let Some(op) = self.profile_tab_operation() else {
+            return (vertices, indices);
+        };
+        if !op.tabs.enabled
+            || !op.tabs.width.is_finite()
+            || op.tabs.width <= 0.
+            || !op.tabs.height.is_finite()
+            || op.tabs.height <= 0.
+        {
+            return (vertices, indices);
+        }
+        let Some(diameter) = self.profile_tab_diameter(&op) else {
+            return (vertices, indices);
+        };
+        let bottom = self
+            .resolve_height_editor(if self.creating_operation() { 0 } else { op.id })
+            .map(|h| h.bottom)
+            .unwrap_or(-op.depth);
+        if !bottom.is_finite() {
+            return (vertices, indices);
+        }
+        let frame = &self.controller.document().setup().frame;
+        for (index, tab) in cam_toolpath::profile_tab_preview(&op, diameter)
+            .into_iter()
+            .enumerate()
+        {
+            let u = [tab.tangent[0], tab.tangent[1], 0.];
+            let v = [-tab.tangent[1], tab.tangent[0], 0.];
+            let color = if self.profile_tab_selection == Some(index) {
+                [1., 0.60, 0.08, 1.]
+            } else {
+                [0.86, 0.86, 0.65, 1.]
+            };
+            let corners: [[f64; 3]; 8] = std::array::from_fn(|corner| {
+                let along = if corner & 1 == 0 {
+                    -op.tabs.width * 0.5
+                } else {
+                    op.tabs.width * 0.5
+                };
+                let across = if corner & 2 == 0 {
+                    -diameter * 0.5
+                } else {
+                    diameter * 0.5
+                };
+                [
+                    tab.center[0] + u[0] * along + v[0] * across,
+                    tab.center[1] + u[1] * along + v[1] * across,
+                    bottom + if corner & 4 == 0 { 0. } else { op.tabs.height },
+                ]
+            });
+            for (quad, normal) in [
+                ([0, 4, 6, 2], u.map(|x| -x)),
+                ([1, 3, 7, 5], u),
+                ([0, 1, 5, 4], v.map(|x| -x)),
+                ([2, 6, 7, 3], v),
+                ([0, 2, 3, 1], [0., 0., -1.]),
+                ([4, 5, 7, 6], [0., 0., 1.]),
+            ] {
+                let base = vertices.len() as u32;
+                vertices.extend(quad.map(|corner| MeshVertex {
+                    position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
+                    normal: frame.to_world_vector(normal).map(|v| v as f32),
+                    color,
+                }));
+                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        (vertices, indices)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile_editor() -> (App, u32) {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Profile);
+        let id = app
+            .controller
+            .document()
+            .setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        app.begin_operation_draft(id);
+        app.show_stock = false;
+        let _ = app.update(Message::ProfileTabsEnabled(true));
+        let _ = app.update(Message::ProfileTabPositioning(
+            profile_tabs::Positioning::Manual,
+        ));
+        let Operation::Profile(profile) = app.operation_draft.as_mut().unwrap() else {
+            unreachable!()
+        };
+        let pts = profile.chain.points();
+        profile.tabs.positions = [0, 2]
+            .map(|index| {
+                let a = pts[index];
+                let b = pts[(index + 1) % pts.len()];
+                [(a.x + b.x) * 0.5, (a.y + b.y) * 0.5]
+            })
+            .to_vec();
+        let _ = app.update(Message::FieldChanged(Field::TabWidth, "3".into()));
+        let _ = app.update(Message::FieldChanged(Field::TabHeight, "1".into()));
+        (app, id)
+    }
+
+    #[test]
+    fn preview_blocks_follow_draft_dimensions_and_location_selection() {
+        let (mut app, id) = profile_editor();
+        let (initial, indices) = app.profile_tab_mesh();
+        assert_eq!((initial.len(), indices.len()), (48, 72));
+        let extent = |vertices: &[MeshVertex], axis: usize| {
+            let min = vertices
+                .iter()
+                .map(|v| v.position[axis])
+                .fold(f32::INFINITY, f32::min);
+            let max = vertices
+                .iter()
+                .map(|v| v.position[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        assert!((extent(&initial[..24], 2) - 1.).abs() < 1e-5);
+        let bottom = app.resolve_height_editor(id).unwrap().bottom as f32;
+        assert!(
+            (initial
+                .iter()
+                .map(|v| v.position[2])
+                .fold(f32::INFINITY, f32::min)
+                - bottom)
+                .abs()
+                < 1e-5
+        );
+        let _ = app.update(Message::ProfileTabSelected(1));
+        let (highlighted, _) = app.profile_tab_mesh();
+        assert_eq!(highlighted[0].color, initial[0].color);
+        assert_ne!(highlighted[24].color, initial[24].color);
+        assert_eq!(app.profile_tab_selection, Some(1));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Passes));
+        assert!(app
+            .profile_tab_overlay(OrbitCamera::framed([-50.; 3], [100.; 3]), 0.)
+            .is_some());
+        let _ = app.update(Message::FieldChanged(Field::TabWidth, "9".into()));
+        let _ = app.update(Message::FieldChanged(Field::TabHeight, "2".into()));
+        let (resized, _) = app.profile_tab_mesh();
+        assert!((extent(&resized[..24], 2) - 2.).abs() < 1e-5);
+        assert!(
+            extent(&resized[..24], 0) > extent(&initial[..24], 0) + 5.
+                || extent(&resized[..24], 1) > extent(&initial[..24], 1) + 5.
+        );
+        let _ = app.update(Message::ProfileTabRemove(0));
+        assert_eq!(app.profile_tab_selection, Some(0));
+        assert_eq!(app.profile_tab_mesh().0.len(), 24);
+        let _ = app.update(Message::ProfileTabRemove(0));
+        assert_eq!(app.profile_tab_selection, None);
+        assert!(app.profile_tab_mesh().0.is_empty());
+        let _ = app.update(Message::ProfileTabsEnabled(false));
+        assert!(app
+            .operation_geometry_preview()
+            .strips
+            .iter()
+            .any(|s| s.color == PICK_BOUNDARY));
+    }
+
+    #[test]
+    fn automatic_tab_locations_and_blocks_update_with_spacing() {
+        let (mut app, _) = profile_editor();
+        let _ = app.update(Message::ProfileTabPositioning(
+            profile_tabs::Positioning::ByDistance,
+        ));
+        let _ = app.update(Message::FieldChanged(Field::TabSpacing, "30".into()));
+        let locations = app.profile_tab_locations();
+        assert!(locations.len() > 1);
+        assert_eq!(app.profile_tab_mesh().0.len(), locations.len() * 24);
+        let _ = app.update(Message::ProfileTabSelected(locations.len() - 1));
+        assert_eq!(app.profile_tab_selection, Some(locations.len() - 1));
+        let _ = app.update(Message::FieldChanged(Field::TabSpacing, "10000".into()));
+        assert_eq!(app.profile_tab_locations().len(), 1);
+        assert_eq!(app.profile_tab_mesh().0.len(), 24);
+        assert_eq!(app.profile_tab_selection, None);
+    }
+
+    #[test]
+    fn editing_replaces_generated_paths_with_geometry_until_the_editor_closes() {
+        let (mut app, id) = profile_editor();
+        // Generate the committed operation; draft tabs stay uncommitted.
+        app.controller.run(&cam_toolpath::CancelToken::new());
+        let generated = app.controller.outcome().unwrap().program.clone();
+        app.focus_ops.insert(id);
+        let viewport = app.machining_viewport();
+        assert!(!viewport
+            .vertices
+            .iter()
+            .any(|v| v.color == cam_render::CUT || v.color == cam_render::RAPID));
+        assert!(viewport.vertices.iter().any(|v| v.color == PICK_BOUNDARY));
+        assert!(viewport.drill_marks.is_empty());
+        assert_eq!(viewport.mesh_indices.len(), 72);
+        assert_eq!(app.controller.outcome().unwrap().program, generated);
+        app.operation_draft = None;
+        app.inspector_active = false;
+        assert!(app
+            .machining_viewport()
+            .vertices
+            .iter()
+            .any(|v| v.color == cam_render::CUT));
+        assert_eq!(app.controller.outcome().unwrap().program, generated);
+    }
+}

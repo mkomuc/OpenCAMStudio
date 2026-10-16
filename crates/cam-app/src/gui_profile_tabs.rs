@@ -20,55 +20,136 @@ impl std::fmt::Display for Positioning {
 }
 
 impl App {
-    pub(super) fn manual_tab_controls(&self, op: &cam_model::ProfileOp) -> Element<'_, Message> {
-        let mut list = column![row![
-            text("Tab locations").size(12).width(Length::Fill),
-            inspector_button(if self.profile_tab_picking {
-                "Done"
-            } else {
-                "Select"
-            })
-            .on_press(Message::ProfileTabPickToggle),
-            inspector_button("Clear").on_press_maybe(
-                (!op.tabs.positions.is_empty()).then_some(Message::ProfileTabsClear)
-            ),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)]
-        .spacing(4);
-        for (index, point) in op.tabs.positions.iter().enumerate() {
-            list = list.push(
-                row![
-                    text(format!(
-                        "{}   X {}   Y {}",
-                        index + 1,
-                        fmt_num(point[0]),
-                        fmt_num(point[1])
-                    ))
-                    .size(12)
-                    .width(Length::Fill),
-                    inspector_button("×").on_press(Message::ProfileTabRemove(index)),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            );
+    pub(super) fn tab_location_controls(&self, op: &cam_model::ProfileOp) -> Element<'_, Message> {
+        let mut header = row![text("Tab locations").size(12).width(Length::Fill)]
+            .spacing(6)
+            .align_y(Alignment::Center);
+        if op.tabs.manual {
+            header = header
+                .push(
+                    inspector_button(if self.profile_tab_picking {
+                        "Done"
+                    } else {
+                        "Select"
+                    })
+                    .on_press(Message::ProfileTabPickToggle),
+                )
+                .push(inspector_button("Clear").on_press_maybe(
+                    (!op.tabs.positions.is_empty()).then_some(Message::ProfileTabsClear),
+                ));
         }
+        let mut items = column![].spacing(3);
+        for (index, point) in self.profile_tab_locations().into_iter().enumerate() {
+            let active = self.profile_tab_selection == Some(index);
+            let mut item = row![button(
+                text(format!(
+                    "{}   X {}   Y {}",
+                    index + 1,
+                    fmt_num(point[0]),
+                    fmt_num(point[1])
+                ))
+                .size(12)
+                .width(Length::Fill)
+            )
+            .width(Length::Fill)
+            .padding([7, 9])
+            .style(move |theme, status| inspector_tab(theme, status, active))
+            .on_press(Message::ProfileTabSelected(index))]
+            .spacing(4)
+            .align_y(Alignment::Center);
+            if op.tabs.manual {
+                item = item.push(inspector_button("×").on_press(Message::ProfileTabRemove(index)));
+            }
+            items = items.push(item);
+        }
+        let list = column![
+            header,
+            container(scrollable(items).height(Length::Shrink)).max_height(160)
+        ]
+        .spacing(4);
         list.into()
     }
 
     pub(super) fn profile_tab_operation(&self) -> Option<cam_model::ProfileOp> {
+        self.profile_tab_geometry().map(|(op, _)| op)
+    }
+
+    /// Resolve the selected source rather than the cached machining contour or
+    /// a stock/height plane. Replacement geometry remains transactional.
+    pub(super) fn profile_tab_geometry(&self) -> Option<(cam_model::ProfileOp, f64)> {
         if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
             return None;
         }
-        let operation = if self.creating_operation() {
-            self.creation_operation().ok()?.0
+        let (mut operation, binding) = if self.creating_operation() {
+            self.creation_operation().ok()?
         } else {
-            self.operation_draft.clone()?
+            let Selection::Operation(id) = self.controller.selection() else {
+                return None;
+            };
+            let operation = self
+                .operation_draft
+                .as_ref()
+                .filter(|op| op.id() == id)?
+                .clone();
+            let binding = self
+                .operation_binding_preview
+                .as_ref()
+                .or_else(|| self.controller.geometry_state().bindings.get(&id))
+                .cloned();
+            (operation, binding)
         };
-        match operation {
-            Operation::Profile(p) => Some(p),
-            _ => None,
-        }
+        let parsed = self
+            .fields
+            .iter()
+            .filter_map(|(field, value)| {
+                value
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .map(|v| (*field, v))
+            })
+            .collect();
+        apply_op_fields(&mut operation, &parsed);
+        let Operation::Profile(mut op) = operation else {
+            return None;
+        };
+        let z = if let Some(binding) = binding {
+            let geometry =
+                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+            let resolved = cam_geometry3d::resolve_binding(&geometry, &binding).ok()?;
+            op.chain = resolved.regions.first()?.outer().clone();
+            let reference = binding.selected.first()?;
+            if reference.kind == EntityKind::Silhouette {
+                // The selected XY silhouette is displayed on the setup XY plane.
+                0.0
+            } else {
+                let asset = geometry.asset(reference.asset_id)?;
+                let instance = geometry.instance(reference.instance_id)?;
+                let wire = asset
+                    .topology
+                    .loops
+                    .iter()
+                    .find(|wire| wire.id == reference.id)?;
+                let edge_id = wire.edge_uses.first()?.edge_id;
+                let edge = asset
+                    .topology
+                    .edges
+                    .iter()
+                    .find(|edge| edge.id == edge_id)?;
+                let point = match edge.curve {
+                    cam_model::CadCurve::Line { start, .. } => start,
+                    cam_model::CadCurve::CircleArc { center, .. } => center,
+                    cam_model::CadCurve::Unsupported { .. } => return None,
+                };
+                instance.placement.transform_point(point)[2]
+            }
+        } else {
+            // Selected drawing contours live on setup XY, independently of the
+            // operation's cutting heights and the stock top.
+            0.0
+        };
+        Some((op, z))
     }
 
     pub(super) fn profile_tab_overlay(
@@ -76,28 +157,25 @@ impl App {
         camera: OrbitCamera,
         browser_width: f32,
     ) -> Option<TabOverlay> {
-        if self.operation_tab != OperationTab::Geometry
-            || !self.inspector_active
-            || !self.inspector_enabled
-        {
+        if !self.inspector_active || !self.inspector_enabled {
             return None;
         }
-        let op = self.profile_tab_operation()?;
-        if !op.tabs.enabled || !op.tabs.manual || !op.chain.is_valid() {
+        let (op, z) = self.profile_tab_geometry()?;
+        if !op.chain.is_valid() {
             return None;
         }
-        let z = self
-            .resolve_height_editor(if self.creating_operation() { 0 } else { op.id })
-            .map(|h| h.top)
-            .unwrap_or(self.controller.document().setup().heights.top_of_stock);
         Some(TabOverlay {
             camera,
             browser_width,
             points: op.chain.points().iter().map(|p| [p.x, p.y]).collect(),
-            positions: op.tabs.positions,
+            positions: self.profile_tab_locations(),
             z,
             frame: self.controller.document().setup().frame.clone(),
-            picking: self.profile_tab_picking,
+            picking: self.profile_tab_picking
+                && op.tabs.enabled
+                && op.tabs.manual
+                && self.operation_tab == OperationTab::Geometry,
+            selected: self.profile_tab_selection,
             catch_px: self.settings.snap_catch_px().max(8.0),
             gizmo_size: self.show_gizmo.then_some(self.gizmo_size),
         })
@@ -112,6 +190,7 @@ pub(super) struct TabOverlay {
     z: f64,
     frame: cam_model::SetupFrame,
     picking: bool,
+    selected: Option<usize>,
     catch_px: f32,
     gizmo_size: Option<f32>,
 }
@@ -248,14 +327,23 @@ impl canvas::Program<Message> for TabOverlay {
             }
         }
         outline.close();
-        frame.stroke(&outline.build(), stroke(1.5));
+        frame.stroke(
+            &outline.build(),
+            canvas::Stroke::default()
+                .with_color(Color::from_rgb(0.2, 0.6, 0.98))
+                .with_width(2.),
+        );
         for (index, point) in self.positions.iter().enumerate() {
             if let Some(p) = self.project(*point, local) {
                 frame.fill(
                     &canvas::Path::circle(p, 6.),
                     Color::from_rgb(0.12, 0.14, 0.17),
                 );
-                frame.stroke(&canvas::Path::circle(p, 6.), stroke(2.));
+                let active = self.selected == Some(index);
+                frame.stroke(
+                    &canvas::Path::circle(p, if active { 9. } else { 6. }),
+                    stroke(if active { 4. } else { 2. }),
+                );
                 frame.fill_text(canvas::Text {
                     content: (index + 1).to_string(),
                     position: p + iced::Vector::new(9., -16.),
@@ -283,6 +371,254 @@ mod tests {
     use super::*;
     use iced::widget::canvas::Program;
 
+    fn selected_cad_profile() -> (App, u32) {
+        use cam_model::*;
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        let points = [
+            [0., 0., 0.],
+            [20., 0., 0.],
+            [20., 20., 0.],
+            [0., 20., 0.],
+            [0., 0., -5.],
+            [20., 0., -5.],
+            [20., 20., -5.],
+            [0., 20., -5.],
+        ];
+        let mut topology = TopologySnapshot {
+            bodies: vec![CadBody {
+                id: 1,
+                name: "Plate".into(),
+                valid_solid: true,
+                bounds: [[0., 0., -5.], [20., 20., 0.]],
+            }],
+            vertices: points
+                .iter()
+                .enumerate()
+                .map(|(i, p)| CadVertex {
+                    id: i as u64 + 1,
+                    body_id: 1,
+                    point: *p,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        for (index, (corners, normal)) in [
+            ([0, 1, 2, 3], [0., 0., 1.]),
+            ([7, 6, 5, 4], [0., 0., -1.]),
+            ([4, 5, 1, 0], [0., -1., 0.]),
+            ([5, 6, 2, 1], [1., 0., 0.]),
+            ([6, 7, 3, 2], [0., 1., 0.]),
+            ([7, 4, 0, 3], [-1., 0., 0.]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let face_id = 100 + index as u64;
+            let loop_id = 200 + index as u64;
+            let mut edge_uses = Vec::new();
+            let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+            for i in 0..4 {
+                let a = corners[i];
+                let b = corners[(i + 1) % 4];
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(points[a][axis]);
+                    bounds[1][axis] = bounds[1][axis].max(points[a][axis]);
+                }
+                let ids = [a as u64 + 1, b as u64 + 1];
+                let (edge_id, reversed) = if let Some(edge) = topology
+                    .edges
+                    .iter_mut()
+                    .find(|edge| edge.vertices == ids || edge.vertices == [ids[1], ids[0]])
+                {
+                    edge.face_ids.push(face_id);
+                    (edge.id, edge.vertices != ids)
+                } else {
+                    let edge_id = 300 + topology.edges.len() as u64;
+                    topology.edges.push(CadEdge {
+                        id: edge_id,
+                        body_id: 1,
+                        vertices: ids,
+                        face_ids: vec![face_id],
+                        curve: CadCurve::Line {
+                            start: points[a],
+                            end: points[b],
+                        },
+                    });
+                    (edge_id, false)
+                };
+                edge_uses.push(EdgeUse { edge_id, reversed });
+            }
+            topology.loops.push(CadLoop {
+                id: loop_id,
+                body_id: 1,
+                face_id,
+                edge_uses,
+                is_outer: true,
+            });
+            topology.faces.push(CadFace {
+                id: face_id,
+                body_id: 1,
+                surface: CadSurface::Plane {
+                    origin: points[corners[0]],
+                    normal,
+                },
+                loop_ids: vec![loop_id],
+                bounds,
+            });
+        }
+        topology.projection = Some(CadProjectionMesh {
+            mesh: CadMesh {
+                vertices: points.to_vec(),
+                triangles: vec![
+                    [0, 1, 2],
+                    [0, 2, 3],
+                    [7, 6, 5],
+                    [7, 5, 4],
+                    [4, 5, 1],
+                    [4, 1, 0],
+                    [5, 6, 2],
+                    [5, 2, 1],
+                    [6, 7, 3],
+                    [6, 3, 2],
+                    [7, 4, 0],
+                    [7, 0, 3],
+                ],
+                triangle_faces: (100..106).flat_map(|id| [id, id]).collect(),
+            },
+            chord_tolerance: 0.002,
+        });
+        app.controller
+            .add_cad_asset(
+                GeometryAsset {
+                    id: 1,
+                    revision: 1,
+                    name: "Plate".into(),
+                    source_format: CadFormat::Step,
+                    source_data: vec![].into(),
+                    import_options: None,
+                    import_diagnostics: vec![],
+                    source_fingerprint: String::new(),
+                    source_units: SourceUnits::Millimetres,
+                    backend: "analytic fixture".into(),
+                    topology: topology.into(),
+                },
+                (1..=2)
+                    .map(|id| GeometryInstance {
+                        id,
+                        asset_id: 1,
+                        body_id: 1,
+                        name: format!("Plate {id}"),
+                        visible: true,
+                        placement: RigidTransform {
+                            translation: [(id - 1) as f64 * 60., 0., 5.],
+                            ..Default::default()
+                        },
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        app.controller
+            .edit_setup(|setup| setup.model_instances = vec![1, 2]);
+        app.controller.edit_stock(|stock| {
+            *stock = Stock::BoundingBox {
+                x_offset: 0.,
+                y_offset: 0.,
+                top: 20.,
+                thickness: 30.,
+            }
+        });
+        let reference = EntityRef {
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Loop,
+            id: 200,
+        };
+        let id = app
+            .controller
+            .create_cad_operation(OpKind::Profile, vec![reference])
+            .unwrap();
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        let _ = app.update(Message::ProfileTabsEnabled(true));
+        let _ = app.update(Message::ProfileTabPositioning(Positioning::Manual));
+        (app, id)
+    }
+
+    #[test]
+    fn tab_picker_uses_selected_cad_geometry_and_its_source_plane() {
+        let (mut app, id) = selected_cad_profile();
+        let camera = OrbitCamera::framed([-20., -20., -10.], [100., 40., 30.]);
+        let bounds = iced::Rectangle::with_size(iced::Size::new(900., 700.));
+        let overlay = app.profile_tab_overlay(camera, 0.).unwrap();
+        assert_eq!(overlay.z, 5.); // Selected loop; stock top is 20 mm.
+        let p = overlay.project([10., 0.], bounds).unwrap();
+        let actual = overlay.nearest(p, bounds).unwrap();
+        assert!((actual[0] - 10.).abs() < 1e-4 && actual[1].abs() < 1e-4);
+        let unrelated = overlay.project([70., 0.], bounds).unwrap();
+        assert!(overlay.nearest(unrelated, bounds).is_none());
+
+        // Use replacement geometry without applying the operation. Cached XY
+        // remains on the first instance while the current selection is on #2.
+        let mut binding = app.controller.geometry_state().bindings[&id].clone();
+        binding.selected[0].instance_id = 2;
+        app.operation_binding_preview = Some(binding.clone());
+        app.operation_geometry = Some(binding.selected.clone());
+        assert!(
+            matches!(app.operation_draft.as_ref(), Some(Operation::Profile(op)) if op.chain.points().iter().all(|p| p.x <= 20.))
+        );
+        let replacement = app.profile_tab_overlay(camera, 0.).unwrap();
+        assert!(replacement.points.iter().all(|p| p[0] >= 60.));
+        assert!(replacement.nearest(p, bounds).is_none());
+        assert!(replacement.nearest(unrelated, bounds).is_some());
+
+        // Silhouettes are selected on setup XY, even when the body is elevated.
+        binding.selected[0].kind = EntityKind::Silhouette;
+        binding.selected[0].id = 1;
+        app.operation_binding_preview = Some(binding);
+        let silhouette = app.profile_tab_overlay(camera, 0.).unwrap();
+        assert_eq!(silhouette.z, 0.);
+        assert!(silhouette.points.iter().all(|p| p[0] > 59.));
+    }
+
+    #[test]
+    fn drawing_tab_picker_stays_on_selected_contour_when_stock_height_changes() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Profile);
+        let id = app
+            .controller
+            .document()
+            .setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        let _ = app.update(Message::ProfileTabsEnabled(true));
+        let _ = app.update(Message::ProfileTabPositioning(Positioning::Manual));
+        app.controller.edit_heights(|h| h.top_of_stock = 25.);
+        let overlay = app
+            .profile_tab_overlay(OrbitCamera::framed([-30.; 3], [100.; 3]), 0.)
+            .unwrap();
+        assert_eq!(overlay.z, 0.);
+        let Operation::Profile(op) = app.operation_draft.as_ref().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(
+            overlay.points,
+            op.chain
+                .points()
+                .iter()
+                .map(|p| [p.x, p.y])
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn manual_tab_screen_picking_tracks_rotated_views_and_setup_frames() {
         let bounds = iced::Rectangle {
@@ -303,6 +639,7 @@ mod tests {
                 browser_width: 0.,
                 z: 3.,
                 picking: true,
+                selected: None,
                 catch_px: 12.,
                 gizmo_size: None,
                 points: vec![[0., 0.], [40., 0.], [40., 40.], [0., 40.]],
