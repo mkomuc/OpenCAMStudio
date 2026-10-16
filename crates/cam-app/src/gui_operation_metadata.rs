@@ -23,6 +23,12 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 Field::Feed,
                 Field::PlungeFeed,
             ]);
+            if p.tabs.enabled {
+                fields.extend([Field::TabWidth, Field::TabHeight]);
+                if !p.tabs.manual {
+                    fields.push(Field::TabSpacing);
+                }
+            }
             // Lead/plunge sizes appear only when the kind uses them.
             if p.lead_in != Lead::None {
                 fields.push(Field::LeadInSize);

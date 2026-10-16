@@ -297,10 +297,43 @@ pub enum Plunge {
     ZigZag { length: f64, angle_deg: f64 },
 }
 
+/// Rectangular holding tabs placed by distance or at selected contour locations.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ProfileTabs {
+    pub enabled: bool,
+    /// Retained material width along the contour (mm).
+    pub width: f64,
+    /// Height above the profile floor (mm).
+    pub height: f64,
+    /// Maximum centre-to-centre distance along the contour (mm).
+    pub spacing: f64,
+    /// Use selected locations instead of automatic spacing.
+    pub manual: bool,
+    /// Selected points in the contour's setup XY coordinates.
+    pub positions: Vec<[f64; 2]>,
+}
+
+impl Default for ProfileTabs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: 9.0,
+            height: 3.0,
+            spacing: 180.0,
+            manual: false,
+            positions: Vec::new(),
+        }
+    }
+}
+
 /// A 2.5-D profiling operation: follow a closed chain at an offset, in stepdown
 /// passes, down to a depth.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    /// Optional rectangular holding tabs (disabled in older projects).
+    #[serde(default)]
+    pub tabs: ProfileTabs,
     /// Operation id (0-based within the setup); stamped onto every emitted tag.
     pub id: u32,
     /// Tool number to select from the setup's tool list.
@@ -1498,6 +1531,7 @@ mod tests {
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            tabs: Default::default(),
             spindle_rpm: 0.0,
             work_offset: 1,
             clearing: Clearing::default(),
@@ -1523,6 +1557,28 @@ mod tests {
             lead_overlap: 0.0,
             plunge: Plunge::Straight,
         })
+    }
+
+    #[test]
+    fn profile_tabs_roundtrip_and_old_projects_default_to_disabled() {
+        let Operation::Profile(mut op) = profile(0) else {
+            unreachable!()
+        };
+        let mut legacy = serde_json::to_value(&op).unwrap();
+        legacy.as_object_mut().unwrap().remove("tabs");
+        let restored: ProfileOp = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.tabs, ProfileTabs::default());
+        op.tabs = ProfileTabs {
+            enabled: true,
+            width: 9.0,
+            height: 3.0,
+            spacing: 180.0,
+            manual: true,
+            positions: vec![[5.0, 0.0]],
+        };
+        let restored: ProfileOp =
+            serde_json::from_str(&serde_json::to_string(&op).unwrap()).unwrap();
+        assert_eq!(restored, op);
     }
 
     fn carve(clear_tool: Option<u32>) -> Operation {

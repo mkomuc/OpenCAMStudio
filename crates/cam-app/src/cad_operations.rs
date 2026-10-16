@@ -331,6 +331,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            tabs: Default::default(),
             id,
             tool,
             work_offset,

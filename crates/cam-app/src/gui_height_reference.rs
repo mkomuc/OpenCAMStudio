@@ -204,7 +204,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for HeightPicker {
         for (index, reference) in options.iter().copied().enumerate() {
             let current = group(reference);
             if previous.is_some_and(|g| g != current) {
-                rows = rows.push(container(iced::widget::rule::horizontal(1)).padding([5, 4]));
+                rows = rows.push(popup_separator());
             }
             previous = Some(current);
             let active = index == state.active;
@@ -213,42 +213,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for HeightPicker {
                     .on_press(reference)
                     .width(Length::Fill)
                     .padding([3, 7])
-                    .style(move |_, status| button::Style {
-                        background: Some(Background::Color(
-                            if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                                Color::from_rgb(0.23, 0.32, 0.42)
-                            } else if active {
-                                Color::from_rgb(0.19, 0.29, 0.40)
-                            } else {
-                                Color::TRANSPARENT
-                            },
-                        )),
-                        text_color: INSPECTOR_TEXT,
-                        border: Border {
-                            radius: 3.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
+                    .style(move |theme, status| popup_item_style(theme, status, active)),
             );
         }
         let content: Element<'static, Reference> =
             container(scrollable(rows.padding(4)).id(menu_id(self.plane)))
                 .width(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(Color::from_rgb(0.12, 0.14, 0.17))),
-                    border: Border {
-                        color: INSPECTOR_MUTED,
-                        width: 1.,
-                        radius: 5.0.into(),
-                    },
-                    shadow: iced::Shadow {
-                        color: Color::BLACK.scale_alpha(0.3),
-                        offset: Vector::new(0., 3.),
-                        blur_radius: 10.,
-                    },
-                    ..Default::default()
-                })
+                .style(popup_surface)
                 .into();
         tree.children[1].diff(&content);
         Some(overlay::Element::new(Box::new(Menu {

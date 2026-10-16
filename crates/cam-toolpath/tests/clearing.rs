@@ -204,6 +204,7 @@ fn pocket_doc() -> Document {
 /// An outside profile with radial roughing — the *other* caller of the clearing engine.
 fn roughing_doc() -> Document {
     let op = ProfileOp {
+        tabs: Default::default(),
         spindle_rpm: 0.0,
         work_offset: 1,
         clearing: Clearing::default(),

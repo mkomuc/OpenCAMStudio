@@ -16,22 +16,6 @@ pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn cad_silhouette_note(
-    state: &cam_model::GeometryState,
-    selected: &[EntityRef],
-) -> Option<String> {
-    let reference = selected.iter().find(|r| r.kind == EntityKind::Silhouette)?;
-    let projection = state
-        .asset(reference.asset_id)?
-        .topology
-        .projection
-        .as_ref()?;
-    Some(format!(
-        "Whole-body XY outline · {:.4} mm outward allowance. Internal holes are filled.",
-        projection.chord_tolerance + cam_geo::GRID_MM * 2.
-    ))
-}
-
 pub(super) fn drawing_geometry_labels(selected: &[LoopRef]) -> Vec<String> {
     selected
         .iter()
@@ -75,11 +59,19 @@ impl App {
         for (index, label) in labels.into_iter().enumerate() {
             let active = selected == Some(index);
             items = items.push(
-                button(text(label).size(12).width(Length::Fill))
-                    .padding([8, 9])
-                    .width(Length::Fill)
-                    .style(move |theme, status| inspector_tab(theme, status, active))
-                    .on_press(Message::GeometryRowSelected(index)),
+                container(
+                    row![
+                        button(text(label).size(12).width(Length::Fill))
+                            .padding([8, 9])
+                            .width(Length::Fill)
+                            .style(move |theme, status| inspector_tab(theme, status, active))
+                            .on_press(Message::GeometryRowSelected(index)),
+                        inspector_button("×").on_press(Message::GeometryRemove(index)),
+                    ]
+                    .spacing(2)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill),
             );
         }
         if count == 0 {
@@ -114,28 +106,20 @@ impl App {
                     },
                     ..container::Style::default()
                 }),
-            row![
-                text(format!("{count} selected"))
-                    .size(11)
-                    .color(INSPECTOR_MUTED)
-                    .width(Length::Fill),
-                inspector_button("Remove").on_press_maybe(selected.map(Message::GeometryRemove)),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
         ]
         .spacing(6)
         .into()
     }
 
     pub(super) fn pick_operation_geometry(&mut self) -> iced::Task<Message> {
+        self.profile_tab_picking = false;
         self.geometry_additive = true;
         if self.creating_operation()
             || self.cad_editing_op.is_some()
             || self.drawing_editing_op.is_some()
         {
             self.status =
-                "Click geometry in the viewport to add it. Select a list item to remove it.".into();
+                "Click geometry in the viewport to add it. Use × to remove an item.".into();
             return iced::Task::none();
         }
         if let Selection::Operation(id) = self.controller.selection() {

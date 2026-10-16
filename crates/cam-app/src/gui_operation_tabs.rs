@@ -42,7 +42,9 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::PlungeFeed
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
-        Field::MajorDia => OperationTab::Geometry,
+        Field::MajorDia | Field::TabWidth | Field::TabHeight | Field::TabSpacing => {
+            OperationTab::Geometry
+        }
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -128,6 +130,8 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::PlungeFeed
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
+        Field::TabWidth | Field::TabSpacing => value <= 0.0,
+        Field::TabHeight => value <= 0.0,
         Field::Stepdown if matches!(op, Operation::Profile(_) | Operation::Face(_)) => value <= 0.0,
         Field::ThreadPasses => value < 1.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::ThreadSpringPasses => value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64,
@@ -352,16 +356,6 @@ impl App {
             list = list.push(text(geometry).size(12));
             if let Some(binding) = linked {
                 list = list.push(self.geometry_list(cad_geometry_labels(&binding.selected)));
-                if let Some(note) =
-                    cad_silhouette_note(self.controller.geometry_state(), &binding.selected)
-                {
-                    list = list.push(text(note).size(11).color(INSPECTOR_MUTED));
-                }
-                list = list.push(
-                    text(format!("Association: {:?}", binding.status))
-                        .size(11)
-                        .color(INSPECTOR_MUTED),
-                );
             } else {
                 list = list.push(self.geometry_list(operation_geometry_labels(op)));
             }
@@ -400,6 +394,12 @@ impl App {
         for field in operation_fields(op) {
             if tab == OperationTab::Heights && field != Field::ThreadBlindAllowance {
                 continue;
+            }
+            if matches!(
+                field,
+                Field::TabWidth | Field::TabHeight | Field::TabSpacing
+            ) {
+                continue; // Grouped beneath the holding-tabs toggle.
             }
             if field_tab(field) != tab || is_clear_field(field) {
                 continue;
@@ -456,6 +456,52 @@ impl App {
                             ))
                             .size(12),
                         );
+                    }
+                }
+                if tab == OperationTab::Geometry {
+                    list = list.push(iced::widget::rule::horizontal(1));
+                    list = list.push(
+                        row![
+                            text("Holding tabs").size(12),
+                            checkbox(p.tabs.enabled)
+                                .size(15)
+                                .on_toggle(Message::ProfileTabsEnabled)
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+                    if p.tabs.enabled {
+                        list = list.push(text("Tab shape: Rectangular").size(12));
+                        for field in [Field::TabWidth, Field::TabHeight] {
+                            let value = self.fields.get(&field).cloned().unwrap_or_default();
+                            list = list.push(field_row_labeled(
+                                field,
+                                self.field_label(field),
+                                self.field_help(field),
+                                &value,
+                                self.tooltips,
+                                self.field_invalid(field),
+                            ));
+                        }
+                        list = list.push(profile_picker(
+                            "Tab positioning", "Place tabs automatically by contour distance, or select locations on the contour.", self.tooltips,
+                            if p.tabs.manual { profile_tabs::Positioning::Manual } else { profile_tabs::Positioning::ByDistance },
+                            &profile_tabs::Positioning::ALL[..], Message::ProfileTabPositioning,
+                        ));
+                        if p.tabs.manual {
+                            list = list.push(self.manual_tab_controls(p));
+                        } else {
+                            let field = Field::TabSpacing;
+                            let value = self.fields.get(&field).cloned().unwrap_or_default();
+                            list = list.push(field_row_labeled(
+                                field,
+                                self.field_label(field),
+                                self.field_help(field),
+                                &value,
+                                self.tooltips,
+                                self.field_invalid(field),
+                            ));
+                        }
                     }
                 }
                 if tab == OperationTab::Passes
@@ -809,33 +855,27 @@ impl App {
             _ => {}
         }
         let footer = inspector_footer(
-            column![
-                row![
-                    inspector_button("Cancel").on_press(if creating {
-                        Message::CancelOp
-                    } else {
-                        Message::CancelOperationDraft
-                    }),
-                    Space::new().width(Length::Fill),
-                    inspector_button(if creating {
-                        "Create operation"
-                    } else {
-                        "Apply changes"
-                    })
-                    .style(inspector_primary)
-                    .on_press_maybe(if creating {
-                        self.creation_ready().then_some(Message::ConfirmOp)
-                    } else {
-                        (!self.any_field_invalid()
-                            && self.operation_height_overrides_valid()
-                            && self.inspector_dirty())
-                        .then_some(Message::Apply)
-                    }),
-                ]
-                .spacing(8),
-                text("All tabs and linked heights commit together.")
-                    .size(11)
-                    .color(INSPECTOR_MUTED)
+            row![
+                inspector_button("Cancel").on_press(if creating {
+                    Message::CancelOp
+                } else {
+                    Message::CancelOperationDraft
+                }),
+                Space::new().width(Length::Fill),
+                inspector_button(if creating {
+                    "Create operation"
+                } else {
+                    "Apply changes"
+                })
+                .style(inspector_primary)
+                .on_press_maybe(if creating {
+                    self.creation_ready().then_some(Message::ConfirmOp)
+                } else {
+                    (!self.any_field_invalid()
+                        && self.operation_height_overrides_valid()
+                        && self.inspector_dirty())
+                    .then_some(Message::Apply)
+                }),
             ]
             .spacing(8),
         );
@@ -1112,6 +1152,51 @@ mod tests {
         assert!(operation_field_invalid(pocket, Field::Overlap, 100.0));
         assert!(operation_field_invalid(pocket, Field::Overlap, 99.9));
         assert!(!operation_field_invalid(pocket, Field::Overlap, 99.0));
+    }
+
+    #[test]
+    fn profile_tabs_survive_toggles_apply_undo_and_cancel() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Profile);
+        let id = app
+            .controller
+            .document()
+            .setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        app.begin_operation_draft(id);
+        let before = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::ProfileTabsEnabled(true));
+        for (field, value) in [
+            (Field::TabWidth, "5"),
+            (Field::TabHeight, "1"),
+            (Field::TabSpacing, "40"),
+        ] {
+            assert_eq!(field_tab(field), OperationTab::Geometry);
+            let _ = app.update(Message::FieldChanged(field, value.into()));
+        }
+        let _ = app.update(Message::ProfileTabsEnabled(false));
+        let _ = app.update(Message::ProfileTabsEnabled(true));
+        assert_eq!(
+            app.fields.get(&Field::TabWidth).map(String::as_str),
+            Some("5")
+        );
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Passes));
+        let _ = app.update(Message::Apply);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Profile(p))
+            if p.tabs.enabled && p.tabs.width == 5.0 && p.tabs.height == 1.0 && p.tabs.spacing == 40.0)
+        );
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.operation(id), Some(&before));
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::ProfileTabsEnabled(true));
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.current_operation(id), Some(&before));
     }
 
     #[test]

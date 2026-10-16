@@ -1914,6 +1914,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                tabs: Default::default(),
                 clearing: cam_model::Clearing::default(),
                 id: 0,
                 tool,
@@ -2338,6 +2339,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    tabs: Default::default(),
                     clearing: cam_model::Clearing::default(),
                     id,
                     tool: 1,

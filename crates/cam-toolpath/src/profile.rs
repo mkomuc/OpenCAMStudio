@@ -91,6 +91,45 @@ impl Strategy for ProfileStrategy {
                 ..Default::default()
             };
         }
+        if op.tabs.enabled {
+            let tabs = &op.tabs;
+            if tabs.manual && tabs.positions.is_empty() {
+                diagnostics.push(Diagnostic::error(format!(
+                    "operation {}: select at least one manual holding-tab location",
+                    op.id
+                )));
+                return StrategyResult {
+                    diagnostics,
+                    ..Default::default()
+                };
+            }
+            let invalid = !tabs.width.is_finite()
+                || tabs.width <= 0.0
+                || !tabs.height.is_finite()
+                || tabs.height <= 0.0
+                || tabs.height >= env.heights.top_of_stock - floor
+                || (!tabs.manual && (!tabs.spacing.is_finite() || tabs.spacing <= 0.0))
+                || (tabs.manual
+                    && (tabs.positions.is_empty()
+                        || tabs.positions.len() > 10_000
+                        || tabs.positions.iter().flatten().any(|v| !v.is_finite())));
+            let unsupported = op.comp != Comp::Computed
+                || op.plunge != Plunge::Straight
+                || op.stepover > 0.0
+                || op.lead_overlap > 0.0;
+            if invalid || unsupported {
+                diagnostics.push(Diagnostic::error(format!(
+                    "operation {}: Holding tabs require positive finite width, height and spacing, \
+                     height below the stock top, computed compensation, straight plunge, \
+                     no radial roughing and no lead overlap",
+                    op.id
+                )));
+                return StrategyResult {
+                    diagnostics,
+                    ..Default::default()
+                };
+            }
+        }
         let region = match Polygon::new(op.chain.clone()) {
             Ok(p) => p,
             Err(e) => {
@@ -248,9 +287,56 @@ impl Strategy for ProfileStrategy {
         // one (On has no material side — leave the lead on its default normal).
         let air_sign = if side_sign < 0.0 { -1.0 } else { 1.0 };
 
+        // Validate every loop before emitting any motion. The cutter needs a gap
+        // between protected spans so entry and exit remain below the tab tops.
+        let mut contours: Vec<_> = loops
+            .iter()
+            .map(|poly| rotate_to_start(poly.outer().points(), op.start))
+            .collect();
+        let mut assigned = vec![Vec::new(); contours.len()];
+        if op.tabs.enabled && op.tabs.manual {
+            for &point in &op.tabs.positions {
+                let nearest = contours
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        nearest_on_loop(a, point)
+                            .1
+                            .total_cmp(&nearest_on_loop(b, point).1)
+                    })
+                    .map(|(index, _)| index)
+                    .unwrap_or(0);
+                assigned[nearest].push(point);
+            }
+        }
+        let mut layouts = Vec::new();
+        for (index, points) in contours.iter_mut().enumerate() {
+            if !op.tabs.enabled || (op.tabs.manual && assigned[index].is_empty()) {
+                layouts.push(None);
+                continue;
+            }
+            let mut tab_op = op.clone();
+            if op.tabs.manual {
+                tab_op.tabs.positions = assigned[index].clone();
+                move_tab_seam(points, &tab_op, tool.diameter);
+            }
+            if let Some(layout) = TabLayout::new(points, &tab_op, tool.diameter) {
+                layouts.push(Some(layout));
+            } else {
+                diagnostics.push(Diagnostic::error(format!(
+                    "operation {}: holding tabs overlap or leave insufficient room for entry; \
+                     move tabs, increase spacing, or reduce tab width or lead size",
+                    op.id
+                )));
+                return StrategyResult {
+                    diagnostics,
+                    ..Default::default()
+                };
+            }
+        }
         let levels = depth_levels(env.heights.top_of_stock, floor, op.stepdown);
         let mut program = Program::new();
-        for poly in &loops {
+        for (index, points) in contours.iter().enumerate() {
             if cancel.is_cancelled() {
                 return StrategyResult {
                     program,
@@ -260,12 +346,13 @@ impl Strategy for ProfileStrategy {
             }
             emit_loop(
                 &mut program,
-                poly.outer().points(),
+                points,
                 op,
                 &env.heights,
                 &levels,
                 comp,
                 air_sign,
+                layouts[index].as_ref(),
             );
         }
 
@@ -327,12 +414,11 @@ fn emit_loop(
     levels: &[f64],
     comp: Option<CutterComp>,
     air_sign: f64,
+    tabs: Option<&TabLayout>,
 ) {
     if pts.len() < 3 {
         return;
     }
-    let rotated = rotate_to_start(pts, op.start);
-    let pts = rotated.as_slice();
     let start = pts[0];
 
     // Rich entry (leads, a closure overlap, and/or a non-straight plunge) takes a
@@ -343,7 +429,7 @@ fn emit_loop(
         || op.lead_overlap > 0.0
         || op.plunge != Plunge::Straight
     {
-        emit_loop_rich(prog, pts, op, h, levels, comp, air_sign);
+        emit_loop_rich(prog, pts, op, h, levels, comp, air_sign, tabs);
         return;
     }
 
@@ -375,7 +461,13 @@ fn emit_loop(
         if let Some(c) = comp {
             prog.push(Step::CutterComp(c));
         }
-        crate::emit::cut_loop(prog, pts, op.feed, cut, z);
+        if let Some(tabs) = tabs {
+            let mut closed = pts.to_vec();
+            closed.push(start);
+            tabs.cut(prog, &closed, op, z);
+        } else {
+            crate::emit::cut_loop(prog, pts, op.feed, cut, z);
+        }
         if comp.is_some() {
             prog.push(Step::CutterComp(CutterComp::Off));
         }
@@ -400,6 +492,7 @@ fn emit_loop_rich(
     levels: &[f64],
     comp: Option<CutterComp>,
     air_sign: f64,
+    tabs: Option<&TabLayout>,
 ) {
     let start = pts[0];
     let tan_in = start_tangent(pts); // leaving start, into the cut
@@ -552,7 +645,11 @@ fn emit_loop_rich(
         if let Some(c) = comp {
             prog.push(Step::CutterComp(c));
         }
-        crate::emit::cut_polyline(prog, &loop_pts, op.feed, cut, z);
+        if let Some(tabs) = tabs {
+            tabs.cut(prog, &loop_pts, op, z);
+        } else {
+            crate::emit::cut_polyline(prog, &loop_pts, op.feed, cut, z);
+        }
         if comp.is_some() {
             prog.push(Step::CutterComp(CutterComp::Off));
         }
@@ -569,6 +666,182 @@ fn emit_loop_rich(
             });
         }
         prev_z = z;
+    }
+}
+
+fn loop_length(points: &[Point]) -> f64 {
+    points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
+        .sum()
+}
+
+/// Arc length and squared distance of the nearest point on a closed loop.
+fn nearest_on_loop(points: &[Point], point: [f64; 2]) -> (f64, f64) {
+    let mut walked = 0.0;
+    let mut nearest = (0.0, f64::INFINITY);
+    for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let length2 = dx * dx + dy * dy;
+        if length2 <= 1e-24 {
+            continue;
+        }
+        let t = (((point[0] - a.x) * dx + (point[1] - a.y) * dy) / length2).clamp(0.0, 1.0);
+        let distance2 = (a.x + t * dx - point[0]).powi(2) + (a.y + t * dy - point[1]).powi(2);
+        if distance2 < nearest.1 {
+            nearest = (walked + t * length2.sqrt(), distance2);
+        }
+        walked += length2.sqrt();
+    }
+    nearest
+}
+
+fn lead_extent(lead: Lead) -> f64 {
+    match lead {
+        Lead::None => 0.0,
+        Lead::Linear { length } => length,
+        Lead::Arc { radius } => radius * std::f64::consts::SQRT_2,
+    }
+}
+
+/// Keep entry and leads in an unprotected gap, including tabs at the old seam.
+fn move_tab_seam(points: &mut Vec<Point>, op: &ProfileOp, diameter: f64) {
+    let perimeter = loop_length(points);
+    if perimeter <= 0.0 {
+        return;
+    }
+    let mut centers: Vec<_> = op
+        .tabs
+        .positions
+        .iter()
+        .map(|&point| nearest_on_loop(points, point).0)
+        .collect();
+    centers.sort_by(f64::total_cmp);
+    let room =
+        (op.tabs.width + diameter) * 0.5 + lead_extent(op.lead_in).max(lead_extent(op.lead_out));
+    if centers.first().is_none_or(|d| *d > room)
+        && centers.last().is_none_or(|d| *d < perimeter - room)
+    {
+        return;
+    }
+    let mut largest = (0.0, 0.0);
+    for i in 0..centers.len() {
+        let next = centers[(i + 1) % centers.len()]
+            + if i + 1 == centers.len() {
+                perimeter
+            } else {
+                0.0
+            };
+        let gap = next - centers[i];
+        if gap > largest.1 {
+            largest = ((centers[i] + gap * 0.5) % perimeter, gap);
+        }
+    }
+    let mut rotated = walk_loop(points, largest.0, perimeter);
+    rotated.pop(); // walk_loop includes the closing point.
+    *points = rotated;
+}
+
+/// Tab spans measured along the tool-centre loop. Both tab ends are extended
+/// by a cutter radius to retain the requested material width. Vertical moves at
+/// their boundaries make a rectangular bridge, including on intermediate passes.
+struct TabLayout {
+    spans: Vec<(f64, f64)>,
+    top: f64,
+}
+
+impl TabLayout {
+    fn new(pts: &[Point], op: &ProfileOp, diameter: f64) -> Option<Self> {
+        let perimeter = loop_length(pts);
+        let width = op.tabs.width + diameter;
+        let lead_room = lead_extent(op.lead_in).max(lead_extent(op.lead_out));
+        let mut centers = if op.tabs.manual {
+            op.tabs
+                .positions
+                .iter()
+                .map(|&point| nearest_on_loop(pts, point).0)
+                .collect::<Vec<_>>()
+        } else {
+            let count = (perimeter / op.tabs.spacing).ceil().max(1.0);
+            if !count.is_finite() || count > 10_000.0 {
+                return None;
+            }
+            (0..count as usize)
+                .map(|i| (i as f64 + 0.5) * perimeter / count)
+                .collect()
+        };
+        if !perimeter.is_finite() || perimeter <= 0.0 || centers.is_empty() {
+            return None;
+        }
+        centers.sort_by(f64::total_cmp);
+        let spans: Vec<_> = centers
+            .into_iter()
+            .map(|center| (center - width * 0.5, center + width * 0.5))
+            .collect();
+        if spans[0].0 <= lead_room
+            || spans.last()?.1 >= perimeter - lead_room
+            || spans.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+        {
+            return None;
+        }
+        Some(Self {
+            spans,
+            top: -op.depth + op.tabs.height,
+        })
+    }
+
+    fn cut(&self, prog: &mut Program, pts: &[Point], op: &ProfileOp, z: f64) {
+        if z >= self.top {
+            crate::emit::cut_polyline(prog, pts, op.feed, Tag::new(op.id, MoveKind::Cutting), z);
+            return;
+        }
+        let cut = Tag::new(op.id, MoveKind::Cutting);
+        let plunge = Tag::new(op.id, MoveKind::Plunge);
+        let mut distance = 0.0;
+        let mut span_index = 0;
+        let mut raised = false;
+        // Do not refit across tab boundaries: an arc must never interpolate the
+        // vertical shoulders, which would turn the rectangular tab into a ramp.
+        for edge in pts.windows(2) {
+            let a = edge[0];
+            let b = edge[1];
+            let length = (b.x - a.x).hypot(b.y - a.y);
+            if length <= 1e-12 {
+                continue;
+            }
+            let end = distance + length;
+            while span_index < self.spans.len() {
+                let span = self.spans[span_index];
+                let boundary = if raised { span.1 } else { span.0 };
+                if boundary > end + 1e-9 {
+                    break;
+                }
+                let t = ((boundary - distance) / length).clamp(0.0, 1.0);
+                let p = Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+                prog.push(Step::Linear {
+                    to: Point3::new(p.x, p.y, if raised { self.top } else { z }),
+                    feed: op.feed,
+                    tag: cut,
+                });
+                raised = !raised;
+                prog.push(Step::Linear {
+                    to: Point3::new(p.x, p.y, if raised { self.top } else { z }),
+                    feed: if raised { op.feed } else { op.plunge_feed },
+                    tag: if raised { cut } else { plunge },
+                });
+                if !raised {
+                    span_index += 1;
+                }
+            }
+            prog.push(Step::Linear {
+                to: Point3::new(b.x, b.y, if raised { self.top } else { z }),
+                feed: op.feed,
+                tag: cut,
+            });
+            distance = end;
+        }
     }
 }
 
@@ -1438,6 +1711,7 @@ mod tests {
 
     fn inner_op(hole: f64, lead_r: f64, start: Option<[f64; 2]>) -> ProfileOp {
         ProfileOp {
+            tabs: Default::default(),
             spindle_rpm: 0.0,
             work_offset: 1,
             clearing: cam_model::Clearing::default(),
@@ -1562,6 +1836,7 @@ mod tests {
     /// the stock frames, with a stepover and (optionally) an engagement cap.
     fn outside_rough_op(engagement: f64) -> ProfileOp {
         ProfileOp {
+            tabs: Default::default(),
             spindle_rpm: 0.0,
             work_offset: 1,
             clearing: cam_model::Clearing { engagement, climb: true },
@@ -1588,6 +1863,185 @@ mod tests {
             lead_in: Lead::None,
             lead_out: Lead::None,
             lead_overlap: 0.0,
+        }
+    }
+
+    fn tabbed_op() -> ProfileOp {
+        let mut op = outside_rough_op(0.0);
+        op.side = Side::On;
+        op.stepover = 0.0;
+        op.depth = 6.0;
+        op.stepdown = 2.0;
+        op.tabs = cam_model::ProfileTabs {
+            enabled: true,
+            width: 2.0,
+            height: 3.0,
+            spacing: 20.0,
+            ..Default::default()
+        };
+        op
+    }
+
+    #[test]
+    fn rectangular_tabs_protect_every_lower_pass_with_vertical_shoulders() {
+        let r = run_outside_rough(tabbed_op());
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        let mut pos = Point3::new(0.0, 0.0, 0.0);
+        let mut lifts = 0;
+        let mut drops = 0;
+        let mut tab_traversals = 0;
+        for step in r.program.steps() {
+            match step {
+                Step::Rapid { to, .. } => pos = *to,
+                Step::Linear { to, feed, .. } => {
+                    let xy = (to.x - pos.x).hypot(to.y - pos.y);
+                    if xy < 1e-9 && pos.z < -3.0 && (to.z + 3.0).abs() < 1e-9 {
+                        lifts += 1;
+                    }
+                    if xy < 1e-9 && (pos.z + 3.0).abs() < 1e-9 && to.z < -3.0 {
+                        drops += 1;
+                        assert_eq!(*feed, 100.0);
+                    }
+                    if xy > 1e-9 && pos.z <= -3.0 && to.z <= -3.0 {
+                        let mid_x = (pos.x + to.x) * 0.5;
+                        let mid_y = (pos.y + to.y) * 0.5;
+                        // Four tabs, centred on each side of the 20 mm square.
+                        // Width 2 + cutter diameter 6 protects an 8 mm span.
+                        let over_tab = ((mid_x - 30.0).abs() < 4.0 - 1e-9
+                            && ((mid_y - 20.0).abs() < 1e-9 || (mid_y - 40.0).abs() < 1e-9))
+                            || ((mid_y - 30.0).abs() < 4.0 - 1e-9
+                                && ((mid_x - 20.0).abs() < 1e-9 || (mid_x - 40.0).abs() < 1e-9));
+                        if over_tab {
+                            assert_eq!(pos.z, -3.0);
+                            assert_eq!(to.z, -3.0);
+                            assert!((xy - 8.0).abs() < 1e-9);
+                            tab_traversals += 1;
+                        }
+                    }
+                    pos = *to;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!((lifts, drops, tab_traversals), (8, 8, 8));
+    }
+
+    #[test]
+    fn tabs_preserve_leads_and_work_on_compensated_contours() {
+        for side in [Side::Outside, Side::Inside] {
+            let mut op = tabbed_op();
+            op.side = side;
+            op.lead_in = Lead::Linear { length: 1.0 };
+            op.lead_out = Lead::Linear { length: 1.0 };
+            let r = run_outside_rough(op);
+            assert!(!r.has_errors(), "{:?}", r.diagnostics);
+            assert!(r.program.steps().iter().any(|s| matches!(s,
+                Step::Linear { to, .. } if (to.z + 3.0).abs() < 1e-9)));
+        }
+    }
+
+    #[test]
+    fn manual_tabs_follow_selected_locations_and_move_entry_away_from_a_tab() {
+        let mut op = tabbed_op();
+        op.tabs.manual = true;
+        // Include the original start vertex, forcing a new seam in a free gap.
+        op.tabs.positions = vec![[20.0, 20.0], [40.0, 30.0]];
+        op.tabs.spacing = f64::NAN; // Automatic spacing is irrelevant in manual mode.
+        let r = run_outside_rough(op.clone());
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        let first_xy = r
+            .program
+            .steps()
+            .iter()
+            .find_map(|s| match s {
+                Step::Rapid { to, .. } => Some([to.x, to.y]),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(first_xy, [20.0, 20.0]);
+        let mut lifts = 0;
+        let mut previous = Point3::new(0.0, 0.0, 0.0);
+        let mut corner_at_tab_top = false;
+        for step in r.program.steps() {
+            let to = match step {
+                Step::Linear { to, .. } | Step::Rapid { to, .. } => *to,
+                _ => continue,
+            };
+            if previous.z < -3.0 && to.z == -3.0 && previous.x == to.x && previous.y == to.y {
+                lifts += 1;
+            }
+            if to.x == 20.0 && to.y == 20.0 && to.z == -3.0 {
+                corner_at_tab_top = true;
+            }
+            previous = to;
+        }
+        assert_eq!(lifts, 4); // Two tabs on each of the two lower depth passes.
+        assert!(corner_at_tab_top);
+        for side in [Side::Outside, Side::Inside] {
+            op.side = side;
+            let result = run_outside_rough(op.clone());
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        }
+    }
+
+    #[test]
+    fn empty_overlapping_and_nonfinite_manual_tabs_fail_without_motion() {
+        let mut op = tabbed_op();
+        op.tabs.manual = true;
+        for positions in [
+            vec![],
+            vec![[30.0, 20.0], [31.0, 20.0]],
+            vec![[f64::NAN, 20.0]],
+        ] {
+            op.tabs.positions = positions;
+            let result = run_outside_rough(op.clone());
+            assert!(result.has_errors());
+            assert!(result.program.steps().is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_or_unsupported_tabs_emit_no_motion() {
+        let mut variants = Vec::new();
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut op = tabbed_op();
+            op.tabs.width = value;
+            variants.push(op);
+            let mut op = tabbed_op();
+            op.tabs.height = value;
+            variants.push(op);
+            let mut op = tabbed_op();
+            op.tabs.spacing = value;
+            variants.push(op);
+        }
+        let mut op = tabbed_op();
+        op.tabs.height = op.depth;
+        variants.push(op);
+        let mut op = tabbed_op();
+        op.tabs.width = 100.0;
+        variants.push(op);
+        let mut op = tabbed_op();
+        op.tabs.spacing = 0.00001;
+        variants.push(op);
+        let mut op = tabbed_op();
+        op.stepover = 1.0;
+        variants.push(op);
+        let mut op = tabbed_op();
+        op.plunge = Plunge::Ramp { angle_deg: 5.0 };
+        variants.push(op);
+        let mut op = tabbed_op();
+        op.comp = Comp::ControlLeft;
+        variants.push(op);
+        let mut op = tabbed_op();
+        op.lead_overlap = 10.0;
+        variants.push(op);
+        let mut op = tabbed_op();
+        op.lead_in = Lead::Linear { length: 15.0 };
+        variants.push(op);
+        for op in variants {
+            let r = run_outside_rough(op);
+            assert!(r.has_errors(), "invalid tab settings must fail");
+            assert!(r.program.steps().is_empty());
         }
     }
 

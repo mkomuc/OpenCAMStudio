@@ -65,9 +65,9 @@ mod workspace_view;
 use workspace_view::Workspace;
 #[path = "gui_geometry_selection.rs"]
 mod geometry_selection;
-use geometry_selection::{
-    cad_geometry_labels, cad_silhouette_note, drawing_geometry_labels, operation_geometry_labels,
-};
+use geometry_selection::{cad_geometry_labels, drawing_geometry_labels, operation_geometry_labels};
+#[path = "gui_profile_tabs.rs"]
+mod profile_tabs;
 #[path = "gui_creation.rs"]
 mod creation;
 #[path = "gui_grid.rs"]
@@ -163,6 +163,9 @@ enum Icon {
     ImportLibrary,
     ExportLibrary,
     Duplicate,
+    Edit,
+    Suppress,
+    DeleteOperation,
     Delete,
     #[allow(dead_code)] // Retained view command for the M1a workspace shell.
     ShowStock,
@@ -179,7 +182,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 30] = [
+    const ALL: [Icon; 33] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -202,6 +205,9 @@ impl Icon {
         Icon::ImportLibrary,
         Icon::ExportLibrary,
         Icon::Duplicate,
+        Icon::Edit,
+        Icon::Suppress,
+        Icon::DeleteOperation,
         Icon::Delete,
         Icon::ShowStock,
         Icon::ResetView,
@@ -238,6 +244,9 @@ impl Icon {
             Icon::ImportLibrary => include_bytes!("../assets/icons/import_library.svg"),
             Icon::ExportLibrary => include_bytes!("../assets/icons/export_library.svg"),
             Icon::Duplicate => include_bytes!("../assets/icons/copy.svg"),
+            Icon::Edit => include_bytes!("../assets/icons/edit.svg"),
+            Icon::Suppress => include_bytes!("../assets/icons/suppress.svg"),
+            Icon::DeleteOperation => include_bytes!("../assets/icons/delete_operation.svg"),
             Icon::Delete => include_bytes!("../assets/icons/erase.svg"),
             Icon::ShowStock => include_bytes!("../assets/icons/box3d.svg"),
             Icon::ResetView => include_bytes!("../assets/icons/zoom_ext.svg"),
@@ -291,6 +300,9 @@ impl Icon {
             }
             Icon::ExportLibrary => "Export the working tool library to a .ocam file to share.",
             Icon::Duplicate => "Duplicate the selected operation.",
+            Icon::Edit => "Edit the selected setup or operation.",
+            Icon::Suppress => "Exclude the operation from machining.",
+            Icon::DeleteOperation => "Delete the selected operation or setup.",
             Icon::Delete => "Delete the selected item.",
             Icon::ShowStock => "Show or hide the simulated stock surface in the viewport.",
             Icon::ResetView => "Reset the camera to frame the whole part.",
@@ -1035,6 +1047,9 @@ enum Field {
     Stepover,
     /// Profile finishing allowance left on the wall (mm).
     ProfileOffset,
+    TabWidth,
+    TabHeight,
+    TabSpacing,
     /// Operation spindle speed (rpm) — `M3 S<rpm>`. Seeded from the tool's nominal
     /// RPM when the operation is created; `0` falls back to the job default.
     SpindleRpm,
@@ -1157,6 +1172,9 @@ impl Field {
             Field::DrillStartOffset => "Start offset (mm)",
             Field::Peck => "Peck (mm, 0=off)",
             Field::Dwell => "Dwell (s, 0=off)",
+            Field::TabWidth => "Tab width (mm)",
+            Field::TabHeight => "Tab height (mm)",
+            Field::TabSpacing => "Tab spacing (mm)",
             Field::ProfileOffset => "Offset / leave (mm)",
             Field::Stepdown => "Stepdown (mm)",
             Field::Stepover => "Stepover (mm)",
@@ -1351,6 +1369,9 @@ impl Field {
                  spindle turning before retracting, cleaning up the hole bottom. \
                  0 = no dwell."
             }
+            Field::TabWidth => "Retained tab width along the contour. Tool diameter is added to the protected travel length.",
+            Field::TabHeight => "Tab height above the final profile floor; must be less than the cut depth.",
+            Field::TabSpacing => "Maximum distance between tab centres. Tabs are distributed evenly along each toolpath contour.",
             Field::ProfileOffset => {
                 "Finishing allowance left on the wall (mm): the roughing pass stops this \
                  far from the final profile so a finish pass can clean it up. 0 = cut to \
@@ -1796,6 +1817,7 @@ struct App {
     operation_geometry: Option<Vec<EntityRef>>,
     geometry_row_selection: Option<usize>,
     geometry_additive: bool,
+    profile_tab_picking: bool,
     operation_binding_preview: Option<cam_model::GeometryBinding>,
     drawing_editing_op: Option<u32>,
     operation_tab: OperationTab,
@@ -2245,6 +2267,12 @@ enum Message {
     RunJob,
     OperationTabChanged(OperationTab),
     ProfileCompChanged(cam_model::Comp),
+    ProfileTabsEnabled(bool),
+    ProfileTabPositioning(profile_tabs::Positioning),
+    ProfileTabPickToggle,
+    ProfileTabPicked([f64; 2]),
+    ProfileTabRemove(usize),
+    ProfileTabsClear,
     EngraveClosedChanged(bool),
     OperationStartEnabled(bool),
     OperationToolPicked(usize),
@@ -2739,6 +2767,7 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.profile_tab_picking = false;
         self.model_view = None;
         self.end_setup_draft();
         self.inspector_active = true;
@@ -2984,6 +3013,7 @@ impl App {
             operation_geometry: None,
             geometry_row_selection: None,
             geometry_additive: false,
+            profile_tab_picking: false,
             operation_binding_preview: None,
             drawing_editing_op: None,
             operation_tab: OperationTab::default(),
@@ -3288,6 +3318,11 @@ impl App {
         ) {
             self.geometry_additive = false;
             self.geometry_row_selection = None;
+            if matches!(message, Message::CadEscape) && self.profile_tab_picking {
+                self.profile_tab_picking = false;
+                return iced::Task::none();
+            }
+            self.profile_tab_picking = false;
         }
         match message {
             Message::SimulationPlayPause => {
@@ -3332,8 +3367,84 @@ impl App {
             }
             Message::OperationTabChanged(tab) => {
                 self.operation_tab = tab;
+                self.profile_tab_picking = false;
                 self.height_reference_pick = None;
                 self.focused_height = None;
+            }
+            Message::ProfileTabsEnabled(enabled) => {
+                self.profile_tab_picking = false;
+                let values = [Field::TabWidth, Field::TabHeight, Field::TabSpacing]
+                    .into_iter()
+                    .filter_map(|field| {
+                        self.fields
+                            .get(&field)
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .filter(|v| v.is_finite())
+                            .map(|value| (field, value))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &values);
+                    if let Operation::Profile(profile) = op {
+                        profile.tabs.enabled = enabled;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ProfileTabPositioning(mode) => {
+                self.profile_tab_picking = false;
+                let spacing = self
+                    .fields
+                    .get(&Field::TabSpacing)
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|v| v.is_finite());
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(p) = op {
+                        p.tabs.manual = mode == profile_tabs::Positioning::Manual;
+                        if let Some(spacing) = spacing {
+                            p.tabs.spacing = spacing;
+                        }
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ProfileTabPickToggle => {
+                if self
+                    .profile_tab_operation()
+                    .is_some_and(|p| p.tabs.enabled && p.tabs.manual)
+                {
+                    self.profile_tab_picking = !self.profile_tab_picking;
+                    self.geometry_additive = false;
+                    self.height_reference_pick = None;
+                }
+            }
+            Message::ProfileTabPicked(point) => {
+                if self.profile_tab_picking && point.iter().all(|v| v.is_finite()) {
+                    self.edit_operation_draft(|op| {
+                        if let Operation::Profile(p) = op {
+                            if p.tabs.enabled && p.tabs.manual && !p.tabs.positions.contains(&point)
+                            {
+                                p.tabs.positions.push(point);
+                            }
+                        }
+                    });
+                }
+            }
+            Message::ProfileTabRemove(index) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(p) = op {
+                        if index < p.tabs.positions.len() {
+                            p.tabs.positions.remove(index);
+                        }
+                    }
+                });
+            }
+            Message::ProfileTabsClear => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(p) = op {
+                        p.tabs.positions.clear();
+                    }
+                });
             }
             Message::ProfileCompChanged(comp) => {
                 self.edit_operation_draft(|op| {
@@ -9049,6 +9160,9 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (op, Field::SpindleRpm) => Some(op.spindle_rpm()),
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
         (Operation::Profile(o), Field::Stepover) => Some(o.stepover),
+        (Operation::Profile(o), Field::TabWidth) => Some(o.tabs.width),
+        (Operation::Profile(o), Field::TabHeight) => Some(o.tabs.height),
+        (Operation::Profile(o), Field::TabSpacing) => Some(o.tabs.spacing),
         (Operation::Profile(o), Field::ProfileOffset) => Some(o.offset),
         (Operation::Profile(o), Field::Stepdown) => Some(o.stepdown),
         (Operation::Profile(o), Field::Feed) => Some(o.feed),
@@ -9151,6 +9265,15 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
     }
     match op {
         Operation::Profile(o) => {
+            if let Some(v) = get(Field::TabWidth) {
+                o.tabs.width = v;
+            }
+            if let Some(v) = get(Field::TabHeight) {
+                o.tabs.height = v;
+            }
+            if let Some(v) = get(Field::TabSpacing) {
+                o.tabs.spacing = v;
+            }
             if let Some(v) = get(Field::Depth) {
                 o.depth = v;
             }

@@ -7,6 +7,54 @@ pub(super) const INSPECTOR_MUTED: Color = Color::from_rgb(0.61, 0.65, 0.71);
 const SURFACE: Color = Color::from_rgb(0.16, 0.18, 0.21);
 const OUTLINE: Color = Color::from_rgb(0.25, 0.28, 0.32);
 
+/// Shared popup treatment for reference selectors and project context menus.
+pub(super) fn popup_item_style(
+    _: &iced::Theme,
+    status: button::Status,
+    active: bool,
+) -> button::Style {
+    button::Style {
+        background: Some(Background::Color(
+            if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                Color::from_rgb(0.23, 0.32, 0.42)
+            } else if active {
+                Color::from_rgb(0.19, 0.29, 0.40)
+            } else {
+                Color::TRANSPARENT
+            },
+        )),
+        text_color: INSPECTOR_TEXT,
+        border: Border {
+            radius: 3.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub(super) fn popup_surface(_: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.12, 0.14, 0.17))),
+        border: Border {
+            color: INSPECTOR_MUTED,
+            width: 1.,
+            radius: 5.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::BLACK.scale_alpha(0.3),
+            offset: iced::Vector::new(0., 3.),
+            blur_radius: 10.,
+        },
+        ..Default::default()
+    }
+}
+
+pub(super) fn popup_separator<M: 'static>() -> Element<'static, M> {
+    container(iced::widget::rule::horizontal(1))
+        .padding([5, 4])
+        .into()
+}
+
 pub(super) fn inspector_heading(label: impl Into<String>) -> Element<'static, Message> {
     text(label.into())
         .size(17)

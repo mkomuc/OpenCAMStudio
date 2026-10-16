@@ -26,6 +26,7 @@ fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile_square(id: u32, chain: Contour) -> ProfileOp {
     ProfileOp {
+        tabs: Default::default(),
         spindle_rpm: 0.0,
         work_offset: 1,
         clearing: cam_model::Clearing::default(),

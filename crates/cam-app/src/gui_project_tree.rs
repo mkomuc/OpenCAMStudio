@@ -582,18 +582,27 @@ impl App {
                 Message::ToolpathCommand(_, ToolpathAction::Export) => Some(Icon::Export),
                 Message::DuplicateOp | Message::SetupDuplicate(_) => Some(Icon::Duplicate),
                 Message::ToggleSetOrigin => Some(Icon::SetOrigin),
+                Message::Select(Selection::Operation(_)) | Message::EditSetup(_) => {
+                    Some(Icon::Edit)
+                }
+                Message::SetOpExcluded(_, true) => Some(Icon::Suppress),
+                Message::SetOpExcluded(_, false) => Some(Icon::Run),
+                Message::DeleteOp | Message::SetupDelete(_) => Some(Icon::DeleteOperation),
+                Message::SetupNew => Some(Icon::New),
                 _ => None,
             };
-            let mut label_row = row![].spacing(6);
+            let mut label_row = row![].spacing(8).align_y(Alignment::Center);
             if let Some(icon) = icon {
-                label_row = label_row.push(icon_svg(icon, 14.));
+                label_row = label_row.push(icon_svg(icon, 22.));
+            } else {
+                label_row = label_row.push(Space::new().width(22).height(22));
             }
-            label_row = label_row.push(text(label).size(13));
+            label_row = label_row.push(text(label).size(12));
             button(label_row)
-                .width(Length::Fixed(236.0))
-                .padding(Padding::from([5.0, 8.0]))
+                .width(Length::Fill)
+                .padding([3, 7])
                 .on_press(Message::Tree(TreeMessage::Command(Box::new(message))))
-                .style(inspector_secondary)
+                .style(|theme, status| popup_item_style(theme, status, false))
         };
         let mut items = column![].spacing(2);
         if let Some((label, message)) = match node {
@@ -604,7 +613,7 @@ impl App {
             _ => None,
         } {
             items = items.push(item(label.into(), message));
-            items = items.push(iced::widget::rule::horizontal(1));
+            items = items.push(popup_separator());
             for (label, action) in [
                 ("Recompute toolpath", ToolpathAction::Recompute),
                 ("Simulate toolpath", ToolpathAction::Simulate),
@@ -615,7 +624,7 @@ impl App {
                     Message::ToolpathCommand(node.clone(), action),
                 ));
             }
-            items = items.push(iced::widget::rule::horizontal(1));
+            items = items.push(popup_separator());
         }
         match node {
             TreeNode::Setups => {
@@ -624,6 +633,7 @@ impl App {
             TreeNode::Setup(id) => {
                 items = items.push(item("Duplicate setup".into(), Message::SetupDuplicate(*id)));
                 if self.controller.setups().len() > 1 {
+                    items = items.push(popup_separator());
                     items = items.push(item("Delete setup".into(), Message::SetupDelete(*id)));
                 }
             }
@@ -662,6 +672,7 @@ impl App {
                             Message::TransferOpToSetup(setup.id, true),
                         ));
                 }
+                items = items.push(popup_separator());
                 items = items.push(item("Delete operation".into(), Message::DeleteOp));
             }
             TreeNode::Models => {
@@ -698,19 +709,10 @@ impl App {
                     .push(item("Show all geometry".into(), Message::CadShowAll));
             }
         }
-        let menu = container(scrollable(items).height(Length::Shrink))
+        let menu = container(scrollable(items.padding(4)).height(Length::Shrink))
             .width(244)
             .max_height((self.window.height - self.op_menu_pos.y - 12.0).max(100.0))
-            .padding(4)
-            .style(|_| container::Style {
-                background: Some(Background::Color(palette::RIBBON_BG)),
-                border: Border {
-                    color: palette::BORDER_DARK,
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                ..container::Style::default()
-            });
+            .style(popup_surface);
         let position = iced::Point::new(
             self.op_menu_pos.x.min((self.window.width - 250.0).max(0.0)),
             self.op_menu_pos

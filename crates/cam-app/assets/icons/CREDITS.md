@@ -72,3 +72,7 @@ The `heights/` icons are original 24×24 height-reference glyphs: operation
 planes (colours match the viewport), model/stock/fixture limits, contours,
 selection, origin, extrema, and disabled feed height. © OpenCAMStudio
 contributors, GPL-3.0.
+
+- `edit.svg`, `suppress.svg`, `delete_operation.svg` — original project-menu
+  actions: pencil, suppressed toolpath, and trash can. © OpenCAMStudio
+  contributors, GPL-3.0.

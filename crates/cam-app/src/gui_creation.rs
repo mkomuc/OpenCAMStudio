@@ -204,19 +204,6 @@ impl App {
         if self.cad_pending_kind.is_some() {
             col =
                 col.push(self.geometry_list(cad_geometry_labels(self.controller.cad_selection())));
-            col = col.push(text(match kind {
-                OpKind::Face => "Select a planar top face, or Ctrl-click for the whole-body XY outline.",
-                OpKind::Pocket => "Select a planar pocket floor in the viewport.",
-                OpKind::Profile => "Select a closed boundary or Ctrl-click for its XY silhouette. For a blind bore, select its floor loop.",
-                OpKind::Drill => "Select cylindrical hole faces. Select adds holes; Remove deletes a list item.",
-                _ => "Select geometry in the viewport.",
-            }).size(11).color(INSPECTOR_MUTED));
-            if let Some(note) = cad_silhouette_note(
-                self.controller.geometry_state(),
-                self.controller.cad_selection(),
-            ) {
-                col = col.push(text(note).size(11).color(INSPECTOR_MUTED));
-            }
             for candidate in &self.cad_candidates {
                 col = col.push(
                     inspector_button(format!(
@@ -241,11 +228,6 @@ impl App {
             col = col.push(self.geometry_list(drawing_geometry_labels(
                 &self.controller.pending_operation_geometry(),
             )));
-            col = col.push(
-                text("Select geometry in the viewport. Ctrl/Command adds compatible features.")
-                    .size(11)
-                    .color(INSPECTOR_MUTED),
-            );
         }
         col.into()
     }
