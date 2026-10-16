@@ -46,6 +46,8 @@ mod height_reference;
 mod inspector_view;
 #[path = "gui_jobs.rs"]
 mod jobs_view;
+#[path = "gui_output.rs"]
+mod output_view;
 use jobs_view::ToolpathAction;
 #[path = "gui_simulation.rs"]
 mod simulation_view;
@@ -1564,6 +1566,15 @@ impl Field {
     }
 }
 
+/// Require a deliberate hover before showing help on any control.
+fn delayed_tooltip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    help: impl Into<Element<'a, Message>>,
+    position: tooltip::Position,
+) -> tooltip::Tooltip<'a, Message> {
+    tooltip(content, help, position).delay(std::time::Duration::from_millis(600))
+}
+
 /// An inspector label wrapped in a hover tooltip carrying its help text — the shared
 /// way every parameter (field, picker, checkbox) explains itself to new users. Keeps
 /// the fixed 135-px label column so rows stay aligned.
@@ -1578,7 +1589,7 @@ fn help_wrap<'a>(
     if !show {
         return content;
     }
-    tooltip(
+    delayed_tooltip(
         content,
         container(text(help).size(12))
             .padding(8)
@@ -2010,6 +2021,10 @@ struct App {
     /// Draw the active machine's travel as a box around the job.
     show_envelope: bool,
     status: String,
+    output_history: VecDeque<String>,
+    output_content: iced::widget::text_editor::Content,
+    output_snapshot: String,
+    output_last_geometry_error: Option<String>,
 }
 
 // The pickbox aperture, the object-snap catch distance derived from it, and the snap
@@ -2294,6 +2309,8 @@ fn face_view(normal: [f32; 3]) -> (f32, f32) {
 
 #[derive(Debug, Clone)]
 enum Message {
+    OutputAction(iced::widget::text_editor::Action),
+    OutputCopy,
     OpenSample,
     CancelToolDraft,
     RunJob,
@@ -3030,7 +3047,7 @@ impl App {
                 self.setup_values.retain(|key, _| *key > 2);
                 self.status = "WCS edge reference updated in the setup draft.".into();
             }
-            Err(error) => self.status = error,
+            Err(error) => self.report_error(error),
         }
     }
 
@@ -3172,6 +3189,10 @@ impl App {
             show_origin: settings.view.show_origin,
             show_envelope: settings.view.show_envelope,
             status: "Open the sample part to begin.".to_string(),
+            output_history: VecDeque::new(),
+            output_content: iced::widget::text_editor::Content::new(),
+            output_snapshot: String::new(),
+            output_last_geometry_error: None,
             // Last: every field above reads from it.
             settings,
         };
@@ -3207,11 +3228,35 @@ impl App {
         // Seed the fixed layout against the assumed window size; the first real
         // resize event re-applies it against the true size.
         app.apply_fixed_layout();
+        app.sync_output();
         (app, iced::Task::none())
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
+        let validate_geometry = match &message {
+            Message::ProfileEntry(
+                profile_entries_view::EntryMessage::Name(_)
+                | profile_entries_view::EntryMessage::Tolerance(_),
+            ) => false,
+            Message::CadSelect(_)
+            | Message::ProfileEntry(_)
+            | Message::ConfirmCadOperation
+            | Message::GeometryRemove(_)
+            | Message::GeometryClear
+            | Message::ProfileSelectionModeChanged(_)
+            | Message::ProfileChainEdgesChanged(_) => true,
+            _ => false,
+        };
+        let previous_status = self.status.clone();
+        let context = self.output_context();
         let task = self.update_message(message);
+        if self.status != previous_status {
+            self.append_output(&context, &self.status.clone());
+        }
+        if validate_geometry {
+            self.log_geometry_validation();
+        }
+        self.sync_output();
         if self
             .simulation
             .as_ref()
@@ -3224,6 +3269,20 @@ impl App {
     }
 
     fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        match &message {
+            Message::OutputAction(action) => {
+                self.output_action(action.clone());
+                return iced::Task::none();
+            }
+            Message::OutputCopy => {
+                return iced::clipboard::write(
+                    self.output_content
+                        .selection()
+                        .unwrap_or_else(|| self.output_content.text()),
+                )
+            }
+            _ => {}
+        }
         if self.profile_entry_editor.is_some() && matches!(message,Message::Apply|Message::ConfirmOp) {
             self.status="Finish or cancel the geometry entry settings first.".into();
             return iced::Task::none();
@@ -3644,7 +3703,7 @@ impl App {
                                 self.operation_tab = OperationTab::Geometry;
                                 self.status = "Drawing geometry staged. OK commits all tabs; Cancel discards them.".into();
                             }
-                            Err(error) => self.status = error,
+                            Err(error) => self.report_error(error),
                         }
                     }
                 }
@@ -3760,7 +3819,7 @@ impl App {
                             draft.origin = origin;
                         }
                     }
-                    Err(error) => self.status = error,
+                    Err(error) => self.report_error(error),
                 }
             }
             Message::SetupUseModelOrigin(instance) => {
@@ -3960,7 +4019,7 @@ impl App {
                             self.rerun();
                             self.status = "Setup settings applied.".into();
                         }
-                        Err(error) => self.status = error,
+                        Err(error) => self.report_error(error),
                     }
                 }
             }
@@ -3993,7 +4052,7 @@ impl App {
                             self.end_setup_draft();
                             self.refresh_fields();
                         }
-                        Err(error) => self.status = error,
+                        Err(error) => self.report_error(error),
                     }
                 }
             }
@@ -4376,7 +4435,7 @@ impl App {
                                 self.status =
                                     "Simulation ready. Press Play or drag the timeline.".into();
                             }
-                            Err(error) => self.status = error,
+                            Err(error) => self.report_error(error),
                         }
                     }
                     let export = self.pending_toolpath_export.take().is_some_and(|stamp| {
@@ -4571,7 +4630,9 @@ impl App {
                             self.operation_tab = OperationTab::Geometry;
                             self.status = "Geometry staged. OK commits every operation tab; Cancel discards the changes.".into();
                         }
-                        Err(error) => self.status = format!("Geometry selection rejected: {error}"),
+                        Err(error) => {
+                            self.report_error(format!("Geometry selection rejected: {error}"))
+                        }
                     }
                     return iced::Task::none();
                 }
@@ -4970,7 +5031,7 @@ impl App {
                             self.rerun();
                             self.status = "Operation created.".into();
                         }
-                        Err(reason) => self.status = reason,
+                        Err(reason) => self.report_error(reason),
                     }
                 }
             }
@@ -5079,7 +5140,7 @@ impl App {
                                 selected.len()
                             )
                             }
-                            Err(error) => self.status = error,
+                            Err(error) => self.report_error(error),
                         }
                     }
                     return iced::Task::none();
@@ -5303,7 +5364,7 @@ impl App {
                                 if copy { "copied to" } else { "moved to" }
                             );
                         }
-                        Err(error) => self.status = error,
+                        Err(error) => self.report_error(error),
                     }
                 }
             }
@@ -5987,6 +6048,7 @@ impl App {
             }
             // The preamble already cleared it; the arm keeps the match exhaustive.
             Message::CloseRibbonPopup => {}
+            Message::OutputAction(_) | Message::OutputCopy => unreachable!(),
             Message::SetPaneVisible(Pane::Inspector, show) => self.inspector_enabled = show,
             Message::SetPaneVisible(pane, show) => self.set_pane_visible(pane, show),
         }
@@ -7321,7 +7383,7 @@ impl App {
                     self.operation_binding_preview = None;
                     self.status = format!("Operation {id} settings applied.");
                 }
-                Err(error) => self.status = error,
+                Err(error) => self.report_error(error),
             }
             return;
         }
@@ -8465,7 +8527,13 @@ impl App {
                     self.geometry_row_selection = None;
                     self.status = "Selected all contours of coplanar faces in this body.".into();
                 }
-                Err(error) => self.status = error,
+                Err(error) => self.report_error(format!(
+                    "{}: {error}",
+                    crate::cad_operations::describe_entities(
+                        self.controller.geometry_state(),
+                        std::slice::from_ref(&entity)
+                    )
+                )),
             }
             return;
         }
@@ -8480,7 +8548,10 @@ impl App {
                 || (self.modifiers.command() && !self.modifiers.control())
                 || self.modifiers.shift();
         self.geometry_row_selection = None;
-        match self.controller.toggle_cad_selection(entity, additive) {
+        match self
+            .controller
+            .toggle_cad_selection(entity.clone(), additive)
+        {
             Ok(()) => {
                 if !self.creating_operation() && self.cad_editing_op.is_none() {
                     let selected = self.controller.cad_selection().to_vec();
@@ -8503,7 +8574,13 @@ impl App {
                     }
                 );
             }
-            Err(error) => self.status = error,
+            Err(error) => self.report_error(format!(
+                "{}: {error}",
+                crate::cad_operations::describe_entities(
+                    self.controller.geometry_state(),
+                    std::slice::from_ref(&entity)
+                )
+            )),
         }
     }
 
@@ -9280,7 +9357,7 @@ fn render_command(command: &Command, compact: bool, show: bool) -> Element<'stat
     if !show {
         return btn;
     }
-    tooltip(
+    delayed_tooltip(
         btn,
         container(text(command.help.unwrap_or_else(|| command.icon.help())).size(12))
             .padding(8)

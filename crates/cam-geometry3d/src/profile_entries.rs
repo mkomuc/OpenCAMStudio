@@ -9,6 +9,15 @@ pub fn profile_entry_contours(
     let mut heights = None;
     let mut contours = match &entry.source {
         ProfileGeometrySource::Contours(contours) => contours.clone(),
+        ProfileGeometrySource::Cad(selected)
+            if entry.kind == ProfileGeometryKind::Chain
+                && entry.chain_mode == ProfileChainMode::Open
+                && selected.iter().all(|r| r.kind == EntityKind::Edge) =>
+        {
+            // Exact planar paths are valid even along blends or unsupported
+            // surfaces. Their cutting depth comes from operation settings.
+            profile_contours::open_chain(state, selected)?
+        }
         ProfileGeometrySource::Cad(selected) => {
             if selected.is_empty() {
                 return Err(format!("{}: select geometry", entry.name));
@@ -160,18 +169,7 @@ pub(super) fn extract(
     entries: &[ProfileGeometryEntry],
     stock_top: f64,
 ) -> Result<(Vec<ProfileContour>, CuttingHeights), String> {
-    if entries.is_empty() {
-        return Err("Add at least one profile geometry entry".into());
-    }
-    let mut profiles = Vec::new();
-    let mut heights = None;
-    for entry in entries {
-        let (contours, interval) = profile_entry_contours(state, entry)?;
-        if let Some(interval) = interval {
-            merge_heights(&mut heights, interval)?;
-        }
-        profiles.extend(contours);
-    }
+    let (profiles, heights) = collect(state, entries)?;
     Ok((
         profiles,
         heights.unwrap_or(CuttingHeights {
@@ -180,18 +178,39 @@ pub(super) fn extract(
         }),
     ))
 }
+
+fn collect(
+    state: &GeometryState,
+    entries: &[ProfileGeometryEntry],
+) -> Result<(Vec<ProfileContour>, Option<CuttingHeights>), String> {
+    if entries.is_empty() {
+        return Err("Add at least one profile geometry entry".into());
+    }
+    let mut profiles = Vec::new();
+    let mut heights = None;
+    for entry in entries {
+        let (contours, interval) = profile_entry_contours(state, entry)
+            .map_err(|error| format!("Profile geometry entry '{}': {error}", entry.name))?;
+        if let Some(interval) = interval {
+            merge_heights(&mut heights, interval)?;
+        }
+        profiles.extend(contours);
+    }
+    Ok((profiles, heights))
+}
 pub(super) fn resolve(
     state: &GeometryState,
     binding: &GeometryBinding,
     entries: &[ProfileGeometryEntry],
 ) -> Result<ResolvedInput, String> {
-    let (profiles, base) = extract(state, entries, binding.heights.top)?;
+    let (profiles, certified) = collect(state, entries)?;
+    let base = certified.unwrap_or(binding.heights);
     let heights = CuttingHeights {
         top: binding.overrides.top.unwrap_or(base.top),
         bottom: binding.overrides.bottom.unwrap_or(base.bottom),
     };
     heights.validate()?;
-    if heights.bottom < base.bottom - T || heights.top < base.top - T {
+    if certified.is_some() && (heights.bottom < base.bottom - T || heights.top < base.top - T) {
         return Err("Height override is outside the geometry-certified cutting interval".into());
     }
     let exact: Vec<_> = state
@@ -203,8 +222,14 @@ pub(super) fn resolve(
             (asset.id, asset.revision, &asset.backend, topology)
         })
         .collect();
-    let encoded = serde_json::to_vec(&(exact, &state.instances, entries, &binding.overrides))
-        .map_err(|e| e.to_string())?;
+    let encoded = serde_json::to_vec(&(
+        exact,
+        &state.instances,
+        entries,
+        &binding.overrides,
+        heights,
+    ))
+    .map_err(|e| e.to_string())?;
     let hash = encoded.into_iter().fold(0xcbf29ce484222325_u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     });
@@ -219,9 +244,11 @@ pub(super) fn resolve(
         holes: Vec::new(),
         heights,
         fingerprint: format!("{hash:016x}"),
-        diagnostics: vec![
-            "Profile geometry entries resolved from their individual sources and settings.".into(),
-        ],
+        diagnostics: vec![if certified.is_none() {
+            "Open profile paths resolved from exact planar curves; operation heights define the cut depth without an adjoining wall certificate.".into()
+        } else {
+            "Profile geometry entries resolved from their individual sources and settings.".into()
+        }],
     })
 }
 

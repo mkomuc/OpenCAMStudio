@@ -649,7 +649,10 @@ things worth eyeballing:
   the grey stock. Transparency applies to both colours. Preferences → Stock cut
   simulation → Accuracy adjusts grid density from 0.25× to 2×; higher values resolve
   smaller cuts and use more time and memory. Releasing the slider rebuilds the
-  simulation. The saved setting also controls playback quality, within the cell budget.
+  simulation. Playback uses the same grid as the completed preview, with cached
+  complete moves and bounded checkpoints for seeking. Cut walls recover sub-cell
+  contours from cutter sweeps; flat areas are merged into compact mesh patches.
+  Verification still uses the sampled stock heights, within the same cell budget.
 
 ## Notes
 
@@ -658,3 +661,10 @@ things worth eyeballing:
 - `cam-app`'s logic lives in the headless `AppController` (unit-tested); the iced
   layer is a thin view over it. The tool library
   (`cam-app/src/tool_library.rs`) is the one piece of GUI-side persistent state.
+
+### Stock preview performance check
+
+Run `cargo run -p cam-sim --release --example preview_bench` for a reproducible
+100 × 100 mm, eight-depth curved-cut benchmark. It reports fresh simulation,
+mesh generation, mesh memory, and median/p95 incremental frame CPU time. These
+measurements exclude toolpath generation, GPU upload and UI presentation.

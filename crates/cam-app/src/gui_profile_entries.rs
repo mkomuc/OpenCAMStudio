@@ -48,6 +48,7 @@ fn icon(name: &str, size: f32) -> iced::widget::Svg<'static> {
         "all" => include_bytes!("../assets/icons/profile-selection/all.svg"),
         "outer" => include_bytes!("../assets/icons/profile-selection/outer.svg"),
         "inner" => include_bytes!("../assets/icons/profile-selection/inner.svg"),
+        "remove" => include_bytes!("../assets/icons/delete_operation.svg"),
         _ => include_bytes!("../assets/icons/profile-selection/settings.svg"),
     };
     svg(svg::Handle::from_memory(bytes))
@@ -65,7 +66,7 @@ fn hint<'a>(
     control: impl Into<Element<'a, Message>>,
     label: impl Into<String>,
 ) -> Element<'a, Message> {
-    tooltip(
+    delayed_tooltip(
         control,
         container(text(label.into()).size(12).width(260))
             .padding(10)
@@ -337,6 +338,10 @@ impl App {
                         cam_geometry3d::profile_entry_contours(&g, &editor.draft).map(|_| ())
                     });
                 if let Err(error) = result {
+                    self.report_error(format!(
+                        "Profile geometry entry '{}' rejected: {error}",
+                        editor.draft.name
+                    ));
                     editor.error = Some(error);
                     self.profile_entry_editor = Some(editor);
                     return;
@@ -579,14 +584,17 @@ impl App {
             ));
         }
         toolbar = toolbar.push(hint(
-            inspector_button("×").on_press_maybe(
-                (!editing && selected.is_some())
-                    .then_some(Message::ProfileEntry(EntryMessage::RemoveSelected)),
-            ),
+            button(icon("remove", 28.))
+                .padding(4)
+                .style(inspector_secondary)
+                .on_press_maybe(
+                    (!editing && selected.is_some())
+                        .then_some(Message::ProfileEntry(EntryMessage::RemoveSelected)),
+                ),
             "Delete the selected geometry entry.",
         ));
         toolbar = toolbar.push(hint(
-            button(icon("settings", 27.))
+            button(icon("settings", 28.))
                 .padding(4)
                 .style(inspector_secondary)
                 .on_press_maybe(
@@ -595,7 +603,7 @@ impl App {
                 ),
             "Configure the selected geometry entry.",
         ));
-        let mut result = column![
+        let result = column![
             row![
                 text("Contour selection").size(12).width(Length::Fill),
                 inspector_button("Select").on_press(Message::ProfileEntry(if selected.is_some() {
@@ -621,12 +629,9 @@ impl App {
             toolbar
         ]
         .spacing(6);
-        if let Some(editor) = &self.profile_entry_editor {
-            result = result.push(self.profile_entry_settings(editor));
-        }
         result.into()
     }
-    fn profile_entry_settings<'a>(&'a self, editor: &'a EntryEditor) -> Element<'a, Message> {
+    pub(super) fn profile_entry_settings<'a>(&'a self, editor: &'a EntryEditor) -> Element<'a, Message> {
         let entry = &editor.draft;
         let mut body = column![
             row![
@@ -690,7 +695,7 @@ impl App {
                 .align_y(Alignment::Center);
             for (mode, name, label) in [
                 (ProfileChainMode::Closed, "closed", "Closed chain"),
-                (ProfileChainMode::Open, "open", "Open chain"),
+                (ProfileChainMode::Open, "open", "Open chain: follow planar edges at the operation's Top and Bottom heights, including edges beside rounded surfaces. The cut extends the selected curve vertically."),
             ] {
                 let active = entry.chain_mode == mode
                     || (entry.chain_mode == ProfileChainMode::Auto
@@ -749,18 +754,25 @@ impl App {
         if let Some(error) = &editor.error {
             body = body.push(text(error).size(11).color(palette::WARN));
         }
-        body = body.push(
+        let footer = inspector_footer(
             row![
-                inspector_button("OK").on_press(Message::ProfileEntry(EntryMessage::Confirm)),
-                inspector_button("Cancel").on_press(Message::ProfileEntry(EntryMessage::Cancel))
+                inspector_button("Cancel").on_press(Message::ProfileEntry(EntryMessage::Cancel)),
+                Space::new().width(Length::Fill),
+                inspector_button("OK")
+                    .style(inspector_primary)
+                    .on_press(Message::ProfileEntry(EntryMessage::Confirm))
             ]
             .spacing(8),
         );
-        container(body)
-            .padding(10)
-            .width(Length::Fill)
-            .style(popup_surface)
-            .into()
+        column![
+            scrollable(body.padding(14))
+                .width(Length::Fill)
+                .height(Length::Fill),
+            footer
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 }
 

@@ -287,6 +287,39 @@ pub(crate) fn validate_selection(
     Ok(())
 }
 
+pub(crate) fn operation_type(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::Profile(_) => "Profile",
+        Operation::Pocket(_) => "Pocket",
+        Operation::Drill(_) => "Drill",
+        Operation::Face(_) => "Face",
+        Operation::Chamfer(_) => "Chamfer",
+        Operation::Thread(_) => "Thread",
+        Operation::Engrave(_) => "Engrave",
+        Operation::Carve(_) => "Carve",
+    }
+}
+
+/// Stable feature labels used in selection errors and run diagnostics.
+pub(crate) fn describe_entities(geometry: &GeometryState, selected: &[EntityRef]) -> String {
+    selected
+        .iter()
+        .map(|r| {
+            let asset = geometry
+                .asset(r.asset_id)
+                .map_or("missing asset", |a| a.name.as_str());
+            let instance = geometry
+                .instance(r.instance_id)
+                .map_or("missing instance", |i| i.name.as_str());
+            format!(
+                "'{}' / '{}' (instance {}, body {}, revision {}): {:?} {}",
+                asset, instance, r.instance_id, r.body_id, r.revision, r.kind, r.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Rebuild the machining cache from independently configured profile entries.
 pub(crate) fn resolve_profile_entries(
     document: &Document,
@@ -297,10 +330,17 @@ pub(crate) fn resolve_profile_entries(
         .selections
         .as_mut()
         .ok_or("Profile entries are unavailable")?;
+    let mut certified_heights = false;
     for entry in entries.iter_mut() {
-        entry.contour_count = cam_geometry3d::profile_entry_contours(&geometry, entry)?
-            .0
-            .len();
+        let (contours, heights) = cam_geometry3d::profile_entry_contours(&geometry, entry)
+            .map_err(|error| {
+                format!(
+                    "Profile operation #{} / geometry entry '{}': {error}",
+                    profile.id, entry.name
+                )
+            })?;
+        entry.contour_count = contours.len();
+        certified_heights |= heights.is_some();
     }
     let mut selected = Vec::new();
     for entry in entries.iter() {
@@ -312,7 +352,7 @@ pub(crate) fn resolve_profile_entries(
             }
         }
     }
-    let binding = cam_geometry3d::resolve_selection(
+    let mut binding = cam_geometry3d::resolve_selection(
         &geometry,
         &selected,
         ExtractionRecipe::ProfileEntries {
@@ -320,6 +360,12 @@ pub(crate) fn resolve_profile_entries(
         },
         stock_top(document),
     )?;
+    if !certified_heights {
+        // Open paths use the operator's depth, rather than a default wall
+        // interval. Reference height settings remain authoritative at planning.
+        binding.heights.bottom = binding.heights.top - profile.depth;
+        binding.heights.validate()?;
+    }
     let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
     let mut contours = input.profiles;
     let first = contours.remove(0);
@@ -523,7 +569,14 @@ pub(crate) fn resolve_document_checked(
                 current_binding.heights.top = stock_top(document);
             }
             let input = cam_geometry3d::resolve_binding(&resolved.geometry, &current_binding)
-                .map_err(|e| format!("Operation {id}: {e}"))?;
+                .map_err(|e| {
+                    format!(
+                        "{} operation #{id} / setup '{}' / {}: {e}",
+                        operation_type(operation),
+                        document.setup().name,
+                        describe_entities(&resolved.geometry, &current_binding.selected)
+                    )
+                })?;
             let depth = input.heights.depth();
             let region = || input.regions.first().ok_or("No resolved machining region");
             match (operation, &binding.recipe) {

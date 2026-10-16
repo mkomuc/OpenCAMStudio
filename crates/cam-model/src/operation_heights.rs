@@ -337,12 +337,7 @@ impl OperationHeightSettings {
             StockTop => stock_max[2],
             StockBottom => stock_min[2],
             Origin => setup.origin_position(op.work_offset())[2],
-            SelectedContours => doc
-                .geometry
-                .bindings
-                .get(&op.id())
-                .map(|b| b.heights.bottom)
-                .unwrap_or_else(|| doc.operation_base_cutting_heights(op).bottom),
+            SelectedContours => doc.selected_contour_height(op)?,
             Selection | FixtureTop | FixtureBottom => {
                 let (min, max) = doc.height_definition_bounds(d)?;
                 if reference == Selection && (max[2] - min[2]).abs() > 1e-5 {
@@ -422,6 +417,42 @@ pub fn legacy_cutting(op: &Operation, h: &Heights) -> CuttingHeights {
     })
 }
 impl Document {
+    fn selected_contour_height(&self, op: &Operation) -> Result<f64, String> {
+        let Some(binding) = self.geometry.bindings.get(&op.id()) else {
+            return Ok(self.operation_base_cutting_heights(op).bottom);
+        };
+        // A selected edge chain has its own Z plane. The binding's interval
+        // describes the adjoining wall that is safe to cut, and its bottom can
+        // be well below that plane (or contain an older cached depth).
+        let references: Vec<_> = match &binding.recipe {
+            crate::ExtractionRecipe::ProfileEntries { entries }
+                if entries.iter().all(|entry| {
+                    entry.kind == crate::ProfileGeometryKind::Chain
+                        && matches!(&entry.source, crate::ProfileGeometrySource::Cad(_))
+                }) =>
+            {
+                entries
+                    .iter()
+                    .flat_map(|entry| match &entry.source {
+                        crate::ProfileGeometrySource::Cad(refs) => refs.clone(),
+                        _ => unreachable!(),
+                    })
+                    .collect()
+            }
+            crate::ExtractionRecipe::ProfileContours => binding.selected.clone(),
+            _ => vec![],
+        };
+        if references.is_empty() || references.iter().any(|r| r.kind != EntityKind::Edge) {
+            return Ok(binding.heights.bottom);
+        }
+        let (min, max) = self.height_selection_bounds(&references)?;
+        if (max[2] - min[2]).abs() > 1e-5 {
+            return Err(
+                "Selected contour(s) must lie on one plane perpendicular to setup Z".into(),
+            );
+        }
+        Ok(max[2])
+    }
     fn chamfer_minimum_depth(&self, op: &crate::ChamferOp) -> f64 {
         let angle = self
             .setup()
@@ -611,6 +642,11 @@ impl Document {
                             }))
                         }));
                     }
+                    crate::CadCurve::BezierSpans { spans } => {
+                        // Control hull bounds conservatively enclose every point
+                        // of a positive-weight rational spline in any setup.
+                        points.extend(spans.iter().flat_map(|s| &s.poles).map(|p| transform(*p)));
+                    }
                     _ => return Err("This edge cannot define an exact height reference".into()),
                 },
             }
@@ -777,6 +813,96 @@ mod tests {
             kind: EntityKind::Body,
             id: 1,
         }
+    }
+    #[test]
+    fn selected_chain_height_uses_source_plane_in_setup_axes_instead_of_cached_wall_bottom() {
+        let mut doc = doc();
+        let mut edge = add_body(&mut doc);
+        edge.kind = EntityKind::Edge;
+        edge.id = 3;
+        std::sync::Arc::make_mut(&mut doc.geometry.assets[0].topology)
+            .edges
+            .push(CadEdge {
+                id: 3,
+                body_id: 1,
+                vertices: [2, 2],
+                face_ids: vec![],
+                curve: CadCurve::BezierSpans {
+                    spans: vec![CadBezierSpan {
+                        poles: vec![[0., 30., 4.], [2., 30., 3.], [4., 30., 0.]],
+                        weights: vec![1.; 3],
+                    }],
+                },
+            });
+        doc.setup_mut().frame.world_from_setup.rotation =
+            [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
+        doc.setup_mut().stock = Stock::BoundingBox {
+            x_offset: 0.,
+            y_offset: 0.,
+            top: 40.,
+            thickness: 45.,
+        };
+        let profile: Operation = serde_json::from_value(serde_json::json!({"Profile": {
+            "id": 1, "tool": 1, "chain": {"points": [{"x":0.,"y":-4.},{"x":4.,"y":0.}]},
+            "closed": false, "side": "Outside", "comp": "Computed", "depth": 2.,
+            "stepdown": 2., "feed": 100., "plunge_feed": 100., "start": null,
+            "lead_in": "None", "lead_out": "None", "plunge": "Straight"
+        }}))
+        .unwrap();
+        doc.setup_mut().operations = vec![profile];
+        let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Chain 1".into());
+        entry.source = ProfileGeometrySource::Cad(vec![edge.clone()]);
+        doc.geometry.bindings.insert(
+            1,
+            GeometryBinding {
+                selected: vec![edge],
+                recipe: ExtractionRecipe::ProfileEntries {
+                    entries: vec![entry],
+                },
+                heights: CuttingHeights {
+                    top: 30.,
+                    bottom: 28.,
+                },
+                overrides: GeometryOverrides {
+                    top: None,
+                    bottom: Some(27.),
+                },
+                status: ResolutionStatus::Resolved,
+                resolved_fingerprint: None,
+            },
+        );
+        let mut settings = OperationHeightSettings::default();
+        let resolve = |doc: &Document, settings: &OperationHeightSettings| {
+            settings
+                .resolve(doc, &doc.setup().operations[0])
+                .unwrap()
+                .bottom
+        };
+        assert_eq!(resolve(&doc, &settings), 30.);
+        settings.definition_mut(HeightPlaneKind::Bottom).offset = -0.75;
+        assert_eq!(resolve(&doc, &settings), 29.25);
+        doc.geometry.instances[0].placement.translation[1] = 2.;
+        assert_eq!(resolve(&doc, &settings), 31.25);
+        // The legacy connected-edge recipe uses the same source plane.
+        doc.geometry.bindings.get_mut(&1).unwrap().recipe = ExtractionRecipe::ProfileContours;
+        assert_eq!(resolve(&doc, &settings), 31.25);
+        let reopened: Document =
+            serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(resolve(&reopened, &settings), 31.25);
+        std::sync::Arc::make_mut(&mut doc.geometry.assets[0].topology).edges[0].curve =
+            CadCurve::Line {
+                start: [0., 30., 0.],
+                end: [4., 31., 0.],
+            };
+        assert!(settings
+            .resolve(&doc, &doc.setup().operations[0])
+            .unwrap_err()
+            .contains("one plane"));
+        doc.geometry.bindings.get_mut(&1).unwrap().selected[0].revision = 2;
+        assert!(settings
+            .resolve(&doc, &doc.setup().operations[0])
+            .unwrap_err()
+            .contains("missing or changed"));
     }
     #[test]
     fn fixture_and_geometry_references_follow_placement_and_reject_stale_identity() {

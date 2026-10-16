@@ -1,6 +1,12 @@
 //! Cancellable stock verification and mesh preparation.
 use super::*;
 impl JobInputs {
+    pub(crate) fn stock_resolution(&self, program: &Program) -> f64 {
+        let span = (self.max[0] - self.min[0]).max(self.max[1] - self.min[1]);
+        let feature = narrowest_cut_width(program, &self.document.setup().tools, self.max[2]);
+        simulation_resolution(span, feature, self.simulation_accuracy)
+    }
+
     /// Simulate material removal for `program`: triangulate the remaining stock
     /// into render-ready vertices, indices and a machined-surface mask, and
     /// return any collisions found.
@@ -10,6 +16,7 @@ impl JobInputs {
         program: &Program,
         cancel: &CancelToken,
         progress: &Progress,
+        simulation: &mut SimulationCache,
     ) -> (Vec<MeshVertex>, Vec<u32>, Vec<bool>, Vec<Collision>) {
         let (min, max) = (self.min, self.max);
         if min[0] >= max[0] || min[1] >= max[1] {
@@ -29,15 +36,10 @@ impl JobInputs {
                 profile: sim_profile(t),
             })
             .collect();
-        let span = (max[0] - min[0]).max(max[1] - min[1]);
-        let feature = narrowest_cut_width(program, setup_tools, max[2]);
-        let resolution = simulation_resolution(
-            span,
-            feature,
-            self.simulation_accuracy,
-            self.preview_program.is_some(),
-        );
-        let Some(sim) = cam_sim::simulate_controlled(
+        let resolution = self
+            .preview_resolution
+            .unwrap_or_else(|| self.stock_resolution(program));
+        let Some(sim) = simulation.simulate_controlled(
             program,
             min,
             max,
@@ -82,20 +84,16 @@ impl JobInputs {
     }
 }
 
-/// Refine both the part-sized grid and narrow-feature sampling with the user's
-/// quality setting. Playback uses a smaller grid; all settings retain the hard
-/// cell budget so tiny grooves on large stock cannot exhaust memory.
-fn simulation_resolution(span: f64, feature: f64, accuracy: f32, playback: bool) -> f64 {
+/// Keep playback and verified previews on the same fine grid. Compact flat
+/// surfaces and analytic contours avoid tying GPU memory to the grid cell count.
+fn simulation_resolution(span: f64, feature: f64, accuracy: f32) -> f64 {
     let accuracy = f64::from(crate::settings::clamp_simulation_accuracy(accuracy));
-    let by_span = span / (if playback { 120.0 } else { 300.0 } * accuracy);
-    let by_feature = feature / (3.0 * accuracy);
-    let cells = if playback {
-        240.0 * accuracy
-    } else {
-        MAX_SIM_CELLS_ACROSS
-    };
-    let budget = span / cells;
-    by_span.min(by_feature).clamp(0.02, 2.0).max(budget)
+    let by_span = span / (600.0 * accuracy);
+    let by_feature = feature / (6.0 * accuracy);
+    by_span
+        .min(by_feature)
+        .clamp(0.02, 2.0)
+        .max(span / MAX_SIM_CELLS_ACROSS)
 }
 
 #[cfg(test)]
@@ -104,15 +102,13 @@ mod tests {
 
     #[test]
     fn accuracy_refines_stock_and_playback_within_the_cell_budget() {
-        for playback in [false, true] {
-            let coarse = simulation_resolution(100., 5., 0.5, playback);
-            let normal = simulation_resolution(100., 5., 1., playback);
-            let fine = simulation_resolution(100., 5., 2., playback);
-            assert!(coarse > normal && normal > fine);
-            let narrow = simulation_resolution(100., 0.001, 2., playback);
-            assert!(100. / narrow <= MAX_SIM_CELLS_ACROSS);
-            let large = simulation_resolution(10_000., 0.001, 2., playback);
-            assert!(10_000. / large <= MAX_SIM_CELLS_ACROSS);
-        }
+        let coarse = simulation_resolution(100., 5., 0.5);
+        let normal = simulation_resolution(100., 5., 1.);
+        let fine = simulation_resolution(100., 5., 2.);
+        assert!(coarse > normal && normal > fine);
+        let narrow = simulation_resolution(100., 0.001, 2.);
+        assert!(100. / narrow <= MAX_SIM_CELLS_ACROSS);
+        let large = simulation_resolution(10_000., 0.001, 2.);
+        assert!(10_000. / large <= MAX_SIM_CELLS_ACROSS);
     }
 }

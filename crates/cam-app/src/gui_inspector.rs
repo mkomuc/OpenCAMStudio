@@ -6,6 +6,9 @@ impl App {
         if self.library_mode() {
             return self.library_editor();
         }
+        if let Some(editor) = &self.profile_entry_editor {
+            return self.profile_entry_settings(editor);
+        }
         if self.drawing_editing_op.is_some() {
             return self.drawing_geometry_picker();
         }

@@ -613,6 +613,72 @@ mod tests {
     }
 
     #[test]
+    fn open_chain_edit_preview_stays_on_the_source_plane_in_a_rotated_setup() {
+        use cam_model::*;
+        let (mut app, id) = selected_cad_profile();
+        let rotation = [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
+        app.controller
+            .place_cad_instance(
+                1,
+                RigidTransform {
+                    rotation,
+                    translation: [0., 30., 0.],
+                },
+            )
+            .unwrap();
+        app.controller.edit_setup(|setup| {
+            setup.frame.world_from_setup.rotation = rotation;
+        });
+        app.begin_operation_draft(id);
+        let before = app.controller.document().clone();
+        let Operation::Profile(profile) = app.operation_draft.as_mut().unwrap() else {
+            panic!("profile")
+        };
+        profile.selections = Some(
+            (300..303)
+                .map(|edge| {
+                    let mut entry = ProfileGeometryEntry::new(
+                        ProfileGeometryKind::Chain,
+                        format!("Edge {edge}"),
+                    );
+                    entry.chain_mode = ProfileChainMode::Open;
+                    entry.source = ProfileGeometrySource::Cad(vec![EntityRef {
+                        asset_id: 1,
+                        revision: 1,
+                        instance_id: 1,
+                        body_id: 1,
+                        kind: EntityKind::Edge,
+                        id: edge,
+                    }]);
+                    entry
+                })
+                .collect(),
+        );
+        let geometry =
+            crate::cad_operations::geometry_for_setup(app.controller.document()).unwrap();
+        for entry in app.preview_profile_entries() {
+            let (_, interval) = cam_geometry3d::profile_entry_contours(&geometry, &entry).unwrap();
+            assert!(
+                interval.is_none(),
+                "an open path has no certified wall depth"
+            );
+        }
+        let (profile, z) = app.profile_selection_geometry().unwrap();
+        assert_eq!(profile.contours().count(), 3);
+        assert_eq!(z, 30.);
+        let camera = OrbitCamera::framed([-20.; 3], [100.; 3]);
+        assert_eq!(app.profile_tab_geometry().unwrap().1, 30.);
+        assert!(app.profile_side_overlay(camera, 0.).is_some());
+        let preview = app.operation_geometry_preview();
+        assert_eq!(preview.strips.len(), 3);
+        assert!(preview
+            .strips
+            .iter()
+            .flat_map(|s| &s.points)
+            .all(|p| (p[1] - 30.).abs() < 1e-5));
+        assert_eq!(app.controller.document(), &before);
+    }
+    #[test]
     fn tab_picker_uses_selected_cad_geometry_and_its_source_plane() {
         let (mut app, id) = selected_cad_profile();
         let camera = OrbitCamera::framed([-20., -20., -10.], [100., 40., 30.]);

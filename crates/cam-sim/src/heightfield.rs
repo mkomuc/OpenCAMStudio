@@ -6,7 +6,10 @@
 //! the simplest model that captures 2.5-D removal faithfully — enough to verify
 //! that a program clears what it should and never plows a rapid through stock.
 
-use crate::ToolProfile;
+use crate::{sweep::Sweep, ToolProfile};
+
+#[path = "surface.rs"]
+mod surface;
 
 /// How the simulated stock compares to a desired target surface — the raw
 /// material of gouge / residual verification.
@@ -33,9 +36,8 @@ pub struct SurfaceDiff {
     pub cells_residual: usize,
 }
 
-/// A triangle mesh of the stock surface, for rendering. One vertex per grid cell
-/// (at its centre), two triangles per interior quad, wound CCW as seen from `+Z`.
-/// Positions are millimetres `(x, y, z)`; normals are unit, `+Z`-ish.
+/// An indexed triangle mesh of the stock surface, for rendering. Positions are
+/// millimetres `(x, y, z)`; normals are unit and point out of the remaining stock.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SurfaceMesh {
     pub positions: Vec<[f32; 3]>,
@@ -47,6 +49,7 @@ pub struct SurfaceMesh {
 }
 
 /// Unit normal of triangle `a→b→c` from its winding (CCW ⇒ toward the viewer).
+#[cfg(test)]
 fn tri_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -63,11 +66,15 @@ fn tri_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
 #[derive(Clone, Debug)]
 pub struct Heightfield {
     origin: [f64; 2],
+    max: [f64; 2],
     res: f64,
     nx: usize,
     ny: usize,
     top: f32,
     z: Vec<f32>,
+    // Winning analytic cutter at each sample, used only to recover sub-cell walls.
+    winners: Vec<u32>,
+    cuts: Vec<Sweep>,
 }
 
 impl Heightfield {
@@ -78,12 +85,23 @@ impl Heightfield {
         let ny = (((max[1] - min[1]) / res).ceil() as usize).max(1);
         Self {
             origin: min,
+            max,
             res,
             nx,
             ny,
             top: top as f32,
             z: vec![top as f32; nx * ny],
+            winners: vec![u32::MAX; nx * ny],
+            cuts: Vec::new(),
         }
+    }
+
+    pub(crate) fn top(&self) -> f32 {
+        self.top
+    }
+
+    pub(crate) fn storage_bytes(&self) -> usize {
+        self.z.len() * 8 + self.cuts.len() * std::mem::size_of::<Sweep>()
     }
 
     /// Grid dimensions (columns, rows).
@@ -130,27 +148,38 @@ impl Heightfield {
         cancelled: &dyn Fn() -> bool,
     ) {
         let radius = tool.radius;
-        let (ix0, ix1) = self.index_range(a[0].min(b[0]) - radius, a[0].max(b[0]) + radius, 0);
+        if a[2].min(b[2]) >= f64::from(self.top)
+            || a[0].max(b[0]) + radius < self.origin[0]
+            || a[0].min(b[0]) - radius > self.max[0]
+            || a[1].max(b[1]) + radius < self.origin[1]
+            || a[1].min(b[1]) - radius > self.max[1]
+        {
+            return;
+        }
+        let sweep = Sweep::new(a, b, *tool);
+        let id = self.cuts.len() as u32;
+        self.cuts.push(sweep);
         let (iy0, iy1) = self.index_range(a[1].min(b[1]) - radius, a[1].max(b[1]) + radius, 1);
         let r2 = radius * radius;
         for iy in iy0..=iy1 {
             if cancelled() {
                 return;
             }
+            let cy = self.center(0, iy).1;
+            let Some((lo, hi)) = sweep.row_span(cy) else {
+                continue;
+            };
+            let (ix0, ix1) = self.index_range(lo, hi, 0);
             for ix in ix0..=ix1 {
-                let (cx, cy) = self.center(ix, iy);
-                let (t, dist2) = project(cx, cy, [a[0], a[1]], [b[0], b[1]]);
+                let cx = self.center(ix, iy).0;
+                let (t, dist2) = sweep.projection(cx, cy);
                 if dist2 <= r2 {
-                    // A vertical plunge sweeps the entire column down to its
-                    // lowest endpoint; XY projection alone always returns t=0.
-                    let axis_z = if (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-12 {
-                        a[2].min(b[2])
-                    } else {
-                        a[2] + (b[2] - a[2]) * t
-                    };
-                    let bottom = (axis_z + tool.offset(dist2.sqrt())) as f32;
-                    let cell = &mut self.z[iy * self.nx + ix];
-                    *cell = cell.min(bottom);
+                    let bottom = sweep.bottom(t, dist2) as f32;
+                    let index = iy * self.nx + ix;
+                    if bottom < self.z[index] {
+                        self.z[index] = bottom;
+                        self.winners[index] = id;
+                    }
                 }
             }
         }
@@ -221,7 +250,7 @@ impl Heightfield {
         cancelled: &dyn Fn() -> bool,
     ) -> Option<(f32, f32)> {
         let radius = tool.radius;
-        let (ix0, ix1) = self.index_range(a[0].min(b[0]) - radius, a[0].max(b[0]) + radius, 0);
+        let sweep = Sweep::new([a[0], a[1], tip_z], [b[0], b[1], tip_z], *tool);
         let (iy0, iy1) = self.index_range(a[1].min(b[1]) - radius, a[1].max(b[1]) + radius, 1);
         let r2 = radius * radius;
         let mut worst: Option<(f32, f32)> = None;
@@ -229,9 +258,14 @@ impl Heightfield {
             if cancelled() {
                 return None;
             }
+            let cy = self.center(0, iy).1;
+            let Some((lo, hi)) = sweep.row_span(cy) else {
+                continue;
+            };
+            let (ix0, ix1) = self.index_range(lo, hi, 0);
             for ix in ix0..=ix1 {
-                let (cx, cy) = self.center(ix, iy);
-                let dist2 = project(cx, cy, a, b).1;
+                let cx = self.center(ix, iy).0;
+                let dist2 = sweep.projection(cx, cy).1;
                 if dist2 > r2 {
                     continue;
                 }
@@ -267,7 +301,10 @@ impl Heightfield {
                 let (cx, cy) = self.center(ix, iy);
                 if cx >= min[0] && cx <= max[0] && cy >= min[1] && cy <= max[1] {
                     let cell = &mut self.z[iy * self.nx + ix];
-                    *cell = cell.min(z);
+                    if z < *cell {
+                        *cell = z;
+                        self.winners[iy * self.nx + ix] = u32::MAX;
+                    }
                 }
             }
         }
@@ -354,227 +391,17 @@ impl Heightfield {
         }
     }
 
-    /// Triangulate the stock as a **watertight solid** down to `floor` (the stock
-    /// bottom, mm): sloped per-cell tops, a bottom face, and vertical walls **only
-    /// at steep steps** and the perimeter. Unlike [`to_mesh`](Self::to_mesh) — a
-    /// smooth sheet with no thickness — the block shows its full depth; and unlike
-    /// a pure voxel block it keeps gentle slopes smooth, so a chamfer bevel is a
-    /// clean ramp while a pocket wall stays crisply vertical. A cell cut to or
-    /// below `floor` is left open, so a through feature is see-through.
-    ///
-    /// Top/bottom faces carry geometric (per-triangle) normals from their
-    /// CCW-outward winding. **Wall** normals, though, come from the local *boundary
-    /// gradient* — the summed direction to the cell's open neighbours — so a curved
-    /// wall (a round hole) shades as a smooth cylinder rather than a granular
-    /// stack of axis-aligned facets, while a straight wall's gradient is already
-    /// axis-aligned and looks unchanged. This smooths the *shading*; the stepped
-    /// silhouette is a heightfield limit deferred to the 3D-milling/kernel work.
-    pub fn to_solid_mesh(&self, floor: f64) -> SurfaceMesh {
-        self.to_solid_mesh_controlled(floor, &|| false).unwrap()
-    }
-
-    pub fn to_solid_mesh_controlled(
-        &self,
-        floor: f64,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Option<SurfaceMesh> {
-        let f = floor as f32;
-        let res = self.res as f32;
-        let (ox, oy) = (self.origin[0] as f32, self.origin[1] as f32);
-        // A neighbour drop steeper than this reads as a wall (rendered vertical);
-        // gentler steps are a slope the tops ramp across — so a ≤45° chamfer
-        // (≈`res` drop per cell) stays smooth while pocket walls stay vertical.
-        let wall_step = 2.5 * res;
-
-        let mut positions: Vec<[f32; 3]> = Vec::new();
-        let mut normals: Vec<[f32; 3]> = Vec::new();
-        let mut machined = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        // One triangle with an explicit per-vertex normal.
-        let mut tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3], n: [f32; 3], cut: bool| {
-            let base = positions.len() as u32;
-            positions.extend_from_slice(&[a, b, c]);
-            normals.extend_from_slice(&[n; 3]);
-            machined.extend_from_slice(&[cut; 3]);
-            indices.extend_from_slice(&[base, base + 1, base + 2]);
-        };
-        // Cell height, or `None` off-grid.
-        let h = |ix: i64, iy: i64| -> Option<f32> {
-            if ix < 0 || iy < 0 || ix as usize >= self.nx || iy as usize >= self.ny {
-                None
-            } else {
-                Some(self.z[iy as usize * self.nx + ix as usize])
-            }
-        };
-        // Height of a cell corner as seen by a cell at `z0`: average `z0` with the
-        // (up to 3) other cells meeting at that corner that are within `wall_step`
-        // (gradual). Gentle slopes thus share corner heights (continuous ramp);
-        // across a wall the steep neighbour is excluded, so the corner stays at
-        // this cell's level and a vertical wall is drawn there instead.
-        let corner = |z0: f32, around: [Option<f32>; 3]| -> (f32, bool) {
-            let (mut sum, mut n) = (z0, 1.0f32);
-            let mut cut = z0 < self.top;
-            for c in around.into_iter().flatten() {
-                if (c - z0).abs() <= wall_step {
-                    sum += c;
-                    n += 1.0;
-                    cut |= c < self.top;
-                }
-            }
-            (sum / n, cut)
-        };
-
-        for iy in 0..self.ny {
-            if cancelled() {
-                return None;
-            }
-            for ix in 0..self.nx {
-                let z = self.z[iy * self.nx + ix];
-                if z <= f + 1e-4 {
-                    continue; // cut through to the floor ⇒ open (see-through)
-                }
-                let (i, j) = (ix as i64, iy as i64);
-                let (e, w, n_, s) = (h(i + 1, j), h(i - 1, j), h(i, j + 1), h(i, j - 1));
-                let (ne, nw) = (h(i + 1, j + 1), h(i - 1, j + 1));
-                let (se, sw) = (h(i + 1, j - 1), h(i - 1, j - 1));
-                // Corner heights (SW, SE, NE, NW of the cell footprint).
-                let (c_sw, cut_sw) = corner(z, [w, s, sw]);
-                let (c_se, cut_se) = corner(z, [e, s, se]);
-                let (c_ne, cut_ne) = corner(z, [e, n_, ne]);
-                let (c_nw, cut_nw) = corner(z, [w, n_, nw]);
-                let (x0, y0) = (ox + ix as f32 * res, oy + iy as f32 * res);
-                let (x1, y1) = (x0 + res, y0 + res);
-                // Sloped top — geometric normal per triangle (a planar bevel shades
-                // uniformly; a flat top is +Z).
-                let (p_sw, p_se, p_ne, p_nw) = (
-                    [x0, y0, c_sw],
-                    [x1, y0, c_se],
-                    [x1, y1, c_ne],
-                    [x0, y1, c_nw],
-                );
-                tri(
-                    p_sw,
-                    p_se,
-                    p_ne,
-                    tri_normal(p_sw, p_se, p_ne),
-                    cut_sw || cut_se || cut_ne,
-                );
-                tri(
-                    p_sw,
-                    p_ne,
-                    p_nw,
-                    tri_normal(p_sw, p_ne, p_nw),
-                    cut_sw || cut_ne || cut_nw,
-                );
-                // Flat bottom (−Z).
-                let down = [0.0, 0.0, -1.0];
-                tri([x0, y0, f], [x0, y1, f], [x1, y1, f], down, false);
-                tri([x0, y0, f], [x1, y1, f], [x1, y0, f], down, false);
-
-                // Is a neighbour "open" (off-grid / cut through / a steep drop)?
-                let open = |nb: Option<f32>| match nb {
-                    None => true,
-                    Some(zn) => zn <= f + 1e-4 || z - zn > wall_step,
-                };
-                // Wall shading normal: sum the (unit) directions to every open
-                // neighbour in the 8-ring → points into the void, radial around a
-                // hole. Falls back to the geometric wall direction if it cancels.
-                let mut g = [0.0f32, 0.0];
-                for (dx, dy, nb) in [
-                    (1, 0, e),
-                    (-1, 0, w),
-                    (0, 1, n_),
-                    (0, -1, s),
-                    (1, 1, ne),
-                    (-1, 1, nw),
-                    (1, -1, se),
-                    (-1, -1, sw),
-                ] {
-                    if open(nb) {
-                        let l = ((dx * dx + dy * dy) as f32).sqrt();
-                        g[0] += dx as f32 / l;
-                        g[1] += dy as f32 / l;
-                    }
-                }
-                let glen = (g[0] * g[0] + g[1] * g[1]).sqrt();
-                let grad = (glen > 1e-3).then(|| [g[0] / glen, g[1] / glen, 0.0]);
-
-                // A vertical wall on a side only where that neighbour is open — from
-                // this cell's two edge corners down to the neighbour level (clamped
-                // to the floor). Shaded by the gradient normal, or the face axis.
-                let level = |nb: Option<f32>| nb.map_or(f, |v| v.max(f));
-                // Off-grid walls are original stock sides; walls facing a lower
-                // grid cell were exposed by machining, even if this cell is uncut.
-                let mut wall =
-                    |a: [f32; 3],
-                     b: [f32; 3],
-                     c: [f32; 3],
-                     d: [f32; 3],
-                     axis: [f32; 3],
-                     cut: bool| {
-                        let n = grad.unwrap_or(axis);
-                        tri(a, b, c, n, cut);
-                        tri(a, c, d, n, cut);
-                    };
-                if open(w) {
-                    let l = level(w);
-                    wall(
-                        [x0, y0, c_sw],
-                        [x0, y1, c_nw],
-                        [x0, y1, l],
-                        [x0, y0, l],
-                        [-1.0, 0.0, 0.0],
-                        w.is_some(),
-                    );
-                }
-                if open(e) {
-                    let l = level(e);
-                    wall(
-                        [x1, y1, c_ne],
-                        [x1, y0, c_se],
-                        [x1, y0, l],
-                        [x1, y1, l],
-                        [1.0, 0.0, 0.0],
-                        e.is_some(),
-                    );
-                }
-                if open(s) {
-                    let l = level(s);
-                    wall(
-                        [x1, y0, c_se],
-                        [x0, y0, c_sw],
-                        [x0, y0, l],
-                        [x1, y0, l],
-                        [0.0, -1.0, 0.0],
-                        s.is_some(),
-                    );
-                }
-                if open(n_) {
-                    let l = level(n_);
-                    wall(
-                        [x0, y1, c_nw],
-                        [x1, y1, c_ne],
-                        [x1, y1, l],
-                        [x0, y1, l],
-                        [0.0, 1.0, 0.0],
-                        n_.is_some(),
-                    );
-                }
-            }
-        }
-        Some(SurfaceMesh {
-            positions,
-            normals,
-            machined,
-            indices,
-        })
-    }
-
     /// Centre of cell `(ix, iy)`.
     fn center(&self, ix: usize, iy: usize) -> (f64, f64) {
         (
-            self.origin[0] + (ix as f64 + 0.5) * self.res,
-            self.origin[1] + (iy as f64 + 0.5) * self.res,
+            (self.origin[0]
+                + ix as f64 * self.res
+                + (self.origin[0] + (ix + 1) as f64 * self.res).min(self.max[0]))
+                * 0.5,
+            (self.origin[1]
+                + iy as f64 * self.res
+                + (self.origin[1] + (iy + 1) as f64 * self.res).min(self.max[1]))
+                * 0.5,
         )
     }
 
@@ -582,7 +409,13 @@ impl Heightfield {
     fn cell(&self, x: f64, y: f64) -> Option<(usize, usize)> {
         let ix = ((x - self.origin[0]) / self.res).floor();
         let iy = ((y - self.origin[1]) / self.res).floor();
-        if ix < 0.0 || iy < 0.0 || ix >= self.nx as f64 || iy >= self.ny as f64 {
+        if x >= self.max[0]
+            || y >= self.max[1]
+            || ix < 0.0
+            || iy < 0.0
+            || ix >= self.nx as f64
+            || iy >= self.ny as f64
+        {
             None
         } else {
             Some((ix as usize, iy as usize))
@@ -749,9 +582,9 @@ mod tests {
             assert_eq!(mesh.machined.len(), mesh.positions.len());
             let mut cut_tops = 0;
             let mut cut_walls = 0;
-            for (triangle, flags) in mesh.positions.as_chunks::<3>().0.iter()
-                .zip(mesh.machined.as_chunks::<3>().0.iter())
-            {
+            for indices in mesh.indices.as_chunks::<3>().0 {
+                let triangle = [0, 1, 2].map(|i| mesh.positions[indices[i] as usize]);
+                let flags = [0, 1, 2].map(|i| mesh.machined[indices[i] as usize]);
                 assert!(flags.iter().all(|&cut| cut == flags[0]));
                 let n = tri_normal(triangle[0], triangle[1], triangle[2]);
                 let original = n[2] < -0.9
@@ -771,7 +604,8 @@ mod tests {
             }
             assert_eq!(cut_tops > 0, depth > -5., "through cuts have no floor");
             assert_eq!(
-                cut_walls > 0, depth < -1.25,
+                cut_walls > 0,
+                depth < -1.25,
                 "steep and through cuts expose walls"
             );
         }
@@ -836,11 +670,17 @@ mod tests {
         // through feature reads as see-through rather than a filled recess.
         let floor = -5.0;
         let tops = |hf: &Heightfield| {
-            hf.to_solid_mesh(floor)
-                .normals
+            let mesh = hf.to_solid_mesh(floor);
+            mesh.indices
+                .as_chunks::<3>()
+                .0
                 .iter()
-                .filter(|n| n[2] > 0.9)
-                .count()
+                .map(|t| {
+                    let [a, b, c] = [0, 1, 2].map(|i| mesh.positions[t[i] as usize]);
+                    // Projected top area, independent of mesh compaction.
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).max(0.) * 0.5
+                })
+                .sum::<f32>()
         };
         let mut hf = Heightfield::new([0.0, 0.0], [3.0, 3.0], 1.0, 0.0);
         let before = tops(&hf);

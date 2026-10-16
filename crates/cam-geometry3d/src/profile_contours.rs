@@ -5,6 +5,26 @@ pub(super) fn extract(
     state: &GeometryState,
     refs: &[EntityRef],
 ) -> Result<(Vec<ProfileContour>, CuttingHeights), String> {
+    extract_impl(state, refs, false)
+}
+
+/// Explicit open chains provide a planar path; operation heights define its
+/// vertical extension, independently of the adjoining surface's shape.
+pub(super) fn open_chain(
+    state: &GeometryState,
+    refs: &[EntityRef],
+) -> Result<Vec<ProfileContour>, String> {
+    if refs.iter().any(|r| r.kind != EntityKind::Edge) {
+        return Err("Open Chain requires connected planar edges".into());
+    }
+    Ok(extract_impl(state, refs, true)?.0)
+}
+
+fn extract_impl(
+    state: &GeometryState,
+    refs: &[EntityRef],
+    open_curves: bool,
+) -> Result<(Vec<ProfileContour>, CuttingHeights), String> {
     let view = View::new(state, refs)?;
     let mut loops = BTreeSet::new();
     let mut edges = Vec::new();
@@ -36,11 +56,19 @@ pub(super) fn extract(
         interval.validate()?;
         heights = Some(if let Some(previous) = heights {
             if (previous.top - interval.top).abs() > T {
-                return Err("Selected contours lie on different planes; use separate profile operations".into());
+                return Err(
+                    "Selected contours lie on different planes; use separate profile operations"
+                        .into(),
+                );
             }
             // All contours may be cut only as deep as the shallowest certified wall.
-            CuttingHeights { top: previous.top, bottom: previous.bottom.max(interval.bottom) }
-        } else { interval });
+            CuttingHeights {
+                top: previous.top,
+                bottom: previous.bottom.max(interval.bottom),
+            }
+        } else {
+            interval
+        });
         profiles.push(profile);
         Ok(())
     };
@@ -107,35 +135,80 @@ pub(super) fn extract(
     }
     if !edges.is_empty() {
         let mut pieces = Vec::new();
+        let mut walls = std::collections::BTreeMap::new();
         let mut interval: Option<CuttingHeights> = None;
         for id in edges {
             let edge = view.edge(id)?;
             let points = view.curve_points(edge, false, MACHINING_CHORD_TOLERANCE)?;
             let z = points.first().ok_or("Empty edge")?[2];
-            if points.iter().any(|p| (p[2] - z).abs() > T)
-                || z < view.bounds(view.body.bounds)[1][2] - T
-            {
-                return Err(
-                    "Chain edges must lie on one accessible plane normal to setup Z".into(),
-                );
+            let support = view.curve_support_points(edge)?;
+            if support.iter().any(|p| (p[2] - z).abs() > T) {
+                let lo = support.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
+                let hi = support
+                    .iter()
+                    .map(|p| p[2])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                return Err(format!("Profile Edge {}: Chain edges must lie on one accessible plane normal to setup Z; this edge spans setup Z {lo:.6} to {hi:.6} mm. Select a planar rim or floor edge, or align setup Z to its plane", edge.id));
+            }
+            if open_curves {
+                // This interval only seeds extraction's internal accumulator;
+                // it is not returned as a certified wall depth to the caller.
+                interval = Some(CuttingHeights {
+                    top: z,
+                    bottom: z - 1.,
+                });
+                pieces.push(points);
+                continue;
             }
             let wall = edge
                 .face_ids
                 .iter()
                 .filter_map(|id| view.face(*id).ok())
                 .find(|face| view.vertical(face))
-                .ok_or("Chain edge needs an adjoining vertical wall")?;
+                .ok_or_else(|| {
+                    let faces = edge.face_ids.iter().filter_map(|id| view.face(*id).ok())
+                        .map(|face| {
+                            let reason = match &face.surface {
+                                CadSurface::Plane { normal, .. } => {
+                                    let n = view.vector(*normal);
+                                    format!("plane normal [{:.6}, {:.6}, {:.6}] in setup axes", n[0], n[1], n[2])
+                                }
+                                CadSurface::Cylinder { .. } | CadSurface::LinearExtrusion { .. } =>
+                                    "wall axis is not parallel to setup Z".into(),
+                                CadSurface::Torus { .. } => "rounded torus surface".into(),
+                                CadSurface::Unsupported { description } =>
+                                    format!("unsupported surface: {description}"),
+                            };
+                            format!("Face {} ({reason})", face.id)
+                        }).collect::<Vec<_>>().join(", ");
+                    format!("Profile Edge {} lies on setup Z {z:.6} mm, but has no adjoining vertical wall to certify a constant-depth Chain cut. Adjoining faces: {faces}. For an operation-defined depth along this planar path, use Open mode in a Chain geometry entry. For a whole-body outside profile including rounded transitions, use a Silhouette geometry entry", edge.id)
+                })?;
             let (lo, hi) = view.extent(wall)?;
-            view.certify_wall(wall, lo, hi)?;
-            if (hi - z).abs() > T {
-                return Err("Select the top edge of the profile wall".into());
+            view.certify_open_profile_wall(wall, lo, hi)
+                .map_err(|error| format!("Profile Edge {} / Face {}: {error}", edge.id, wall.id))?;
+            if (hi - z).abs() > T && (lo - z).abs() > T {
+                return Err(format!(
+                    "Profile Edge {}: select the upper rim or lower floor edge of Face {}",
+                    edge.id, wall.id
+                ));
             }
-            let current = CuttingHeights { top: z, bottom: lo };
-            if interval.is_some_and(|old| (old.top - z).abs() > T || (old.bottom - lo).abs() > T) {
-                return Err("Chain edges have different cutting heights".into());
+            if hi < view.bounds(view.body.bounds)[1][2] - T {
+                return Err(format!("Profile Edge {} / Face {}: wall top at setup Z {hi:.6} mm is below the body's accessible entry plane", edge.id, wall.id));
+            }
+            let current = CuttingHeights {
+                top: hi,
+                bottom: lo,
+            };
+            if interval.is_some_and(|old| (old.top - hi).abs() > T || (old.bottom - lo).abs() > T) {
+                return Err(format!("Profile Edge {} / Face {}: Chain edges have different cutting heights; wall interval is {lo:.6} to {hi:.6} mm", edge.id, wall.id));
             }
             interval = Some(current);
+            walls.insert(id, wall);
             pieces.push(points);
+        }
+        let plane = pieces[0][0][2];
+        if pieces.iter().flatten().any(|p| (p[2] - plane).abs() > T) {
+            return Err("Profile chain edges lie on different setup Z planes; select one rim or one floor chain".into());
         }
         let endpoints: Vec<_> = pieces
             .iter()
@@ -184,24 +257,26 @@ pub(super) fn extract(
             points.extend(piece.into_iter().skip(1));
         }
         let closed = distance(points[0], *points.last().unwrap()) < T;
-        // Infer the free side from the adjoining upward face's boundary winding.
-        // Joining can reverse the source edge, so compare the actual first segment.
+        if closed && !open_curves {
+            let interval = interval.unwrap();
+            for wall in walls.values() {
+                view.certify_wall(wall, interval.bottom, interval.top)?;
+            }
+        }
+        // Infer the free side locally from the certified wall's outward normal.
+        // The rest of the upward face may contain unsupported trim curves.
+        // Joining can reverse the source edge, so use the actual first segment.
         let mut side = None;
         for reference in refs {
             let edge = view.edge(reference.id)?;
             let samples = view.curve_points(edge, false, MACHINING_CHORD_TOLERANCE)?;
-            let forward = samples.windows(2).find_map(|pair| {
-                if distance(points[0], pair[0]) < T && distance(points[1], pair[1]) < T {
-                    Some(true)
-                } else if distance(points[0], pair[1]) < T && distance(points[1], pair[0]) < T {
-                    Some(false)
-                } else {
-                    None
-                }
+            let starts_here = samples.windows(2).any(|pair| {
+                (distance(points[0], pair[0]) < T && distance(points[1], pair[1]) < T)
+                    || (distance(points[0], pair[1]) < T && distance(points[1], pair[0]) < T)
             });
-            let Some(forward) = forward else {
+            if !starts_here {
                 continue;
-            };
+            }
             for id in &edge.face_ids {
                 let face = view.face(*id)?;
                 if !view.plane(face).is_ok_and(|(_, normal)| normal[2] > 0.) {
@@ -213,18 +288,75 @@ pub(super) fn extract(
                     else {
                         continue;
                     };
-                    let (contour, _) = view.contour(wire)?;
-                    let mut free_left = wire.is_outer != contour.is_ccw();
-                    if forward == usage.reversed {
-                        free_left = !free_left;
+                    if open_curves {
+                        // An oriented upward face boundary has material on its
+                        // left. Reversing the edge swaps the free side.
+                        let forward = samples.windows(2).any(|pair| {
+                            distance(points[0], pair[0]) < T && distance(points[1], pair[1]) < T
+                        });
+                        side = Some(if forward != usage.reversed {
+                            Side::Inside
+                        } else {
+                            Side::Outside
+                        });
+                        break;
                     }
-                    side = Some(if closed {
-                        if wire.is_outer {
+                    let wall = walls[&edge.id];
+                    if closed {
+                        side = Some(if wire.is_outer {
                             Side::Outside
                         } else {
                             Side::Inside
+                        });
+                        break;
+                    }
+                    if let CadSurface::LinearExtrusion { edge_sides, .. } = &wall.surface {
+                        let local = edge_sides.iter().find(|side| side.edge_id == edge.id)
+                            .ok_or("Spline wall is missing its exact edge orientation; reimport the CAD model")?;
+                        let tangent = view.vector(local.tangent);
+                        let normal = view.vector(local.outward);
+                        let mut left_dot = -tangent[1] * normal[0] + tangent[0] * normal[1];
+                        let forward = samples.windows(2).any(|pair| {
+                            distance(points[0], pair[0]) < T && distance(points[1], pair[1]) < T
+                        });
+                        if !forward {
+                            left_dot = -left_dot;
                         }
-                    } else if free_left {
+                        if left_dot.abs() < T {
+                            return Err("Cannot determine the free side of the spline wall".into());
+                        }
+                        side = Some(if left_dot > 0. {
+                            Side::Outside
+                        } else {
+                            Side::Inside
+                        });
+                        break;
+                    }
+                    let midpoint: [f64; 3] =
+                        std::array::from_fn(|i| (points[0][i] + points[1][i]) * 0.5);
+                    let normal = match wall.surface {
+                        CadSurface::Plane { normal, .. } => view.vector(normal),
+                        CadSurface::Cylinder {
+                            origin,
+                            axis,
+                            inward,
+                            ..
+                        } => {
+                            let origin = view.point(origin);
+                            let axis = view.vector(axis);
+                            let radial: [f64; 3] = std::array::from_fn(|i| midpoint[i] - origin[i]);
+                            let axial: f64 = (0..3).map(|i| radial[i] * axis[i]).sum();
+                            let sign = if inward { -1. } else { 1. };
+                            std::array::from_fn(|i| sign * (radial[i] - axial * axis[i]))
+                        }
+                        _ => unreachable!("certified vertical wall"),
+                    };
+                    let tangent = [points[1][0] - points[0][0], points[1][1] - points[0][1]];
+                    let left_dot = -tangent[1] * normal[0] + tangent[0] * normal[1];
+                    if left_dot.abs() < T * T {
+                        return Err("Cannot determine the free side of the profile wall".into());
+                    }
+                    side = Some(if left_dot > 0. {
                         Side::Outside
                     } else {
                         Side::Inside

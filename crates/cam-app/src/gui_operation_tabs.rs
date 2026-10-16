@@ -188,7 +188,7 @@ fn profile_climb_control(climb: bool, show_help: bool) -> Element<'static, Messa
         iced::widget::svg(iced::widget::svg::Handle::from_memory(include_bytes!("../assets/help/climb-conventional.svg"))).width(440).height(160),
         text("The profile's travel direction follows this setting, the spindle rotation and the selected Inside/Outside side. It also applies to radial roughing. On-contour slotting engages both sides of the cutter; here the setting reverses travel.").size(12),
     ].spacing(10).width(440);
-    tooltip(
+    delayed_tooltip(
         control,
         container(help).padding(12).style(popup_surface),
         tooltip::Position::Left,
@@ -490,14 +490,6 @@ impl App {
                             Compensation::available(self.controller.post_kind()),
                             |value| Message::ProfileCompChanged(value.value()),
                         ));
-                    } else {
-                        list = list.push(
-                            text(format!(
-                                "Compensation: {} (CAD-qualified)",
-                                Compensation::of(p.comp)
-                            ))
-                            .size(12),
-                        );
                     }
                 }
                 if tab == OperationTab::Geometry {

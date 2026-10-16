@@ -52,6 +52,7 @@ impl AppController {
             tool_diameter: self.defaults.tool_diameter,
             frame_error: self.validate_setup_frame(self.setup()).err(),
             preview_program: None,
+            preview_resolution: None,
             simulation_accuracy: self.simulation_accuracy,
         }
     }

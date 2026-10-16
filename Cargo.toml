@@ -35,3 +35,8 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # backtraces through dependency frames, since symbol names survive.
 [profile.dev.package."*"]
 debug = false
+
+# Interactive stock previews need the same tight rasterisation/meshing loops in
+# development builds as in releases; retain debug information for our code.
+[profile.dev.package.cam-sim]
+opt-level = 3

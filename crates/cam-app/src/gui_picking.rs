@@ -159,6 +159,18 @@ impl SetupPickGeometry {
                             straight: false,
                         });
                     }
+                    cam_model::CadCurve::BezierSpans { spans } => {
+                        if let Ok(points) = cam_model::approximate_bezier_spans(spans, 0.05) {
+                            result.edges.push(PickEdge {
+                                source,
+                                points: points
+                                    .into_iter()
+                                    .map(|p| instance.placement.transform_point(p))
+                                    .collect(),
+                                straight: false,
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }

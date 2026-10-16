@@ -16,6 +16,8 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Wire.hxx>
 #include <cctype>
+#include <cmath>
+#include <limits>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -27,6 +29,7 @@
 #include <Bnd_Box.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Curve2d.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
@@ -37,6 +40,10 @@
 #include <gp_Cylinder.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Torus.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <GeomConvert_BSplineCurveToBezierCurve.hxx>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -67,7 +74,28 @@ struct Array {
     std::string str() const { std::string s="["; for (size_t i=0;i<entries.size();++i) { if(i) s+=','; s+=entries[i]; } return s+']'; }
 };
 char* owned(const std::string& s) { char* p=static_cast<char*>(std::malloc(s.size()+1)); if(!p) throw std::bad_alloc(); std::memcpy(p,s.c_str(),s.size()+1); return p; }
-std::string surface(const TopoDS_Face& f) {
+// Recognize a tensor-product spline extrusion from its exact control net.
+// Merely sampling parallel surface normals would miss tapers and bulges.
+bool spline_extrusion_axis(const BRepAdaptor_Surface& a,gp_Dir& axis) {
+    if(a.GetType()!=GeomAbs_BSplineSurface) return false;
+    const auto b=a.BSpline(); // includes the face location
+    for(bool along_v:{true,false}) {
+        if((along_v?b->VDegree():b->UDegree())!=1
+           || (along_v?b->NbVPoles():b->NbUPoles())!=2) continue;
+        auto pole=[&](int i,int j){return along_v?b->Pole(i,j):b->Pole(j,i);};
+        auto weight=[&](int i,int j){return along_v?b->Weight(i,j):b->Weight(j,i);};
+        const gp_Vec delta(pole(1,1),pole(1,2));
+        if(delta.Magnitude()<=1e-9) continue;
+        bool translated=true;
+        for(int i=1;i<=(along_v?b->NbUPoles():b->NbVPoles());++i) {
+            if((gp_Vec(pole(i,1),pole(i,2))-delta).Magnitude()>1e-9
+               || weight(i,1)!=weight(i,2)) { translated=false; break; }
+        }
+        if(translated) { axis=gp_Dir(delta); return true; }
+    }
+    return false;
+}
+std::string surface(const TopoDS_Face& f,const TopTools_IndexedMapOfShape& em,const std::vector<unsigned long long>& edge_ids) {
     BRepAdaptor_Surface a(f);
     std::ostringstream o; o << std::setprecision(17);
     if (a.GetType()==GeomAbs_Plane) {
@@ -85,8 +113,50 @@ std::string surface(const TopoDS_Face& f) {
         gp_Torus t=a.Torus();
         o << "{\"Torus\":{\"origin\":" << xyz(t.Location().XYZ()) << ",\"axis\":" << xyz(t.Axis().Direction().XYZ())
           << ",\"major_radius\":" << t.MajorRadius() << ",\"minor_radius\":" << t.MinorRadius() << "}}";
-    } else o << "{\"Unsupported\":{\"description\":\"nonanalytic or unsupported surface\"}}";
+    } else {
+        gp_Dir axis;
+        if(a.GetType()==GeomAbs_SurfaceOfExtrusion || spline_extrusion_axis(a,axis)) {
+            if(a.GetType()==GeomAbs_SurfaceOfExtrusion) axis=a.Direction();
+            Array sides;
+            for(TopExp_Explorer it(f,TopAbs_EDGE);it.More();it.Next()) {
+                try {
+                    auto edge=TopoDS::Edge(it.Current()); edge.Orientation(TopAbs_FORWARD);
+                    BRepAdaptor_Curve curve(edge);
+                    BRepAdaptor_Curve2d pcurve(edge,f);
+                    const double mid=(curve.FirstParameter()+curve.LastParameter())*0.5;
+                    const auto uv=pcurve.Value(mid);
+                    gp_Pnt point,on_surface; gp_Vec tangent,du,dv;
+                    curve.D1(mid,point,tangent); a.D1(uv.X(),uv.Y(),on_surface,du,dv);
+                    gp_Vec normal=du.Crossed(dv);
+                    if(f.Orientation()==TopAbs_REVERSED) normal.Reverse();
+                    if(tangent.Magnitude()<=1e-12 || normal.Magnitude()<=1e-12
+                       || point.Distance(on_surface)>BRep_Tool::Tolerance(edge)+1e-6) continue;
+                    tangent.Normalize(); normal.Normalize();
+                    if(std::abs(tangent.Dot(normal))>1e-6) continue;
+                    sides.add("{\"edge_id\":"+std::to_string(edge_ids[em.FindIndex(edge)])
+                        +",\"tangent\":"+xyz(tangent.XYZ())+",\"outward\":"+xyz(normal.XYZ())+"}");
+                } catch(const Standard_Failure&) {
+                    // Keep valid solids inspectable when a degenerate seam
+                    // cannot supply a local machining orientation.
+                }
+            }
+            o << "{\"LinearExtrusion\":{\"axis\":" << xyz(axis.XYZ()) << ",\"edge_sides\":" << sides.str() << "}}";
+        } else o << "{\"Unsupported\":{\"description\":\"nonanalytic or unsupported surface\"}}";
+    }
     return o.str();
+}
+std::string bezier_span(const Handle(Geom_BezierCurve)& curve) {
+    Array poles,weights;
+    double min_weight=std::numeric_limits<double>::infinity(),max_weight=0;
+    for(int i=1;i<=curve->NbPoles();++i) {
+        const double weight=curve->Weight(i);
+        if(!std::isfinite(weight) || weight<=0) throw std::runtime_error("invalid rational spline weights");
+        min_weight=std::min(min_weight,weight); max_weight=std::max(max_weight,weight);
+        poles.add(xyz(curve->Pole(i).XYZ()));
+        std::ostringstream w; w << std::setprecision(17) << curve->Weight(i); weights.add(w.str());
+    }
+    if(min_weight/max_weight<1e-12) throw std::runtime_error("rational spline weight range exceeds machining precision budget");
+    return "{\"poles\":"+poles.str()+",\"weights\":"+weights.str()+"}";
 }
 std::string curve(const TopoDS_Edge& e) {
     BRepAdaptor_Curve a(e); std::ostringstream o; o << std::setprecision(17);
@@ -97,6 +167,29 @@ std::string curve(const TopoDS_Edge& e) {
         o << "{\"CircleArc\":{\"center\":" << xyz(c.Location().XYZ()) << ",\"normal\":" << xyz(c.Axis().Direction().XYZ())
           << ",\"x_axis\":" << xyz(c.Position().XDirection().XYZ()) << ",\"radius\":" << c.Radius()
           << ",\"start_angle\":" << a.FirstParameter() << ",\"end_angle\":" << a.LastParameter() << "}}";
+    } else if(a.GetType()==GeomAbs_BSplineCurve || a.GetType()==GeomAbs_BezierCurve) {
+        try {
+            Array spans;
+            if(a.GetType()==GeomAbs_BSplineCurve) {
+                GeomConvert_BSplineCurveToBezierCurve split(a.BSpline(),a.FirstParameter(),a.LastParameter(),1e-12);
+                if(split.NbArcs()>65536) throw std::runtime_error("spline span budget exceeded");
+                size_t pole_count=0;
+                for(int i=1;i<=split.NbArcs();++i) {
+                    const auto span=split.Arc(i); pole_count+=span->NbPoles();
+                    if(pole_count>65536) throw std::runtime_error("spline control-point budget exceeded");
+                    spans.add(bezier_span(span));
+                }
+            } else {
+                auto curve=a.Bezier(); // owned, located copy
+                curve->Segment(a.FirstParameter(),a.LastParameter());
+                spans.add(bezier_span(curve));
+            }
+            o << "{\"BezierSpans\":{\"spans\":" << spans.str() << "}}";
+        } catch(const Standard_Failure&) {
+            o << "{\"Unsupported\":{\"description\":\"spline could not be converted to exact trimmed Bezier spans\"}}";
+        } catch(const std::runtime_error& error) {
+            o << "{\"Unsupported\":{\"description\":" << quote(error.what()) << "}}";
+        }
     } else o << "{\"Unsupported\":{\"description\":\"nonanalytic or unsupported curve\"}}";
     return o.str();
 }
@@ -279,7 +372,7 @@ std::string translate(const char* path,bool iges,double deflection,double precis
                 }
                 loops.add("{\"id\":"+std::to_string(wid)+",\"body_id\":"+std::to_string(bodyid)+",\"face_id\":"+std::to_string(fi[i])+",\"edge_uses\":"+uses.str()+",\"is_outer\":"+(w.IsSame(outer)?"true":"false")+"}"); face_loops.add(std::to_string(wid));
             }
-            faces.add("{\"id\":"+std::to_string(fi[i])+",\"body_id\":"+std::to_string(bodyid)+",\"surface\":"+surface(f)+",\"loop_ids\":"+face_loops.str()+",\"bounds\":"+bounds(f)+"}");
+            faces.add("{\"id\":"+std::to_string(fi[i])+",\"body_id\":"+std::to_string(bodyid)+",\"surface\":"+surface(f,em,ei)+",\"loop_ids\":"+face_loops.str()+",\"bounds\":"+bounds(f)+"}");
             TopLoc_Location loc; Handle(Poly_Triangulation) t=BRep_Tool::Triangulation(f,loc);
             if(t.IsNull()) throw std::runtime_error("face has no display triangulation");
             for(int n=1;n<=t->NbNodes();++n) meshvertices.add(xyz(t->Node(n).Transformed(loc.Transformation()).XYZ()));

@@ -178,7 +178,7 @@ impl App {
                         || !self.controller.geometry_state().instances.is_empty())
                     .then_some(Message::ProfileSelectionModeChanged(mode)),
                 );
-            modes = modes.push(tooltip(
+            modes = modes.push(delayed_tooltip(
                 control,
                 container(
                     column![text(mode.label()).size(15), text(mode.hint()).size(12)]
@@ -192,7 +192,7 @@ impl App {
         }
         let mut controls = column![modes].spacing(6);
         if self.profile_selection_mode == ProfileSelectionMode::FaceContours {
-            controls = controls.push(tooltip(
+            controls = controls.push(delayed_tooltip(
                 checkbox(self.profile_coplanar).label("Select coplanar faces").size(15).text_size(12)
                     .on_toggle(Message::ProfileCoplanarChanged),
                 container(text("Include all upward planar faces at the selected face's height in the same body instance. The common cutting depth stops at the shallowest qualified wall.").size(12).width(280)).padding(10).style(popup_surface),
@@ -201,7 +201,7 @@ impl App {
         if self.profile_selection_mode == ProfileSelectionMode::Chain
             && !self.controller.geometry_state().instances.is_empty()
         {
-            controls = controls.push(tooltip(
+            controls = controls.push(delayed_tooltip(
                 checkbox(self.profile_chain_edges).label("Select individual edges").size(15).text_size(12)
                     .on_toggle(Message::ProfileChainEdgesChanged),
                 container(text("Click connected CAD edges to add or remove them. An unclosed chain is machined as an open path; a complete loop is closed. The cutter side is inferred from the adjoining face boundary.").size(12).width(280)).padding(10).style(popup_surface), tooltip::Position::Left));

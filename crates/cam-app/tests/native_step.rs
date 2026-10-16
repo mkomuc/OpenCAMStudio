@@ -1023,3 +1023,188 @@ fn named_profile_entries_mix_sources_preserve_settings_and_reopen() {
         .contains("finer"));
     assert_eq!(app.document(), &before);
 }
+
+#[test]
+#[ignore = "requires OCCT SDK and local testfiles/Tigerente.step"]
+fn tigerente_mouth_open_edges_ignore_unrelated_spline_trims_and_reopen() {
+    let mut app = new_app();
+    app.import_cad(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente.step"),
+    )
+    .unwrap();
+    app.edit_tool(0, |tool| tool.diameter = 0.5);
+    select_all_models(&mut app);
+    let mut setup = app.document().setup().clone();
+    setup.stock = Stock::RelativeBox {
+        offsets: [[1.; 3]; 2],
+    };
+    setup.frame = SetupFrame::from_xy([1., 0., 0.], [0., 0., 1.]).unwrap();
+    app.apply_setup_settings(setup).unwrap();
+    let topology = &app.geometry_state().assets[0].topology;
+    assert!(matches!(
+        topology.faces.iter().find(|f| f.id == 19).unwrap().surface,
+        CadSurface::LinearExtrusion { .. }
+    ));
+    assert!(matches!(
+        topology.faces.iter().find(|f| f.id == 25).unwrap().surface,
+        CadSurface::Unsupported { .. }
+    ));
+    let mut operations = Vec::new();
+    for edge_id in [88, 92, 96, 91, 95, 99] {
+        let state = app.geometry_state();
+        let topology = &state.assets[0].topology;
+        let edge = topology.edges.iter().find(|e| e.id == edge_id).unwrap();
+        assert!(matches!(
+            edge.curve,
+            CadCurve::Line { .. } | CadCurve::BezierSpans { .. }
+        ));
+        let top = edge
+            .face_ids
+            .iter()
+            .filter_map(|id| topology.faces.iter().find(|f| f.id == *id))
+            .find(|f| matches!(f.surface, CadSurface::Plane { normal, .. } if normal[1] < -0.99))
+            .unwrap();
+        assert!(top
+            .loop_ids
+            .iter()
+            .filter_map(|id| topology.loops.iter().find(|w| w.id == *id))
+            .flat_map(|w| &w.edge_uses)
+            .any(|u| topology
+                .edges
+                .iter()
+                .any(|e| e.id == u.edge_id && matches!(e.curve, CadCurve::BezierSpans { .. }))));
+        let selected = reference(state, EntityKind::Edge, edge_id);
+        let preview = app
+            .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&selected))
+            .unwrap_or_else(|error| panic!("mouth edge {edge_id}: {error}"));
+        assert_eq!(preview.profiles.len(), 1);
+        assert!(!preview.profiles[0].closed);
+        assert!(preview.profiles[0].chain.len() >= 2);
+        assert!((preview.heights.top - 0.).abs() < 1e-6);
+        assert!((preview.heights.bottom + 2.).abs() < 1e-6);
+        let id = app
+            .create_cad_operation(OpKind::Profile, vec![selected])
+            .unwrap();
+        let Some(Operation::Profile(profile)) = app.operation(id) else {
+            panic!("profile")
+        };
+        assert!(!profile.closed);
+        operations.push(id);
+    }
+    for edge_id in [86, 100] {
+        let selected = reference(app.geometry_state(), EntityKind::Edge, edge_id);
+        let preview = app
+            .preview_cad_operation(OpKind::Profile, &[selected])
+            .unwrap();
+        assert!(!preview.profiles[0].closed);
+        assert!((preview.heights.bottom + 2.).abs() < 1e-6);
+    }
+    let floor_chain: Vec<_> = [74, 75, 76, 77, 78, 79, 80, 81]
+        .into_iter()
+        .map(|id| reference(app.geometry_state(), EntityKind::Edge, id))
+        .collect();
+    let floor = app
+        .preview_cad_operation(OpKind::Profile, &floor_chain)
+        .unwrap();
+    assert!(!floor.profiles[0].closed);
+    assert!((floor.heights.top - 0.).abs() < 1e-6);
+    assert!((floor.heights.bottom + 2.).abs() < 1e-6);
+    let chain: Vec<_> = [86, 88, 91, 92, 95, 96, 99, 100]
+        .into_iter()
+        .map(|id| reference(app.geometry_state(), EntityKind::Edge, id))
+        .collect();
+    let preview = app.preview_cad_operation(OpKind::Profile, &chain).unwrap();
+    assert!(!preview.profiles[0].closed);
+    assert!(preview.profiles[0].chain.len() > 7);
+    operations.push(
+        app.create_cad_operation(OpKind::Profile, chain.clone())
+            .unwrap(),
+    );
+    // Display data is deliberately irrelevant to machining and fingerprints.
+    let mut geometry = app
+        .document()
+        .geometry
+        .geometry_in_setup(&app.document().setup().frame)
+        .unwrap();
+    let binding =
+        cam_geometry3d::resolve_selection(&geometry, &chain, ExtractionRecipe::ProfileContours, 0.)
+            .unwrap();
+    let expected = cam_geometry3d::resolve_binding(&geometry, &binding).unwrap();
+    std::sync::Arc::make_mut(&mut geometry.assets[0].topology).mesh = CadMesh::default();
+    assert_eq!(
+        cam_geometry3d::resolve_binding(&geometry, &binding).unwrap(),
+        expected
+    );
+    let outcome = app.run(&CancelToken::new());
+    assert_eq!(
+        outcome.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        outcome.diagnostics
+    );
+    assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+    assert!(!outcome.program.is_empty());
+    let path = std::env::temp_dir().join(format!(
+        "tigerente-mouth-profile-{}.ocam",
+        std::process::id()
+    ));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    for id in operations {
+        assert_eq!(reopened.operation(id), app.operation(id));
+    }
+    let outcome = reopened.run(&CancelToken::new());
+    assert_eq!(
+        outcome.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        outcome.diagnostics
+    );
+    assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn spline_prism_open_rims_use_exact_curves_despite_toleranced_face_joins() {
+    let mut app = new_app();
+    app.import_cad(fixture("toleranced-spline-prism-mm.step"))
+        .unwrap();
+    select_all_models(&mut app);
+    let mut setup = app.document().setup().clone();
+    setup.stock = Stock::RelativeBox {
+        offsets: [[1.; 3]; 2],
+    };
+    app.apply_setup_settings(setup).unwrap();
+    let topology = &app.geometry_state().assets[0].topology;
+    let top = topology
+        .faces
+        .iter()
+        .find(|f| {
+            matches!(f.surface,
+        CadSurface::Plane { origin, normal } if (origin[2] - 5.).abs() < 1e-6 && normal[2] > 0.99)
+        })
+        .unwrap();
+    let edges: Vec<_> = topology
+        .loops
+        .iter()
+        .filter(|w| w.face_id == top.id)
+        .flat_map(|w| &w.edge_uses)
+        .map(|u| reference(app.geometry_state(), EntityKind::Edge, u.edge_id))
+        .collect();
+    assert_eq!(edges.len(), 4);
+    let mut curved = 0;
+    for selected in edges {
+        let input = app
+            .preview_cad_operation(OpKind::Profile, &[selected])
+            .unwrap();
+        assert!(!input.profiles[0].closed);
+        if input.profiles[0].chain.len() > 2 {
+            curved += 1;
+        }
+        assert!((input.heights.top - 5.).abs() < 1e-6);
+        assert!(input.heights.bottom.abs() < 1e-6);
+    }
+    assert_eq!(curved, 2);
+}

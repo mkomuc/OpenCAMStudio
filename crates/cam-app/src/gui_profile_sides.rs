@@ -40,7 +40,21 @@ impl App {
                     cam_geometry3d::profile_entry_contours(&geometry, &entry)
                 {
                     if all.is_empty() && entry.kind != cam_model::ProfileGeometryKind::Silhouette {
-                        plane = heights.map_or(0., |h| h.top);
+                        plane = match &entry.source {
+                            cam_model::ProfileGeometrySource::Cad(refs)
+                                if entry.kind == cam_model::ProfileGeometryKind::Chain =>
+                            {
+                                // Open chains have no certified cutting interval.
+                                // Place the editor geometry on its source plane,
+                                // independently of the operation's cutting depth.
+                                self.controller
+                                    .document()
+                                    .height_selection_bounds(refs)
+                                    .ok()?
+                                    .1[2]
+                            }
+                            _ => heights.map_or(0., |h| h.top),
+                        };
                     }
                     entry.contour_count = contours.len();
                     all.extend(contours);
@@ -137,7 +151,14 @@ impl App {
             let reference = binding.selected.first()?;
             match reference.kind {
                 EntityKind::Silhouette => 0.,
-                EntityKind::Face | EntityKind::Edge => resolved.heights.top,
+                EntityKind::Face => resolved.heights.top,
+                EntityKind::Edge => {
+                    self.controller
+                        .document()
+                        .height_selection_bounds(&binding.selected)
+                        .ok()?
+                        .1[2]
+                }
                 EntityKind::Loop => {
                     let asset = geometry.asset(reference.asset_id)?;
                     let instance = geometry.instance(reference.instance_id)?;
@@ -147,6 +168,9 @@ impl App {
                     let point = match edge.curve {
                         cam_model::CadCurve::Line { start, .. } => start,
                         cam_model::CadCurve::CircleArc { center, .. } => center,
+                        cam_model::CadCurve::BezierSpans { ref spans } => {
+                            *spans.first()?.poles.first()?
+                        }
                         _ => return None,
                     };
                     instance.placement.transform_point(point)[2]

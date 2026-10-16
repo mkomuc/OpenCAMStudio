@@ -57,6 +57,13 @@ resolved or machined. Every run resolves planar inputs from the bound topology/p
 there is no stale embedded-contour fallback. Direct planner calls also require a
 matching resolved fingerprint.
 
+The Output pane retains selection and operation errors with setup, operation
+type/ID, named geometry entry, CAD model/instance and exact feature IDs. It logs
+invalid chain previews as soon as selection changes. Drag to select text and
+copy with Cmd/Ctrl+C, or use Copy output. Text updates pause while a selection is
+active so incoming progress cannot erase text being copied; click in the text
+to clear the selection and resume updates.
+
 ## Qualified geometry subset
 
 - Pocket: one upward planar floor; closed vertical walls and constant opening
@@ -68,6 +75,24 @@ matching resolved fingerprint.
   planar entry/termination. Split seam faces are merged. Bore diameter, entry and
   depth must agree within a group; the tool diameter must match. Circular edges
   alone cannot establish a hole. Conical tips and breakthrough are not inferred.
+- Open Profile chains: connected line, circle, B-spline or Bezier edges on an
+  accessible setup-XY rim or floor plane, with vertical supporting walls.
+  Explicit **Open** mode on a named Chain entry also accepts planar edges
+  adjoining rounded or unsupported surfaces. It uses the upward face boundary
+  orientation for the initial cutter side and the operation's Top/Bottom height
+  settings for depth. This cuts the vertical extension of the selected curve;
+  it does not infer a safe wall depth or finish the adjoining 3D surface.
+  Auto/Closed modes continue to require supporting vertical walls.
+  Exact rational spline spans are approximated within 0.01 mm using control-hull
+  bounds. Plane/cylinder normals or imported spline-wall edge orientations choose
+  the free side locally; unrelated face trim gaps or unsupported curves do not
+  block a supported open chain. Spline walls must be exact linear extrusions.
+  Two end trims may meet rounded transitions: open profiles follow the selected
+  XY curve at each depth, cutting its vertical extension through those ends.
+  Closed features retain the full-height wall certificate. Selecting floor
+  edges uses the wall's upper/lower cutting interval, rather than requiring
+  the selected edge itself to be at the top of the body. Reimport old saved
+  CAD assets to obtain spline descriptors and extrusion orientation data.
 - Profile: an exterior coplanar loop with vertical supporting walls and an outside
   computed-compensation cut. Alternatively, select the whole-body XY silhouette,
   including spline outlines and rounded top transitions. It uses a separate OCCT

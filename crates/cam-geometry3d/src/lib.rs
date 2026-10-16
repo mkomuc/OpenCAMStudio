@@ -411,7 +411,7 @@ impl<'a> View<'a> {
     fn vertical(&self, f: &CadFace) -> bool {
         match f.surface {
             CadSurface::Plane { normal, .. } => self.vector(normal)[2].abs() < T,
-            CadSurface::Cylinder { axis, .. } => {
+            CadSurface::Cylinder { axis, .. } | CadSurface::LinearExtrusion { axis, .. } => {
                 let n = self.vector(axis);
                 n[0].abs() < T && n[1].abs() < T
             }
@@ -453,6 +453,10 @@ impl<'a> View<'a> {
                     })
                     .collect()
             }
+            CadCurve::BezierSpans { ref spans } => approximate_bezier_spans(spans, tolerance)?
+                .into_iter()
+                .map(|p| self.point(p))
+                .collect(),
             _ => {
                 return Err(
                     "unsupported exact boundary curve; display tessellation cannot be machined"
@@ -464,6 +468,19 @@ impl<'a> View<'a> {
             p.reverse();
         }
         Ok(p)
+    }
+    /// Positive-weight Bezier curves lie inside their control hull. Use it for
+    /// conservative height/planarity certificates, never just sampled vertices.
+    fn curve_support_points(&self, edge: &CadEdge) -> Result<Vec<[f64; 3]>, String> {
+        if let CadCurve::BezierSpans { spans } = &edge.curve {
+            Ok(spans
+                .iter()
+                .flat_map(|s| &s.poles)
+                .map(|p| self.point(*p))
+                .collect())
+        } else {
+            self.curve_points(edge, false, MACHINING_CHORD_TOLERANCE)
+        }
     }
     fn contour(&self, w: &CadLoop) -> Result<(Contour, f64), String> {
         if w.edge_uses.is_empty() {
@@ -488,7 +505,13 @@ impl<'a> View<'a> {
         }
         points.pop();
         let z = points[0][2];
-        if points.iter().any(|p| (p[2] - z).abs() > T) {
+        if points.iter().any(|p| (p[2] - z).abs() > T)
+            || w.edge_uses.iter().any(|u| {
+                self.edge(u.edge_id)
+                    .and_then(|e| self.curve_support_points(e))
+                    .is_ok_and(|p| p.iter().any(|p| (p[2] - z).abs() > T))
+            })
+        {
             return Err("boundary loop is not coplanar in setup XY".into());
         }
         let c = Contour::new(points.into_iter().map(|p| Point::new(p[0], p[1])).collect());
@@ -520,7 +543,7 @@ impl<'a> View<'a> {
         for id in &f.loop_ids {
             for u in &self.wire(*id)?.edge_uses {
                 let e = self.edge(u.edge_id)?;
-                for p in self.curve_points(e, false, MACHINING_CHORD_TOLERANCE)? {
+                for p in self.curve_support_points(e)? {
                     min = min.min(p[2]);
                     max = max.max(p[2]);
                 }
@@ -642,19 +665,106 @@ impl<'a> View<'a> {
         for id in &wall.loop_ids {
             for usage in &self.wire(*id)?.edge_uses {
                 let edge = self.edge(usage.edge_id)?;
-                let points = self.curve_points(edge, false, MACHINING_CHORD_TOLERANCE)?;
+                let points = self.curve_support_points(edge)?;
                 let horizontal = points.iter().all(|p| (p[2] - bottom).abs() < T)
                     || points.iter().all(|p| (p[2] - top).abs() < T);
-                let axial = matches!(edge.curve, CadCurve::Line { .. })
-                    && points.iter().all(|p| {
-                        (p[0] - points[0][0]).abs() < T && (p[1] - points[0][1]).abs() < T
-                    });
+                let axial = matches!(
+                    edge.curve,
+                    CadCurve::Line { .. } | CadCurve::BezierSpans { .. }
+                ) && points
+                    .iter()
+                    .all(|p| (p[0] - points[0][0]).abs() < T && (p[1] - points[0][1]).abs() < T);
                 if !horizontal && !axial {
-                    return Err(
-                        "wall has intermediate openings or nonconstant-section trims".into(),
-                    );
+                    return Err(format!(
+                        "wall has intermediate openings or nonconstant-section trims (face {}, edge {})", wall.id, edge.id
+                    ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Open profiles follow a selected planar curve through the end transitions.
+    /// An end may trim a vertical wall obliquely; it need not remain an axial
+    /// seam. Keep the closed-feature certificate for pockets and closed loops.
+    fn certify_open_profile_wall(
+        &self,
+        wall: &CadFace,
+        bottom: f64,
+        top: f64,
+    ) -> Result<(), String> {
+        if self.certify_wall(wall, bottom, top).is_ok() {
+            return Ok(());
+        }
+        if wall.loop_ids.len() != 1 {
+            return Err("profile wall has intermediate openings or ambiguous trims".into());
+        }
+        let wire = self.wire(wall.loop_ids[0])?;
+        let mut uses = Vec::new();
+        for usage in &wire.edge_uses {
+            let edge = self.edge(usage.edge_id)?;
+            let mut points = self.curve_support_points(edge)?;
+            if usage.reversed {
+                points.reverse();
+            }
+            let rim = if points.iter().all(|p| (p[2] - top).abs() < T) {
+                Some(true)
+            } else if points.iter().all(|p| (p[2] - bottom).abs() < T) {
+                Some(false)
+            } else {
+                None
+            };
+            if rim.is_none()
+                && !matches!(
+                    edge.curve,
+                    CadCurve::Line { .. } | CadCurve::BezierSpans { .. }
+                )
+            {
+                return Err(format!(
+                    "profile wall end Edge {} needs an exact end trim",
+                    edge.id
+                ));
+            }
+            uses.push((rim, points));
+        }
+        let first_rim = uses
+            .iter()
+            .position(|(rim, _)| rim.is_some())
+            .ok_or("profile wall has no horizontal rims")?;
+        uses.rotate_left(first_rim);
+        if !uses.iter().any(|(rim, _)| *rim == Some(true))
+            || !uses.iter().any(|(rim, _)| *rim == Some(false))
+        {
+            return Err("profile wall needs both an upper and a lower horizontal rim".into());
+        }
+        let mut caps = 0;
+        let mut index = 0;
+        while index < uses.len() {
+            if uses[index].0.is_some() {
+                index += 1;
+                continue;
+            }
+            let before = uses[index - 1].0.unwrap();
+            let mut heights = vec![if before { top } else { bottom }];
+            while index < uses.len() && uses[index].0.is_none() {
+                heights.extend(uses[index].1.iter().map(|p| p[2]));
+                index += 1;
+            }
+            let after = uses[index % uses.len()].0.unwrap();
+            if before == after {
+                return Err("profile wall has an intermediate opening in a rim".into());
+            }
+            heights.push(if after { top } else { bottom });
+            if (heights[1] - heights[0]).abs() > T
+                || (heights[heights.len() - 2] - heights[heights.len() - 1]).abs() > T
+                || heights.iter().any(|z| *z < bottom - T || *z > top + T)
+            {
+                return Err("profile wall end trims must connect its two horizontal rims within the cutting interval".into());
+            }
+            caps += 1;
+        }
+        if caps != 2 {
+            return Err("profile wall needs exactly two end transitions".into());
         }
         Ok(())
     }
@@ -669,7 +779,7 @@ impl<'a> View<'a> {
         for id in &wall.loop_ids {
             for usage in &self.wire(*id)?.edge_uses {
                 let edge = self.edge(usage.edge_id)?;
-                let points = self.curve_points(edge, false, MACHINING_CHORD_TOLERANCE)?;
+                let points = self.curve_support_points(edge)?;
                 if !points.iter().all(|p| (p[2] - top).abs() < T) {
                     continue;
                 }
@@ -1587,6 +1697,259 @@ mod tests {
             0.
         )
         .is_err());
+    }
+
+    #[test]
+    fn open_chain_uses_local_wall_normals_despite_unsupported_face_trims() {
+        let (mut state, face) = plate_with_hole();
+        let wire = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|w| w.face_id == face.id && w.is_outer)
+            .unwrap()
+            .clone();
+        let edges: Vec<_> = wire
+            .edge_uses
+            .iter()
+            .map(|u| reference(u.edge_id, EntityKind::Edge))
+            .collect();
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        topology
+            .edges
+            .iter_mut()
+            .find(|e| e.id == edges[2].id)
+            .unwrap()
+            .curve = CadCurve::Unsupported {
+            description: "unselected spline on the same face".into(),
+        };
+        for reversed in [false, true] {
+            let selected = if reversed {
+                vec![edges[1].clone(), edges[0].clone()]
+            } else {
+                edges[..2].to_vec()
+            };
+            let binding =
+                resolve_selection(&state, &selected, ExtractionRecipe::ProfileContours, 0.)
+                    .unwrap();
+            let input = resolve_binding(&state, &binding).unwrap();
+            let profile = &input.profiles[0];
+            assert!(!profile.closed);
+            assert_eq!(profile.chain.len(), 3);
+            assert_eq!(
+                profile.side,
+                if reversed {
+                    Side::Outside
+                } else {
+                    Side::Inside
+                }
+            );
+            assert_eq!(
+                input.heights,
+                CuttingHeights {
+                    top: 0.,
+                    bottom: -5.
+                }
+            );
+            // Transforming both the edge and its wall must preserve the free side.
+            let mut rotated = state.clone();
+            rotated.instances[0].placement = RigidTransform {
+                rotation: [[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]],
+                translation: [100., -50., 40.],
+            };
+            let rotated_binding =
+                resolve_selection(&rotated, &selected, ExtractionRecipe::ProfileContours, 40.)
+                    .unwrap();
+            assert_eq!(
+                resolve_binding(&rotated, &rotated_binding)
+                    .unwrap()
+                    .profiles[0]
+                    .side,
+                profile.side
+            );
+        }
+        // Unsupported selected geometry still cannot be machined.
+        assert!(
+            resolve_selection(&state, &edges[2..3], ExtractionRecipe::ProfileContours, 0.)
+                .unwrap_err()
+                .contains("unsupported exact boundary curve")
+        );
+        assert!(resolve_selection(
+            &state,
+            &[reference(wire.id, EntityKind::Loop)],
+            ExtractionRecipe::ProfileLoop {
+                side: Side::Outside
+            },
+            0.
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn spline_control_hulls_reject_nonplanar_curves_hidden_by_chord_tolerance() {
+        let (mut state, face) = plate_with_hole();
+        let edge_id = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|w| w.face_id == face.id && w.is_outer)
+            .unwrap()
+            .edge_uses[0]
+            .edge_id;
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        let edge = topology.edges.iter_mut().find(|e| e.id == edge_id).unwrap();
+        let CadCurve::Line { start, end } = edge.curve else {
+            panic!("line")
+        };
+        let middle = std::array::from_fn(|i| {
+            if i == 2 {
+                0.005
+            } else {
+                (start[i] + end[i]) * 0.5
+            }
+        });
+        let spans = vec![CadBezierSpan {
+            poles: vec![start, middle, end],
+            weights: vec![1.; 3],
+        }];
+        assert_eq!(
+            approximate_bezier_spans(&spans, MACHINING_CHORD_TOLERANCE)
+                .unwrap()
+                .len(),
+            2
+        );
+        edge.curve = CadCurve::BezierSpans { spans };
+        let error = resolve_selection(
+            &state,
+            &[reference(edge_id, EntityKind::Edge)],
+            ExtractionRecipe::ProfileContours,
+            0.,
+        )
+        .unwrap_err();
+        assert!(error.contains("one accessible plane"), "{error}");
+    }
+
+    #[test]
+    fn explicit_open_chain_uses_operation_depth_without_a_vertical_wall() {
+        let (mut state, face) = plate_with_hole();
+        let wire = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|w| w.face_id == face.id && w.is_outer)
+            .unwrap()
+            .clone();
+        let edges: Vec<_> = wire
+            .edge_uses
+            .iter()
+            .map(|u| reference(u.edge_id, EntityKind::Edge))
+            .collect();
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        let wall_id = topology
+            .edges
+            .iter()
+            .find(|e| e.id == edges[0].id)
+            .unwrap()
+            .face_ids
+            .iter()
+            .copied()
+            .find(|id| *id != face.id)
+            .unwrap();
+        topology
+            .faces
+            .iter_mut()
+            .find(|f| f.id == wall_id)
+            .unwrap()
+            .surface = CadSurface::Unsupported {
+            description: "spline blend".into(),
+        };
+        let mut entry =
+            ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Open blend rim".into());
+        entry.source = ProfileGeometrySource::Cad(edges[..2].to_vec());
+        entry.chain_mode = ProfileChainMode::Open;
+        let (contours, heights) = profile_entry_contours(&state, &entry).unwrap();
+        assert!(
+            heights.is_none(),
+            "a planar path does not certify wall depth"
+        );
+        assert!(!contours[0].closed);
+        assert_eq!(contours[0].side, Side::Inside);
+        let mut backwards = entry.clone();
+        backwards.source = ProfileGeometrySource::Cad(vec![edges[1].clone(), edges[0].clone()]);
+        assert_eq!(
+            profile_entry_contours(&state, &backwards).unwrap().0[0].side,
+            Side::Outside
+        );
+        let mut binding = resolve_selection(
+            &state,
+            &edges[..2],
+            ExtractionRecipe::ProfileEntries {
+                entries: vec![entry.clone()],
+            },
+            1.,
+        )
+        .unwrap();
+        binding.overrides = GeometryOverrides {
+            top: Some(1.),
+            bottom: Some(-12.),
+        };
+        let resolved = resolve_binding(&state, &binding).unwrap();
+        assert_eq!(
+            resolved.heights,
+            CuttingHeights {
+                top: 1.,
+                bottom: -12.
+            }
+        );
+        std::sync::Arc::make_mut(&mut state.assets[0].topology).mesh = CadMesh::default();
+        assert_eq!(resolve_binding(&state, &binding).unwrap(), resolved);
+        for mode in [ProfileChainMode::Auto, ProfileChainMode::Closed] {
+            entry.chain_mode = mode;
+            assert!(profile_entry_contours(&state, &entry)
+                .unwrap_err()
+                .contains("no adjoining vertical wall"));
+        }
+        entry.chain_mode = ProfileChainMode::Open;
+        entry.source = ProfileGeometrySource::Cad(vec![edges[0].clone(), edges[2].clone()]);
+        assert!(profile_entry_contours(&state, &entry)
+            .unwrap_err()
+            .contains("connect without gaps"));
+        state.instances[0].placement.rotation = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]];
+        entry.source = ProfileGeometrySource::Cad(vec![edges[1].clone()]);
+        assert!(profile_entry_contours(&state, &entry)
+            .unwrap_err()
+            .contains("one accessible plane"));
+    }
+
+    #[test]
+    fn trimmed_wall_ends_are_usable_only_for_open_profiles() {
+        let mut fixture = Fixture::new();
+        let wall_id = fixture.face(
+            vec![vec![
+                [0., 0., 0.],
+                [20., 0., 0.],
+                [18., 0., -5.],
+                [2., 0., -5.],
+            ]],
+            [0., -1., 0.],
+        );
+        let state = fixture.state();
+        let selected = [reference(wall_id, EntityKind::Face)];
+        let view = View::new(&state, &selected).unwrap();
+        let wall = view.face(wall_id).unwrap();
+        assert!(view.certify_open_profile_wall(wall, -5., 0.).is_ok());
+        assert!(
+            view.certify_wall(wall, -5., 0.).is_err(),
+            "closed pockets retain their full-height trim guard"
+        );
+        let mut with_opening = state.clone();
+        let topology = std::sync::Arc::make_mut(&mut with_opening.assets[0].topology);
+        let wall = topology.faces.iter_mut().find(|f| f.id == wall_id).unwrap();
+        wall.loop_ids.push(wall.loop_ids[0]);
+        let view = View::new(&with_opening, &selected).unwrap();
+        assert!(view
+            .certify_open_profile_wall(view.face(wall_id).unwrap(), -5., 0.)
+            .is_err());
     }
 
     #[test]

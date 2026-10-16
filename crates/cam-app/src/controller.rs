@@ -2319,7 +2319,12 @@ impl AppController {
         self.cancel_run();
         let inputs = self.job_inputs();
         let mut cache = std::mem::take(&mut self.operation_cache);
-        let result = inputs.execute(cancel, &mut cache, &crate::jobs::Progress::default());
+        let result = inputs.execute(
+            cancel,
+            &mut cache,
+            &crate::jobs::Progress::default(),
+            &mut Default::default(),
+        );
         self.operation_cache = cache;
         self.outcome = Some(result);
         self.nc = None;

@@ -201,9 +201,11 @@ impl SimulationPlayer {
             program: timeline.prefix(0.),
             ..Default::default()
         };
-        Ok(Self {
+        let mut inputs = controller.job_inputs();
+        inputs.preview_resolution = Some(inputs.stock_resolution(&outcome.program));
+        let mut player = Self {
             source,
-            inputs: controller.job_inputs(),
+            inputs,
             timeline,
             jobs: JobService::default(),
             preview,
@@ -214,7 +216,9 @@ impl SimulationPlayer {
             speed: 1.,
             error: None,
             last_tick: Instant::now(),
-        })
+        };
+        player.request_frame();
+        Ok(player)
     }
     pub fn current(&self, controller: &AppController) -> bool {
         controller.revision() == self.source.revision
@@ -499,6 +503,20 @@ mod tests {
         }
         let nc = controller.export_nc().unwrap().to_owned();
         let mut player = SimulationPlayer::new(&controller).unwrap();
+        drain_player(&mut player);
+        assert!(
+            !player.preview.stock_vertices.is_empty(),
+            "opening playback shows the initial stock"
+        );
+        assert!(player.preview.stock_machined.iter().all(|&cut| !cut));
+        assert_eq!(
+            player.inputs.preview_resolution,
+            Some(
+                player
+                    .inputs
+                    .stock_resolution(&controller.outcome().unwrap().program)
+            )
+        );
         player.seek(player.timeline.duration);
         drain_player(&mut player);
         let cut = player.preview.stock_vertices.clone();

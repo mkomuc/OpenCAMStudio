@@ -472,9 +472,23 @@ pub enum CadSurface {
         major_radius: f64,
         minor_radius: f64,
     },
+    /// Native extrusion, including a degree-one spline surface whose pole rows
+    /// are exact translations with identical rational weights.
+    LinearExtrusion {
+        axis: [f64; 3],
+        /// Local outward surface orientation at each boundary edge's midpoint.
+        /// Keeps open chains independent of unrelated face trims.
+        edge_sides: Vec<CadWallEdgeSide>,
+    },
     Unsupported {
         description: String,
     },
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CadWallEdgeSide {
+    pub edge_id: EntityId,
+    pub tangent: [f64; 3],
+    pub outward: [f64; 3],
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CadFace {
@@ -497,6 +511,10 @@ pub enum CadCurve {
         radius: f64,
         start_angle: f64,
         end_angle: f64,
+    },
+    /// Exact trimmed spline, decomposed into rational Bezier spans by OCCT.
+    BezierSpans {
+        spans: Vec<crate::CadBezierSpan>,
     },
     Unsupported {
         description: String,
@@ -884,6 +902,22 @@ impl TopologySnapshot {
                         && minor_radius.is_finite()
                         && *minor_radius > 0.
                 }
+                CadSurface::LinearExtrusion { axis, edge_sides } => {
+                    direction(*axis)
+                        && edge_sides.iter().all(|side| {
+                            direction(side.tangent)
+                                && direction(side.outward)
+                                && (0..3)
+                                    .map(|i| side.tangent[i] * side.outward[i])
+                                    .sum::<f64>()
+                                    .abs()
+                                    < 1e-6
+                                && self
+                                    .edges
+                                    .iter()
+                                    .any(|e| e.id == side.edge_id && e.face_ids.contains(&f.id))
+                        })
+                }
                 CadSurface::Unsupported { .. } => true,
             };
             if !ok {
@@ -930,6 +964,11 @@ impl TopologySnapshot {
                         && *radius > 0.
                         && start_angle.is_finite()
                         && end_angle.is_finite()
+                }
+                CadCurve::BezierSpans { spans } => {
+                    !spans.is_empty()
+                        && spans.iter().map(|s| s.poles.len()).sum::<usize>() <= 65536
+                        && spans.iter().all(|s| s.is_valid())
                 }
                 CadCurve::Unsupported { .. } => true,
             };

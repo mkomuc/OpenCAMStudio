@@ -9,9 +9,15 @@ Requesting `occt` without an SDK fails the build. Without `occt`, solid imports
 return `BackendUnavailable`.
 
 The bridge uses `STEPControl_Reader` and `IGESControl_Reader`, millimetre system units, solid
-validation, analytic plane/cylinder/torus and line/circle descriptors, oriented topology,
-and independent display tessellation. Other analytic/spline entities do not
-supply analytic feature adapters. Whole-body XY silhouettes use a separate,
+validation, analytic plane/cylinder/torus and line/circle descriptors, exact trimmed
+B-spline/Bezier curves, oriented topology, and independent display tessellation.
+Spline curves are stored as rational Bezier spans; positive-weight control-hull
+subdivision bounds machining chord error to 0.01 mm independently of display.
+Linear extrusion walls are recognized from OCCT extrusion surfaces or from
+exactly translated degree-one spline pole rows with matching weights. Local
+outward edge orientations are retained, so an open chain does not require an
+unrelated face boundary to close within machining recognition tolerance.
+Other curved surfaces do not supply fixed-axis feature adapters. Whole-body XY silhouettes use a separate,
 fixed-tolerance projection tessellation rather than display triangles. OCCT calls are serialized,
 all handles live inside a call, and all C++ exceptions are translated.
 
@@ -73,3 +79,14 @@ Run the original IGES fixture and application regression tests with:
 cargo test -p cam-kernel --features occt --test iges
 cargo test -p cam-app --features occt --test native_iges
 ```
+
+Spline open chains require planar rim or floor edges on vertical supporting
+walls. Their cutting interval comes from the upper and lower wall rims, so a
+recess floor below the body's top remains selectable. Two end transitions may
+trim a vertical wall obliquely or flow into a blend: an open profile follows its
+selected XY curve at every depth through these transitions. This cuts a vertical
+extension of the selected curve; it does not follow a 3D blend surface. Closed
+features still require full-height rims and axial seams. Nonplanar chains,
+tapered walls and intermediate openings remain ineligible. Control hulls certify
+spline heights and planarity. Old imports with unsupported spline descriptors
+need model replacement/reimport to acquire the exact curve and wall data.

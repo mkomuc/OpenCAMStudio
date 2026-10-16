@@ -807,6 +807,9 @@ fn curve_points(curve: &CadCurve) -> Vec<Point> {
                 })
                 .collect()
         }
+        CadCurve::BezierSpans { spans } => {
+            cam_model::approximate_bezier_spans(spans, 0.05).unwrap_or_default()
+        }
         CadCurve::Unsupported { .. } => vec![],
     }
 }

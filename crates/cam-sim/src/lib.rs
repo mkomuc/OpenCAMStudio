@@ -10,6 +10,9 @@
 //! the viewport is a separate concern (as with `cam-render`).
 
 mod heightfield;
+mod simulation;
+mod sweep;
+pub use simulation::{simulate_controlled, SimulationCache};
 
 pub use heightfield::{Heightfield, SurfaceDiff, SurfaceMesh};
 
@@ -17,7 +20,7 @@ use cam_cldata::{ArcDir, Point3, Program, Step};
 use cam_geo::{Arc, Point};
 
 /// How finely to simulate, and the tool it runs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SimOptions {
     /// Heightfield cell size, mm.
     pub resolution: f64,
@@ -211,140 +214,6 @@ pub fn simulate(
     simulate_controlled(program, min, max, options, tools, &|| false, |_, _| {}).unwrap()
 }
 
-/// Cancellable simulation. A stopped traversal has no complete result.
-pub fn simulate_controlled(
-    program: &Program,
-    min: [f64; 3],
-    max: [f64; 3],
-    options: &SimOptions,
-    tools: &[SimTool],
-    cancelled: &dyn Fn() -> bool,
-    mut progress: impl FnMut(usize, usize),
-) -> Option<SimResult> {
-    if cancelled() {
-        return None;
-    }
-    let mut field = Heightfield::new(
-        [min[0], min[1]],
-        [max[0], max[1]],
-        options.resolution,
-        max[2],
-    );
-    let default_tool = ToolProfile::flat(options.tool_radius);
-    let mut tool = default_tool;
-    let mut cur: Option<Point3> = None;
-    let mut collisions = Vec::new();
-
-    for (index, step) in program.steps().iter().enumerate() {
-        if cancelled() {
-            return None;
-        }
-        if index % 128 == 0 {
-            progress(index, program.steps().len());
-        }
-        match step {
-            Step::ToolChange { tool: number } => {
-                tool = tools
-                    .iter()
-                    .find(|t| t.number == *number)
-                    .map_or(default_tool, |t| t.profile);
-            }
-            Step::Rapid { to, .. } => {
-                if let Some(a) = cur {
-                    // A vertical lift (no XY travel, moving up) is always safe: the tool
-                    // retreats straight up through the column it just cut, so it cannot
-                    // plow through stock. The tool-radius disc below would otherwise catch
-                    // a neighbouring ridge — e.g. the scallops a V/chamfer tool leaves
-                    // between face passes — and false-flag the retract. (A *downward*
-                    // in-place move is still checked: strategies plunge with a feed, not a
-                    // rapid, so a descending rapid into stock is a real fault.) A lateral
-                    // rapid sweeps the tool horizontally and is always checked.
-                    let lateral = (a.x - to.x).hypot(a.y - to.y) > 1e-9;
-                    let vertical_lift = !lateral && to.z >= a.z;
-                    if !vertical_lift {
-                        // Profile-aware: the tool is only as wide as its own shape at
-                        // the depth it sits, so a pointed tool descending into the
-                        // narrow groove it just cut is not stopped by the uncut
-                        // surface alongside it. For a flat tool `offset` is zero
-                        // everywhere, so this reduces exactly to the old radius test.
-                        let tip_z = a.z.min(to.z);
-                        if let Some((intrusion, stock)) = field.max_intrusion_along_controlled(
-                            [a.x, a.y],
-                            [to.x, to.y],
-                            tip_z,
-                            &tool,
-                            cancelled,
-                        ) {
-                            if intrusion > CLEARANCE_EPS {
-                                collisions.push(Collision {
-                                    kind: CollisionKind::RapidThroughStock,
-                                    at: [to.x, to.y, to.z],
-                                    message: format!(
-                                        "rapid at Z {:.3} passes through stock standing at Z {:.3}",
-                                        to.z, stock
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
-                cur = Some(*to);
-            }
-            Step::Linear { to, .. } => {
-                if let Some(a) = cur {
-                    field.cut_segment_profile_controlled(
-                        [a.x, a.y, a.z],
-                        [to.x, to.y, to.z],
-                        &tool,
-                        cancelled,
-                    );
-                }
-                cur = Some(*to);
-            }
-            Step::Arc {
-                end, center, dir, ..
-            } => {
-                if let Some(a) = cur {
-                    let pts = arc_points(a, *end, *center, *dir);
-                    for w in pts.windows(2) {
-                        if cancelled() {
-                            return None;
-                        }
-                        field.cut_segment_profile_controlled(w[0], w[1], &tool, cancelled);
-                    }
-                }
-                cur = Some(*end);
-            }
-            Step::Drill(cycle) => {
-                for &[x, y] in &cycle.points {
-                    if cancelled() {
-                        return None;
-                    }
-                    field.cut_segment_profile_controlled(
-                        [x, y, cycle.depth],
-                        [x, y, cycle.depth],
-                        &tool,
-                        cancelled,
-                    );
-                }
-                cur = None;
-            }
-            _ => {}
-        }
-    }
-
-    if cancelled() {
-        return None;
-    }
-    progress(program.steps().len(), program.steps().len());
-    let removed_volume = field.removed_volume();
-    Some(SimResult {
-        field,
-        collisions,
-        removed_volume,
-    })
-}
-
 /// Verify a simulated `field` against a desired `target` surface: if the tool cut
 /// more than `tol` mm below the target anywhere, return a [`CollisionKind::Gouge`]
 /// summarising the worst point and total over-cut. Returns `None` when the run is
@@ -369,12 +238,19 @@ pub fn check_gouge(field: &Heightfield, target: &Heightfield, tol: f64) -> Optio
 }
 
 /// Flatten an arc move into points (XY on the circle, Z interpolated end to end).
-fn arc_points(a: Point3, end: Point3, center: Point3, dir: ArcDir) -> Vec<[f64; 3]> {
+fn arc_points(
+    a: Point3,
+    end: Point3,
+    center: Point3,
+    dir: ArcDir,
+    resolution: f64,
+) -> Vec<[f64; 3]> {
     let r = ((a.x - center.x).powi(2) + (a.y - center.y).powi(2)).sqrt();
     let a0 = (a.y - center.y).atan2(a.x - center.x);
     let a1 = (end.y - center.y).atan2(end.x - center.x);
     let ccw = matches!(dir, ArcDir::Ccw);
-    let xy = Arc::new(Point::new(center.x, center.y), r, a0, a1, ccw).flatten(0.1);
+    let xy = Arc::new(Point::new(center.x, center.y), r, a0, a1, ccw)
+        .flatten((resolution * 0.2).clamp(0.00001, 0.05));
     let n = xy.len().max(2);
     xy.iter()
         .enumerate()

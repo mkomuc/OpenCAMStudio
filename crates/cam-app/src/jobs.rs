@@ -6,7 +6,7 @@ use cam_cldata::{Program, SpindleDir};
 use cam_geo::{Polygon, Polyline};
 use cam_model::{Document, Machine};
 use cam_render::{mesh_vertices, MeshVertex, Scene, PART};
-use cam_sim::{Collision, SimOptions, SimTool};
+use cam_sim::{Collision, SimOptions, SimTool, SimulationCache};
 use cam_toolpath::{
     build_job_cached, CancelToken, Diagnostic, DiagnosticCode, JobCompletion, OperationCache,
     PlanRequest,
@@ -70,6 +70,8 @@ pub(crate) struct JobInputs {
     /// A playback prefix bypasses planning; it never replaces the verified job.
     pub preview_program: Option<Program>,
     pub simulation_accuracy: f32,
+    /// Fixed from the full playback program so partial frames share one grid.
+    pub preview_resolution: Option<f64>,
 }
 impl JobInputs {
     pub fn execute(
@@ -77,6 +79,7 @@ impl JobInputs {
         cancel: &CancelToken,
         cache: &mut OperationCache,
         progress: &Progress,
+        simulation: &mut SimulationCache,
     ) -> RunOutcome {
         cache.reset_stats();
         if cancel.is_cancelled() {
@@ -189,7 +192,7 @@ impl JobInputs {
         }
         let (stock_vertices, stock_indices, stock_machined, collisions) =
             if completion == JobCompletion::Complete && !cancel.is_cancelled() {
-                self.simulate_stock(&job.program, cancel, progress)
+                self.simulate_stock(&job.program, cancel, progress, simulation)
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
@@ -232,6 +235,7 @@ pub(crate) struct JobOutput {
 type TestHook = Arc<dyn Fn(&CancelToken) + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct JobService {
+    simulation: Arc<Mutex<SimulationCache>>,
     serial: u64,
     expected: Option<JobStamp>,
     running: Option<Running>,
@@ -281,6 +285,7 @@ impl JobService {
         let hook = self.hook.clone();
         let failure_sender = sender.clone();
         let setup_id = request.inputs.document.setup().id;
+        let simulation = self.simulation.clone();
         let spawned = std::thread::Builder::new()
             .name("machining-job".into())
             .spawn(move || {
@@ -290,7 +295,12 @@ impl JobService {
                     if let Some(hook) = hook {
                         hook(&token);
                     }
-                    request.inputs.execute(&token, &mut cache, &progress)
+                    request.inputs.execute(
+                        &token,
+                        &mut cache,
+                        &progress,
+                        &mut simulation.lock().unwrap_or_else(|e| e.into_inner()),
+                    )
                 }))
                 .unwrap_or_else(|_| RunOutcome {
                     completion: JobCompletion::Failed,
