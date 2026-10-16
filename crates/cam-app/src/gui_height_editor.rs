@@ -235,13 +235,7 @@ impl App {
                 section = section.push(
                     row![
                         text("From").size(12).width(50),
-                        pick_list(Reference::options(plane), Some(d.reference), move |r| {
-                            Message::HeightReferenceChanged(plane, r)
-                        })
-                        .text_size(12)
-                        .padding([7, 9])
-                        .width(Length::Fill)
-                        .style(inspector_picker)
+                        super::height_reference::picker(plane, d.reference)
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),

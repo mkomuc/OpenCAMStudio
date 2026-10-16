@@ -67,3 +67,8 @@ The remaining originals are in the flat 24×24 style:
 - `undo.svg`, `redo.svg`, `run.svg` — edit / run actions
 - `toolpath.svg` — recompute toolpaths (connected cutting passes and direction arrow)
 - `new.svg`, `open.svg`, `save.svg` — project file actions
+
+The `heights/` icons are original 24×24 height-reference glyphs: operation
+planes (colours match the viewport), model/stock/fixture limits, contours,
+selection, origin, extrema, and disabled feed height. © OpenCAMStudio
+contributors, GPL-3.0.

@@ -40,6 +40,8 @@ use inspector_style::*;
 mod height_editor;
 #[path = "gui_height_planes.rs"]
 mod height_planes;
+#[path = "gui_height_reference.rs"]
+mod height_reference;
 #[path = "gui_inspector.rs"]
 mod inspector_view;
 #[path = "gui_jobs.rs"]
