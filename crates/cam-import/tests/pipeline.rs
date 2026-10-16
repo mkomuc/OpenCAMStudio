@@ -29,10 +29,13 @@ fn fixture_path() -> String {
     format!("{}/tests/fixtures/part.dxf", env!("CARGO_MANIFEST_DIR"))
 }
 
-fn profile_op(id: u32, chain: cam_geo::Contour, side: Side) -> Operation {
+fn profile_op(id: u32, chain: cam_geo::Contour, side: Side, climb: bool) -> Operation {
     Operation::Profile(ProfileOp {
         tabs: Default::default(),
-        clearing: cam_model::Clearing::default(),
+        clearing: cam_model::Clearing {
+            climb,
+            ..Default::default()
+        },
         id,
         tool: 1,
         chain,
@@ -61,9 +64,12 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
     assert_eq!(import.regions.len(), 1, "one region: {:?}", import.warnings);
     let region = &import.regions[0];
 
-    let mut ops = vec![profile_op(0, region.outer().clone(), Side::Outside)];
+    // The golden uses CCW travel for both contours with an M3 spindle:
+    // conventional milling outside, climb milling inside. Set both explicitly
+    // so this pipeline fixture does not depend on the default milling direction.
+    let mut ops = vec![profile_op(0, region.outer().clone(), Side::Outside, false)];
     for (i, hole) in region.holes().iter().enumerate() {
-        ops.push(profile_op(1 + i as u32, hole.clone(), Side::Inside));
+        ops.push(profile_op(1 + i as u32, hole.clone(), Side::Inside, true));
     }
 
     let doc = Document::new(Setup {

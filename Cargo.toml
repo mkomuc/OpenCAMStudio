@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+exclude = ["vendor/block"]
+
+# wgpu's macOS backend still uses block 0.1.6. Keep its ABI unchanged while
+# fixing the uninhabited foreign static until the dependency is replaced.
+[patch.crates-io]
+block = { path = "vendor/block" }
 
 [workspace.package]
 version = "0.1.0"

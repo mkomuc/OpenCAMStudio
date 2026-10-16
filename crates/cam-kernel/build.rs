@@ -30,12 +30,18 @@ fn main() {
              OCCT_LIB_DIR. Build without occt for a drawing-only application."
         );
     };
-    cc::Build::new()
-        .cpp(true)
-        .std("c++17")
-        .include(include)
-        .file("native/bridge.cpp")
-        .compile("cam_occt_bridge");
+    let mut build = cc::Build::new();
+    build.cpp(true).std("c++17");
+    // Treat SDK headers as external while keeping warnings for our bridge.
+    // OCCT 7.9.3 uses sprintf in a header, which macOS marks as deprecated.
+    if build.get_compiler().is_like_msvc() {
+        let mut external_include = std::ffi::OsString::from("/external:I");
+        external_include.push(&include);
+        build.flag(external_include).flag("/external:W0");
+    } else {
+        build.flag("-isystem").flag(include.as_os_str());
+    }
+    build.file("native/bridge.cpp").compile("cam_occt_bridge");
     if let Some(lib) = env::var_os("OCCT_LIB_DIR")
         .map(PathBuf::from)
         .or_else(|| root.map(|p| p.join("lib")))
