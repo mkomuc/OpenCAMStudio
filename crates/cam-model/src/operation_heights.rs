@@ -424,6 +424,15 @@ impl Document {
         // A selected edge chain has its own Z plane. The binding's interval
         // describes the adjoining wall that is safe to cut, and its bottom can
         // be well below that plane (or contain an older cached depth).
+        if matches!(
+            binding.recipe,
+            crate::ExtractionRecipe::ChamferLoop
+                | crate::ExtractionRecipe::EngravePath
+                | crate::ExtractionRecipe::CarveRegion
+                | crate::ExtractionRecipe::ThreadCylinders { .. }
+        ) {
+            return Ok(binding.heights.top);
+        }
         let references: Vec<_> = match &binding.recipe {
             crate::ExtractionRecipe::ProfileEntries { entries }
                 if entries.iter().all(|entry| {

@@ -49,6 +49,7 @@ pub struct CadScene {
     cylindrical_faces: BTreeSet<EntityRef>,
     bore_rims: BTreeMap<EntityRef, Vec<EntityRef>>,
     planar_loops: BTreeSet<EntityRef>,
+    surface_loops: BTreeSet<EntityRef>,
     profile_targets: BTreeMap<EntityRef, EntityRef>,
 }
 
@@ -133,6 +134,21 @@ impl CadScene {
                 let reference = entity(EntityKind::Loop, wire.id);
                 if planar {
                     scene.planar_loops.insert(reference.clone());
+                }
+                if topology
+                    .faces
+                    .iter()
+                    .find(|f| f.id == wire.face_id)
+                    .is_some_and(|f| match f.surface {
+                        CadSurface::Plane { normal, .. } => {
+                            let n =
+                                frame.to_setup_vector(instance.placement.transform_vector(normal));
+                            n[0].abs() < 1e-5 && n[1].abs() < 1e-5 && n[2] > 0.
+                        }
+                        _ => false,
+                    })
+                {
+                    scene.surface_loops.insert(reference.clone());
                 }
                 // A rounded transition makes the top face boundary an inset.
                 // Select the full body envelope explicitly in that case.
@@ -535,6 +551,34 @@ impl CadScene {
             .collect();
         deduplicate_candidates(&mut candidates);
         candidates
+    }
+
+    /// Chamfer/engrave/carve select the actual planar rim. Rounded transitions
+    /// do not redirect these surface operations to a whole-body silhouette.
+    pub fn pick_surface_loop_candidates(
+        &self,
+        ray: Ray,
+        aperture: f64,
+        select_through: bool,
+    ) -> Vec<PickCandidate> {
+        let mut loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
+        loops.retain(|c| self.surface_loops.contains(&c.entity));
+        if loops.is_empty() {
+            loops = self
+                .pick_candidates(ray, EntityKind::Face, aperture, select_through)
+                .into_iter()
+                .filter_map(|mut c| {
+                    let wire = self.face_outer_loops.get(&c.entity)?;
+                    if !self.surface_loops.contains(wire) {
+                        return None;
+                    }
+                    c.entity = wire.clone();
+                    Some(c)
+                })
+                .collect();
+        }
+        deduplicate_candidates(&mut loops);
+        loops
     }
 
     /// Ctrl-click selects the envelope of the visible body instance, regardless
@@ -949,7 +993,22 @@ mod tests {
         assert_eq!(hits[0].entity.instance_id, 1);
         assert_eq!(hits[0].entity.revision, 1);
         assert!(!hits[0].occluded);
+        let mut scene = scene;
+        let rim = hits[0].entity.clone();
+        let mut silhouette = rim.clone();
+        silhouette.kind = EntityKind::Silhouette;
+        silhouette.id = silhouette.body_id;
+        scene.profile_targets.insert(rim.clone(), silhouette);
+        let surface_hits = scene.pick_surface_loop_candidates(down(), 0.1, false);
+        assert_eq!(surface_hits.len(), 1);
+        assert_eq!(
+            surface_hits[0].entity, rim,
+            "Surface operations retain the actual rim even beside a blend"
+        );
         let hidden = CadScene::from_geometry(&geometry, &BTreeSet::from([1]));
+        assert!(hidden
+            .pick_surface_loop_candidates(down(), 0.1, false)
+            .is_empty());
         assert!(hidden
             .pick_profile_candidates(down(), 0.1, false)
             .is_empty());

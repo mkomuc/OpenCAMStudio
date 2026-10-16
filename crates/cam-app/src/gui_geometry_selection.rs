@@ -151,6 +151,59 @@ impl App {
         if self.profile_geometry_active() {
             selection = selection.push(self.profile_selection_controls());
         }
+        let kind = self
+            .cad_pending_kind
+            .or_else(|| {
+                self.cad_editing_op
+                    .and_then(|id| self.current_operation(id))
+                    .map(AppController::operation_kind)
+            })
+            .or_else(|| {
+                self.operation_draft
+                    .as_ref()
+                    .map(AppController::operation_kind)
+            });
+        let cad_geometry = self.cad_pending_kind.is_some()
+            || self.cad_editing_op.is_some()
+            || self.operation_draft.as_ref().is_some_and(|op| {
+                self.controller
+                    .geometry_state()
+                    .bindings
+                    .contains_key(&op.id())
+            });
+        if cad_geometry {
+            match kind {
+                Some(OpKind::Chamfer | OpKind::Engrave) => {
+                    selection = selection.push(
+                        row![
+                            inspector_button("Boundary loop")
+                                .on_press(Message::GeometryFilterChanged(CadFilter::Loop)),
+                            inspector_button("Individual edges")
+                                .on_press(Message::GeometryFilterChanged(CadFilter::Edge)),
+                        ]
+                        .spacing(4),
+                    );
+                    selection = selection.push(text(if kind == Some(OpKind::Chamfer) {
+                        "Select a closed rim, or connected edges forming a closed rim."
+                    } else { "Select a boundary loop, or connected edges for an open or closed engraving path." }).size(12));
+                }
+                Some(OpKind::Carve) => {
+                    selection = selection.push(
+                        row![
+                            inspector_button("Face and islands")
+                                .on_press(Message::GeometryFilterChanged(CadFilter::Face)),
+                            inspector_button("Boundary loop")
+                                .on_press(Message::GeometryFilterChanged(CadFilter::Loop)),
+                        ]
+                        .spacing(4),
+                    );
+                }
+                Some(OpKind::Thread) => {
+                    selection = selection.push(text("Select cylindrical bore or boss faces. Selected features must share diameter and cutting heights.").size(12));
+                }
+                _ => {}
+            }
+        }
         selection.into()
     }
 

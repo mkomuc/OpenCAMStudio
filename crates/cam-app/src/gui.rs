@@ -1861,6 +1861,7 @@ struct App {
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
     creation_edited_fields: BTreeSet<Field>,
+    creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
     operation_geometry: Option<Vec<EntityRef>>,
     geometry_row_selection: Option<usize>,
     geometry_additive: bool,
@@ -2431,6 +2432,7 @@ enum Message {
     CadReplacementChosen(u64, Option<PathBuf>),
     RemoveCadAsset(u64),
     CadFilterChanged(CadFilter),
+    GeometryFilterChanged(CadFilter),
     CadHover(Option<EntityRef>),
     CadPicked(Vec<PickCandidate>),
     ProfileSelectionModeChanged(ProfileSelectionMode),
@@ -3127,6 +3129,7 @@ impl App {
             setup_values: BTreeMap::new(),
             operation_draft: None,
             creation_edited_fields: BTreeSet::new(),
+            creation_geometry_height_defaults: None,
             operation_geometry: None,
             geometry_row_selection: None,
             geometry_additive: false,
@@ -4500,6 +4503,15 @@ impl App {
                 self.controller.cancel_cad_import();
                 self.status = "CAD import cancelled.".into();
             }
+            Message::GeometryFilterChanged(filter) => {
+                let _ = self.pick_operation_geometry();
+                if self.cad_filter != filter {
+                    self.remove_operation_geometry(None);
+                }
+                self.cad_filter = filter;
+                self.cad_hover = None;
+                self.cad_candidates.clear();
+            }
             Message::CadFilterChanged(filter) => {
                 self.cad_filter = filter;
                 self.cad_hover = None;
@@ -4660,6 +4672,46 @@ impl App {
                                     }
                                 });
                             }
+                            if let Ok(input) = crate::cad_operations::geometry_for_setup(
+                                self.controller.document(),
+                            )
+                            .and_then(|geometry| {
+                                cam_geometry3d::resolve_binding(&geometry, &binding)
+                            }) {
+                                self.edit_operation_draft(|operation| match operation {
+                                    Operation::Chamfer(op) => {
+                                        if let Some(path) = input.profiles.first() {
+                                            if op.chain != path.chain {
+                                                op.side = path.side;
+                                            }
+                                            op.chain = path.chain.clone();
+                                        }
+                                    }
+                                    Operation::Engrave(op) => {
+                                        if let Some(path) = input.profiles.first() {
+                                            op.chain = path.chain.clone();
+                                            op.closed = path.closed;
+                                            if !op.closed {
+                                                op.start = None;
+                                            }
+                                        }
+                                    }
+                                    Operation::Carve(op) => {
+                                        if let Some(region) = input.regions.first() {
+                                            op.boundary = region.outer().clone();
+                                            op.islands = region.holes().to_vec();
+                                        }
+                                    }
+                                    Operation::Thread(op) => {
+                                        op.points = input
+                                            .holes
+                                            .iter()
+                                            .map(|h| [h.center.x, h.center.y])
+                                            .collect()
+                                    }
+                                    _ => {}
+                                });
+                            }
                             self.operation_binding_preview = Some(binding);
                             self.operation_geometry = Some(selected);
                             self.cad_editing_op = None;
@@ -4688,7 +4740,16 @@ impl App {
                             refs.first().is_some_and(|r| r.kind == EntityKind::Edge);
                     }
                     self.cad_filter = match binding.recipe {
-                        cam_model::ExtractionRecipe::ProfileLoop { .. } => CadFilter::Loop,
+                        cam_model::ExtractionRecipe::ProfileLoop { .. }
+                        | cam_model::ExtractionRecipe::ChamferLoop
+                        | cam_model::ExtractionRecipe::EngravePath
+                        | cam_model::ExtractionRecipe::CarveRegion => {
+                            match refs.first().map(|r| r.kind) {
+                                Some(EntityKind::Edge) => CadFilter::Edge,
+                                Some(EntityKind::Face) => CadFilter::Face,
+                                _ => CadFilter::Loop,
+                            }
+                        }
                         _ => CadFilter::Face,
                     };
                     let refs = self.operation_geometry.clone().unwrap_or(refs);
@@ -4958,11 +5019,12 @@ impl App {
                     self.cad_tool_pick = tool.map(|tool| tool.number);
                     self.cad_inspecting = false;
                     self.cad_editing_op = None;
-                    self.cad_filter = if kind == OpKind::Profile {
-                        CadFilter::Loop
-                    } else {
-                        CadFilter::Face
-                    };
+                    self.cad_filter =
+                        if matches!(kind, OpKind::Profile | OpKind::Chamfer | OpKind::Engrave) {
+                            CadFilter::Loop
+                        } else {
+                            CadFilter::Face
+                        };
                     self.controller.cancel_operation();
                     self.seed_creation_editor(kind);
                     self.status = "Choose a tool, then select geometry on the Geometry tab.".into();
@@ -8628,11 +8690,22 @@ impl App {
             return;
         }
         let multiple = (profile && entity.kind != EntityKind::Silhouette)
-            || self.cad_pending_kind == Some(OpKind::Drill)
+            || matches!(
+                self.cad_pending_kind,
+                Some(OpKind::Drill | OpKind::Thread | OpKind::Engrave | OpKind::Chamfer)
+            )
             || self
                 .cad_editing_op
                 .and_then(|id| self.current_operation(id))
-                .is_some_and(|op| matches!(op, Operation::Drill(_)));
+                .is_some_and(|op| {
+                    matches!(
+                        op,
+                        Operation::Drill(_)
+                            | Operation::Thread(_)
+                            | Operation::Engrave(_)
+                            | Operation::Chamfer(_)
+                    )
+                });
         let additive =
             (self.geometry_additive && multiple && entity.kind != EntityKind::Silhouette)
                 || (self.modifiers.command() && !self.modifiers.control())
@@ -8648,6 +8721,7 @@ impl App {
                     self.clear_browser_selection();
                     self.controller.set_cad_selection(selected);
                 }
+                self.sync_creation_geometry_heights();
                 self.focus_ops.clear();
                 self.status = format!(
                     "{} CAD feature(s) selected.{}",
@@ -10731,7 +10805,7 @@ impl Viewport {
         } else {
             self.cad_operation_kind
         } {
-            Some(OpKind::Profile)
+            Some(OpKind::Profile | OpKind::Chamfer | OpKind::Engrave)
                 if matches!(self.cad_filter, EntityKind::Face | EntityKind::Edge) =>
             {
                 self.cad_scene.pick_candidates(
@@ -10741,12 +10815,21 @@ impl Viewport {
                     self.cad_select_through,
                 )
             }
+            Some(OpKind::Chamfer | OpKind::Engrave) | Some(OpKind::Carve)
+                if self.cad_filter == EntityKind::Loop =>
+            {
+                self.cad_scene.pick_surface_loop_candidates(
+                    ray,
+                    aperture as f64,
+                    self.cad_select_through,
+                )
+            }
             Some(OpKind::Profile) => self.cad_scene.pick_profile_candidates(
                 ray,
                 aperture as f64,
                 self.cad_select_through,
             ),
-            Some(OpKind::Drill) => {
+            Some(OpKind::Drill | OpKind::Thread) => {
                 self.cad_scene
                     .pick_drill_candidates(ray, aperture as f64, self.cad_select_through)
             }

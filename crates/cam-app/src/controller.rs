@@ -1001,10 +1001,15 @@ impl AppController {
             op.apply_tool_preset(preset)?;
         }
         let mut preview = self.document().clone();
-        preview
-            .setup_mut()
-            .height_settings
-            .insert(id, cam_model::OperationHeightSettings::default());
+        let settings = if matches!(
+            kind,
+            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread
+        ) {
+            crate::cad_operations::selection_height_defaults(&preview, &op)
+        } else {
+            cam_model::OperationHeightSettings::default()
+        };
+        preview.setup_mut().height_settings.insert(id, settings);
         preview.setup_mut().operations.push(op);
         preview.geometry.bindings.insert(id, binding);
         preview.cad_linked_operations.insert(id);

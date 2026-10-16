@@ -519,7 +519,7 @@ impl AppController {
         {
             return Err("Operation refers to a missing tool".into());
         }
-        let before = old.legacy_cutting_heights(&document.setup().heights_for(id));
+        let before = Some(document.operation_base_cutting_heights(old));
         if let Some(heights) = safety_heights {
             heights.validate()?;
             document.setup_mut().height_settings.remove(&id);
@@ -588,7 +588,12 @@ impl AppController {
                 }
                 Some(recipe)
             } else {
-                None
+                let geometry = crate::cad_operations::geometry_for_setup(&document)?;
+                Some(crate::cad_operations::recipe(
+                    Self::operation_kind(&operation),
+                    &geometry,
+                    selected,
+                )?)
             };
             let binding = document
                 .geometry

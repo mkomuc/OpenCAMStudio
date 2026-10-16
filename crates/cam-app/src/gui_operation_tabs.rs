@@ -2005,4 +2005,70 @@ mod tests {
             app.refresh_fields();
         }
     }
+
+    #[test]
+    fn cad_surface_geometry_creates_clears_and_switches_to_an_open_engraving() {
+        for kind in [OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
+            let (mut app, _) = linked_face_app();
+            let before = app.controller.document().clone();
+            let _ = app.update(Message::BeginOp(kind));
+            let mut reference = EntityRef {
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                kind: EntityKind::Loop,
+                id: 3,
+            };
+            if kind == OpKind::Carve {
+                reference.kind = EntityKind::Face;
+                reference.id = 2;
+            }
+            let _ = app.update(Message::CadSelect(reference.clone()));
+            assert!(
+                app.creation_ready(),
+                "{kind:?}: {:?}",
+                app.creation_operation()
+            );
+            assert_eq!(app.resolve_height_editor(0).unwrap().top, -1.);
+            let _ = app.update(Message::FieldChanged(Field::Feed, "321".into()));
+            if kind == OpKind::Engrave {
+                let _ = app.update(Message::HeightOffsetChanged(
+                    cam_model::HeightPlaneKind::Bottom,
+                    "-0.25".into(),
+                ));
+            }
+            let _ = app.update(Message::GeometryClear);
+            assert!(!app.creation_ready());
+            let _ = app.update(Message::GeometryPick);
+            let _ = app.update(Message::CadSelect(reference));
+            assert_eq!(app.fields[&Field::Feed], "321");
+            if kind == OpKind::Engrave {
+                let _ = app.update(Message::GeometryFilterChanged(CadFilter::Edge));
+                assert!(app.controller.cad_selection().is_empty());
+                let _ = app.update(Message::CadSelect(EntityRef {
+                    asset_id: 1,
+                    revision: 1,
+                    instance_id: 1,
+                    body_id: 1,
+                    kind: EntityKind::Edge,
+                    id: 20,
+                }));
+                assert!(
+                    matches!(app.creation_operation().unwrap().0, Operation::Engrave(op) if !op.closed)
+                );
+                assert_eq!(
+                    app.height_offsets[&cam_model::HeightPlaneKind::Bottom],
+                    "-0.25"
+                );
+                assert!(!app.operation_geometry_preview().line_vertices().is_empty());
+                assert_eq!(app.machining_viewport().cad_filter, EntityKind::Edge);
+            }
+            assert_eq!(app.controller.document(), &before);
+            let _ = app.update(Message::ConfirmOp);
+            assert!(!app.creating_operation(), "{kind:?}: {}", app.status);
+            assert!(app.controller.undo());
+            assert_eq!(app.controller.document(), &before);
+        }
+    }
 }

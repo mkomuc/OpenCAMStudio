@@ -25,7 +25,8 @@ outer boundary, and Drill accepts cylindrical faces and their visible circular
 rims. STEP and DXF use the same creation controls and five-tab operation editor.
 Hover and selection highlight semantic geometry. Ctrl-click selects the visible
 body's silhouette projected onto the active setup XY reference plane (Z = 0),
-regardless of the geometry filter. Shift-click toggles multiple features;
+for Profile and Face. Surface and thread operations keep their operation-specific
+picking filters. Shift-click toggles multiple features;
 Command-click also toggles on macOS. Cylindrical and toroidal fillet faces retain
 their radius for inspection. Profile selection skips nonplanar wall/seam loops;
 a top boundary adjoining a rounded transition selects the whole-body silhouette.
@@ -34,12 +35,24 @@ Overlapping edge candidates remain available for WCS picking. Hide/isolate/show-
 straight boundary edge sets X. Placement also supports XYZ translation and Z
 rotation. Stock remains independently editable.
 
-Create Pocket, Drill, Profile or Face from the selection. Review extracted top,
+Create Pocket, Drill, Profile, Face, Chamfer, Engrave, Carve or Thread from the selection. Review extracted top,
 bottom, preserved islands, holes and approximation diagnostics, then select the
 tool from the library. Operation links survive save/reopen, duplicate, undo and
 redo. Absolute height overrides are explicit; blank height inputs follow geometry.
 **Edit / repair geometry** changes the source selection while preserving machining
 parameters and overrides. Unsupported selections give an incompatibility reason.
+
+On the Geometry tab, Chamfer and Engrave offer **Boundary loop** and
+**Individual edges**. Chamfer requires a closed rim; Engrave also accepts one
+connected open chain and preserves its endpoints. Carve offers **Face and
+islands** (all inner boundaries remain uncut) or a single **Boundary loop**.
+Thread accepts cylindrical bore or boss faces, including picks on their circular
+rims; multiple centres must share diameter and cutting heights. The selected
+cylinder seeds internal/external type and diameter; nominal thread diameter and
+pitch remain editable. These operations follow the selected feature's setup Z
+plane. Surface-operation depth is specified by the operator; thread geometry
+provides the cylindrical cutting interval. Clear, remove and reselect work during
+creation and editing, with all changes waiting for the operation's OK/Cancel.
 
 Assets embed their original bytes, source fingerprint, units, backend version,
 import budgets, analytic topology, independent projection tessellation and semantic display mesh in schema-14

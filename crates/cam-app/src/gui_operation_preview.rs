@@ -90,12 +90,31 @@ impl App {
                         .any(|r| r.kind == EntityKind::Silhouette)
                     {
                         0.0
-                    } else if matches!(op, Operation::Drill(_) | Operation::Thread(_)) {
+                    } else if matches!(
+                        op,
+                        Operation::Drill(_)
+                            | Operation::Thread(_)
+                            | Operation::Chamfer(_)
+                            | Operation::Engrave(_)
+                            | Operation::Carve(_)
+                    ) {
                         resolved.heights.top
                     } else {
                         resolved.heights.bottom
                     };
-                    for region in resolved.regions {
+                    if matches!(op, Operation::Chamfer(_) | Operation::Engrave(_)) {
+                        outlines.extend(
+                            resolved
+                                .profiles
+                                .iter()
+                                .map(|p| (p.chain.points().to_vec(), p.closed)),
+                        );
+                    }
+                    for region in resolved
+                        .regions
+                        .into_iter()
+                        .filter(|_| !matches!(op, Operation::Chamfer(_) | Operation::Engrave(_)))
+                    {
                         outlines.push((region.outer().points().to_vec(), true));
                         outlines.extend(
                             region

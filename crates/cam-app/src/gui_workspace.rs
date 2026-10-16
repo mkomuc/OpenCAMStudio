@@ -553,6 +553,12 @@ impl App {
             viewport.cad_silhouette |=
                 self.profile_selection_mode == ProfileSelectionMode::Silhouette;
         }
+        if matches!(
+            viewport.cad_operation_kind,
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+        ) {
+            viewport.cad_silhouette = false;
+        }
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
         }
