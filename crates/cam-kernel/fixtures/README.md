@@ -22,3 +22,22 @@ GPL-3.0-only with the repository; they contain no customer/vendor part data.
 
 These are AP214 files from one writer. They do not qualify the whole STEP
 standard, AP203/AP242, open shells or arbitrary curved surfaces.
+
+## IGES fixtures
+
+`generate_iges.cpp` authors the IGES corpus against OCCT 7.9.3. All parts are
+original and redistribution-safe, with the same 60 × 40 × 10 mm box at Z−10…0:
+
+- `box-mm.iges`, `box-inch.igs`, `box-m.iges`: B-rep solids in three source units.
+- `box-surfaces-mm.igs`: the box exported as trimmed faces, requiring sewing.
+- `two-boxes-mm.iges`, `two-boxes-surfaces-mm.iges`: two boxes, the second
+  translated X+80 mm, exported as B-rep and trimmed faces respectively.
+- `nested-surfaces-mm.iges`: nested closed shells; must fail rather than fill a void.
+- `box-hole-mm.iges`: the box with a Ø5 mm through-hole at (30,20).
+- `open-surface-mm.iges`: one box face; must fail as an open surface.
+- `wire-mm.iges`: one edge; must fail as unsupported wire geometry.
+- `unsupported-unit-cm.iges`: centimetres; must fail with an explicit unit error.
+- `solids-and-open-surface-mm.iges`: two solids plus one open face; must fail
+  rather than silently importing only the solids.
+
+These qualify the listed importer paths, not arbitrary IGES entities or exporters.

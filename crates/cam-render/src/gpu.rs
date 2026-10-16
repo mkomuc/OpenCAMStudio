@@ -42,8 +42,8 @@ fn line_depth() -> wgpu::DepthStencilState {
     }
 }
 
-/// A camera uniform buffer (one `mat4x4<f32>`), its bind-group layout, and the
-/// matching bind group — shared setup for both renderers.
+/// Camera projection and world-to-view rotation, shared by the renderers.
+/// Keeping the rotation separate prevents zoom and aspect from distorting lighting.
 struct Camera {
     buffer: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
@@ -54,7 +54,7 @@ impl Camera {
     fn new(device: &wgpu::Device) -> Self {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cam-render camera"),
-            size: 64, // one mat4x4<f32>
+            size: 128, // view-projection and view rotation, two mat4x4<f32>
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -86,8 +86,12 @@ impl Camera {
         }
     }
 
-    fn set(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[view_proj]));
+    fn set(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4], view_rotation: [[f32; 4]; 4]) {
+        queue.write_buffer(
+            &self.buffer,
+            0,
+            bytemuck::cast_slice(&[view_proj, view_rotation]),
+        );
     }
 }
 
@@ -114,9 +118,48 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+// Expand only highlighted segments into screen-space quads. Ordinary outlines
+// and large backplots retain the native line pipeline and their existing cost.
+const HIGHLIGHT_SHADER: &str = r#"
+struct Camera { view_proj: mat4x4<f32>, viewport: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> camera: Camera;
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32,
+    @location(0) start: vec3<f32>, @location(1) color: vec4<f32>,
+    @location(2) width: f32, @location(3) end: vec3<f32>) -> VsOut {
+    let a = camera.view_proj * vec4<f32>(start, 1.0);
+    let b = camera.view_proj * vec4<f32>(end, 1.0);
+    let size = max(camera.viewport[0].xy, vec2<f32>(1.0));
+    let delta = (b.xy / b.w - a.xy / a.w) * size;
+    let direction = delta / max(length(delta), 0.0001);
+    let normal = vec2<f32>(-direction.y, direction.x);
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0));
+    let corner = corners[index];
+    var clip = mix(a, b, corner.x);
+    // Square caps overlap adjoining segments so corners have no visible gaps.
+    let offset = (normal * corner.y + direction * (corner.x * 2.0 - 1.0)) * width / size;
+    clip = vec4<f32>(clip.xy + offset * clip.w, clip.zw);
+    var out: VsOut;
+    out.clip = clip;
+    out.color = color;
+    return out;
+}
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> { return in.color; }
+"#;
+
 /// Draws scene line segments with `wgpu`.
 pub struct LineRenderer {
     pipeline: wgpu::RenderPipeline,
+    highlight_pipeline: wgpu::RenderPipeline,
+    highlight_buffer: Option<wgpu::Buffer>,
+    highlight_count: u32,
     camera: Camera,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_count: u32,
@@ -165,62 +208,116 @@ impl LineRenderer {
             ],
         };
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("cam-render line pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: Some(if depth_tested {
-                wgpu::DepthStencilState {
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    bias: wgpu::DepthBiasState {
-                        constant: -2,
-                        slope_scale: -1.0,
-                        clamp: 0.0,
-                    },
-                    ..line_depth()
-                }
-            } else {
-                line_depth()
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let make_pipeline = |shader: &wgpu::ShaderModule, vertex_layout, topology| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("cam-render line pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    ..Default::default()
+                },
+                depth_stencil: Some(if depth_tested {
+                    wgpu::DepthStencilState {
+                        depth_compare: wgpu::CompareFunction::LessEqual,
+                        bias: wgpu::DepthBiasState {
+                            constant: -2,
+                            slope_scale: -1.0,
+                            clamp: 0.0,
+                        },
+                        ..line_depth()
+                    }
+                } else {
+                    line_depth()
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
 
+        let pipeline = make_pipeline(&shader, vertex_layout, wgpu::PrimitiveTopology::LineList);
+        let highlight_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cam-render highlight shader"),
+            source: wgpu::ShaderSource::Wgsl(HIGHLIGHT_SHADER.into()),
+        });
+        let highlight_layout = wgpu::VertexBufferLayout {
+            array_stride: (2 * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32, 3 => Float32x3],
+        };
+        let highlight_pipeline = make_pipeline(
+            &highlight_shader,
+            highlight_layout,
+            wgpu::PrimitiveTopology::TriangleList,
+        );
         Self {
             pipeline,
+            highlight_pipeline,
+            highlight_buffer: None,
+            highlight_count: 0,
             camera,
             vertex_buffer: None,
             vertex_count: 0,
         }
     }
 
-    /// Upload the camera view-projection (column-major).
-    pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
-        self.camera.set(queue, view_proj);
+    /// Upload the projection and logical viewport size for constant-width highlights.
+    pub fn set_camera(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: [[f32; 4]; 4],
+        logical_size: [f32; 2],
+    ) {
+        let mut viewport = crate::camera::IDENTITY;
+        viewport[0] = [logical_size[0], logical_size[1], 0.0, 0.0];
+        self.camera.set(queue, view_proj, viewport);
     }
 
     /// Upload the scene's line vertices, replacing any previous set.
     pub fn upload(&mut self, device: &wgpu::Device, vertices: &[Vertex]) {
+        let mut lines = Vec::new();
+        let mut highlights = Vec::new();
+        if vertices
+            .chunks_exact(2)
+            .any(|segment| segment[0].width > 1.0)
+        {
+            for segment in vertices.chunks_exact(2) {
+                if segment[0].width > 1.0 {
+                    highlights.extend_from_slice(segment);
+                } else {
+                    lines.extend_from_slice(segment);
+                }
+            }
+        }
+        self.highlight_count = (highlights.len() / 2) as u32;
+        self.highlight_buffer = (!highlights.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cam-render highlight segments"),
+                contents: bytemuck::cast_slice(&highlights),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
+        let vertices = if highlights.is_empty() {
+            vertices
+        } else {
+            lines.as_slice()
+        };
         self.vertex_count = vertices.len() as u32;
         self.vertex_buffer = if vertices.is_empty() {
             None
@@ -237,18 +334,22 @@ impl LineRenderer {
 
     /// Record draw commands into an existing render pass.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let Some(buffer) = &self.vertex_buffer else {
-            return;
-        };
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera.bind_group, &[]);
-        pass.set_vertex_buffer(0, buffer.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+        if let Some(buffer) = &self.vertex_buffer {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..self.vertex_count, 0..1);
+        }
+        if let Some(buffer) = &self.highlight_buffer {
+            pass.set_pipeline(&self.highlight_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..self.highlight_count);
+        }
     }
 }
 
 const MESH_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32> };
+struct Camera { view_proj: mat4x4<f32>, view_rotation: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct VsOut {
@@ -261,18 +362,18 @@ struct VsOut {
 fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) color: vec4<f32>) -> VsOut {
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.normal = normal;
+    out.normal = (camera.view_rotation * vec4<f32>(normal, 0.0)).xyz;
     out.color = color;
     return out;
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // A fixed key light from the upper front; world-space normals suffice under
-    // the orthographic top view (no non-uniform transform). Ambient keeps floors
-    // lit while the diffuse term reveals pocket walls and steps.
+fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // A camera-fixed key light: every newly visible face receives the same
+    // upper-front illumination as the model tumbles. Ambient reveals recesses.
     let light = normalize(vec3<f32>(0.35, 0.45, 0.82));
-    let n = normalize(in.normal);
+    // Open CAD shells are visible from both sides; light the side facing us.
+    let n = select(-normalize(in.normal), normalize(in.normal), front);
     let lambert = max(dot(n, light), 0.0);
     let base = in.color.rgb;
     let shade = base * (0.35 + 0.65 * lambert);
@@ -387,9 +488,15 @@ impl MeshRenderer {
         }
     }
 
-    /// Upload the camera view-projection (column-major).
-    pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
-        self.camera.set(queue, view_proj);
+    /// Upload the projection and world-to-view rotation (column-major).
+    /// The rotation keeps illumination fixed relative to the camera.
+    pub fn set_camera(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: [[f32; 4]; 4],
+        view_rotation: [[f32; 4]; 4],
+    ) {
+        self.camera.set(queue, view_proj, view_rotation);
     }
 
     /// Sort translucent triangles from far to near for the current camera before
@@ -403,6 +510,26 @@ impl MeshRenderer {
     ) {
         let sorted = crate::mesh::transparent_indices(vertices, indices, view_proj);
         self.upload(device, vertices, &sorted);
+    }
+
+    /// Re-sort an already uploaded translucent mesh after a camera change.
+    /// The vertices must match the last upload; only triangle order changes.
+    pub fn resort_transparent(
+        &mut self,
+        device: &wgpu::Device,
+        vertices: &[MeshVertex],
+        indices: &[u32],
+        view_proj: [[f32; 4]; 4],
+    ) {
+        let sorted = crate::mesh::transparent_indices(vertices, indices, view_proj);
+        self.index_count = sorted.len() as u32;
+        self.index_buffer = (!sorted.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cam-render sorted mesh indices"),
+                contents: bytemuck::cast_slice(&sorted),
+                usage: wgpu::BufferUsages::INDEX,
+            })
+        });
     }
 
     /// Upload the mesh (interleaved position+normal vertices and triangle
@@ -444,7 +571,7 @@ impl MeshRenderer {
 }
 
 const GIZMO_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32> };
+struct Camera { view_proj: mat4x4<f32>, view_rotation: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var atlas: texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
@@ -465,7 +592,7 @@ fn vs_main(
 ) -> VsOut {
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.normal = normal;
+    out.normal = (camera.view_rotation * vec4<f32>(normal, 0.0)).xyz;
     out.color = color;
     out.uv = uv;
     return out;
@@ -599,9 +726,14 @@ impl GizmoRenderer {
         }
     }
 
-    /// Upload the camera view-projection (column-major).
-    pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
-        self.camera.set(queue, view_proj);
+    /// Upload the projection and world-to-view rotation (column-major).
+    pub fn set_camera(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: [[f32; 4]; 4],
+        view_rotation: [[f32; 4]; 4],
+    ) {
+        self.camera.set(queue, view_proj, view_rotation);
     }
 
     /// Record the cube draw into an existing render pass.

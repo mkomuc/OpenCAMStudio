@@ -268,7 +268,7 @@ impl Icon {
             Icon::New => "Start a new, empty project.",
             Icon::Open => "Open a saved .ocam project from disk.",
             Icon::Save => "Save the current project to disk.",
-            Icon::Import => "Import a STEP model or DXF/DWG drawing.",
+            Icon::Import => "Import a STEP/IGES model or DXF/DWG drawing.",
             Icon::Export => "Export the generated toolpaths as G-code (NC) for your machine.",
             Icon::Undo => "Undo the last change.",
             Icon::Redo => "Redo the change just undone.",
@@ -1806,6 +1806,8 @@ impl std::fmt::Display for ToolChoice {
 
 struct App {
     controller: AppController,
+    viewport_cache: std::cell::RefCell<Option<(workspace_view::ViewportKey, Viewport)>>,
+    cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
     notice: Option<Notice>,
     notice_queue: VecDeque<Notice>,
     /// Shared transactional editor for setup, stock and postprocess settings. The
@@ -2138,7 +2140,7 @@ fn add_path_highlight(scene: &mut Scene, pts: &[cam_geo::Point], closed: bool, c
             strip.push(first);
         }
     }
-    scene.add_strip(strip, color);
+    scene.add_highlight(strip, color);
 }
 
 /// Colour of the drilling annotations — a light blue, distinct from the cyan snap
@@ -2221,6 +2223,7 @@ fn push_drill_mark(
             at[2] + du * right[2] + dv * up[2],
         ],
         color: DRILL_MARK,
+        width: 1.0,
     };
     match mark.kind {
         DrillMarkKind::PeckRing => {
@@ -3007,6 +3010,8 @@ impl App {
         let active_machine = active.name().to_string();
         let mut app = Self {
             controller: AppController::new(active.machine.clone()),
+            viewport_cache: Default::default(),
+            cad_scene_cache: Default::default(),
             notice: None,
             notice_queue: VecDeque::new(),
             setup_draft: None,
@@ -4253,7 +4258,7 @@ impl App {
             }
             Message::ImportCad => {
                 return iced::Task::perform(
-                    pick_open("CAD model / drawing", &["step", "stp", "dxf", "dwg"]),
+                    pick_open("CAD model / drawing", &["step", "stp", "iges", "igs", "dxf", "dwg"]),
                     Message::CadToImport,
                 );
             }
@@ -4268,7 +4273,7 @@ impl App {
             }
             Message::ReplaceCadAsset(id) => {
                 return iced::Task::perform(
-                    pick_open("Replace STEP model", &["step", "stp"]),
+                    pick_open("Replace CAD model", &["step", "stp", "iges", "igs"]),
                     move |path| Message::CadReplacementChosen(id, path),
                 );
             }
@@ -8639,7 +8644,7 @@ impl App {
                         );
                     } else {
                         list = list.push(
-                            text("Reimport the STEP file to enable its silhouette.").size(12),
+                            text("Reimport the CAD file to enable its silhouette.").size(12),
                         );
                     }
                 }
@@ -9969,8 +9974,9 @@ impl std::fmt::Display for CadFilter {
     }
 }
 
+#[derive(Clone)]
 struct Viewport {
-    setup_geometry: SetupPickGeometry,
+    setup_geometry: Arc<SetupPickGeometry>,
     setup_axis: bool,
     setup_hover: SetupHover,
     setup_snaps: Vec<SnapKind>,
@@ -9978,7 +9984,7 @@ struct Viewport {
     snap_marker_scale: f32,
     browser_overlay_width: f32,
     planar_features: Vec<LoopRef>,
-    planar_outlines: Vec<(LoopRef, Vec<Vertex>)>,
+    planar_outlines: Arc<Vec<(LoopRef, Vec<Vertex>)>>,
     vertices: Arc<Vec<Vertex>>,
     mesh_vertices: Arc<Vec<MeshVertex>>,
     mesh_indices: Arc<Vec<u32>>,
@@ -10020,7 +10026,7 @@ struct Viewport {
     pick_z: f32,
     /// Drilling annotations (peck rings / dwell bars) anchored in world space;
     /// sized to constant screen pixels and billboarded in [`Self::draw`].
-    drill_marks: Vec<DrillMark>,
+    drill_marks: Arc<Vec<DrillMark>>,
 }
 
 impl Viewport {
@@ -10047,6 +10053,7 @@ impl Viewport {
         // The active machine's travel per axis, when the envelope is shown.
         envelope: Option<[f32; 3]>,
         editor_geometry: Option<&[EntityRef]>,
+        cached_cad_scene: Option<Arc<CadScene>>,
     ) -> Self {
         let cad_hover = cad_hover.filter(|reference| {
             !cad_hidden.contains(&reference.instance_id)
@@ -10108,11 +10115,13 @@ impl Viewport {
         // Frame the camera on the *stable* part/backplot only — capture bounds
         // before the transient pick overlays (hover highlight, snap marker), or
         // the whole view would re-fit and drift as the cursor moves.
-        let cad_scene = CadScene::from_geometry_in_setup(
-            controller.geometry_state(),
-            cad_hidden,
-            &controller.document().setup().frame,
-        );
+        let cad_scene = cached_cad_scene.unwrap_or_else(|| {
+            Arc::new(CadScene::from_geometry_in_setup(
+                controller.geometry_state(),
+                cad_hidden,
+                &controller.document().setup().frame,
+            ))
+        });
         let bounds = union_bounds(
             controller
                 .outcome()
@@ -10166,7 +10175,7 @@ impl Viewport {
                         };
                         // The reference-plane outline must stay visible through
                         // the model/stock, like other selection overlays.
-                        scene.add_strip(points, color);
+                        scene.add_highlight(points, color);
                     }
                 }
             }
@@ -10310,11 +10319,11 @@ impl Viewport {
             Some(([-50., -50., 0.], [50., 50., 0.]))
         };
         Self {
-            setup_geometry: SetupPickGeometry::new(
+            setup_geometry: Arc::new(SetupPickGeometry::new(
                 controller,
                 controller.document().setup(),
                 cad_hidden,
-            ),
+            )),
             setup_axis: false,
             setup_hover: SetupHover::default(),
             setup_snaps: if prefs.snapping.enabled {
@@ -10326,23 +10335,25 @@ impl Viewport {
             snap_marker_scale: prefs.snapping.marker_scale,
             browser_overlay_width: 0.,
             planar_features: Vec::new(),
-            planar_outlines: controller
-                .regions()
-                .iter()
-                .enumerate()
-                .flat_map(|(region, polygon)| {
-                    std::iter::once(LoopRef::outer(region)).chain(
-                        (0..polygon.holes().len()).map(move |hole| LoopRef::hole(region, hole)),
-                    )
-                })
-                .chain((0..controller.open_paths().len()).map(LoopRef::open))
-                .filter_map(|reference| {
-                    let (points, closed) = controller.loop_points(reference)?;
-                    let mut highlight = Scene::new();
-                    add_path_highlight(&mut highlight, &points, closed, PICK_BOUNDARY);
-                    Some((reference, highlight.line_vertices()))
-                })
-                .collect(),
+            planar_outlines: Arc::new(
+                controller
+                    .regions()
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(region, polygon)| {
+                        std::iter::once(LoopRef::outer(region)).chain(
+                            (0..polygon.holes().len()).map(move |hole| LoopRef::hole(region, hole)),
+                        )
+                    })
+                    .chain((0..controller.open_paths().len()).map(LoopRef::open))
+                    .filter_map(|reference| {
+                        let (points, closed) = controller.loop_points(reference)?;
+                        let mut highlight = Scene::new();
+                        add_path_highlight(&mut highlight, &points, closed, PICK_BOUNDARY);
+                        Some((reference, highlight.line_vertices()))
+                    })
+                    .collect(),
+            ),
             vertices: Arc::new(scene.line_vertices()),
             mesh_vertices: Arc::new(mesh_vertices),
             mesh_indices: Arc::new(mesh_indices),
@@ -10350,7 +10361,7 @@ impl Viewport {
             transparent_stock_indices: Arc::new(transparent_stock_indices),
             show_stock,
             cad_edges,
-            cad_scene: Arc::new(cad_scene),
+            cad_scene,
             cad_filter,
             cad_operation_kind: None,
             cad_silhouette: false,
@@ -10365,7 +10376,7 @@ impl Viewport {
             set_origin,
             snap_engaged: snap.is_some(),
             pick_z,
-            drill_marks,
+            drill_marks: Arc::new(drill_marks),
         }
     }
 
@@ -10613,7 +10624,7 @@ impl shader::Program<Message> for Viewport {
                 }
                 let mode = match button {
                     Button::Left => DragMode::Orbit,
-                    Button::Right => DragMode::Pan,
+                    Button::Middle | Button::Right => DragMode::Pan,
                     _ => return None,
                 };
                 state.drag = Some(mode);
@@ -10760,35 +10771,21 @@ impl shader::Program<Message> for Viewport {
         // Drilling annotations are sized here, where the viewport's pixel height is
         // known, so they stay a constant screen size at any zoom (never scaling with
         // the model) and billboard to face the camera at any orbit angle.
-        let vertices = if self.drill_marks.is_empty() {
-            self.vertices.clone()
-        } else {
+        // Transient annotations have a separate buffer. Orbiting or hovering must
+        // never copy the full backplot just to append a handful of overlay lines.
+        let mut overlays = Vec::new();
+        if !self.drill_marks.is_empty() {
             let cam = self.camera();
             let px_world = DRILL_MARK_PX * cam.world_per_pixel(bounds.height);
-            let (right, up) = (cam.right(), cam.up());
-            let mut v = (*self.vertices).clone();
-            for &mark in &self.drill_marks {
-                push_drill_mark(&mut v, mark, px_world, right, up);
+            for &mark in self.drill_marks.iter() {
+                push_drill_mark(&mut overlays, mark, px_world, cam.right(), cam.up());
             }
-            Arc::new(v)
-        };
-        let vertices = if self.planar_features.is_empty() {
-            vertices
-        } else {
-            let mut highlighted = (*vertices).clone();
-            for reference in &self.planar_features {
-                // Rendering data was captured from the same controller snapshot.
-                if let Some(points) = self
-                    .planar_outlines
-                    .iter()
-                    .find(|(r, _)| r == reference)
-                    .map(|(_, points)| points)
-                {
-                    highlighted.extend(points.iter().copied());
-                }
+        }
+        for reference in &self.planar_features {
+            if let Some((_, points)) = self.planar_outlines.iter().find(|(r, _)| r == reference) {
+                overlays.extend_from_slice(points);
             }
-            Arc::new(highlighted)
-        };
+        }
         let mut setup_scene = Scene::new();
         if self.show_stock {
             for (_, edge) in self.setup_geometry.stock_lines() {
@@ -10812,20 +10809,20 @@ impl shader::Program<Message> for Viewport {
                 self.cad_select_through,
             );
         }
-        let mut vertices = (*vertices).clone();
-        vertices.extend(setup_scene.line_vertices());
-        let vertices = Arc::new(vertices);
+        overlays.extend(setup_scene.line_vertices());
         ScenePrimitive {
             grid_vertices: Arc::new(
                 grid_view::GridLayout::new(self.camera(), bounds.size()).vertices(),
             ),
-            vertices,
+            vertices: self.vertices.clone(),
+            overlay_vertices: Arc::new(overlays),
             mesh_vertices: self.mesh_vertices.clone(),
             mesh_indices: self.mesh_indices.clone(),
             transparent_stock_vertices: self.transparent_stock_vertices.clone(),
             transparent_stock_indices: self.transparent_stock_indices.clone(),
             cad_edges: self.cad_edges.clone(),
             view_proj: self.camera().view_proj(aspect),
+            view_rotation: self.camera().orient,
             gizmo_view_proj: self.gizmo_camera().view_proj(1.0),
             show_gizmo: self.show_gizmo,
             gizmo_size: self.gizmo_size,
@@ -10872,6 +10869,8 @@ struct DepthTarget {
 struct ViewportPipeline {
     grid: cam_render::LineRenderer,
     lines: cam_render::LineRenderer,
+    overlays: cam_render::LineRenderer,
+    uploaded: Option<ScenePrimitive>,
     mesh: cam_render::MeshRenderer,
     transparent_stock: cam_render::MeshRenderer,
     cad_edges: cam_render::LineRenderer,
@@ -10883,6 +10882,8 @@ impl shader::Pipeline for ViewportPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         ViewportPipeline {
             lines: cam_render::LineRenderer::new(device, format),
+            overlays: cam_render::LineRenderer::new(device, format),
+            uploaded: None,
             mesh: cam_render::MeshRenderer::new(device, format),
             transparent_stock: cam_render::MeshRenderer::new_transparent(device, format),
             grid: cam_render::LineRenderer::new_depth_tested(device, format),
@@ -10922,9 +10923,10 @@ impl ViewportPipeline {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ScenePrimitive {
     grid_vertices: Arc<Vec<Vertex>>,
+    overlay_vertices: Arc<Vec<Vertex>>,
     vertices: Arc<Vec<Vertex>>,
     mesh_vertices: Arc<Vec<MeshVertex>>,
     mesh_indices: Arc<Vec<u32>>,
@@ -10932,6 +10934,8 @@ struct ScenePrimitive {
     transparent_stock_indices: Arc<Vec<u32>>,
     cad_edges: Arc<Vec<Vertex>>,
     view_proj: [[f32; 4]; 4],
+    /// World-to-view rotation for camera-fixed illumination of the part and cube.
+    view_rotation: [[f32; 4]; 4],
     /// The orientation cube's view-projection (same rotation, its own framing).
     gizmo_view_proj: [[f32; 4]; 4],
     /// Whether to draw the orientation cube.
@@ -10951,27 +10955,80 @@ impl shader::Primitive for ScenePrimitive {
         pipeline: &mut Self::Pipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _bounds: &iced::Rectangle,
+        bounds: &iced::Rectangle,
         viewport: &shader::Viewport,
     ) {
-        pipeline.grid.upload(device, &self.grid_vertices);
-        pipeline.grid.set_camera(queue, self.view_proj);
-        pipeline.lines.upload(device, &self.vertices);
+        // Retain the previous Arcs as identity tokens: keeping them alive also
+        // prevents allocator address reuse from mistaking new geometry for old.
+        let previous = pipeline.uploaded.as_ref();
+        if previous.is_none_or(|p| p.grid_vertices != self.grid_vertices) {
+            pipeline.grid.upload(device, &self.grid_vertices);
+        }
+        if previous.is_none_or(|p| !Arc::ptr_eq(&p.vertices, &self.vertices)) {
+            pipeline.lines.upload(device, &self.vertices);
+        }
+        if previous.is_none_or(|p| p.overlay_vertices != self.overlay_vertices) {
+            pipeline.overlays.upload(device, &self.overlay_vertices);
+        }
+        if previous.is_none_or(|p| {
+            !Arc::ptr_eq(&p.mesh_vertices, &self.mesh_vertices)
+                || !Arc::ptr_eq(&p.mesh_indices, &self.mesh_indices)
+        }) {
+            pipeline
+                .mesh
+                .upload(device, &self.mesh_vertices, &self.mesh_indices);
+        }
+        if previous.is_none_or(|p| !Arc::ptr_eq(&p.cad_edges, &self.cad_edges)) {
+            pipeline.cad_edges.upload(device, &self.cad_edges);
+        }
+        if previous.is_none_or(|p| {
+            !Arc::ptr_eq(
+                &p.transparent_stock_vertices,
+                &self.transparent_stock_vertices,
+            ) || !Arc::ptr_eq(
+                &p.transparent_stock_indices,
+                &self.transparent_stock_indices,
+            )
+        }) {
+            pipeline.transparent_stock.upload_transparent(
+                device,
+                &self.transparent_stock_vertices,
+                &self.transparent_stock_indices,
+                self.view_proj,
+            );
+        } else if !self.transparent_stock_indices.is_empty()
+            && previous.is_some_and(|p| p.view_proj != self.view_proj)
+        {
+            pipeline.transparent_stock.resort_transparent(
+                device,
+                &self.transparent_stock_vertices,
+                &self.transparent_stock_indices,
+                self.view_proj,
+            );
+        }
+        pipeline.uploaded = Some(self.clone());
+        let logical_size = [bounds.width, bounds.height];
+        pipeline
+            .grid
+            .set_camera(queue, self.view_proj, logical_size);
+        pipeline
+            .overlays
+            .set_camera(queue, self.view_proj, logical_size);
+        pipeline
+            .transparent_stock
+            .set_camera(queue, self.view_proj, self.view_rotation);
+        pipeline
+            .cad_edges
+            .set_camera(queue, self.view_proj, logical_size);
+        pipeline
+            .lines
+            .set_camera(queue, self.view_proj, logical_size);
         pipeline
             .mesh
-            .upload(device, &self.mesh_vertices, &self.mesh_indices);
-        pipeline.cad_edges.upload(device, &self.cad_edges);
-        pipeline.transparent_stock.upload_transparent(
-            device,
-            &self.transparent_stock_vertices,
-            &self.transparent_stock_indices,
-            self.view_proj,
-        );
-        pipeline.transparent_stock.set_camera(queue, self.view_proj);
-        pipeline.cad_edges.set_camera(queue, self.view_proj);
-        pipeline.lines.set_camera(queue, self.view_proj);
-        pipeline.mesh.set_camera(queue, self.view_proj);
-        pipeline.gizmo.set_camera(queue, self.gizmo_view_proj);
+            .set_camera(queue, self.view_proj, self.view_rotation);
+        pipeline
+            .gizmo
+            .set_camera(queue, self.gizmo_view_proj, self.view_rotation);
         let size = viewport.physical_size();
         pipeline.ensure_depth(device, (size.width.max(1), size.height.max(1)));
     }
@@ -11033,6 +11090,7 @@ impl shader::Primitive for ScenePrimitive {
         pipeline.cad_edges.draw(&mut pass);
         pipeline.transparent_stock.draw(&mut pass);
         pipeline.lines.draw(&mut pass);
+        pipeline.overlays.draw(&mut pass);
         drop(pass);
 
         // Second pass: the orientation cube in the top-right corner, with its own

@@ -82,6 +82,8 @@ fn color_for(kind: MoveKind) -> Color {
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 4],
+    /// Stroke width in logical screen pixels.
+    pub width: f32,
 }
 
 /// A connected run of points drawn in one colour.
@@ -89,6 +91,8 @@ pub struct Vertex {
 pub struct LineStrip {
     pub points: Vec<[f32; 3]>,
     pub color: Color,
+    /// Stroke width in logical screen pixels.
+    pub width: f32,
     /// The operation this strip belongs to, if any. Backplot motions carry their
     /// CL-data `op_id`; part/stock outlines and pick highlights carry `None`.
     /// Drives selection focus (see [`Scene::focus_operation`]).
@@ -118,6 +122,14 @@ impl Scene {
         self.add_strip_op(points, color, None);
     }
 
+    /// Add a selection/hover outline with the shared, zoom-independent weight.
+    pub fn add_highlight(&mut self, points: Vec<[f32; 3]>, color: Color) {
+        if points.len() >= 2 {
+            self.add_strip(points, color);
+            self.strips.last_mut().unwrap().width = 3.0;
+        }
+    }
+
     /// Add a polyline strip tagged with an operation id (a backplot motion).
     pub fn add_strip_op(&mut self, points: Vec<[f32; 3]>, color: Color, op: Option<u32>) {
         self.add_strip_styled(points, color, op, false);
@@ -135,6 +147,7 @@ impl Scene {
             self.strips.push(LineStrip {
                 points,
                 color,
+                width: 1.0,
                 op,
                 dashed,
             });
@@ -337,10 +350,12 @@ impl Scene {
                 out.push(Vertex {
                     position: a,
                     color: strip.color,
+                    width: strip.width,
                 });
                 out.push(Vertex {
                     position: b,
                     color: strip.color,
+                    width: strip.width,
                 });
             };
             if !dash_this {

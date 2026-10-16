@@ -1,13 +1,14 @@
-# Optional STEP backend
+# Optional STEP/IGES backend
 
 Default builds do not load native CAD libraries. `--features cam-import/occt`
 (or `cam-kernel/occt`) enables the owned OCCT bridge when an SDK is present.
 Set `OCCT_ROOT` to a prefix containing `include/opencascade` and `lib`, or set
-`OCCT_INCLUDE_DIR` and `OCCT_LIB_DIR`. OCCT 7.8/7.9 API is the bounded target;
+`OCCT_INCLUDE_DIR` and `OCCT_LIB_DIR`. OCCT 7.9.3 is the tested SDK;
 no native distribution or whole-STEP-standard qualification is implied.
-Missing SDKs return `BackendUnavailable`, including all-features headless tests.
+Requesting `occt` without an SDK fails the build. Without `occt`, solid imports
+return `BackendUnavailable`.
 
-The bridge uses the real `STEPControl_Reader`, millimetre system units, solid
+The bridge uses `STEPControl_Reader` and `IGESControl_Reader`, millimetre system units, solid
 validation, analytic plane/cylinder/torus and line/circle descriptors, oriented topology,
 and independent display tessellation. Other analytic/spline entities do not
 supply analytic feature adapters. Whole-body XY silhouettes use a separate,
@@ -50,7 +51,25 @@ fills internal holes and adds a 0.0027 mm outward allowance. This permits an
 outside envelope Profile across rounded transitions without claiming exact
 freeform-surface machining. The projection does not depend on display quality;
 its snapshot and placement participate in the operation fingerprint. Reopening
-needs neither the STEP source nor OCCT. Projects predating this data need a STEP
+needs neither the CAD source nor OCCT. Projects predating this data need a CAD
 reimport before silhouette selection can drive machining. Failed/incomplete
 projection meshing or more than one million triangles disables silhouettes while
 retaining ordinary inspection/import behavior.
+
+IGES (`.iges` / `.igs`, case-insensitive) supports millimetres, inches and metres,
+normalized to millimetres. Other/unknown source units are rejected explicitly.
+B-rep solids retain their topology; separate trimmed faces are sewn with the
+configured import tolerance, and only closed shells forming valid solids are
+accepted. Open surfaces, wire geometry and partial transfers fail with diagnostics,
+even when the file also contains solids. Each separate closed shell becomes a
+body; nested surface shells are rejected so voids cannot become filled bodies. The existing
+fixed-axis feature adapters and silhouette projection apply equally to IGES.
+Import, background model replacement and portable `.ocam` persistence share the
+STEP workflow. No new native dependency beyond the SDK's `TKDEIGES` library is needed.
+
+Run the original IGES fixture and application regression tests with:
+
+```sh
+cargo test -p cam-kernel --features occt --test iges
+cargo test -p cam-app --features occt --test native_iges
+```

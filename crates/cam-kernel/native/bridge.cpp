@@ -4,6 +4,13 @@
 #error "cam-kernel currently supports the tested OCCT 7.9.3 release"
 #endif
 #include <STEPControl_Reader.hxx>
+#include <IGESControl_Reader.hxx>
+#include <IGESData_IGESModel.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRep_Builder.hxx>
+#include <ShapeFix_Solid.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Solid.hxx>
 #include <Interface_Static.hxx>
 #include <TColStd_SequenceOfAsciiString.hxx>
 #include <TopoDS.hxx>
@@ -15,6 +22,7 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -92,8 +100,7 @@ std::string curve(const TopoDS_Edge& e) {
     } else o << "{\"Unsupported\":{\"description\":\"nonanalytic or unsupported curve\"}}";
     return o.str();
 }
-std::string translate(const char* path,double deflection,double precision) {
-    STEPControl_Reader reader;
+void configure_precision(double precision) {
     // Legacy OCCT parameters are process-global; Rust's service mutex serializes calls.
     Interface_Static::SetCVal("xstep.cascade.unit","MM");
     // Use the STEP uncertainty when provided, with precision as the fallback.
@@ -103,9 +110,13 @@ std::string translate(const char* path,double deflection,double precision) {
     Interface_Static::SetRVal("read.precision.val",precision);
     Interface_Static::SetIVal("read.maxprecision.mode",0);
     Interface_Static::SetRVal("read.maxprecision.val",precision);
+}
+TopoDS_Shape read_step(const char* path,double precision,std::string& units) {
+    STEPControl_Reader reader;
+    configure_precision(precision);
     if(reader.ReadFile(path)!=IFSelect_RetDone) throw std::runtime_error("OCCT could not read STEP data");
     TColStd_SequenceOfAsciiString length,angle,solidangle; reader.FileUnits(length,angle,solidangle);
-    std::string units="Unknown";
+    units="Unknown";
     if(length.Length()==1) {
         std::string u=length.Value(1).ToCString(); std::transform(u.begin(),u.end(),u.begin(),[](unsigned char c){return std::tolower(c);});
         if(u=="millimetre"||u=="millimeter"||u=="mm") units="Millimetres";
@@ -118,7 +129,76 @@ std::string translate(const char* path,double deflection,double precision) {
     const int transferred=reader.TransferRoots();
     if(transferred==0) throw std::runtime_error("STEP contains no translatable roots");
     if(transferred!=roots) throw std::runtime_error("STEP translation was partial; not all root components transferred");
-    TopoDS_Shape shape=reader.OneShape();
+    return reader.OneShape();
+}
+TopoDS_Shape read_iges(const char* path,double precision,std::string& units) {
+    IGESControl_Reader reader;
+    configure_precision(precision);
+    // Include hidden roots too, so components are never silently omitted.
+    reader.SetReadVisible(false);
+    if(reader.ReadFile(path)!=IFSelect_RetDone) throw std::runtime_error("OCCT could not read IGES data");
+    const auto model=reader.IGESModel();
+    if(model.IsNull()) throw std::runtime_error("IGES has no model");
+    const auto& header=model->GlobalSection();
+    switch(header.UnitFlag()) {
+        case 1: units="Inches"; break;
+        case 2: units="Millimetres"; break;
+        case 6: units="Metres"; break;
+        default: throw std::runtime_error("unsupported or unknown IGES source units; supported units are millimetres, inches and metres");
+    }
+    // IGES uses the model's cascade unit for transfer; 1.0 is millimetres.
+    model->ChangeGlobalSection().SetCascadeUnit(1.0);
+    const int roots=reader.NbRootsForTransfer();
+    const int transferred=reader.TransferRoots();
+    if(transferred==0) throw std::runtime_error("IGES contains no translatable roots");
+    if(transferred!=roots) throw std::runtime_error("IGES translation was partial; not all root components transferred");
+    const TopoDS_Shape shape=reader.OneShape();
+
+    // Preserve explicit B-rep solids. Many IGES writers instead export separate
+    // trimmed surfaces: sew only those free faces and require closed valid shells.
+    BRep_Builder builder; TopoDS_Compound result; builder.MakeCompound(result);
+    for(TopExp_Explorer it(shape,TopAbs_SOLID);it.More();it.Next()) builder.Add(result,it.Current());
+    BRepBuilderAPI_Sewing sewing(precision);
+    int free_faces=0;
+    for(TopExp_Explorer it(shape,TopAbs_FACE,TopAbs_SOLID);it.More();it.Next()) {
+        sewing.Add(it.Current()); ++free_faces;
+    }
+    if(free_faces) {
+        sewing.Perform();
+        const auto sewn=sewing.SewedShape();
+        if(sewn.IsNull()) throw std::runtime_error("IGES surface sewing failed");
+        for(TopExp_Explorer it(sewn,TopAbs_FACE,TopAbs_SHELL);it.More();it.Next())
+            throw std::runtime_error("IGES contains open surfaces; a closed solid is required");
+        std::vector<TopoDS_Solid> surface_solids;
+        for(TopExp_Explorer it(sewn,TopAbs_SHELL);it.More();it.Next()) {
+            const auto shell=TopoDS::Shell(it.Current());
+            if(!BRep_Tool::IsClosed(shell)) throw std::runtime_error("IGES contains open surfaces; a closed solid is required");
+            ShapeFix_Solid fixer;
+            const auto solid=fixer.SolidFromShell(shell);
+            if(solid.IsNull() || !BRepCheck_Analyzer(solid).IsValid()) throw std::runtime_error("IGES surface shell could not form a valid solid");
+            // A surface-only export does not identify outer versus void shells.
+            // Reject nesting rather than fill a cavity with another solid body.
+            for(const auto& other:surface_solids) {
+                auto inside=[&](const TopoDS_Solid& inner,const TopoDS_Solid& outer) {
+                    TopExp_Explorer vertex(inner,TopAbs_VERTEX);
+                    if(!vertex.More()) throw std::runtime_error("IGES shell has no vertices");
+                    BRepClass3d_SolidClassifier classifier(outer,BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())),precision);
+                    return classifier.State()==TopAbs_IN;
+                };
+                if(inside(solid,other) || inside(other,solid))
+                    throw std::runtime_error("IGES contains nested surface shells; export B-rep solids to preserve voids");
+            }
+            surface_solids.push_back(solid);
+            builder.Add(result,solid);
+        }
+    }
+    for(TopExp_Explorer it(shape,TopAbs_EDGE,TopAbs_FACE);it.More();it.Next())
+        throw std::runtime_error("IGES contains wire geometry; only solids and closed surface shells are supported");
+    return result;
+}
+std::string translate(const char* path,bool iges,double deflection,double precision) {
+    std::string units;
+    const TopoDS_Shape shape=iges?read_iges(path,precision,units):read_step(path,precision,units);
     Array bodies,faces,edges,loops,vertices,meshvertices,triangles,trianglefaces,placements;
     Array projectionvertices,projectiontriangles,projectionfaces;
     int projectionbase=0;
@@ -210,15 +290,15 @@ std::string translate(const char* path,double deflection,double precision) {
             meshbase+=t->NbNodes();
         }
     }
-    if(bodycount==0) throw std::runtime_error("STEP contains no solid bodies; surface-only models are not qualified");
+    if(bodycount==0) throw std::runtime_error(std::string(iges?"IGES":"STEP")+" contains no solid bodies; open surface-only models are not supported");
     const std::string projection_json=projection_ok ? "{\"chord_tolerance\":0.0025,\"mesh\":{\"vertices\":"+projectionvertices.str()+",\"triangles\":"+projectiontriangles.str()+",\"triangle_faces\":"+projectionfaces.str()+"}}" : "null";
     const std::string projection_warning=projection_issue.empty()?"":quote(projection_issue);
     return "{\"source_units\":"+quote(units)+",\"backend\":"+quote(std::string("OCCT ")+OCC_VERSION_COMPLETE)+",\"warnings\":["+projection_warning+"],\"placements\":"+placements.str()+",\"topology\":{\"version\":1,\"bodies\":"+bodies.str()+",\"faces\":"+faces.str()+",\"edges\":"+edges.str()+",\"loops\":"+loops.str()+",\"vertices\":"+vertices.str()+",\"projection\":"+projection_json+",\"mesh\":{\"vertices\":"+meshvertices.str()+",\"triangles\":"+triangles.str()+",\"triangle_faces\":"+trianglefaces.str()+"}}}";
 }
 }
-extern "C" char* cam_occt_step(const char* path,double display,double precision,char** error) noexcept {
+extern "C" char* cam_occt_read(const char* path,int iges,double display,double precision,char** error) noexcept {
     *error=nullptr;
-    try { return owned(translate(path,display,precision)); }
+    try { return owned(translate(path,iges!=0,display,precision)); }
     catch(const Standard_Failure& e) { try { *error=owned(e.GetMessageString()?e.GetMessageString():"OCCT failure"); } catch(...) {} }
     catch(const std::exception& e) { try { *error=owned(e.what()); } catch(...) {} }
     catch(...) { try { *error=owned("unknown CAD backend failure"); } catch(...) {} }

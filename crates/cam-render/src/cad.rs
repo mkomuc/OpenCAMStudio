@@ -39,11 +39,13 @@ pub struct PickCandidate {
 
 #[derive(Clone, Debug, Default)]
 pub struct CadScene {
+    bounds: Option<([f32; 3], [f32; 3])>,
     triangles: Vec<Triangle>,
     paths: Vec<Path>,
     vertices: Vec<Vertex>,
     nodes: Vec<Node>,
     face_outer_loops: BTreeMap<EntityRef, EntityRef>,
+    face_edges: BTreeMap<EntityRef, BTreeSet<EntityRef>>,
     cylindrical_faces: BTreeSet<EntityRef>,
     bore_rims: BTreeMap<EntityRef, Vec<EntityRef>>,
     planar_loops: BTreeSet<EntityRef>,
@@ -227,6 +229,13 @@ impl CadScene {
                 .iter()
                 .filter(|e| e.body_id == instance.body_id)
             {
+                for face_id in &edge.face_ids {
+                    scene
+                        .face_edges
+                        .entry(entity(EntityKind::Face, *face_id))
+                        .or_default()
+                        .insert(entity(EntityKind::Edge, edge.id));
+                }
                 let points: Vec<_> = curve_points(&edge.curve)
                     .into_iter()
                     .map(|p| instance.placement.transform_point(p))
@@ -276,6 +285,7 @@ impl CadScene {
         if !scene.triangles.is_empty() {
             scene.build_node((0..scene.triangles.len()).collect());
         }
+        scene.bounds = scene.compute_bounds();
         scene
     }
 
@@ -300,7 +310,9 @@ impl CadScene {
                     (bounds[1][a] - bounds[0][a]).total_cmp(&(bounds[1][b] - bounds[0][b]))
                 })
                 .unwrap();
-            ids.sort_by(|&a, &b| {
+            // The BVH needs a median partition, not a full ordering at every level.
+            let middle = ids.len() / 2;
+            ids.select_nth_unstable_by(middle, |&a, &b| {
                 let centre = |i: usize| {
                     self.triangles[i]
                         .points
@@ -319,6 +331,10 @@ impl CadScene {
     }
 
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        self.bounds
+    }
+
+    fn compute_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
         for t in &self.triangles {
             for p in t.points {
@@ -606,10 +622,16 @@ impl CadScene {
     pub fn edges(&self, selected: &[EntityRef], hover: Option<&EntityRef>) -> Scene {
         let mut scene = Scene::new();
         for p in &self.paths {
-            let selected_path = selected
-                .iter()
-                .any(|r| *r == p.entity || matches_body(r, &p.entity));
-            let hovered = hover.is_some_and(|r| *r == p.entity || matches_body(r, &p.entity));
+            let matches = |r: &EntityRef| {
+                *r == p.entity
+                    || matches_body(r, &p.entity)
+                    || self
+                        .face_edges
+                        .get(r)
+                        .is_some_and(|edges| edges.contains(&p.entity))
+            };
+            let selected_path = selected.iter().any(matches);
+            let hovered = hover.is_some_and(matches);
             // Loops draw only as semantic highlights, avoiding duplicate ordinary edges.
             if p.entity.kind == EntityKind::Loop && !selected_path && !hovered {
                 continue;
@@ -621,10 +643,12 @@ impl CadScene {
             } else {
                 [0.20, 0.22, 0.25, 1.]
             };
-            scene.add_strip(
-                p.points.iter().map(|p| p.map(|v| v as f32)).collect(),
-                color,
-            );
+            let points = p.points.iter().map(|p| p.map(|v| v as f32)).collect();
+            if selected_path || hovered {
+                scene.add_highlight(points, color);
+            } else {
+                scene.add_strip(points, color);
+            }
         }
         for v in &self.vertices {
             let picked = selected.contains(&v.entity);
@@ -645,7 +669,7 @@ impl CadScene {
                     let mut b = a;
                     a[axis] -= size;
                     b[axis] += size;
-                    scene.add_strip(vec![a, b], color);
+                    scene.add_highlight(vec![a, b], color);
                 }
             }
         }
@@ -1138,6 +1162,66 @@ mod tests {
         );
         assert_eq!(before, after);
     }
+    #[test]
+    fn hover_uses_selection_weight_only_on_the_target_instance_and_clears() {
+        let mut geometry = geometry();
+        let mut second = geometry.instances[0].clone();
+        second.id = 2;
+        second.placement.translation = [8., 0., 0.];
+        geometry.instances.push(second);
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        let edge = scene
+            .paths
+            .iter()
+            .find(|p| p.entity.kind == EntityKind::Edge)
+            .unwrap()
+            .entity
+            .clone();
+        for kind in [
+            EntityKind::Edge,
+            EntityKind::Loop,
+            EntityKind::Body,
+            EntityKind::Face,
+            EntityKind::Vertex,
+        ] {
+            let mut target = edge.clone();
+            target.kind = kind;
+            target.id = match kind {
+                EntityKind::Loop => 50,
+                EntityKind::Body => target.body_id,
+                EntityKind::Vertex => 40,
+                EntityKind::Face => 20,
+                _ => target.id,
+            };
+            let hovered = scene.edges(&[], Some(&target)).line_vertices();
+            let selected = scene.edges(&[target.clone()], None).line_vertices();
+            let hovered_points: Vec<_> = hovered
+                .iter()
+                .filter(|v| v.width > 1.)
+                .map(|v| (v.position, v.width))
+                .collect();
+            let selected_points: Vec<_> = selected
+                .iter()
+                .filter(|v| v.width > 1.)
+                .map(|v| (v.position, v.width))
+                .collect();
+            assert!(!hovered_points.is_empty(), "{kind:?}");
+            assert_eq!(hovered_points, selected_points, "{kind:?}");
+            assert!(hovered_points
+                .iter()
+                .all(|(p, width)| p[0] < 4. && *width == 3.));
+            assert!(hovered
+                .iter()
+                .filter(|v| v.position[0] > 4.)
+                .all(|v| v.width == 1.));
+        }
+        assert!(scene
+            .edges(&[], None)
+            .line_vertices()
+            .iter()
+            .all(|v| v.width == 1.));
+    }
+
     #[test]
     fn complete_face_highlights_only_the_selected_instance() {
         let mut geometry = geometry();

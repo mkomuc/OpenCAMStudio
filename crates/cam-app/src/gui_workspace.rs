@@ -83,6 +83,62 @@ pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, 
     }
     (vertices, indices)
 }
+/// Only semantic scene inputs belong here. Camera, pointer position and menu
+/// state are applied to the shared snapshot without rebuilding its geometry.
+#[derive(Clone, PartialEq)]
+pub(super) struct ViewportKey {
+    revision: u64,
+    setup: u64,
+    origin: u32,
+    selection: Selection,
+    pending: Option<crate::PendingOp>,
+    outcome: Option<crate::JobStamp>,
+    cad_selection: Vec<EntityRef>,
+    cad_hover: Option<EntityRef>,
+    cad_hidden: BTreeSet<InstanceId>,
+    focus: BTreeSet<u32>,
+    hidden: Vec<u32>,
+    model_view: bool,
+    show_stock: bool,
+    show_origin: bool,
+    envelope: Option<[f32; 3]>,
+    snap: Option<(SnapHit, f64)>,
+    hover_loop: Option<LoopRef>,
+    set_origin: bool,
+    origin_first: Option<[f64; 3]>,
+    view_prefs: crate::settings::ViewPrefs,
+    snap_prefs: crate::settings::SnapPrefs,
+    draft: Option<cam_model::Setup>,
+    editor: Option<EditorKey>,
+}
+
+#[derive(Clone, PartialEq)]
+struct EditorKey {
+    creating: bool,
+    cad_kind: Option<OpKind>,
+    cad_editing: Option<u32>,
+    drawing_editing: Option<u32>,
+    tool: Option<cam_model::Tool>,
+    operation: Option<Operation>,
+    binding: Option<cam_model::GeometryBinding>,
+    geometry: Vec<EntityRef>,
+    fields: BTreeMap<Field, String>,
+    edited_fields: BTreeSet<Field>,
+    tools: Vec<cam_model::Tool>,
+    heights: Option<cam_model::OperationHeightSettings>,
+    height_id: Option<u32>,
+    offsets: BTreeMap<cam_model::HeightPlaneKind, String>,
+    tab_selection: Option<usize>,
+    tab: OperationTab,
+}
+
+#[derive(Clone, PartialEq)]
+pub(super) struct CadSceneKey {
+    revision: u64,
+    hidden: BTreeSet<InstanceId>,
+    frame: cam_model::SetupFrame,
+}
+
 impl App {
     pub(super) fn reset_model_browser(&mut self) {
         self.model_view = Some(TreeNode::Models);
@@ -178,7 +234,10 @@ impl App {
         let tab_overlay = self
             .profile_tab_overlay(viewport_camera, viewport_browser_width)
             .map(|overlay| {
-                overlay.with_scene_mesh(viewport.mesh_vertices.clone(), viewport.mesh_indices.clone())
+                overlay.with_scene_mesh(
+                    viewport.mesh_vertices.clone(),
+                    viewport.mesh_indices.clone(),
+                )
             });
         let mut layers = iced::widget::stack![
             shader(viewport).width(Length::Fill).height(Length::Fill),
@@ -228,13 +287,38 @@ impl App {
         }
         column![
             layers.width(Length::Fill).height(Length::Fill),
-            if self.operation_preview_active() { Element::from(Space::new()) } else { self.simulation_controls() },
+            if self.operation_preview_active() {
+                Element::from(Space::new())
+            } else {
+                self.simulation_controls()
+            },
             self.viewport_pick_toolbar()
         ]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
     }
+    fn cached_cad_scene(&self, hidden: &BTreeSet<InstanceId>) -> Arc<CadScene> {
+        let key = CadSceneKey {
+            revision: self.controller.revision(),
+            hidden: hidden.clone(),
+            frame: self.controller.document().setup().frame.clone(),
+        };
+        let mut cache = self.cad_scene_cache.borrow_mut();
+        if let Some((previous, scene)) = cache.as_ref() {
+            if *previous == key {
+                return scene.clone();
+            }
+        }
+        let scene = Arc::new(CadScene::from_geometry_in_setup(
+            self.controller.geometry_state(),
+            hidden,
+            &key.frame,
+        ));
+        *cache = Some((key, scene.clone()));
+        scene
+    }
+
     pub(super) fn machining_viewport(&self) -> Viewport {
         let cad_hidden = self.viewport_hidden_instances();
         let model_view = self.model_view.is_some();
@@ -253,88 +337,171 @@ impl App {
             .collect();
         let editing = self.operation_preview_active();
         let selected_geometry = self.editor_selected_geometry();
-        let mut viewport = Viewport::new(
-            &self.controller,
-            self.simulation
-                .as_ref()
-                .filter(|_| !model_view)
-                .map(|player| &player.preview),
-            if self.setup_model_pick {
-                EntityKind::Body
-            } else {
-                self.cad_filter.kind()
-            },
-            self.cad_hover.as_ref(),
-            &cad_hidden,
-            self.cad_select_through,
-            (self.show_stock || self.controller.selection() == Selection::Setup) && !model_view,
-            self.view,
-            self.show_gizmo,
-            self.gizmo_size,
-            &self.settings,
-            &self.focus_ops.iter().copied().collect::<Vec<_>>(),
-            &hidden,
-            self.snap_hover.map(|hit| (hit, self.snap_aperture)),
-            self.hover_loop,
-            self.in_origin_pick(),
-            self.show_origin && self.controller.selection() != Selection::Setup,
-            self.origin_first.map(|p| {
-                self.setup_draft
-                    .as_ref()
-                    .unwrap_or_else(|| self.controller.document().setup())
-                    .frame
-                    .to_world_vector(p)
-            }),
-            self.show_envelope.then(|| {
+        // Playback publishes fresh material meshes independently of the document.
+        // Keep it live, while sharing the CAD acceleration structure. Drafts have
+        // their own small semantic key so camera/menu events also stay cheap there.
+        // Unstamped synchronous/headless results have no publication identity.
+        let cacheable = self.simulation.is_none()
+            && self.controller.outcome().is_none_or(|o| o.stamp.is_some());
+        let key = cacheable.then(|| ViewportKey {
+            revision: self.controller.revision(),
+            setup: self.controller.active_setup_id(),
+            origin: self.controller.active_origin(),
+            selection: self.controller.selection(),
+            pending: self.controller.pending_op(),
+            outcome: self.controller.outcome().and_then(|o| o.stamp.clone()),
+            cad_selection: self.controller.cad_selection().to_vec(),
+            cad_hover: self.cad_hover.clone(),
+            cad_hidden: cad_hidden.clone(),
+            focus: self.focus_ops.clone(),
+            hidden: hidden.clone(),
+            model_view,
+            show_stock: self.show_stock,
+            show_origin: self.show_origin,
+            envelope: self.show_envelope.then(|| {
                 let (x, y, z) = self.controller.machine().envelope.extent();
                 [x as f32, y as f32, z as f32]
             }),
-            editing.then_some(selected_geometry.as_slice()),
-        );
-        if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
-            let (vertices, indices) = player.tool_mesh();
-            let offset = viewport.mesh_vertices.len() as u32;
-            Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
-            Arc::make_mut(&mut viewport.mesh_indices)
-                .extend(indices.into_iter().map(|i| i + offset));
-        }
-        viewport.setup_geometry = SetupPickGeometry::new(
-            &self.controller,
-            self.setup_draft
-                .as_ref()
-                .unwrap_or_else(|| self.controller.document().setup()),
-            &cad_hidden,
-        );
-        if model_view {
-            viewport.setup_geometry = SetupPickGeometry::default();
-            viewport.drill_marks.clear();
-        }
-        viewport.setup_axis = self.setup_axis_pick.is_some();
-        if let Some(draft) = &self.setup_draft {
-            let geometry = self.controller.geometry_state();
-            let selected: Vec<_> = draft
-                .model_instances
-                .iter()
-                .filter_map(|id| {
-                    let instance = geometry.instance(*id)?;
-                    let asset = geometry.asset(instance.asset_id)?;
-                    Some(EntityRef {
-                        asset_id: asset.id,
-                        revision: asset.revision,
-                        instance_id: *id,
-                        body_id: instance.body_id,
-                        kind: EntityKind::Body,
-                        id: instance.body_id,
-                    })
-                })
-                .collect();
-            viewport.cad_edges = Arc::new(
-                viewport
-                    .cad_scene
-                    .edges(&selected, self.cad_hover.as_ref())
-                    .line_vertices(),
+            snap: self.snap_hover.map(|hit| (hit, self.snap_aperture)),
+            hover_loop: self.hover_loop,
+            set_origin: self.in_origin_pick(),
+            origin_first: self.origin_first,
+            view_prefs: self.settings.view.clone(),
+            snap_prefs: self.settings.snapping.clone(),
+            draft: self.setup_draft.clone(),
+            editor: editing.then(|| EditorKey {
+                creating: self.creating_operation(),
+                cad_kind: self.cad_pending_kind,
+                cad_editing: self.cad_editing_op,
+                drawing_editing: self.drawing_editing_op,
+                tool: self.wizard_tool(),
+                operation: self.operation_draft.clone(),
+                binding: self.operation_binding_preview.clone(),
+                geometry: selected_geometry.clone(),
+                fields: self.fields.clone(),
+                edited_fields: self.creation_edited_fields.clone(),
+                tools: self.operation_tools.clone(),
+                heights: self.height_draft.clone(),
+                height_id: self.height_draft_id,
+                offsets: self.height_offsets.clone(),
+                tab_selection: self.profile_tab_selection,
+                tab: self.operation_tab,
+            }),
+        });
+        let cached = self
+            .viewport_cache
+            .borrow()
+            .as_ref()
+            .and_then(|(previous, viewport)| {
+                (key.as_ref() == Some(previous)).then(|| viewport.clone())
+            });
+        let mut viewport = cached.unwrap_or_else(|| {
+            let mut viewport = Viewport::new(
+                &self.controller,
+                self.simulation
+                    .as_ref()
+                    .filter(|_| !model_view)
+                    .map(|player| &player.preview),
+                if self.setup_model_pick {
+                    EntityKind::Body
+                } else {
+                    self.cad_filter.kind()
+                },
+                self.cad_hover.as_ref(),
+                &cad_hidden,
+                self.cad_select_through,
+                (self.show_stock || self.controller.selection() == Selection::Setup) && !model_view,
+                self.view,
+                self.show_gizmo,
+                self.gizmo_size,
+                &self.settings,
+                &self.focus_ops.iter().copied().collect::<Vec<_>>(),
+                &hidden,
+                self.snap_hover.map(|hit| (hit, self.snap_aperture)),
+                self.hover_loop,
+                self.in_origin_pick(),
+                self.show_origin && self.controller.selection() != Selection::Setup,
+                self.origin_first.map(|p| {
+                    self.setup_draft
+                        .as_ref()
+                        .unwrap_or_else(|| self.controller.document().setup())
+                        .frame
+                        .to_world_vector(p)
+                }),
+                self.show_envelope.then(|| {
+                    let (x, y, z) = self.controller.machine().envelope.extent();
+                    [x as f32, y as f32, z as f32]
+                }),
+                editing.then_some(selected_geometry.as_slice()),
+                Some(self.cached_cad_scene(&cad_hidden)),
             );
-        }
+            if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
+                let (vertices, indices) = player.tool_mesh();
+                let offset = viewport.mesh_vertices.len() as u32;
+                Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
+                Arc::make_mut(&mut viewport.mesh_indices)
+                    .extend(indices.into_iter().map(|i| i + offset));
+            }
+            viewport.setup_geometry = Arc::new(SetupPickGeometry::new(
+                &self.controller,
+                self.setup_draft
+                    .as_ref()
+                    .unwrap_or_else(|| self.controller.document().setup()),
+                &cad_hidden,
+            ));
+            if model_view {
+                viewport.setup_geometry = Arc::default();
+                viewport.drill_marks = Arc::default();
+            }
+            if let Some(draft) = &self.setup_draft {
+                let geometry = self.controller.geometry_state();
+                let selected: Vec<_> = draft
+                    .model_instances
+                    .iter()
+                    .filter_map(|id| {
+                        let instance = geometry.instance(*id)?;
+                        let asset = geometry.asset(instance.asset_id)?;
+                        Some(EntityRef {
+                            asset_id: asset.id,
+                            revision: asset.revision,
+                            instance_id: *id,
+                            body_id: instance.body_id,
+                            kind: EntityKind::Body,
+                            id: instance.body_id,
+                        })
+                    })
+                    .collect();
+                viewport.cad_edges = Arc::new(
+                    viewport
+                        .cad_scene
+                        .edges(&selected, self.cad_hover.as_ref())
+                        .line_vertices(),
+                );
+            }
+            if editing {
+                let preview = self.operation_geometry_preview();
+                Arc::make_mut(&mut viewport.vertices).extend(preview.line_vertices());
+                let (vertices, indices) = self.profile_tab_mesh();
+                let offset = viewport.mesh_vertices.len() as u32;
+                Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
+                Arc::make_mut(&mut viewport.mesh_indices)
+                    .extend(indices.into_iter().map(|i| i + offset));
+            }
+            if let Some(key) = key {
+                *self.viewport_cache.borrow_mut() = Some((key, viewport.clone()));
+            }
+            viewport
+        });
+        viewport.cad_filter = if self.setup_model_pick {
+            EntityKind::Body
+        } else {
+            self.cad_filter.kind()
+        };
+        viewport.cad_select_through = self.cad_select_through;
+        viewport.controls = self.view;
+        viewport.show_gizmo = self.show_gizmo;
+        viewport.gizmo_size = self.gizmo_size;
+        viewport.setup_axis = self.setup_axis_pick.is_some();
         viewport.setup_hover = self.setup_hover.clone();
         viewport.setup_snaps = if self.settings.snapping.enabled {
             self.snaps.clone()
@@ -367,14 +534,6 @@ impl App {
             0.
         };
         viewport.planar_features = self.planar_selection.clone();
-        if editing {
-            let preview = self.operation_geometry_preview();
-            Arc::make_mut(&mut viewport.vertices).extend(preview.line_vertices());
-            let (vertices, indices) = self.profile_tab_mesh();
-            let offset = viewport.mesh_vertices.len() as u32;
-            Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
-            Arc::make_mut(&mut viewport.mesh_indices).extend(indices.into_iter().map(|i| i + offset));
-        }
         viewport
     }
     fn viewport_pick_toolbar(&self) -> Element<'_, Message> {
@@ -782,6 +941,7 @@ mod tests {
 
     fn picking_app() -> App {
         let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
         app.controller = AppController::new(crate::default_machine());
         app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
         app.begin_setup_draft();
@@ -1076,6 +1236,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         viewport.browser_overlay_width = 250.;
         let bounds = iced::Rectangle {
@@ -1182,6 +1343,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let bounds = iced::Rectangle {
             x: 0.,
@@ -1258,6 +1420,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         viewport.cad_operation_kind = Some(OpKind::Profile);
         let body = &controller.geometry_state().assets[0].topology.bodies[0];
@@ -1327,5 +1490,382 @@ mod tests {
         app.modifiers = iced::keyboard::Modifiers::SHIFT;
         let _ = app.update(Message::CadPicked(candidates));
         assert!(app.controller.cad_selection().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use std::{hint::black_box, time::Instant};
+
+    fn cad_app() -> App {
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testfiles/test_project.ocam"
+            ))
+            .unwrap();
+        app
+    }
+
+    #[test]
+    fn camera_and_menu_events_reuse_geometry_but_hover_and_visibility_refresh_it() {
+        let mut app = cad_app();
+        let initial = app.machining_viewport();
+        assert!(!initial.mesh_indices.is_empty());
+        let _ = app.update(Message::WindowCursor(iced::Point::new(20., 20.)));
+        let _ = app.update(Message::ToggleRibbonGroup(0));
+        let _ = app.update(Message::OrbitBy(0.3, 0.2));
+        let moved = app.machining_viewport();
+        assert!(Arc::ptr_eq(&initial.mesh_vertices, &moved.mesh_vertices));
+        assert!(Arc::ptr_eq(&initial.setup_geometry, &moved.setup_geometry));
+        assert_ne!(initial.camera().view_proj(1.), moved.camera().view_proj(1.));
+        let instance = &app.controller.geometry_state().instances[0];
+        let asset = &app.controller.geometry_state().assets[0];
+        let reference = EntityRef {
+            asset_id: asset.id,
+            revision: asset.revision,
+            instance_id: instance.id,
+            body_id: instance.body_id,
+            kind: EntityKind::Face,
+            id: asset.topology.faces[0].id,
+        };
+        let instance_id = instance.id;
+        let _ = app.update(Message::CadHover(Some(reference)));
+        let hovered = app.machining_viewport();
+        assert!(Arc::ptr_eq(&moved.cad_scene, &hovered.cad_scene));
+        assert_ne!(moved.mesh_vertices, hovered.mesh_vertices);
+        let _ = app.update(Message::CadHover(app.cad_hover.clone()));
+        assert!(Arc::ptr_eq(
+            &hovered.mesh_vertices,
+            &app.machining_viewport().mesh_vertices
+        ));
+        app.cad_hidden.insert(instance_id);
+        let hidden = app.machining_viewport();
+        assert!(hidden.mesh_indices.is_empty());
+        assert!(hidden.cad_scene.bounds().is_none());
+        app.cad_hidden.clear();
+        assert_eq!(app.machining_viewport().mesh_indices, initial.mesh_indices);
+        app.controller.edit_setup(|setup| {
+            setup.frame = cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()
+        });
+        assert!(!Arc::ptr_eq(
+            &hovered.cad_scene,
+            &app.machining_viewport().cad_scene
+        ));
+    }
+
+    #[test]
+    fn cached_editor_and_stock_follow_uncommitted_edits() {
+        let mut app = cad_app();
+        app.model_view = None;
+        app.controller.select(Selection::Setup);
+        app.show_stock = true;
+        app.settings.view.transparent_stock = false;
+        let opaque = app.machining_viewport();
+        app.settings.view.transparent_stock = true;
+        let transparent = app.machining_viewport();
+        assert!(!transparent.transparent_stock_indices.is_empty());
+        assert!(transparent.mesh_indices.len() < opaque.mesh_indices.len());
+        let id = app
+            .controller
+            .document()
+            .setup()
+            .operations
+            .iter()
+            .find(|op| matches!(op, Operation::Profile(_)))
+            .unwrap()
+            .id();
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::ProfileTabsEnabled(true));
+        let _ = app.update(Message::FieldChanged(Field::TabWidth, "3".into()));
+        let draft = app.machining_viewport();
+        let _ = app.update(Message::OrbitBy(0.1, 0.1));
+        assert!(Arc::ptr_eq(
+            &draft.mesh_vertices,
+            &app.machining_viewport().mesh_vertices
+        ));
+        let _ = app.update(Message::FieldChanged(Field::TabWidth, "9".into()));
+        let edited = app.machining_viewport();
+        assert_ne!(draft.mesh_vertices, edited.mesh_vertices);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Profile(op)) if !op.tabs.enabled)
+        );
+        assert!(Arc::ptr_eq(&draft.cad_scene, &edited.cad_scene));
+    }
+
+    /// Exercise actual wgpu validation and repeated uploads on a local GPU.
+    #[test]
+    #[ignore = "requires a graphics adapter"]
+    fn viewport_gpu_smoke() {
+        use shader::{Pipeline, Primitive, Program};
+        let instance = wgpu::Instance::default();
+        let adapter =
+            iced::futures::executor::block_on(instance.request_adapter(&Default::default()))
+                .unwrap();
+        let (device, queue) =
+            iced::futures::executor::block_on(adapter.request_device(&Default::default())).unwrap();
+        let mut pipeline = ViewportPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport smoke test"),
+            size: wgpu::Extent3d {
+                width: 1000,
+                height: 700,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target = target.create_view(&Default::default());
+        let bounds = iced::Rectangle::with_size(iced::Size::new(1000., 700.));
+        let viewport = shader::Viewport::with_physical_size(iced::Size::new(1000, 700), 1.);
+        let mut app = cad_app();
+        app.model_view = None;
+        app.show_stock = true;
+        let geometry = app.controller.geometry_state();
+        let instance = &geometry.instances[0];
+        app.cad_hover = Some(EntityRef {
+            asset_id: instance.asset_id,
+            revision: geometry.assets[0].revision,
+            instance_id: instance.id,
+            body_id: instance.body_id,
+            kind: EntityKind::Body,
+            id: instance.body_id,
+        });
+        for (index, action) in [
+            Message::WindowCursor(iced::Point::ORIGIN),
+            Message::OrbitBy(0.3, 0.2),
+            Message::WindowCursor(iced::Point::ORIGIN),
+            Message::OrbitBy(0.2, 0.1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Change only in-memory preferences; the smoke test must not save settings.
+            app.settings.view.transparent_stock = index >= 2;
+            let _ = app.update(action);
+            let scene = app.machining_viewport();
+            assert!(scene.cad_edges.iter().any(|vertex| vertex.width == 3.));
+            let primitive = scene.draw(
+                &Default::default(),
+                iced::mouse::Cursor::Unavailable,
+                bounds,
+            );
+            primitive.prepare(&mut pipeline, &device, &queue, &bounds, &viewport);
+            // A second preparation of the same snapshot must keep all meshes usable.
+            primitive.prepare(&mut pipeline, &device, &queue, &bounds, &viewport);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            primitive.render(
+                &pipeline,
+                &mut encoder,
+                &target,
+                &iced::Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: 1000,
+                    height: 700,
+                },
+            );
+            queue.submit([encoder.finish()]);
+        }
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    }
+
+    /// Read actual rendered pixels so a world-fixed light cannot pass unnoticed.
+    #[test]
+    #[ignore = "requires a graphics adapter"]
+    fn viewport_lighting_stays_constant_when_rotating() {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            iced::futures::executor::block_on(instance.request_adapter(&Default::default()))
+                .unwrap();
+        let (device, queue) =
+            iced::futures::executor::block_on(adapter.request_device(&Default::default())).unwrap();
+        let texture = |label, format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let target = texture(
+            "lighting regression",
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let depth = texture(
+            "lighting regression depth",
+            cam_render::DEPTH_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let target_view = target.create_view(&Default::default());
+        let depth_view = depth.create_view(&Default::default());
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lighting regression pixels"),
+            size: 64 * 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let (cube, indices) = cam_render::unit_cube();
+        let vertices: Vec<_> = cube
+            .iter()
+            .map(|v| MeshVertex {
+                position: v.position,
+                normal: v.normal,
+                color: [0.7, 0.7, 0.7, 1.0],
+            })
+            .collect();
+        let mut renderer = cam_render::MeshRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut reference: Option<u8> = None;
+        // The first quad is the +X face. Drawing it alone also checks the
+        // back of an open shell, which must remain illuminated.
+        for shell in [false, true] {
+            renderer.upload(
+                &device,
+                &vertices,
+                if shell { &indices[..6] } else { &indices },
+            );
+            for normal in [
+                [1., 0., 0.],
+                [-1., 0., 0.],
+                [0., 1., 0.],
+                [0., -1., 0.],
+                [0., 0., 1.],
+                [0., 0., -1.],
+            ] {
+                if shell && normal[0] == 0. {
+                    continue;
+                }
+                for (aspect, zoom) in [(0.5, -0.4), (1., 0.), (2., 0.7)] {
+                    let (yaw, pitch) = face_view(normal);
+                    let mut camera = OrbitCamera::framed([-1.; 3], [1.; 3]);
+                    camera.orient = cam_render::orientation(yaw, pitch);
+                    camera.zoom = zoom;
+                    camera.pan = [0.1, -0.1, 0.1];
+                    renderer.set_camera(&queue, camera.view_proj(aspect), camera.orient);
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &target_view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            ..Default::default()
+                        });
+                        renderer.draw(&mut pass);
+                    }
+                    encoder.copy_texture_to_buffer(
+                        target.as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &readback,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(256),
+                                rows_per_image: Some(64),
+                            },
+                        },
+                        target.size(),
+                    );
+                    queue.submit([encoder.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    readback
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |result| {
+                            tx.send(result).unwrap();
+                        });
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    rx.recv().unwrap().unwrap();
+                    let pixels = readback.slice(..).get_mapped_range();
+                    let brightness = pixels[32 * 256 + 32 * 4];
+                    assert!(brightness > 140, "visible face is too dark: {brightness}");
+                    let expected = *reference.get_or_insert(brightness);
+                    assert!(
+                        brightness.abs_diff(expected) <= 2,
+                        "illumination changed: {brightness} vs {expected}, normal={normal:?}, \
+                         aspect={aspect}, zoom={zoom}, shell={shell}"
+                    );
+                    drop(pixels);
+                    readback.unmap();
+                }
+            }
+        }
+    }
+
+    /// Reproduce menu pointer traffic and camera motion against the bundled CAD job.
+    /// Run manually with `cargo test -p cam-app --features gui viewport_interaction_benchmark -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual performance measurement"]
+    fn viewport_interaction_benchmark() {
+        let mut app = cad_app();
+        black_box(app.machining_viewport());
+        for (label, orbit) in [("menu pointer", false), ("orbit", true)] {
+            let start = Instant::now();
+            for i in 0..60 {
+                let message = if orbit {
+                    Message::OrbitBy(0.01, 0.005)
+                } else {
+                    Message::WindowCursor(iced::Point::new(i as f32, 20.))
+                };
+                let _ = app.update(message);
+                let viewport = app.machining_viewport();
+                black_box(shader::Program::draw(
+                    &viewport,
+                    &Default::default(),
+                    iced::mouse::Cursor::Unavailable,
+                    iced::Rectangle::with_size(iced::Size::new(1000., 700.)),
+                ));
+            }
+            eprintln!(
+                "{label}: {:.3} ms/update+draw",
+                start.elapsed().as_secs_f64() * 1000. / 60.
+            );
+        }
+        for editing in [false, true] {
+            if editing {
+                let id = app.controller.document().setup().operations[0].id();
+                app.begin_operation_draft(id);
+            }
+            black_box(app.view());
+            let start = Instant::now();
+            for _ in 0..60 {
+                let _ = app.update(Message::OrbitBy(0.01, 0.005));
+                black_box(app.view());
+            }
+            eprintln!(
+                "full UI construction (editing={editing}): {:.3} ms/update+view",
+                start.elapsed().as_secs_f64() * 1000. / 60.
+            );
+        }
     }
 }

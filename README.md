@@ -39,7 +39,7 @@ to export.*
   a carved region's islands (the counters of letters) come from the drawing's own
   nesting rather than being clicked one by one;
   AutoCAD-style object snaps (end / mid / quadrant / nearest) when picking.
-- **STEP feature selection (optional CAD build)** — background import and unit/
+- **STEP/IGES feature selection (optional CAD build)** — background import and unit/
   dimension preview, shaded bodies with face/edge/loop picking, and linked Pocket,
   Drill, Profile and Face operations in the qualified fixed-axis subset. Geometry
   links, height overrides and model replacement/reselection survive `.ocam` saves
@@ -128,7 +128,7 @@ source in one command — see below.
 ```bash
 cargo build --workspace                # headless: geometry, toolpaths, posts, sim
 cargo test  --workspace                # the full test suite
-cargo run -p cam-app --features gui    # the desktop GUI
+cargo run -p cam-app --features gui,occt    # the desktop GUI - occt for 3d STEP/IGES support
 ```
 
 Stable Rust, pinned in `rust-toolchain.toml`. GUI prerequisites and platform

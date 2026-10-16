@@ -37,3 +37,15 @@ fn a_real_file_arc_sweeps_its_full_angle() {
     assert!((first.x - 10.0).abs() < 1e-6 && first.y.abs() < 1e-6, "{first:?}");
     assert!(last.x.abs() < 1e-6 && (last.y - 10.0).abs() < 1e-6, "{last:?}");
 }
+
+#[test]
+fn iges_extensions_dispatch_to_the_solid_reader() {
+    for extension in ["iges", "igs", "IGES", "IGS"] {
+        let path = std::env::temp_dir().join(format!(
+            "opencam-missing-iges-{}.{}", std::process::id(), extension
+        ));
+        let result = cam_import::read_geometry_file(&path, &Default::default(), &Default::default());
+        assert!(matches!(result,
+            Err(cam_import::GeometryImportError::Solid(cam_kernel::KernelError::Io(_)))));
+    }
+}

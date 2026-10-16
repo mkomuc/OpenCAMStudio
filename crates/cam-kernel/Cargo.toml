@@ -1,6 +1,6 @@
 [package]
 name = "cam-kernel"
-description = "Owned optional OCCT STEP boundary for OpenCAMStudio"
+description = "Owned optional OCCT STEP/IGES boundary for OpenCAMStudio"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

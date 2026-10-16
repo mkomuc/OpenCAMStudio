@@ -806,7 +806,7 @@ impl AppController {
                     self.replace_cad_asset(id, asset)?;
                     Ok(count)
                 }
-                _ => Err("Replace model requires a STEP solid, not a planar drawing".into()),
+                _ => Err("Replace model requires a STEP/IGES solid, not a planar drawing".into()),
             }
         } else {
             self.commit_cad_import(prepared)

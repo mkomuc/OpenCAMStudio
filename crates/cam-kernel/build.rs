@@ -50,6 +50,7 @@ fn main() {
     }
     for lib in [
         "TKDESTEP",
+        "TKDEIGES",
         "TKDE",
         "TKXSBase",
         "TKMesh",

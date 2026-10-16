@@ -292,7 +292,7 @@ impl fmt::Display for GeometryImportError {
 impl std::error::Error for GeometryImportError {}
 pub use cam_kernel::SolidImportOptions;
 
-/// Strict format dispatch: STEP never falls through to the drawing reader.
+/// Strict format dispatch: STEP and IGES never fall through to the drawing reader.
 pub fn read_geometry_file(
     path: impl AsRef<Path>,
     solid_options: &SolidImportOptions,
@@ -303,6 +303,7 @@ pub fn read_geometry_file(
     match ext.as_str() {
         "dxf" | "dwg" => read_cad_file(path, drawing_options).map(GeometryImport::Drawing).map_err(GeometryImportError::Drawing),
         "step" | "stp" => cam_kernel::read_step_file(path, solid_options).map(|solid| GeometryImport::Solid(Box::new(solid))).map_err(GeometryImportError::Solid),
+        "iges" | "igs" => cam_kernel::read_iges_file(path, solid_options).map(|solid| GeometryImport::Solid(Box::new(solid))).map_err(GeometryImportError::Solid),
         _ => Err(GeometryImportError::UnsupportedFormat(ext)),
     }
 }

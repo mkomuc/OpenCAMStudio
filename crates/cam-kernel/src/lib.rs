@@ -8,7 +8,7 @@ use std::{fmt, path::Path};
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SolidImportOptions {
     pub display_tolerance: f64,
-    /// Fallback precision in millimetres when STEP does not specify uncertainty.
+    /// Fallback precision in millimetres when the source does not specify uncertainty.
     /// Source tolerances needed for consistent topology are preserved.
     pub import_tolerance: f64,
 }
@@ -44,7 +44,7 @@ pub enum KernelError {
 impl fmt::Display for KernelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BackendUnavailable => f.write_str("STEP import requires the optional OCCT backend (rebuild with occt and an OCCT 7.9.3 SDK)"),
+            Self::BackendUnavailable => f.write_str("STEP/IGES import requires the optional OCCT backend (rebuild with occt and an OCCT 7.9.3 SDK)"),
             Self::UnsupportedFormat(s) => write!(f, "unsupported solid format: {s}"),
             Self::InvalidOptions => f.write_str("CAD import tolerances must be finite and positive"),
             Self::Io(s) => write!(f, "could not read CAD file: {s}"),
@@ -62,6 +62,22 @@ pub fn read_step_file(
     path: impl AsRef<Path>,
     options: &SolidImportOptions,
 ) -> Result<SolidImport, KernelError> {
+    read_solid_file(path.as_ref(), options, false)
+}
+
+/// Import IGES B-rep solids or closed surface shells, in millimetres.
+pub fn read_iges_file(
+    path: impl AsRef<Path>,
+    options: &SolidImportOptions,
+) -> Result<SolidImport, KernelError> {
+    read_solid_file(path.as_ref(), options, true)
+}
+
+fn read_solid_file(
+    path: &Path,
+    options: &SolidImportOptions,
+    _iges: bool,
+) -> Result<SolidImport, KernelError> {
     if !options.display_tolerance.is_finite()
         || options.display_tolerance <= 0.0
         || !options.import_tolerance.is_finite()
@@ -69,7 +85,6 @@ pub fn read_step_file(
     {
         return Err(KernelError::InvalidOptions);
     }
-    let path = path.as_ref();
     if !path.is_file() {
         return Err(KernelError::Io(format!(
             "{} is not a readable file",
@@ -78,7 +93,7 @@ pub fn read_step_file(
     }
     #[cfg(occt_available)]
     {
-        native::read(path, options)
+        native::read(path, options, _iges)
     }
     #[cfg(not(occt_available))]
     {
@@ -95,8 +110,9 @@ mod native {
     };
     static CAD_SERVICE: Mutex<()> = Mutex::new(());
     extern "C" {
-        fn cam_occt_step(
+        fn cam_occt_read(
             path: *const c_char,
+            iges: i32,
             display_tolerance: f64,
             import_tolerance: f64,
             error: *mut *mut c_char,
@@ -112,6 +128,7 @@ mod native {
     pub(super) fn read(
         path: &Path,
         options: &SolidImportOptions,
+        iges: bool,
     ) -> Result<SolidImport, KernelError> {
         let path = CString::new(
             path.to_str()
@@ -125,8 +142,9 @@ mod native {
         // SAFETY: C strings live through the call; bridge returns owned malloc
         // strings and never exposes CAD handles or throws over the FFI boundary.
         let value = OwnedString(unsafe {
-            cam_occt_step(
+            cam_occt_read(
                 path.as_ptr(),
+                i32::from(iges),
                 options.display_tolerance,
                 options.import_tolerance,
                 &mut error,
@@ -171,6 +189,26 @@ mod tests {
         );
     }
     #[test]
+    fn iges_invalid_tolerance_precedes_translation() {
+        for tolerance in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            for options in [
+                SolidImportOptions {
+                    display_tolerance: tolerance,
+                    ..Default::default()
+                },
+                SolidImportOptions {
+                    import_tolerance: tolerance,
+                    ..Default::default()
+                },
+            ] {
+                assert_eq!(
+                    read_iges_file("missing.iges", &options).unwrap_err(),
+                    KernelError::InvalidOptions
+                );
+            }
+        }
+    }
+    #[test]
     #[cfg(not(occt_available))]
     fn native_free_build_reports_explicit_backend_error() {
         let path = std::env::temp_dir().join(format!(
@@ -180,6 +218,10 @@ mod tests {
         std::fs::write(&path, "ISO-10303-21;END-ISO-10303-21;").unwrap();
         assert_eq!(
             read_step_file(&path, &Default::default()).unwrap_err(),
+            KernelError::BackendUnavailable
+        );
+        assert_eq!(
+            read_iges_file(&path, &Default::default()).unwrap_err(),
             KernelError::BackendUnavailable
         );
         std::fs::remove_file(path).unwrap();

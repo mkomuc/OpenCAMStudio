@@ -122,7 +122,7 @@ impl App {
                     world.push(first);
                 }
             }
-            scene.add_strip(world, PICK_BOUNDARY);
+            scene.add_highlight(world, PICK_BOUNDARY);
         }
         for point in centers {
             for axis in 0..2 {
@@ -130,7 +130,7 @@ impl App {
                 let mut b = a;
                 a[axis] -= 1.;
                 b[axis] += 1.;
-                scene.add_strip(
+                scene.add_highlight(
                     vec![
                         frame.to_world_vector(a).map(|v| v as f32),
                         frame.to_world_vector(b).map(|v| v as f32),

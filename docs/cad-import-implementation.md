@@ -7,7 +7,7 @@ surface machining or B-rep collision verification.
 
 ## Available workflow
 
-Build with `gui,occt` and OCCT **7.9.3**. Home → Import accepts STEP/STP and the
+Build with `gui,occt` and OCCT **7.9.3**. Home → Import accepts STEP/STP, IGES/IGS and the
 existing DXF/DWG inputs. Translation runs off the UI thread and successful imports
 are used immediately; there is no Add to project step. Warnings and errors appear
 in an in-app dialog over the project window. An import failure leaves the project
@@ -113,7 +113,7 @@ quality does not change machining contours or NC.
 The default headless build and ordinary GUI build have no required CAD SDK.
 Requesting `occt` without its SDK now fails the build with setup instructions;
 it cannot silently produce a desktop app without STEP support. Builds without
-`occt` still report backend unavailable when importing STEP.
+`occt` still report backend unavailable when importing STEP or IGES.
 With a tested OCCT 7.9.3 installation:
 
 ```sh
@@ -163,10 +163,11 @@ Remaining release work from the original plan: OCCT/truck fixture comparison,
 AP203/AP242 and difficult spline/shell qualification, assembly names/colours and
 external dependency handling, editable X-direction/datum choices during frame
 setup, replacement mapping suggestions, unknown-unit choice, fine-grained stage
-progress, IGES, package-size/performance budgets and native release bundles on all
+progress, broader IGES qualification, package-size/performance budgets and native release bundles on all
 three platforms. Current STEP assemblies are flattened to solid instances with
 shared body identity and placements; assembly hierarchy/metadata are not claimed.
-Surface-only files and unknown/mixed units are rejected with diagnostics. The
+Open surface-only files and unknown/mixed units are rejected with diagnostics.
+IGES closed surface shells are sewn into solids; see the kernel README for limits. The
 optional backend is not yet enabled in release packaging.
 
 ### Multi-body Tigerente import check
