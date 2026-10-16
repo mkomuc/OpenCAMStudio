@@ -307,6 +307,8 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile(id: u32, chain: Contour, side: Side, tool: u32, work_offset: u32) -> Operation {
     Operation::Profile(ProfileOp {
+        closed: true,
+        additional_chains: Vec::new(),
         tabs: Default::default(),
         spindle_rpm: 0.0,
         work_offset,

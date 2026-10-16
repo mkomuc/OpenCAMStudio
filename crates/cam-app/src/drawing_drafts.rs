@@ -43,7 +43,11 @@ impl AppController {
             .ok_or("Selected drawing cannot resolve this geometry field")?;
         let mut draft = operation.clone();
         match (&mut draft, replacement) {
-            (Operation::Profile(op), Operation::Profile(new)) => op.chain = new.chain,
+            (Operation::Profile(op), Operation::Profile(new)) => {
+                op.chain = new.chain;
+                op.closed = new.closed;
+                op.additional_chains = new.additional_chains;
+            }
             (Operation::Pocket(op), Operation::Pocket(new)) => {
                 op.boundary = new.boundary;
                 op.islands = new.islands;

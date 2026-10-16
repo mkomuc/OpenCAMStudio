@@ -525,6 +525,19 @@ impl App {
                     .map(AppController::operation_kind)
             })
         });
+        if viewport.cad_operation_kind == Some(OpKind::Profile)
+            && !self.setup_model_pick
+            && !viewport.setup_axis
+            && self.height_reference_pick.is_none()
+        {
+            viewport.cad_filter = match self.profile_selection_mode {
+                ProfileSelectionMode::FaceContours => EntityKind::Face,
+                ProfileSelectionMode::Chain if self.profile_chain_edges => EntityKind::Edge,
+                _ => EntityKind::Loop,
+            };
+            viewport.cad_silhouette |=
+                self.profile_selection_mode == ProfileSelectionMode::Silhouette;
+        }
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
         }

@@ -65,17 +65,19 @@ mod workspace_view;
 use workspace_view::Workspace;
 #[path = "gui_geometry_selection.rs"]
 mod geometry_selection;
-use geometry_selection::{cad_geometry_labels, drawing_geometry_labels, operation_geometry_labels};
-#[path = "gui_operation_preview.rs"]
-mod operation_preview;
-#[path = "gui_profile_tabs.rs"]
-mod profile_tabs;
+use geometry_selection::{
+    cad_geometry_labels, drawing_geometry_labels, operation_geometry_labels, ProfileSelectionMode,
+};
 #[path = "gui_creation.rs"]
 mod creation;
 #[path = "gui_grid.rs"]
 mod grid_view;
+#[path = "gui_operation_preview.rs"]
+mod operation_preview;
 #[path = "gui_picking.rs"]
 mod picking_view;
+#[path = "gui_profile_tabs.rs"]
+mod profile_tabs;
 #[path = "gui_wcs.rs"]
 mod wcs_view;
 use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
@@ -1948,6 +1950,9 @@ struct App {
     /// Live keyboard modifiers (from a global subscription), so an op click can
     /// tell a plain click (single focus) from ⌘/Ctrl-click (add/remove from set).
     modifiers: iced::keyboard::Modifiers,
+    profile_selection_mode: ProfileSelectionMode,
+    profile_coplanar: bool,
+    profile_chain_edges: bool,
     cad_filter: CadFilter,
     cad_hover: Option<EntityRef>,
     cad_candidates: Vec<PickCandidate>,
@@ -2376,6 +2381,9 @@ enum Message {
     CadFilterChanged(CadFilter),
     CadHover(Option<EntityRef>),
     CadPicked(Vec<PickCandidate>),
+    ProfileSelectionModeChanged(ProfileSelectionMode),
+    ProfileCoplanarChanged(bool),
+    ProfileChainEdgesChanged(bool),
     GeometryPick,
     GeometryRowSelected(usize),
     GeometryRemove(usize),
@@ -2784,6 +2792,20 @@ impl App {
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
+        if matches!(self.operation_draft, Some(Operation::Profile(_))) {
+            let first = self
+                .controller
+                .geometry_state()
+                .bindings
+                .get(&id)
+                .and_then(|b| b.selected.first());
+            self.profile_selection_mode = match first.map(|r| r.kind) {
+                Some(EntityKind::Face) => ProfileSelectionMode::FaceContours,
+                Some(EntityKind::Silhouette) => ProfileSelectionMode::Silhouette,
+                _ => ProfileSelectionMode::Chain,
+            };
+            self.profile_chain_edges = first.is_some_and(|r| r.kind == EntityKind::Edge);
+        }
         self.seed_height_editor(id);
         self.operation_tools.clear();
         self.fields.clear();
@@ -3090,6 +3112,9 @@ impl App {
             window_cursor: iced::Point::ORIGIN,
             focus_ops: BTreeSet::new(),
             modifiers: iced::keyboard::Modifiers::default(),
+            profile_selection_mode: ProfileSelectionMode::Chain,
+            profile_coplanar: false,
+            profile_chain_edges: false,
             cad_filter: CadFilter::Face,
             cad_hover: None,
             cad_candidates: vec![],
@@ -4258,7 +4283,10 @@ impl App {
             }
             Message::ImportCad => {
                 return iced::Task::perform(
-                    pick_open("CAD model / drawing", &["step", "stp", "iges", "igs", "dxf", "dwg"]),
+                    pick_open(
+                        "CAD model / drawing",
+                        &["step", "stp", "iges", "igs", "dxf", "dwg"],
+                    ),
                     Message::CadToImport,
                 );
             }
@@ -4401,6 +4429,22 @@ impl App {
                     self.cad_candidates = candidates;
                 }
             }
+            Message::ProfileSelectionModeChanged(mode) => {
+                if self.profile_selection_mode != mode {
+                    let _ = self.pick_operation_geometry();
+                    self.remove_operation_geometry(None);
+                    self.profile_selection_mode = mode;
+                    self.status = mode.hint().into();
+                }
+            }
+            Message::ProfileCoplanarChanged(enabled) => self.profile_coplanar = enabled,
+            Message::ProfileChainEdgesChanged(enabled) => {
+                if self.profile_chain_edges != enabled {
+                    let _ = self.pick_operation_geometry();
+                    self.remove_operation_geometry(None);
+                    self.profile_chain_edges = enabled;
+                }
+            }
             Message::GeometryPick => return self.pick_operation_geometry(),
             Message::GeometryRowSelected(index) => self.geometry_row_selection = Some(index),
             Message::GeometryRemove(index) => self.remove_operation_geometry(Some(index)),
@@ -4479,6 +4523,35 @@ impl App {
                     let selected = self.controller.cad_selection().to_vec();
                     match self.preview_geometry_draft(id, selected.clone()) {
                         Ok(binding) => {
+                            if let Ok(geometry) = crate::cad_operations::geometry_for_setup(
+                                self.controller.document(),
+                            ) {
+                                if let Ok(input) =
+                                    cam_geometry3d::resolve_binding(&geometry, &binding)
+                                {
+                                    if let Some(Operation::Profile(profile)) =
+                                        &mut self.operation_draft
+                                    {
+                                        if let Some(first) = input.profiles.first() {
+                                            profile.chain = first.chain.clone();
+                                            profile.closed = first.closed;
+                                            profile.side = first.side;
+                                            profile.additional_chains =
+                                                input.profiles.iter().skip(1).cloned().collect();
+                                        } else if let Some(region) = input.regions.first() {
+                                            profile.chain = region.outer().clone();
+                                            profile.closed = true;
+                                            profile.additional_chains.clear();
+                                            if let cam_model::ExtractionRecipe::ProfileLoop {
+                                                side,
+                                            } = binding.recipe
+                                            {
+                                                profile.side = side;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             self.operation_binding_preview = Some(binding);
                             self.operation_geometry = Some(selected);
                             self.cad_editing_op = None;
@@ -4495,6 +4568,15 @@ impl App {
             Message::EditCadGeometry(id) => {
                 if let Some(binding) = self.controller.geometry_state().bindings.get(&id) {
                     let refs = binding.selected.clone();
+                    if matches!(self.current_operation(id), Some(Operation::Profile(_))) {
+                        self.profile_selection_mode = match refs.first().map(|r| r.kind) {
+                            Some(EntityKind::Face) => ProfileSelectionMode::FaceContours,
+                            Some(EntityKind::Silhouette) => ProfileSelectionMode::Silhouette,
+                            _ => ProfileSelectionMode::Chain,
+                        };
+                        self.profile_chain_edges =
+                            refs.first().is_some_and(|r| r.kind == EntityKind::Edge);
+                    }
                     self.cad_filter = match binding.recipe {
                         cam_model::ExtractionRecipe::ProfileLoop { .. } => CadFilter::Loop,
                         _ => CadFilter::Face,
@@ -4750,33 +4832,17 @@ impl App {
                     self.cancel_setup_picks();
                     self.cad_pending_kind = Some(kind);
                     if kind == OpKind::Profile {
-                        let references = self
+                        self.profile_selection_mode =
+                            match self.controller.cad_selection().first().map(|r| r.kind) {
+                                Some(EntityKind::Face) => ProfileSelectionMode::FaceContours,
+                                Some(EntityKind::Silhouette) => ProfileSelectionMode::Silhouette,
+                                _ => ProfileSelectionMode::Chain,
+                            };
+                        self.profile_chain_edges = self
                             .controller
                             .cad_selection()
-                            .iter()
-                            .cloned()
-                            .map(|mut reference| {
-                                if reference.kind == EntityKind::Face {
-                                    if let Some(outer) = self
-                                        .controller
-                                        .geometry_state()
-                                        .asset(reference.asset_id)
-                                        .and_then(|asset| {
-                                            asset.topology.loops.iter().find(|wire| {
-                                                wire.body_id == reference.body_id
-                                                    && wire.face_id == reference.id
-                                                    && wire.is_outer
-                                            })
-                                        })
-                                    {
-                                        reference.kind = EntityKind::Loop;
-                                        reference.id = outer.id;
-                                    }
-                                }
-                                reference
-                            })
-                            .collect();
-                        self.controller.set_cad_selection(references);
+                            .first()
+                            .is_some_and(|r| r.kind == EntityKind::Edge);
                     }
                     let tool = self.library.default_tool_for(kind);
                     self.cad_tool_pick = tool.map(|tool| tool.number);
@@ -4972,7 +5038,9 @@ impl App {
                     return iced::Task::none();
                 }
                 let multiple = self.controller.pending_op().is_some_and(|pending| {
-                    op_takes_islands(pending.kind) || op_selects_circles(pending.kind)
+                    op_takes_islands(pending.kind)
+                        || op_selects_circles(pending.kind)
+                        || pending.kind == OpKind::Profile
                 });
                 if (self.geometry_additive && multiple)
                     || self.modifiers.command()
@@ -8345,7 +8413,26 @@ impl App {
             return;
         }
         self.cad_inspecting = self.cad_editing_op.is_some();
-        let multiple = self.cad_pending_kind == Some(OpKind::Drill)
+        let profile = self.profile_geometry_active();
+        if profile
+            && self.profile_selection_mode == ProfileSelectionMode::FaceContours
+            && self.profile_coplanar
+            && entity.kind == EntityKind::Face
+        {
+            let result = crate::cad_operations::geometry_for_setup(self.controller.document())
+                .and_then(|geometry| cam_geometry3d::coplanar_profile_faces(&geometry, &entity));
+            match result {
+                Ok(references) => {
+                    self.controller.set_cad_selection(references);
+                    self.geometry_row_selection = None;
+                    self.status = "Selected all contours of coplanar faces in this body.".into();
+                }
+                Err(error) => self.status = error,
+            }
+            return;
+        }
+        let multiple = (profile && entity.kind != EntityKind::Silhouette)
+            || self.cad_pending_kind == Some(OpKind::Drill)
             || self
                 .cad_editing_op
                 .and_then(|id| self.current_operation(id))
@@ -8643,9 +8730,8 @@ impl App {
                             .size(11),
                         );
                     } else {
-                        list = list.push(
-                            text("Reimport the CAD file to enable its silhouette.").size(12),
-                        );
+                        list = list
+                            .push(text("Reimport the CAD file to enable its silhouette.").size(12));
                     }
                 }
                 let radius = match entity.kind {
@@ -10432,6 +10518,16 @@ impl Viewport {
         } else {
             self.cad_operation_kind
         } {
+            Some(OpKind::Profile)
+                if matches!(self.cad_filter, EntityKind::Face | EntityKind::Edge) =>
+            {
+                self.cad_scene.pick_candidates(
+                    ray,
+                    self.cad_filter,
+                    aperture as f64,
+                    self.cad_select_through,
+                )
+            }
             Some(OpKind::Profile) => self.cad_scene.pick_profile_candidates(
                 ray,
                 aperture as f64,

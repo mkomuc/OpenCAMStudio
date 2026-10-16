@@ -299,6 +299,78 @@ fn blind_bore_with_unrelated_surface() -> (GeometryState, EntityRef) {
 }
 
 #[test]
+fn face_profile_and_open_chain_replace_each_other_transactionally_and_survive_reopen() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+    let state = fixture.state();
+    let top_face = state.assets[0]
+        .topology
+        .faces
+        .iter()
+        .find(|face| face.id == top)
+        .unwrap();
+    let wire = state.assets[0]
+        .topology
+        .loops
+        .iter()
+        .find(|wire| wire.id == top_face.loop_ids[0])
+        .unwrap();
+    let edges: Vec<_> = wire
+        .edge_uses
+        .iter()
+        .take(2)
+        .map(|usage| reference(usage.edge_id, EntityKind::Edge))
+        .collect();
+    let mut app = controller();
+    app.edit_tool(0, |tool| tool.flute_length = 10.);
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let face = reference(top, EntityKind::Face);
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![face.clone()])
+        .unwrap();
+    assert!(matches!(app.operation(id), Some(Operation::Profile(profile)) if profile.closed));
+    let before = app.document().clone();
+    let binding = app.preview_operation_binding(id, edges.clone()).unwrap();
+    assert_eq!(binding.recipe, ExtractionRecipe::ProfileContours);
+    assert_eq!(app.document(), &before);
+    let operation = app.operation(id).unwrap().clone();
+    app.apply_operation_settings_with_geometry(operation, None, vec![], Some(edges))
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Profile(profile)) if !profile.closed && profile.chain.len() == 3 && profile.side != Side::On)
+    );
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let path = std::env::temp_dir().join(format!("profile-contours-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = controller();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(matches!(reopened.operation(id), Some(Operation::Profile(profile)) if !profile.closed));
+    assert_eq!(
+        reopened.run(&CancelToken::new()).completion,
+        JobCompletion::Complete
+    );
+    let operation = app.operation(id).unwrap().clone();
+    app.apply_operation_settings_with_geometry(operation, None, vec![], Some(vec![face]))
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Profile(profile)) if profile.closed && profile.side == Side::Outside)
+    );
+    assert!(app.undo());
+    assert!(matches!(app.operation(id), Some(Operation::Profile(profile)) if !profile.closed));
+}
+
+#[test]
 fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
     let (state, selected) = blind_bore_with_unrelated_surface();
     let mut app = controller();

@@ -31,6 +31,8 @@ fn fixture_path() -> String {
 
 fn profile_op(id: u32, chain: cam_geo::Contour, side: Side, climb: bool) -> Operation {
     Operation::Profile(ProfileOp {
+        closed: true,
+        additional_chains: Vec::new(),
         tabs: Default::default(),
         clearing: cam_model::Clearing {
             climb,

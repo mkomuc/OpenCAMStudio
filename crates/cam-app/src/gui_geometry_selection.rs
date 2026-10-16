@@ -3,6 +3,31 @@ use super::*;
 use crate::LoopPart;
 use iced::widget::column;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ProfileSelectionMode {
+    FaceContours,
+    #[default]
+    Chain,
+    Silhouette,
+}
+impl ProfileSelectionMode {
+    pub(super) const ALL: [Self; 3] = [Self::FaceContours, Self::Chain, Self::Silhouette];
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::FaceContours => "Face Contours",
+            Self::Chain => "Chain",
+            Self::Silhouette => "Silhouette",
+        }
+    }
+    pub(super) fn hint(self) -> &'static str {
+        match self {
+            Self::FaceContours => "Select a planar face to use all of its boundary contours, including holes. Enable Select coplanar faces to include other upward faces on the same plane in this body.",
+            Self::Chain => "Select an open or closed contour. For CAD, enable Select individual edges to build a connected chain. Open chains retain their endpoints; Outside offsets left and Inside offsets right of the selected direction.",
+            Self::Silhouette => "Select a body to use its silhouette as viewed along the active setup Z axis. This includes the outside outline and any through openings, projected onto setup XY. Blind recesses do not create inner silhouette contours.",
+        }
+    }
+}
+
 pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
     selected
         .iter()
@@ -43,6 +68,18 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
         Operation::Carve(op) => std::iter::once("Boundary".into())
             .chain((0..op.islands.len()).map(|i| format!("Island {}", i + 1)))
             .collect(),
+        Operation::Profile(op) => std::iter::once(format!(
+            "{} chain 1",
+            if op.closed { "Closed" } else { "Open" }
+        ))
+        .chain(op.additional_chains.iter().enumerate().map(|(i, p)| {
+            format!(
+                "{} chain {}",
+                if p.closed { "Closed" } else { "Open" },
+                i + 2
+            )
+        }))
+        .collect(),
         Operation::Engrave(op) if !op.closed => vec!["Open path".into()],
         _ => vec!["Boundary".into()],
     }
@@ -79,7 +116,7 @@ impl App {
                 container(text("No geometry selected").size(12).color(INSPECTOR_MUTED)).padding(9),
             );
         }
-        column![
+        let mut selection = column![
             row![
                 text("Geometry selection").size(12).width(Length::Fill),
                 inspector_button(if self.geometry_additive {
@@ -107,8 +144,66 @@ impl App {
                     ..container::Style::default()
                 }),
         ]
-        .spacing(6)
-        .into()
+        .spacing(6);
+        if self.profile_geometry_active() {
+            selection = selection.push(self.profile_selection_controls());
+        }
+        selection.into()
+    }
+
+    pub(super) fn profile_geometry_active(&self) -> bool {
+        self.cad_pending_kind == Some(OpKind::Profile)
+            || self
+                .controller
+                .pending_op()
+                .is_some_and(|p| p.kind == OpKind::Profile)
+            || self
+                .operation_draft
+                .as_ref()
+                .is_some_and(|op| matches!(op, Operation::Profile(_)))
+    }
+
+    fn profile_selection_controls(&self) -> Element<'_, Message> {
+        let mut modes = row![].spacing(4);
+        for mode in ProfileSelectionMode::ALL {
+            let active = mode == self.profile_selection_mode;
+            let control = button(text(mode.label()).size(11))
+                .padding([7, 6])
+                .style(move |theme, status| inspector_tab(theme, status, active))
+                .on_press_maybe(
+                    (mode == ProfileSelectionMode::Chain
+                        || !self.controller.geometry_state().instances.is_empty())
+                    .then_some(Message::ProfileSelectionModeChanged(mode)),
+                );
+            modes = modes.push(tooltip(
+                control,
+                container(
+                    column![text(mode.label()).size(15), text(mode.hint()).size(12)]
+                        .spacing(8)
+                        .width(300),
+                )
+                .padding(12)
+                .style(popup_surface),
+                tooltip::Position::Left,
+            ));
+        }
+        let mut controls = column![modes].spacing(6);
+        if self.profile_selection_mode == ProfileSelectionMode::FaceContours {
+            controls = controls.push(tooltip(
+                checkbox(self.profile_coplanar).label("Select coplanar faces").size(15).text_size(12)
+                    .on_toggle(Message::ProfileCoplanarChanged),
+                container(text("Include all upward planar faces at the selected face's height in the same body instance. The common cutting depth stops at the shallowest qualified wall.").size(12).width(280)).padding(10).style(popup_surface),
+                tooltip::Position::Left));
+        }
+        if self.profile_selection_mode == ProfileSelectionMode::Chain
+            && !self.controller.geometry_state().instances.is_empty()
+        {
+            controls = controls.push(tooltip(
+                checkbox(self.profile_chain_edges).label("Select individual edges").size(15).text_size(12)
+                    .on_toggle(Message::ProfileChainEdgesChanged),
+                container(text("Click connected CAD edges to add or remove them. An unclosed chain is machined as an open path; a complete loop is closed. The cutter side is inferred from the adjoining face boundary.").size(12).width(280)).padding(10).style(popup_surface), tooltip::Position::Left));
+        }
+        controls.into()
     }
 
     pub(super) fn pick_operation_geometry(&mut self) -> iced::Task<Message> {
@@ -142,6 +237,20 @@ impl App {
                 if !self.controller.geometry_state().bindings.contains_key(&id) {
                     if let Some(mut op) = self.current_operation(id).cloned() {
                         let removed = match &mut op {
+                            Operation::Profile(op)
+                                if !op.additional_chains.is_empty()
+                                    && index <= op.additional_chains.len() =>
+                            {
+                                if index == 0 {
+                                    let first = op.additional_chains.remove(0);
+                                    op.chain = first.chain;
+                                    op.closed = first.closed;
+                                    op.side = first.side;
+                                } else {
+                                    op.additional_chains.remove(index - 1);
+                                }
+                                true
+                            }
                             Operation::Drill(op)
                                 if op.points.len() > 1 && index < op.points.len() =>
                             {
@@ -204,5 +313,47 @@ impl App {
                 self.status = error;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_mode_controls_route_picks_and_preserve_the_committed_operation() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.setup_draft = None;
+        app.cad_pending_kind = Some(OpKind::Profile);
+        app.operation_draft = Some(app.controller.operation_template(OpKind::Profile, 1));
+        let before = app.controller.document().clone();
+        for mode in ProfileSelectionMode::ALL {
+            let _ = app.update(Message::ProfileSelectionModeChanged(mode));
+            assert_eq!(app.profile_selection_mode, mode);
+            let viewport = app.machining_viewport();
+            assert_eq!(viewport.cad_operation_kind, Some(OpKind::Profile));
+            assert_eq!(
+                viewport.cad_silhouette,
+                mode == ProfileSelectionMode::Silhouette
+            );
+            assert_eq!(
+                viewport.cad_filter,
+                if mode == ProfileSelectionMode::FaceContours {
+                    EntityKind::Face
+                } else {
+                    EntityKind::Loop
+                }
+            );
+            assert_eq!(app.controller.document(), &before);
+            assert!(!mode.hint().is_empty());
+            let _ = app.profile_selection_controls();
+        }
+        let _ = app.update(Message::ProfileSelectionModeChanged(
+            ProfileSelectionMode::Chain,
+        ));
+        let _ = app.update(Message::ProfileChainEdgesChanged(true));
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Edge);
+        assert_eq!(app.controller.document(), &before);
     }
 }

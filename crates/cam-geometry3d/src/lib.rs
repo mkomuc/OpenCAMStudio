@@ -1,8 +1,10 @@
 //! Fixed-axis feature extraction. Analytic operations use exact topology;
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
+mod profile_contours;
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
+pub use profile_contours::coplanar_faces as coplanar_profile_faces;
 use std::{collections::BTreeSet, f64::consts::TAU};
 
 /// Recognition and machining budgets are independent of display tessellation.
@@ -16,6 +18,7 @@ pub struct ResolvedHole {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedInput {
+    pub profiles: Vec<ProfileContour>,
     pub regions: Vec<Polygon>,
     pub holes: Vec<ResolvedHole>,
     pub heights: CuttingHeights,
@@ -125,7 +128,29 @@ pub fn resolve_binding(
     } else {
         vec![format!("Exact curves approximated within {MACHINING_CHORD_TOLERANCE} mm; planar grid error ≤ {} mm",cam_geo::GRID_MM/2f64.sqrt())]
     };
+    let profiles = if binding.recipe == ExtractionRecipe::ProfileContours {
+        profile_contours::extract(state, &binding.selected)?.0
+    } else if binding.recipe == ExtractionRecipe::ProfileSilhouette {
+        regions
+            .iter()
+            .flat_map(|region| {
+                std::iter::once(ProfileContour {
+                    chain: region.outer().clone(),
+                    closed: true,
+                    side: Side::Outside,
+                })
+                .chain(region.holes().iter().map(|hole| ProfileContour {
+                    chain: hole.clone(),
+                    closed: true,
+                    side: Side::Inside,
+                }))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(ResolvedInput {
+        profiles,
         regions,
         holes,
         heights,
@@ -149,6 +174,7 @@ struct CachedSilhouette {
     topology: std::sync::Weak<TopologySnapshot>,
     body: BodyId,
     placement: RigidTransform,
+    include_holes: bool,
     region: Polygon,
 }
 thread_local! {
@@ -196,12 +222,16 @@ impl<'a> View<'a> {
         })
     }
     fn silhouette(&self) -> Result<Polygon, String> {
+        self.projected_outline(false)
+    }
+    fn projected_outline(&self, include_holes: bool) -> Result<Polygon, String> {
         if let Some(region) = SILHOUETTES.with(|cache| {
             cache
                 .borrow()
                 .iter()
                 .find(|entry| {
                     entry.body == self.body.id
+                        && entry.include_holes == include_holes
                         && entry.placement == self.instance.placement
                         && entry
                             .topology
@@ -266,11 +296,15 @@ impl<'a> View<'a> {
         // Preserve every projected component. Tiny seams introduced by curve
         // discretization/grid rounding close under the declared allowance;
         // genuinely separate outlines still fail below, never become a hull.
-        let envelopes: Vec<_> = regions
-            .iter()
-            .map(|region| Polygon::new(region.outer().clone()))
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?;
+        let envelopes: Vec<_> = if include_holes {
+            regions
+        } else {
+            regions
+                .iter()
+                .map(|region| Polygon::new(region.outer().clone()))
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?
+        };
         let expanded = cam_geo::offset(
             &envelopes,
             silhouette_allowance(projection.chord_tolerance),
@@ -292,6 +326,7 @@ impl<'a> View<'a> {
                 topology: std::sync::Arc::downgrade(&self.asset.topology),
                 body: self.body.id,
                 placement: self.instance.placement,
+                include_holes,
                 region: region.clone(),
             });
         });
@@ -759,6 +794,15 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+    if binding.recipe == ExtractionRecipe::ProfileContours {
+        let (profiles, heights) = profile_contours::extract(state, &binding.selected)?;
+        let regions = profiles
+            .into_iter()
+            .filter(|p| p.closed)
+            .map(|p| Polygon::new(p.chain).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok((regions, vec![], heights));
+    }
     let view = View::new(state, &binding.selected)?;
     if matches!(
         binding.recipe,
@@ -770,7 +814,7 @@ fn derive(
     if refs.len() == 1 && refs[0].kind == EntityKind::Silhouette {
         let bounds = view.bounds(view.body.bounds);
         let heights = match binding.recipe {
-            ExtractionRecipe::ProfileLoop { side: Side::Outside } => CuttingHeights {
+            ExtractionRecipe::ProfileLoop { side: Side::Outside } | ExtractionRecipe::ProfileSilhouette => CuttingHeights {
                 top: bounds[1][2], bottom: bounds[0][2],
             },
             ExtractionRecipe::FaceRegion => CuttingHeights {
@@ -779,7 +823,12 @@ fn derive(
             _ => return Err("An XY silhouette supports outside Profile or Face; select a face for Pocket or Drill".into()),
         };
         heights.validate()?;
-        return Ok((vec![view.silhouette()?], vec![], heights));
+        let region = if binding.recipe == ExtractionRecipe::ProfileSilhouette {
+            view.projected_outline(true)?
+        } else {
+            view.silhouette()?
+        };
+        return Ok((vec![region], vec![], heights));
     }
     match binding.recipe {
         ExtractionRecipe::PocketFloor => {
@@ -997,6 +1046,8 @@ fn derive(
             Ok((vec![region], vec![], heights))
         }
         ExtractionRecipe::DrillHoles => derive_holes(&view, refs),
+        ExtractionRecipe::ProfileContours => unreachable!(),
+        ExtractionRecipe::ProfileSilhouette => Err("Select one body for its silhouette".into()),
     }
 }
 fn derive_holes(
@@ -1439,6 +1490,104 @@ mod tests {
         .unwrap_err()
         .contains("overhang"));
     }
+    fn plate_with_hole() -> (GeometryState, EntityRef) {
+        let mut f = Fixture::new();
+        let rings = |z| vec![square(0., 20., 0., 20., z), square(8., 12., 8., 12., z)];
+        let top = f.face(rings(0.), [0., 0., 1.]);
+        f.walls(0., 20., 0., 20., -5., 0.);
+        f.walls(8., 12., 8., 12., -5., 0.);
+        f.face(rings(-5.), [0., 0., -1.]);
+        (f.state(), reference(top, EntityKind::Face))
+    }
+
+    #[test]
+    fn face_contours_extract_outer_and_inner_walls_with_independent_sides() {
+        let (mut state, face) = plate_with_hole();
+        state.instances[0].placement.translation = [100., -50., 40.];
+        let b = resolve_selection(&state, &[face], ExtractionRecipe::ProfileContours, 40.).unwrap();
+        let input = resolve_binding(&state, &b).unwrap();
+        assert_eq!(input.profiles.len(), 2);
+        assert_eq!(input.profiles[0].side, Side::Outside);
+        assert_eq!(input.profiles[1].side, Side::Inside);
+        assert!(input.profiles.iter().all(|p| p.closed));
+        assert_eq!(input.profiles[0].chain.area(), 400.);
+        assert_eq!(input.profiles[1].chain.area(), 16.);
+        assert_eq!(
+            input.heights,
+            CuttingHeights {
+                top: 40.,
+                bottom: 35.
+            }
+        );
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        topology.mesh = CadMesh::default();
+        assert_eq!(resolve_binding(&state, &b).unwrap(), input);
+        state.assets[0].revision += 1;
+        assert!(resolve_binding(&state, &b).is_err());
+    }
+
+    #[test]
+    fn connected_edges_preserve_open_endpoints_and_detect_complete_loops_and_gaps() {
+        let (state, face) = plate_with_hole();
+        let asset = &state.assets[0];
+        let wire = asset
+            .topology
+            .loops
+            .iter()
+            .find(|w| w.face_id == face.id && w.is_outer)
+            .unwrap();
+        let edges: Vec<_> = wire
+            .edge_uses
+            .iter()
+            .map(|u| reference(u.edge_id, EntityKind::Edge))
+            .collect();
+        let b =
+            resolve_selection(&state, &edges[..2], ExtractionRecipe::ProfileContours, 0.).unwrap();
+        let input = resolve_binding(&state, &b).unwrap();
+        assert_eq!(input.profiles.len(), 1);
+        assert!(!input.profiles[0].closed);
+        assert_eq!(input.profiles[0].chain.len(), 3);
+        assert_eq!(
+            input.profiles[0].chain.points().first(),
+            Some(&Point::new(0., 0.))
+        );
+        assert_eq!(
+            input.profiles[0].chain.points().last(),
+            Some(&Point::new(20., 20.))
+        );
+        let shuffled = vec![
+            edges[2].clone(),
+            edges[0].clone(),
+            edges[3].clone(),
+            edges[1].clone(),
+        ];
+        let b =
+            resolve_selection(&state, &shuffled, ExtractionRecipe::ProfileContours, 0.).unwrap();
+        assert!(resolve_binding(&state, &b).unwrap().profiles[0].closed);
+        assert!(resolve_selection(
+            &state,
+            &[edges[0].clone(), edges[2].clone()],
+            ExtractionRecipe::ProfileContours,
+            0.
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn coplanar_faces_stay_in_the_selected_body_and_require_matching_cutting_intervals() {
+        let (state, _) = pocket();
+        let top = state.assets[0].topology.faces.iter().find(|f| matches!(f.surface, CadSurface::Plane { origin, normal } if origin[2] == 0. && normal[2] > 0.)).unwrap();
+        let refs = coplanar_profile_faces(&state, &reference(top.id, EntityKind::Face)).unwrap();
+        assert_eq!(refs.len(), 2);
+        assert!(refs
+            .iter()
+            .all(|r| r.kind == EntityKind::Face && r.body_id == 1));
+        assert!(
+            resolve_selection(&state, &refs, ExtractionRecipe::ProfileContours, 0.).is_err(),
+            "different wall depths cannot silently share one profile depth"
+        );
+    }
+
     #[test]
     fn rectangle_facing_and_exterior_profile_support_only_certified_sides() {
         let mut f = Fixture::new();
@@ -1819,6 +1968,62 @@ mod tests {
                 bottom: -25.
             }
         );
+    }
+
+    #[test]
+    fn profile_silhouettes_include_through_openings_and_fill_blind_recesses() {
+        let (mut geometry, selected) = projected_l_prism();
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        let face = topology.faces[0].id;
+        let projection = topology.projection.as_mut().unwrap();
+        projection.mesh.vertices = vec![
+            [0., 0., 0.],
+            [4., 0., 0.],
+            [4., 4., 0.],
+            [0., 4., 0.],
+            [1., 1., 0.],
+            [3., 1., 0.],
+            [3., 3., 0.],
+            [1., 3., 0.],
+        ];
+        projection.mesh.triangles = vec![
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        projection.mesh.triangle_faces = vec![face; 8];
+        let binding = resolve_selection(
+            &geometry,
+            &[selected.clone()],
+            ExtractionRecipe::ProfileSilhouette,
+            0.,
+        )
+        .unwrap();
+        let input = resolve_binding(&geometry, &binding).unwrap();
+        assert_eq!(input.profiles.len(), 2);
+        assert_eq!(input.profiles[0].side, Side::Outside);
+        assert_eq!(input.profiles[1].side, Side::Inside);
+        assert!(!input.regions[0].contains(Point::new(2., 2.)));
+        // The older envelope-only recipe and hover cache retain their original behavior.
+        assert!(silhouette(&geometry, &selected).unwrap().holes().is_empty());
+        let projection = std::sync::Arc::make_mut(&mut geometry.assets[0].topology)
+            .projection
+            .as_mut()
+            .unwrap();
+        projection.mesh.triangles.extend([[4, 5, 6], [4, 6, 7]]);
+        projection.mesh.triangle_faces.extend([face; 2]);
+        let input = resolve_binding(&geometry, &binding).unwrap();
+        assert_eq!(
+            input.profiles.len(),
+            1,
+            "a projected recess floor fills the opening"
+        );
+        assert!(input.regions[0].contains(Point::new(2., 2.)));
     }
 
     #[test]

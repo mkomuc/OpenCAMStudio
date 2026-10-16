@@ -364,7 +364,12 @@ impl App {
         }
         if tab == OperationTab::Geometry && !creating {
             let geometry = match op {
-                Operation::Profile(_) | Operation::Chamfer(_) => "One closed chain".into(),
+                Operation::Profile(p) => format!(
+                    "{} profile contour(s) · {}",
+                    1 + p.additional_chains.len(),
+                    if p.closed { "closed" } else { "open" }
+                ),
+                Operation::Chamfer(_) => "One closed chain".into(),
                 Operation::Engrave(o) => {
                     format!("One {} chain", if o.closed { "closed" } else { "open" })
                 }
@@ -470,8 +475,8 @@ impl App {
             Operation::Profile(p) => {
                 if tab == OperationTab::Geometry {
                     list = list.push(profile_picker(
-                        "Side",
-                        help::SIDE,
+                        if p.closed { "Side" } else { "Side (Outside = left)" },
+                        if p.closed { help::SIDE } else { "For an open chain, Outside offsets left and Inside offsets right of its selected direction. On follows the chain with the tool centre." },
                         self.tooltips,
                         p.side,
                         &Side::ALL[..],
@@ -508,13 +513,24 @@ impl App {
                     list = list.push(
                         row![
                             text("Holding tabs").size(12),
-                            checkbox(p.tabs.enabled)
-                                .size(15)
-                                .on_toggle(Message::ProfileTabsEnabled)
+                            checkbox(p.tabs.enabled).size(15).on_toggle_maybe(
+                                (p.tabs.enabled || (p.closed && p.additional_chains.is_empty()))
+                                    .then_some(Message::ProfileTabsEnabled)
+                            )
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
                     );
+                    if !p.closed || !p.additional_chains.is_empty() {
+                        list = list.push(
+                            text("Holding tabs require a single closed contour.")
+                                .size(11)
+                                .color(INSPECTOR_MUTED),
+                        );
+                    }
+                    if !p.closed {
+                        list = list.push(text("Open chains use computed compensation and straight plunge, without leads or radial roughing.").size(11).color(INSPECTOR_MUTED));
+                    }
                     if p.tabs.enabled {
                         list = list.push(text("Tab shape: Rectangular").size(12));
                         for field in [Field::TabWidth, Field::TabHeight] {

@@ -137,11 +137,21 @@ impl App {
             let geometry =
                 crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
             let resolved = cam_geometry3d::resolve_binding(&geometry, &binding).ok()?;
-            op.chain = resolved.regions.first()?.outer().clone();
+            if let Some(first) = resolved.profiles.first() {
+                op.chain = first.chain.clone();
+                op.closed = first.closed;
+                op.additional_chains = resolved.profiles.iter().skip(1).cloned().collect();
+            } else {
+                op.chain = resolved.regions.first()?.outer().clone();
+                op.closed = true;
+                op.additional_chains.clear();
+            }
             let reference = binding.selected.first()?;
             if reference.kind == EntityKind::Silhouette {
                 // The selected XY silhouette is displayed on the setup XY plane.
                 0.0
+            } else if matches!(reference.kind, EntityKind::Face | EntityKind::Edge) {
+                resolved.heights.top
             } else {
                 let asset = geometry.asset(reference.asset_id)?;
                 let instance = geometry.instance(reference.instance_id)?;

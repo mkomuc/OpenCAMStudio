@@ -589,7 +589,13 @@ impl CuttingHeights {
 pub enum ExtractionRecipe {
     PocketFloor,
     DrillHoles,
-    ProfileLoop { side: Side },
+    ProfileLoop {
+        side: Side,
+    },
+    /// Face boundaries or explicitly selected connected edges/loops.
+    ProfileContours,
+    /// Complete setup-Z projection, including through-opening contours.
+    ProfileSilhouette,
     FaceRegion,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

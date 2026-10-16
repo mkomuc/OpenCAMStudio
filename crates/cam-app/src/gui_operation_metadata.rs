@@ -13,7 +13,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             let mut fields = vec![Field::Depth, Field::Stepdown];
             // Radial roughing (stepover) is outside-only; an inner profile is
             // a single-pass wall finish (rough the pocket first).
-            if p.side == Side::Outside && p.comp == cam_model::Comp::Computed {
+            if p.closed && p.additional_chains.is_empty() && p.side == Side::Outside && p.comp == cam_model::Comp::Computed {
                 fields.push(Field::Stepover);
                 fields.push(Field::Engagement);
             }

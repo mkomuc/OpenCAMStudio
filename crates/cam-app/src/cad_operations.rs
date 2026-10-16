@@ -171,9 +171,15 @@ pub(crate) fn recipe(
     Ok(match kind {
         OpKind::Pocket => ExtractionRecipe::PocketFloor,
         OpKind::Drill => ExtractionRecipe::DrillHoles,
-        OpKind::Profile => ExtractionRecipe::ProfileLoop {
-            side: cam_geometry3d::profile_side(geometry, selected)?,
-        },
+        OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette => {
+            ExtractionRecipe::ProfileSilhouette
+        }
+        OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Loop => {
+            ExtractionRecipe::ProfileLoop {
+                side: cam_geometry3d::profile_side(geometry, selected)?,
+            }
+        }
+        OpKind::Profile => ExtractionRecipe::ProfileContours,
         OpKind::Face => ExtractionRecipe::FaceRegion,
         _ => return Err("CAD selections currently support Pocket, Drill, Profile and Face".into()),
     })
@@ -331,14 +337,24 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            closed: resolved.profiles.first().map_or(true, |p| p.closed),
+            additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
             tabs: Default::default(),
             id,
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
-            chain: boundary()?,
+            chain: resolved
+                .profiles
+                .first()
+                .map(|p| p.chain.clone())
+                .map(Ok)
+                .unwrap_or_else(boundary)?,
             side: match binding.recipe {
                 ExtractionRecipe::ProfileLoop { side } => side,
+                ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette => {
+                    resolved.profiles[0].side
+                }
                 _ => unreachable!("Profile uses a profile extraction recipe"),
             },
             comp: Comp::Computed,
@@ -418,8 +434,15 @@ pub(crate) fn resolve_document_checked(
     for operation in &document.setup().operations {
         if document.excluded_operations.contains(&operation.id()) || document.disabled_origins.get(&document.setup().id).is_some_and(|set|set.contains(&operation.work_offset())) { continue; }
         if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
-            let heights = settings.resolve(document,operation).map_err(|reason| error(format!("Operation {}: {reason}",operation.id())).for_op(operation.id()))?;
-            resolved.setup_mut().height_settings.get_mut(&operation.id()).unwrap().resolved=Some(heights);
+            let heights = settings.resolve(document, operation).map_err(|reason| {
+                error(format!("Operation {}: {reason}", operation.id())).for_op(operation.id())
+            })?;
+            resolved
+                .setup_mut()
+                .height_settings
+                .get_mut(&operation.id())
+                .unwrap()
+                .resolved = Some(heights);
         }
     }
     resolved.geometry = geometry_for_setup(document).map_err(error)?;
@@ -458,6 +481,23 @@ pub(crate) fn resolve_document_checked(
                     p.islands = region()?.holes().to_vec();
                     p.depth = depth;
                 }
+                (
+                    Operation::Profile(p),
+                    ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette,
+                ) => {
+                    let first = input.profiles.first().ok_or("No resolved profile chains")?;
+                    if p.side != first.side
+                        || p.comp != Comp::Computed
+                        || p.offset < 0.
+                        || p.stepover > 0.
+                    {
+                        return Err(format!("Operation {id}: profile compensation is outside the certified CAD adapter"));
+                    }
+                    p.chain = first.chain.clone();
+                    p.closed = first.closed;
+                    p.additional_chains = input.profiles.iter().skip(1).cloned().collect();
+                    p.depth = depth;
+                }
                 (Operation::Profile(p), ExtractionRecipe::ProfileLoop { side }) => {
                     if p.side != *side
                         || p.comp != Comp::Computed
@@ -467,6 +507,8 @@ pub(crate) fn resolve_document_checked(
                         return Err(format!("Operation {id}: profile side/compensation/roughing is outside the certified CAD adapter"));
                     }
                     p.chain = region()?.outer().clone();
+                    p.closed = true;
+                    p.additional_chains.clear();
                     p.depth = depth;
                 }
                 (Operation::Drill(p), ExtractionRecipe::DrillHoles) => {

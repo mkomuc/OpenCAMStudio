@@ -136,6 +136,8 @@ impl App {
             match (&mut draft, geometry) {
                 (Operation::Profile(op), Operation::Profile(new)) => {
                     op.chain = new.chain;
+                    op.closed = new.closed;
+                    op.additional_chains = new.additional_chains;
                     op.side = new.side;
                     op.comp = new.comp;
                 }

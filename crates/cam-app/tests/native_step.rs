@@ -166,8 +166,7 @@ fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
         .contains("seam"));
     assert!(app
         .preview_cad_operation(OpKind::Profile, &[trim, selected.clone()])
-        .unwrap_err()
-        .contains("one boundary per operation"));
+        .is_err(), "a cylindrical seam cannot become a planar chain by adding another loop");
     let preview = app
         .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&selected))
         .unwrap();
@@ -877,4 +876,29 @@ fn silhouette_projection_is_independent_of_display_quality_on_curved_step_models
         assert_eq!(preview.regions.len(), 1);
         assert!(preview.regions[0].area() > 1.);
     }
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn profile_face_contours_and_silhouette_resolve_real_step_boundaries() {
+    let mut app = new_app();
+    app.import_cad(fixture("pocket-island-holes-mm.step")).unwrap();
+    select_all_models(&mut app);
+    let state = app.geometry_state();
+    let topology = &state.assets[0].topology;
+    let top = topology.faces.iter().filter(|face| matches!(face.surface,
+        CadSurface::Plane { origin, normal } if origin[2].abs() < 1e-6 && normal[2] > 0.99))
+        .max_by_key(|face| face.loop_ids.len()).unwrap();
+    let face = reference(state, EntityKind::Face, top.id);
+    let silhouette = reference(state, EntityKind::Silhouette, state.instances[0].body_id);
+    let contours = app.preview_cad_operation(OpKind::Profile, &[face]).unwrap();
+    assert_eq!(contours.profiles.len(), 6, "outside, pocket opening and four bores");
+    assert_eq!(contours.profiles.iter().filter(|p| p.side == Side::Inside).count(), 5);
+    assert!((contours.heights.bottom + 6.).abs() < 1e-6, "stop all contours at the shallowest wall");
+    let projected = app.preview_cad_operation(OpKind::Profile, &[silhouette.clone()]).unwrap();
+    assert_eq!(projected.profiles.len(), 5, "outside plus four through holes; blind pocket is filled by its floor");
+    let id = app.create_cad_operation(OpKind::Profile, vec![silhouette]).unwrap();
+    assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.additional_chains.len() == 4));
+    let result = app.run(&CancelToken::new());
+    assert_eq!(result.completion, JobCompletion::Complete, "{:?}", result.diagnostics);
 }

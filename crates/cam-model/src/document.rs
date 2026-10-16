@@ -75,7 +75,8 @@ use crate::Tool;
 /// v17: per-operation safety planes, with setup heights as legacy defaults.
 /// v18: reference-plus-offset definitions for all five operation heights.
 /// v19: setup model lists are explicit; an empty list selects no solid bodies.
-pub const SCHEMA_VERSION: u32 = 19;
+/// v20: profiles support open chains, multiple contours, and complete silhouettes.
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// Operation safety planes (also used as legacy setup defaults), all
 /// **absolute Z in millimetres**. By
@@ -327,10 +328,26 @@ impl Default for ProfileTabs {
     }
 }
 
-/// A 2.5-D profiling operation: follow a closed chain at an offset, in stepdown
-/// passes, down to a depth.
+/// One open or closed contour and its compensation side.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProfileContour {
+    pub chain: Contour,
+    pub closed: bool,
+    /// Closed loops use Inside/Outside; open chains use right/left respectively.
+    pub side: Side,
+}
+
+fn profile_closed_default() -> bool {
+    true
+}
+
+/// A profile operation may contain several independently retracted contours.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    #[serde(default = "profile_closed_default")]
+    pub closed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_chains: Vec<ProfileContour>,
     /// Optional rectangular holding tabs (disabled in older projects).
     #[serde(default)]
     pub tabs: ProfileTabs,
@@ -338,7 +355,7 @@ pub struct ProfileOp {
     pub id: u32,
     /// Tool number to select from the setup's tool list.
     pub tool: u32,
-    /// The closed chain to profile, in the part/WCS frame.
+    /// The primary chain to profile, in the part/WCS frame.
     pub chain: Contour,
     /// Which side of the chain the tool runs on.
     pub side: Side,
@@ -1531,6 +1548,8 @@ mod tests {
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            closed: true,
+            additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
             work_offset: 1,
@@ -1557,6 +1576,29 @@ mod tests {
             lead_overlap: 0.0,
             plunge: Plunge::Straight,
         })
+    }
+
+    #[test]
+    fn legacy_profiles_stay_closed_and_multiple_open_chains_roundtrip() {
+        let Operation::Profile(mut op) = profile(0) else {
+            unreachable!()
+        };
+        let mut legacy = serde_json::to_value(&op).unwrap();
+        legacy.as_object_mut().unwrap().remove("closed");
+        legacy.as_object_mut().unwrap().remove("additional_chains");
+        let restored: ProfileOp = serde_json::from_value(legacy).unwrap();
+        assert!(restored.closed);
+        assert!(restored.additional_chains.is_empty());
+        op.closed = false;
+        op.chain = Contour::new(vec![Point::new(0., 0.), Point::new(5., 0.)]);
+        op.additional_chains.push(ProfileContour {
+            chain: op.chain.clone(),
+            closed: false,
+            side: Side::Inside,
+        });
+        let restored: ProfileOp =
+            serde_json::from_str(&serde_json::to_string(&op).unwrap()).unwrap();
+        assert_eq!(restored, op);
     }
 
     #[test]

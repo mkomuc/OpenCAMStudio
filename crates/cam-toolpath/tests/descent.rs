@@ -206,6 +206,8 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        closed: true,
+        additional_chains: Vec::new(),
         tabs: Default::default(),
         spindle_rpm: 0.0,
         work_offset: 1,

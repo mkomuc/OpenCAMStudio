@@ -303,10 +303,9 @@ impl LoopRef {
     }
 }
 
-/// Whether an operation kind can machine an **open** path. Only engraving can: every
-/// other strategy needs a closed region to offset, clear, or bound.
+/// Profile and Engrave can machine open paths without inventing a closing edge.
 pub fn op_accepts_open_paths(kind: OpKind) -> bool {
-    matches!(kind, OpKind::Engrave)
+    matches!(kind, OpKind::Engrave | OpKind::Profile)
 }
 
 /// Whether an operation kind takes **islands** — enclosed areas left standing. Only the
@@ -1867,9 +1866,7 @@ impl AppController {
         if !islands.is_empty() {
             self.planar_operation_eligibility(kind, &selected).ok()?;
         }
-        // An open imported path can only feed an operation that machines one; every
-        // other strategy needs a closed region to offset, clear or bound. Refusing
-        // here keeps a mis-picked stroke from becoming a nonsense profile.
+        // Area strategies still require a closed region.
         if boundary.is_open() && !op_accepts_open_paths(kind) {
             return None;
         }
@@ -1914,6 +1911,22 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                closed,
+                additional_chains: islands
+                    .iter()
+                    .map(|r| {
+                        let (points, closed) = self.loop_points(*r)?;
+                        Some(cam_model::ProfileContour {
+                            chain: Contour::new(points),
+                            closed,
+                            side: if matches!(r.part, crate::LoopPart::Hole(_)) {
+                                Side::Inside
+                            } else {
+                                Side::Outside
+                            },
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
                 tabs: Default::default(),
                 clearing: cam_model::Clearing::default(),
                 id: 0,
@@ -2339,6 +2352,8 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    closed: true,
+                    additional_chains: Vec::new(),
                     tabs: Default::default(),
                     clearing: cam_model::Clearing::default(),
                     id,
@@ -3415,12 +3430,10 @@ mod tests {
 
     #[test]
     fn an_open_path_cannot_become_a_closed_region_operation() {
-        // The guard that stops a mis-picked stroke turning into a nonsense profile
-        // or pocket — those strategies need a closed area to offset and clear.
+        // Area strategies require a closed boundary.
         let mut app = AppController::new(machine());
         app.open_dxf(PART_WITH_STROKE_DXF, "part.dxf").unwrap();
         for kind in [
-            OpKind::Profile,
             OpKind::Pocket,
             OpKind::Face,
             OpKind::Drill,
@@ -3444,12 +3457,17 @@ mod tests {
         assert!(!app.open_paths_pickable(), "no pending op, no open picking");
 
         app.begin_operation(OpKind::Profile);
-        assert!(!app.open_paths_pickable());
-        let hit = app.nearest_loop_point(on_stroke, 2.0, false);
-        assert!(
-            hit.is_none_or(|(l, _)| !l.is_open()),
-            "profile must not pick the stroke"
-        );
+        assert!(app.open_paths_pickable());
+        let hit = app.nearest_loop_point(on_stroke, 2.0, false).unwrap();
+        assert!(hit.0.is_open(), "profile can machine an open chain");
+        let Operation::Profile(profile) = app
+            .build_op(OpKind::Profile, hit.0, &[], 1, None, None)
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(!profile.closed);
+        assert_eq!(profile.chain.points(), app.open_paths()[0].points());
 
         app.begin_operation(OpKind::Engrave);
         assert!(app.open_paths_pickable());

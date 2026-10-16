@@ -22,7 +22,8 @@ impl AppController {
             .ok_or("Needs reselection: drawing feature is missing")?;
         if !closed && !op_accepts_open_paths(kind) {
             return Err(
-                "This operation requires a closed boundary; open paths support Engrave".into(),
+                "This operation requires a closed boundary; open paths support Profile and Engrave"
+                    .into(),
             );
         }
         if op_selects_circles(kind) && (!closed || fit_circle(&points).is_none()) {
@@ -38,6 +39,19 @@ impl AppController {
                     .ok_or("Drill and Thread require circular holes of the same geometry kind")?;
                 if kind == OpKind::Thread && (radius - other_radius).abs() > 0.001 {
                     return Err("Thread uses one major diameter per operation; select equal-diameter holes or create separate operations".into());
+                }
+            }
+            return Ok(());
+        }
+        if kind == OpKind::Profile {
+            for reference in selected {
+                let (points, closed) = self
+                    .loop_points(*reference)
+                    .ok_or("Profile chain is missing")?;
+                if points.len() < if closed { 3 } else { 2 }
+                    || points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+                {
+                    return Err("Select a valid open or closed profile chain".into());
                 }
             }
             return Ok(());
@@ -557,12 +571,7 @@ mod workflow_tests {
     fn drawing_rejects_unrelated_chains_and_incompatible_thread_diameters_atomically() {
         let mut app = drawing();
         let unrelated = [LoopRef::outer(0), LoopRef::outer(1)];
-        for kind in [
-            OpKind::Profile,
-            OpKind::Face,
-            OpKind::Chamfer,
-            OpKind::Engrave,
-        ] {
+        for kind in [OpKind::Face, OpKind::Chamfer, OpKind::Engrave] {
             assert!(app
                 .planar_operation_eligibility(kind, &unrelated)
                 .unwrap_err()
@@ -614,7 +623,27 @@ mod workflow_tests {
     }
 
     #[test]
-    fn feature_first_open_paths_are_selectable_and_only_engrave_can_consume_them() {
+    fn multiple_drawing_profile_contours_preserve_hole_sides_and_geometry() {
+        let mut app = drawing();
+        let features = [LoopRef::outer(0), LoopRef::hole(0, 0), LoopRef::outer(1)];
+        app.begin_operation_from_selection(OpKind::Profile, &features)
+            .unwrap();
+        app.set_pending_tool(1);
+        assert!(app.confirm_operation(None));
+        let Some(Operation::Profile(profile)) = app.selected_operation() else {
+            panic!("expected profile")
+        };
+        assert_eq!(profile.additional_chains.len(), 2);
+        assert_eq!(profile.additional_chains[0].side, Side::Inside);
+        assert_eq!(profile.additional_chains[1].side, Side::Outside);
+        assert_eq!(
+            &profile.additional_chains[0].chain,
+            app.loop_contour(features[1]).unwrap()
+        );
+    }
+
+    #[test]
+    fn feature_first_open_paths_support_profile_and_engrave() {
         let mut app = drawing();
         app.open_paths = vec![Polyline::new(vec![
             Point::new(25., 2.),
@@ -623,11 +652,15 @@ mod workflow_tests {
         let (feature, start) = app.nearest_drawing_feature([25.1, 5.], 0.5).unwrap();
         assert_eq!(feature, LoopRef::open(0));
         assert_eq!(start, [25., 5.]);
-        assert!(app
-            .begin_operation_from_selection(OpKind::Profile, &[feature])
-            .unwrap_err()
-            .contains("closed boundary"));
-        assert!(app.pending_op().is_none());
+        app.begin_operation_from_selection(OpKind::Profile, &[feature])
+            .unwrap();
+        app.set_pending_tool(1);
+        assert!(app.confirm_operation(None));
+        let Some(Operation::Profile(profile)) = app.selected_operation() else {
+            panic!("expected profile")
+        };
+        assert!(!profile.closed);
+        assert_eq!(profile.chain.points(), app.open_paths[0].points());
         app.begin_operation_from_selection(OpKind::Engrave, &[feature])
             .unwrap();
         app.set_pending_tool(1);

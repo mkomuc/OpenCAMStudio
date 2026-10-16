@@ -22,7 +22,12 @@ pub fn profile_tab_preview(
     diameter: f64,
     spindle: SpindleDir,
 ) -> Vec<ProfileTabPreview> {
-    if !op.tabs.enabled || !op.chain.is_valid() || !diameter.is_finite() || diameter <= 0.0 {
+    if !op.closed
+        || !op.tabs.enabled
+        || !op.chain.is_valid()
+        || !diameter.is_finite()
+        || diameter <= 0.0
+    {
         return Vec::new();
     }
     let Ok(region) = Polygon::new(op.chain.clone()) else {
@@ -127,6 +132,33 @@ impl Strategy for ProfileStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if !op.additional_chains.is_empty() {
+            if op.tabs.enabled || op.stepover > 0. {
+                return StrategyResult { diagnostics: vec![Diagnostic::error("Holding tabs and radial roughing require one closed profile chain; use separate operations")], ..Default::default() };
+            }
+            let mut result = StrategyResult::default();
+            let primary = cam_model::ProfileContour {
+                chain: op.chain.clone(),
+                closed: op.closed,
+                side: op.side,
+            };
+            for contour in std::iter::once(&primary).chain(&op.additional_chains) {
+                let mut single = op.clone();
+                single.chain = contour.chain.clone();
+                single.closed = contour.closed;
+                single.side = contour.side;
+                single.additional_chains.clear();
+                let part = Self::new(single).compute(env, cancel);
+                result.diagnostics.extend(part.diagnostics.clone());
+                if part.has_errors() || part.cancelled {
+                    result.program = Program::new();
+                    result.cancelled = part.cancelled;
+                    return result;
+                }
+                result.program.extend(part.program);
+            }
+            return result;
+        }
         let mut diagnostics = Vec::new();
 
         // Look up the tool.
@@ -158,6 +190,9 @@ impl Strategy for ProfileStrategy {
             };
         }
 
+        if !op.closed {
+            return open_profile(op, tool.radius(), env, cancel);
+        }
         // Validate the geometry and parameters.
         if !op.chain.is_valid() {
             diagnostics.push(Diagnostic::error(format!(
@@ -471,6 +506,145 @@ impl Strategy for ProfileStrategy {
     }
 }
 
+/// Open paths retain their endpoints and retract before returning to the start.
+fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+    let fail = |message: &str| StrategyResult {
+        diagnostics: vec![Diagnostic::error(format!("operation {}: {message}", op.id))],
+        ..Default::default()
+    };
+    if op.chain.len() < 2
+        || op
+            .chain
+            .points()
+            .iter()
+            .any(|p| !p.x.is_finite() || !p.y.is_finite())
+    {
+        return fail("an open profile needs at least two finite points");
+    }
+    if !op.stepdown.is_finite()
+        || op.stepdown <= 0.
+        || !op.depth.is_finite()
+        || op.depth <= 0.
+        || !op.offset.is_finite()
+    {
+        return fail(
+            "profile depth and stepdown must be positive and finite; allowance must be finite",
+        );
+    }
+    if op.comp != Comp::Computed
+        || op.tabs.enabled
+        || op.stepover > 0.
+        || op.plunge != Plunge::Straight
+        || op.lead_overlap != 0.
+        || op.lead_in != Lead::None
+        || op.lead_out != Lead::None
+    {
+        return fail("open profiles require computed compensation, straight plunge, no tabs, roughing, leads or overlap");
+    }
+    let sign = match op.side {
+        Side::Outside => 1.,
+        Side::Inside => -1.,
+        Side::On => 0.,
+    };
+    let distance = sign * (radius + op.offset);
+    let source = op.chain.points();
+    let mut tangents = Vec::new();
+    for pair in source.windows(2) {
+        let dx = pair[1].x - pair[0].x;
+        let dy = pair[1].y - pair[0].y;
+        let length = dx.hypot(dy);
+        if length < 1e-9 {
+            return fail("open chain contains a zero-length edge");
+        }
+        tangents.push([dx / length, dy / length]);
+    }
+    let mut points = Vec::new();
+    for (i, p) in source.iter().enumerate() {
+        let a = tangents[i.saturating_sub(1)];
+        let b = tangents[i.min(tangents.len() - 1)];
+        let denominator = 1. + a[0] * b[0] + a[1] * b[1];
+        if denominator < 1e-6 {
+            return fail("open chain doubles back; split it at the reversal");
+        }
+        let dx = -(a[1] + b[1]) * distance / denominator;
+        let dy = (a[0] + b[0]) * distance / denominator;
+        if dx.hypot(dy) > distance.abs().max(1e-9) * 10. {
+            return fail("open chain corner is too sharp for its tool offset");
+        }
+        points.push(Point::new(p.x + dx, p.y + dy));
+    }
+    // Offsets that cross themselves or reverse an edge cannot be machined as one chain.
+    for (i, pair) in points.windows(2).enumerate() {
+        let t = tangents[i];
+        if (pair[1].x - pair[0].x) * t[0] + (pair[1].y - pair[0].y) * t[1] <= 1e-9 {
+            return fail("tool offset collapses an open chain edge; use a smaller cutter");
+        }
+        for other in points.windows(2).skip(i + 2) {
+            let cross = |a: Point, b: Point, c: Point| {
+                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+            };
+            if cross(pair[0], pair[1], other[0]) * cross(pair[0], pair[1], other[1]) < 0.
+                && cross(other[0], other[1], pair[0]) * cross(other[0], other[1], pair[1]) < 0.
+            {
+                return fail(
+                    "tool offset intersects itself; split the chain or use a smaller cutter",
+                );
+            }
+        }
+    }
+    let material_right = op.clearing.climb == (env.spindle == SpindleDir::Cw);
+    let reverse = match op.side {
+        Side::Outside | Side::On => !material_right,
+        Side::Inside => material_right,
+    };
+    if reverse {
+        points.reverse();
+    }
+    let first = points[0];
+    let last = *points.last().unwrap();
+    let mut program = Program::new();
+    for z in depth_levels(env.heights.top_of_stock, -op.depth, op.stepdown) {
+        if cancel.is_cancelled() {
+            return StrategyResult {
+                cancelled: true,
+                ..Default::default()
+            };
+        }
+        program.push(Step::Rapid {
+            to: Point3::new(first.x, first.y, env.heights.clearance),
+            tag: Tag::new(op.id, MoveKind::Link),
+        });
+        program.push(Step::Rapid {
+            to: Point3::new(
+                first.x,
+                first.y,
+                env.heights.retract.max(env.heights.top_of_stock),
+            ),
+            tag: Tag::new(op.id, MoveKind::Link),
+        });
+        program.push(Step::Linear {
+            to: Point3::new(first.x, first.y, z),
+            feed: op.plunge_feed,
+            tag: Tag::new(op.id, MoveKind::Plunge),
+        });
+        crate::emit::cut_polyline(
+            &mut program,
+            &points,
+            op.feed,
+            Tag::new(op.id, MoveKind::Cutting),
+            z,
+        );
+        program.push(Step::Rapid {
+            to: Point3::new(last.x, last.y, env.heights.clearance),
+            tag: Tag::new(op.id, MoveKind::Retract),
+        });
+    }
+    StrategyResult {
+        program,
+        ..Default::default()
+    }
+}
+
 /// The region to clear when radial roughing an **outside** profile: the frame
 /// between the raw stock and the part, so the region is the stock with the part —
 /// dilated by the finishing allowance — as an island. Returns `None` when roughing
@@ -685,13 +859,7 @@ fn emit_loop_rich(
         // which is how the operator controls this.
         let lead_path = lead_in_path(start, entry, out, lead_in);
         let lead_end = lead_path.len().saturating_sub(1);
-        let ramp = contour_ramp(
-            pts,
-            lead_path,
-            op.plunge,
-            ramp_top,
-            z,
-        );
+        let ramp = contour_ramp(pts, lead_path, op.plunge, ramp_top, z);
 
         // Where the pass begins cutting at depth: the arc position the ramp ended at.
         let cut_from = ramp.as_ref().map_or(0.0, |(_, on_contour, _)| *on_contour);
@@ -770,7 +938,9 @@ fn emit_loop_rich(
         }
 
         // Lead off the contour at depth — **flat**. Only the lead-in descends.
-        crate::leads::emit_lead(prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.feed, lead);
+        crate::leads::emit_lead(
+            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.feed, lead,
+        );
 
         // Lift only when the next pass has somewhere else to start from; the final
         // retract is unconditional (the operation must leave the tool clear).
@@ -1322,7 +1492,6 @@ pub(crate) fn contour_ramp(
     Some((path, in_material, ramp_top + rise))
 }
 
-
 /// The first `len` mm of an **open** path, from `path[0]` forward, truncated at the
 /// path's end. Unlike [`approach_along_loop`] there is nothing to wrap around, so a
 /// path shorter than `len` yields all of it — the ramp then descends over what
@@ -1640,7 +1809,13 @@ mod tests {
         assert!(
             (contour_ramp_len(Plunge::Ramp { angle_deg: 45.0 }, 5.0).unwrap() - 5.0).abs() < 1e-9
         );
-        let shallow = contour_ramp_len(Plunge::Ramp { angle_deg: 26.565_051_2 }, 5.0).unwrap();
+        let shallow = contour_ramp_len(
+            Plunge::Ramp {
+                angle_deg: 26.565_051_2,
+            },
+            5.0,
+        )
+        .unwrap();
         assert!((shallow - 10.0).abs() < 1e-6, "got {shallow}");
         // Not a ramp, a degenerate angle, or no descent to make: the plain plunge.
         assert!(contour_ramp_len(Plunge::Straight, 5.0).is_none());
@@ -1844,6 +2019,8 @@ mod tests {
 
     fn inner_op(hole: f64, lead_r: f64, start: Option<[f64; 2]>) -> ProfileOp {
         ProfileOp {
+            closed: true,
+            additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
             work_offset: 1,
@@ -1969,10 +2146,15 @@ mod tests {
     /// the stock frames, with a stepover and (optionally) an engagement cap.
     fn outside_rough_op(engagement: f64) -> ProfileOp {
         ProfileOp {
+            closed: true,
+            additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
             work_offset: 1,
-            clearing: cam_model::Clearing { engagement, climb: true },
+            clearing: cam_model::Clearing {
+                engagement,
+                climb: true,
+            },
             id: 0,
             tool: 1,
             // A 20×20 part; the stock is a 60×60 block, so the frame around it is the
@@ -2322,6 +2504,73 @@ mod tests {
         ProfileStrategy::new(op).compute(&env, &crate::CancelToken::new())
     }
 
+    #[test]
+    fn open_profiles_offset_both_sides_without_a_closing_cut_and_retract_between_passes() {
+        for (side, expected_y) in [(Side::Outside, 13.), (Side::Inside, 7.), (Side::On, 10.)] {
+            let mut op = outside_rough_op(0.);
+            op.closed = false;
+            op.chain = Contour::new(vec![Point::new(10., 10.), Point::new(30., 10.)]);
+            op.side = side;
+            op.stepover = 0.;
+            op.depth = 2.;
+            op.stepdown = 1.;
+            op.lead_in = Lead::None;
+            op.lead_out = Lead::None;
+            let result = run_outside_rough(op);
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let cuts: Vec<_> = result
+                .program
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(cuts.len(), 2, "one segment per pass, with no return cut");
+            assert!(cuts.iter().all(|p| (p.y - expected_y).abs() < 1e-9));
+            assert_eq!(cuts.last().unwrap().z, -2.);
+            let retracts: Vec<_> = result
+                .program
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Rapid { to, tag } if tag.kind == MoveKind::Retract => Some(*to),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(retracts.len(), 2);
+            assert!(retracts
+                .iter()
+                .all(|p| p.z == 5. && (p.y - expected_y).abs() < 1e-9));
+            assert_eq!(retracts[0].x, cuts[0].x);
+        }
+    }
+
+    #[test]
+    fn multiple_profile_contours_cut_all_chains_and_discard_partial_motion_on_error() {
+        let mut op = outside_rough_op(0.);
+        op.stepover = 0.;
+        op.depth = 2.;
+        op.additional_chains.push(cam_model::ProfileContour {
+            chain: Contour::new(vec![
+                Point::new(20., 20.),
+                Point::new(40., 20.),
+                Point::new(40., 40.),
+                Point::new(20., 40.),
+            ]),
+            closed: true,
+            side: Side::Inside,
+        });
+        let result = run_outside_rough(op.clone());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(result.program.steps.iter().any(|step| matches!(step, Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting && (to.x-23.).abs() < 1e-6)));
+        op.additional_chains[0].chain = Contour::new(vec![]);
+        let result = run_outside_rough(op);
+        assert!(result.has_errors());
+        assert!(result.program.steps.is_empty());
+    }
+
     /// **The ramp never travels through air.** Its height is the *material* it has to
     /// get through — one stepdown — not the drop from the retract plane. Measured
     /// rather than asserted about: the ramp's own length is `dz / tan(angle)`, so a
@@ -2342,13 +2591,26 @@ mod tests {
         let mut cur = 0.0;
         for st in r.program.steps() {
             let (to, ramping, length) = match st {
-                Step::Linear { to, tag, .. } => (*to, tag.kind == MoveKind::Plunge, (to.x - pos.x).hypot(to.y - pos.y)),
+                Step::Linear { to, tag, .. } => (
+                    *to,
+                    tag.kind == MoveKind::Plunge,
+                    (to.x - pos.x).hypot(to.y - pos.y),
+                ),
                 Step::Rapid { to, .. } => (*to, false, 0.),
                 Step::Arc { end, center, dir, tag, .. } => {
                     let start_angle = (pos.y - center.y).atan2(pos.x - center.x);
                     let end_angle = (end.y - center.y).atan2(end.x - center.x);
-                    let sweep = if *dir == ArcDir::Ccw { end_angle - start_angle } else { start_angle - end_angle };
-                    (*end, tag.kind == MoveKind::Plunge, (pos.x - center.x).hypot(pos.y - center.y) * sweep.rem_euclid(std::f64::consts::TAU))
+                    let sweep = if *dir == ArcDir::Ccw {
+                        end_angle - start_angle
+                    } else {
+                        start_angle - end_angle
+                    };
+                    (
+                        *end,
+                        tag.kind == MoveKind::Plunge,
+                        (pos.x - center.x).hypot(pos.y - center.y)
+                            * sweep.rem_euclid(std::f64::consts::TAU),
+                    )
                 }
                 _ => continue,
             };
@@ -2391,13 +2653,9 @@ mod tests {
 
         // The contour's own vertices, to tell "on the wall" from "on the lead".
         let on_contour = |p: Point3| {
-            let pts = [
-                (20.0, 20.0),
-                (40.0, 20.0),
-                (40.0, 40.0),
-                (20.0, 40.0),
-            ];
-            pts.iter().any(|&(x, y)| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6)
+            let pts = [(20.0, 20.0), (40.0, 20.0), (40.0, 40.0), (20.0, 40.0)];
+            pts.iter()
+                .any(|&(x, y)| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6)
         };
         let first_plunge = r
             .program
@@ -2437,7 +2695,14 @@ mod tests {
             })
             .collect();
         let mut prog = Program::new();
-        emit_descending_path(&mut prog, &pts, 0.0, -2.0, 300.0, Tag::new(0, MoveKind::Plunge));
+        emit_descending_path(
+            &mut prog,
+            &pts,
+            0.0,
+            -2.0,
+            300.0,
+            Tag::new(0, MoveKind::Plunge),
+        );
 
         let arcs = prog.steps.iter().filter(|s| matches!(s, Step::Arc { .. })).count();
         assert!(arcs >= 1, "a flattened circle must come back as an arc:\n{:#?}", prog.steps);
@@ -2505,8 +2770,10 @@ mod tests {
             .program
             .steps()
             .iter()
-            .position(|st| matches!(st,
-                Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge))
+            .position(|st| {
+                matches!(st,
+                Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge)
+            })
             .expect("a ramp");
         let before = r.program.steps()[..first_plunge_at]
             .iter()

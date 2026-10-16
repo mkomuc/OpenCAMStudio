@@ -59,7 +59,13 @@ impl App {
         if matches!(op, Operation::Profile(_)) {
             if let Some((profile, source_z)) = self.profile_tab_geometry() {
                 z = source_z;
-                outlines.push((profile.chain.points().to_vec(), true));
+                outlines.push((profile.chain.points().to_vec(), profile.closed));
+                outlines.extend(
+                    profile
+                        .additional_chains
+                        .iter()
+                        .map(|p| (p.chain.points().to_vec(), p.closed)),
+                );
             }
         } else if let Some(binding) = binding.as_ref() {
             if let Ok(geometry) =

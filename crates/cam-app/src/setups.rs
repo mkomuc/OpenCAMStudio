@@ -472,7 +472,7 @@ impl AppController {
 
     fn prepare_operation_settings(
         &self,
-        operation: Operation,
+        mut operation: Operation,
         overrides: Option<cam_model::GeometryOverrides>,
         tools: Vec<Tool>,
         geometry: Option<Vec<EntityRef>>,
@@ -523,11 +523,46 @@ impl AppController {
         let heights = document.setup().heights_for(id);
         if let Some(selected) = &geometry {
             crate::cad_operations::validate_selection(&document.geometry, selected)?;
+            let profile_recipe = if matches!(operation, Operation::Profile(_)) {
+                let geometry = crate::cad_operations::geometry_for_setup(&document)?;
+                let recipe = if let Some(binding) = document
+                    .geometry
+                    .bindings
+                    .get(&id)
+                    .filter(|b| b.selected == *selected)
+                {
+                    binding.recipe.clone()
+                } else {
+                    crate::cad_operations::recipe(OpKind::Profile, &geometry, selected)?
+                };
+                if document
+                    .geometry
+                    .bindings
+                    .get(&id)
+                    .is_some_and(|b| b.selected != *selected)
+                {
+                    let binding =
+                        cam_geometry3d::resolve_selection(&geometry, selected, recipe.clone(), 0.)?;
+                    let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
+                    if let Operation::Profile(profile) = &mut operation {
+                        profile.side = match recipe {
+                            cam_model::ExtractionRecipe::ProfileLoop { side } => side,
+                            _ => input.profiles[0].side,
+                        };
+                    }
+                }
+                Some(recipe)
+            } else {
+                None
+            };
             let binding = document
                 .geometry
                 .bindings
                 .get_mut(&id)
                 .ok_or("Geometry associations are available only for CAD operations")?;
+            if let Some(recipe) = profile_recipe {
+                binding.recipe = recipe;
+            }
             binding.selected = selected.clone();
             binding.status = cam_model::ResolutionStatus::Resolved;
             binding.resolved_fingerprint = None;
@@ -591,17 +626,9 @@ impl AppController {
         id: u32,
         selected: Vec<EntityRef>,
     ) -> Result<cam_model::GeometryBinding, String> {
-        crate::cad_operations::validate_selection(self.geometry_state(), &selected)?;
-        let mut document = self.document().clone();
-        let binding = document
-            .geometry
-            .bindings
-            .get_mut(&id)
-            .ok_or("Operation has explicit geometry")?;
-        binding.selected = selected;
-        binding.status = cam_model::ResolutionStatus::Resolved;
-        binding.resolved_fingerprint = None;
-        crate::cad_operations::validate_binding_edit(&mut document, id)?;
+        let operation = self.operation(id).cloned().ok_or("Operation unavailable")?;
+        let document =
+            self.prepare_operation_settings(operation, None, Vec::new(), Some(selected), None)?;
         Ok(document.geometry.bindings[&id].clone())
     }
 
