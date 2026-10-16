@@ -5,6 +5,7 @@ use cam_toolpath::{CancelToken, JobCompletion};
 
 fn profile(id: u32, depth: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),

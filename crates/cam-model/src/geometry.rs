@@ -596,6 +596,9 @@ pub enum ExtractionRecipe {
     ProfileContours,
     /// Complete setup-Z projection, including through-opening contours.
     ProfileSilhouette,
+    ProfileEntries {
+        entries: Vec<crate::ProfileGeometryEntry>,
+    },
     FaceRegion,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

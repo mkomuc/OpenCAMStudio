@@ -21,16 +21,46 @@
     windows_subsystem = "windows"
 )]
 
+mod cli;
+
+fn main() -> std::process::ExitCode {
+    let args = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error}\n\n{}", cli::USAGE);
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if args.help {
+        println!("{}", cli::USAGE);
+        return std::process::ExitCode::SUCCESS;
+    }
+    match launch(args.setup) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Open CAM Studio: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(feature = "gui")]
-fn main() -> iced::Result {
-    cam_app::gui::run()
+fn launch(setup: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    match setup {
+        Some(path) => cam_app::gui::run_with_setup(&path),
+        None => cam_app::gui::run().map_err(Into::into),
+    }
 }
 
 #[cfg(not(feature = "gui"))]
-fn main() {
+fn launch(setup: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    if setup.is_some() {
+        return Err("--setup requires the desktop app; build with --features gui".into());
+    }
     println!(
         "Open CAM Studio {} — headless build. Launch the desktop app with:\n    \
          cargo run -p cam-app --features gui",
         cam_app::version_string()
     );
+    Ok(())
 }

@@ -142,12 +142,17 @@ impl Strategy for ProfileStrategy {
                 closed: op.closed,
                 side: op.side,
             };
-            for contour in std::iter::once(&primary).chain(&op.additional_chains) {
+            for (index, contour) in std::iter::once(&primary)
+                .chain(&op.additional_chains)
+                .enumerate()
+            {
                 let mut single = op.clone();
                 single.chain = contour.chain.clone();
                 single.closed = contour.closed;
                 single.side = contour.side;
                 single.additional_chains.clear();
+                single.clearing.climb ^= op.contour_reversed(index);
+                single.selections = None;
                 let part = Self::new(single).compute(env, cancel);
                 result.diagnostics.extend(part.diagnostics.clone());
                 if part.has_errors() || part.cancelled {
@@ -158,6 +163,12 @@ impl Strategy for ProfileStrategy {
                 result.program.extend(part.program);
             }
             return result;
+        }
+        if op.contour_reversed(0) {
+            let mut single = op.clone();
+            single.selections = None;
+            single.clearing.climb = !single.clearing.climb;
+            return Self::new(single).compute(env, cancel);
         }
         let mut diagnostics = Vec::new();
 
@@ -2019,6 +2030,7 @@ mod tests {
 
     fn inner_op(hole: f64, lead_r: f64, start: Option<[f64; 2]>) -> ProfileOp {
         ProfileOp {
+            selections: None,
             closed: true,
             additional_chains: Vec::new(),
             tabs: Default::default(),
@@ -2146,6 +2158,7 @@ mod tests {
     /// the stock frames, with a stepover and (optionally) an engagement cap.
     fn outside_rough_op(engagement: f64) -> ProfileOp {
         ProfileOp {
+            selections: None,
             closed: true,
             additional_chains: Vec::new(),
             tabs: Default::default(),
@@ -2246,6 +2259,53 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn named_closed_chain_reverse_changes_cut_direction_independently() {
+        let tools = [Tool {
+            number: 1,
+            diameter: 6.,
+            length: 30.,
+            flutes: 2,
+            kind: ToolKind::EndMill,
+            ..Default::default()
+        }];
+        let env = JobEnv {
+            heights: Heights::new(5., 2., 0.),
+            tools: &tools,
+            stock: None,
+            spindle: SpindleDir::Cw,
+        };
+        for reversed in [false, true] {
+            let mut op = outside_rough_op(0.);
+            op.stepover = 0.;
+            let mut entry = cam_model::ProfileGeometryEntry::new(
+                cam_model::ProfileGeometryKind::Chain,
+                "Rim".into(),
+            );
+            entry.reversed = reversed;
+            entry.contour_count = 1;
+            op.selections = Some(vec![entry]);
+            let climb = op.clearing.climb;
+            let result = ProfileStrategy::new(op).compute(&env, &CancelToken::new());
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let points: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        Some(Point::new(to.x, to.y))
+                    }
+                    Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        Some(Point::new(end.x, end.y))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(is_ccw(&points), !(climb ^ reversed));
         }
     }
 

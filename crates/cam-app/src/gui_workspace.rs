@@ -231,6 +231,7 @@ impl App {
         let height_preview = self.height_preview(viewport.camera(), viewport.browser_overlay_width);
         let viewport_camera = viewport.camera();
         let viewport_browser_width = viewport.browser_overlay_width;
+        let side_overlay = self.profile_side_overlay(viewport_camera, viewport_browser_width);
         let tab_overlay = self
             .profile_tab_overlay(viewport_camera, viewport_browser_width)
             .map(|overlay| {
@@ -262,6 +263,13 @@ impl App {
         if let Some(tabs) = tab_overlay {
             layers = layers.push(
                 canvas::Canvas::new(tabs)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            );
+        }
+        if let Some(sides) = side_overlay {
+            layers = layers.push(
+                canvas::Canvas::new(sides)
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
@@ -525,6 +533,13 @@ impl App {
                     .map(AppController::operation_kind)
             })
         });
+        if self
+            .profile_entry_editor
+            .as_ref()
+            .is_some_and(|e| e.picking)
+        {
+            viewport.cad_operation_kind = Some(OpKind::Profile);
+        }
         if viewport.cad_operation_kind == Some(OpKind::Profile)
             && !self.setup_model_pick
             && !viewport.setup_axis

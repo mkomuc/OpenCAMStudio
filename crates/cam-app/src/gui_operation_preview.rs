@@ -13,6 +13,18 @@ impl App {
     }
 
     pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
+        if self.profile_entry_editor.is_some()
+            || matches!(&self.operation_draft,Some(Operation::Profile(p)) if p.selections.is_some())
+        {
+            return self
+                .preview_profile_entries()
+                .into_iter()
+                .flat_map(|e| match e.source {
+                    cam_model::ProfileGeometrySource::Cad(refs) => refs,
+                    _ => Vec::new(),
+                })
+                .collect();
+        }
         if self.cad_pending_kind.is_some() || self.cad_editing_op.is_some() {
             return self.controller.cad_selection().to_vec();
         }

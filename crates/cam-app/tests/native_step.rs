@@ -900,5 +900,126 @@ fn profile_face_contours_and_silhouette_resolve_real_step_boundaries() {
     let id = app.create_cad_operation(OpKind::Profile, vec![silhouette]).unwrap();
     assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.additional_chains.len() == 4));
     let result = app.run(&CancelToken::new());
-    assert_eq!(result.completion, JobCompletion::Complete, "{:?}", result.diagnostics);
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn named_profile_entries_mix_sources_preserve_settings_and_reopen() {
+    let mut app = new_app();
+    app.import_cad(fixture("pocket-island-holes-mm.step"))
+        .unwrap();
+    select_all_models(&mut app);
+    let state = app.geometry_state();
+    let topology = &state.assets[0].topology;
+    let top = topology
+        .faces
+        .iter()
+        .filter(|face| {
+            matches!(face.surface,
+        CadSurface::Plane { origin, normal } if origin[2].abs() < 1e-6 && normal[2] > 0.99)
+        })
+        .max_by_key(|face| face.loop_ids.len())
+        .unwrap();
+    let face = reference(state, EntityKind::Face, top.id);
+    let outer = topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == top.id && wire.is_outer)
+        .unwrap();
+    let chain = reference(state, EntityKind::Loop, outer.id);
+    let silhouette = reference(state, EntityKind::Silhouette, state.instances[0].body_id);
+    let mut faces =
+        ProfileGeometryEntry::new(ProfileGeometryKind::FaceContours, "Face openings".into());
+    faces.source = ProfileGeometrySource::Cad(vec![face]);
+    faces.curves = ProfileCurves::Inner;
+    faces.side_rule = ProfileSideRule::On;
+    let mut edge = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Reversed rim".into());
+    edge.source = ProfileGeometrySource::Cad(vec![chain]);
+    edge.chain_mode = ProfileChainMode::Closed;
+    edge.reversed = true;
+    edge.side_rule = ProfileSideRule::AlwaysInside;
+    let mut body =
+        ProfileGeometryEntry::new(ProfileGeometryKind::Silhouette, "Body silhouette".into());
+    body.source = ProfileGeometrySource::Cad(vec![silhouette.clone()]);
+    body.curves = ProfileCurves::Outer;
+    body.side_overrides.insert(0, Side::On);
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![silhouette])
+        .unwrap();
+    let mut operation = app.operation(id).unwrap().clone();
+    let Operation::Profile(profile) = &mut operation else {
+        panic!("profile")
+    };
+    profile.selections = Some(vec![faces, edge, body]);
+    app.apply_operation_settings(operation, None).unwrap();
+    let Some(Operation::Profile(profile)) = app.operation(id) else {
+        panic!("profile")
+    };
+    assert_eq!(profile.contours().count(), 7);
+    assert_eq!(
+        profile.contours().map(|p| p.side).collect::<Vec<_>>(),
+        vec![
+            Side::On,
+            Side::On,
+            Side::On,
+            Side::On,
+            Side::On,
+            Side::Inside,
+            Side::On
+        ]
+    );
+    assert!(profile.contour_reversed(5));
+    assert!(!profile.contour_reversed(6));
+    assert_eq!(
+        profile
+            .selections
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| e.contour_count)
+            .collect::<Vec<_>>(),
+        vec![5, 1, 1]
+    );
+    assert!(matches!(
+        app.geometry_state().bindings[&id].recipe,
+        ExtractionRecipe::ProfileEntries { .. }
+    ));
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let path =
+        std::env::temp_dir().join(format!("native-named-profile-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.operation(id), app.operation(id));
+    let result = reopened.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let before = app.document().clone();
+    let mut invalid = app.operation(id).unwrap().clone();
+    let Operation::Profile(profile) = &mut invalid else {
+        panic!("profile")
+    };
+    profile.selections.as_mut().unwrap()[2].tolerance = 1e-10;
+    assert!(app
+        .apply_operation_settings(invalid, None)
+        .unwrap_err()
+        .contains("finer"));
+    assert_eq!(app.document(), &before);
 }

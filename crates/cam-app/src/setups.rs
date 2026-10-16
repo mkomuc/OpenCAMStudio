@@ -521,6 +521,8 @@ impl AppController {
             }
         }
         let heights = document.setup().heights_for(id);
+        let geometry = geometry
+            .filter(|_| !matches!(&operation,Operation::Profile(p) if p.selections.is_some()));
         if let Some(selected) = &geometry {
             crate::cad_operations::validate_selection(&document.geometry, selected)?;
             let profile_recipe = if matches!(operation, Operation::Profile(_)) {
@@ -545,10 +547,36 @@ impl AppController {
                         cam_geometry3d::resolve_selection(&geometry, selected, recipe.clone(), 0.)?;
                     let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
                     if let Operation::Profile(profile) = &mut operation {
-                        profile.side = match recipe {
-                            cam_model::ExtractionRecipe::ProfileLoop { side } => side,
-                            _ => input.profiles[0].side,
-                        };
+                        let previous: Vec<_> = profile.contours().collect();
+                        let mut contours = input.profiles;
+                        if contours.is_empty() {
+                            let side = match recipe {
+                                cam_model::ExtractionRecipe::ProfileLoop { side } => side,
+                                _ => profile.side,
+                            };
+                            contours.push(cam_model::ProfileContour {
+                                chain: input
+                                    .regions
+                                    .first()
+                                    .ok_or("No profile contour")?
+                                    .outer()
+                                    .clone(),
+                                closed: true,
+                                side,
+                            });
+                        }
+                        for contour in &mut contours {
+                            if let Some(edited) = previous.iter().find(|old| {
+                                old.chain == contour.chain && old.closed == contour.closed
+                            }) {
+                                contour.side = edited.side;
+                            }
+                        }
+                        let first = contours.remove(0);
+                        profile.chain = first.chain;
+                        profile.closed = first.closed;
+                        profile.side = first.side;
+                        profile.additional_chains = contours;
                     }
                 }
                 Some(recipe)
@@ -585,6 +613,27 @@ impl AppController {
             binding.resolved_fingerprint = None;
         } else if overrides.is_some() {
             return Err("Height links are available only for CAD operations".into());
+        }
+        if let Operation::Profile(profile) = &mut operation {
+            if profile.selections.is_some() {
+                let previous = document
+                    .geometry
+                    .bindings
+                    .get(&id)
+                    .map(|b| b.overrides.clone());
+                if let Some(mut binding) =
+                    crate::cad_operations::resolve_profile_entries(&document, profile)?
+                {
+                    if let Some(overrides) = previous {
+                        binding.overrides = overrides;
+                    }
+                    document.geometry.bindings.insert(id, binding);
+                    document.cad_linked_operations.insert(id);
+                } else {
+                    document.geometry.bindings.remove(&id);
+                    document.cad_linked_operations.remove(&id);
+                }
+            }
         }
         *document
             .setup_mut()

@@ -50,6 +50,7 @@ fn document() -> Document {
         ..Default::default()
     };
     let outer = ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),
@@ -74,6 +75,7 @@ fn document() -> Document {
         plunge: Plunge::Straight,
     };
     let hole = ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),
@@ -196,6 +198,7 @@ fn tool_too_large_for_hole_reports_error() {
         ..Default::default()
     };
     let op = ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),
@@ -242,6 +245,7 @@ fn cancellation_stops_before_emitting() {
         ..Default::default()
     };
     let op = ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),
@@ -296,6 +300,7 @@ fn lead_overlap_recuts_past_the_start() {
     };
     let overlap = 2.0;
     let op = ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),
@@ -378,6 +383,7 @@ fn offset_leaves_stock_on_the_wall() {
     // out, leaving `offset` mm of stock on the wall for a later finishing pass.
     let run_offset = |offset: f64| {
         let op = ProfileOp {
+            selections: None,
             closed: true,
             additional_chains: Vec::new(),
             tabs: Default::default(),
@@ -447,6 +453,7 @@ fn plunge_count(prog: &Program) -> usize {
 
 fn rough_op(side: Side, chain: Contour, stepover: f64) -> ProfileOp {
     ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),
@@ -725,6 +732,7 @@ fn ascii_backplot(prog: &Program, w: usize, h: usize) -> String {
 #[test]
 fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
     let op = ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),
@@ -865,6 +873,7 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
     let mut operations = vec![Operation::Carve(carve)];
     if let Some(t) = trailing_tool {
         operations.push(Operation::Profile(ProfileOp {
+            selections: None,
             closed: true,
             additional_chains: Vec::new(),
             tabs: Default::default(),

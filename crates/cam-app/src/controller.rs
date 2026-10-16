@@ -1911,6 +1911,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                selections: None,
                 closed,
                 additional_chains: islands
                     .iter()
@@ -2352,6 +2353,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    selections: None,
                     closed: true,
                     additional_chains: Vec::new(),
                     tabs: Default::default(),

@@ -99,24 +99,8 @@ impl App {
         if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
             return None;
         }
-        let (mut operation, binding) = if self.creating_operation() {
-            self.creation_operation().ok()?
-        } else {
-            let Selection::Operation(id) = self.controller.selection() else {
-                return None;
-            };
-            let operation = self
-                .operation_draft
-                .as_ref()
-                .filter(|op| op.id() == id)?
-                .clone();
-            let binding = self
-                .operation_binding_preview
-                .as_ref()
-                .or_else(|| self.controller.geometry_state().bindings.get(&id))
-                .cloned();
-            (operation, binding)
-        };
+        let (op, z) = self.profile_selection_geometry()?;
+        let mut operation = Operation::Profile(op);
         let parsed = self
             .fields
             .iter()
@@ -130,53 +114,8 @@ impl App {
             })
             .collect();
         apply_op_fields(&mut operation, &parsed);
-        let Operation::Profile(mut op) = operation else {
+        let Operation::Profile(op) = operation else {
             return None;
-        };
-        let z = if let Some(binding) = binding {
-            let geometry =
-                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
-            let resolved = cam_geometry3d::resolve_binding(&geometry, &binding).ok()?;
-            if let Some(first) = resolved.profiles.first() {
-                op.chain = first.chain.clone();
-                op.closed = first.closed;
-                op.additional_chains = resolved.profiles.iter().skip(1).cloned().collect();
-            } else {
-                op.chain = resolved.regions.first()?.outer().clone();
-                op.closed = true;
-                op.additional_chains.clear();
-            }
-            let reference = binding.selected.first()?;
-            if reference.kind == EntityKind::Silhouette {
-                // The selected XY silhouette is displayed on the setup XY plane.
-                0.0
-            } else if matches!(reference.kind, EntityKind::Face | EntityKind::Edge) {
-                resolved.heights.top
-            } else {
-                let asset = geometry.asset(reference.asset_id)?;
-                let instance = geometry.instance(reference.instance_id)?;
-                let wire = asset
-                    .topology
-                    .loops
-                    .iter()
-                    .find(|wire| wire.id == reference.id)?;
-                let edge_id = wire.edge_uses.first()?.edge_id;
-                let edge = asset
-                    .topology
-                    .edges
-                    .iter()
-                    .find(|edge| edge.id == edge_id)?;
-                let point = match edge.curve {
-                    cam_model::CadCurve::Line { start, .. } => start,
-                    cam_model::CadCurve::CircleArc { center, .. } => center,
-                    cam_model::CadCurve::Unsupported { .. } => return None,
-                };
-                instance.placement.transform_point(point)[2]
-            }
-        } else {
-            // Selected drawing contours live on setup XY, independently of the
-            // operation's cutting heights and the stock top.
-            0.0
         };
         Some((op, z))
     }

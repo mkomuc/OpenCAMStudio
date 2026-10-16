@@ -87,6 +87,9 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
 
 impl App {
     pub(super) fn geometry_list(&self, labels: Vec<String>) -> Element<'_, Message> {
+        if self.profile_geometry_active() {
+            return self.profile_geometry_collection();
+        }
         let count = labels.len();
         let selected = self
             .geometry_row_selection

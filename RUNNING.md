@@ -44,6 +44,30 @@ The interactive app lives behind the `gui` feature (which also enables
 cargo run -p cam-app --features gui
 ```
 
+### Load a setup on startup
+
+Pass `--setup <path.ocam>` to open a saved setup/project without a file dialog:
+
+```bash
+cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam"
+./target/debug/opencamstudio --setup "/absolute/path/My setup.ocam"
+```
+
+Use `--features gui,occt` for projects requiring native STEP/IGES support.
+Packaged executables accept the same arguments. On macOS, launch the app's
+executable directly for automation:
+
+```bash
+"/Applications/Open CAM Studio.app/Contents/MacOS/opencamstudio" --setup "/absolute/path/My setup.ocam"
+```
+
+Relative paths use the process's current working directory. Loading follows the
+same path as **Home → Open**, including tool reconciliation and toolpath generation.
+Missing, invalid, or incompatible project files print an error to stderr and exit
+with status 1 before a window opens; invalid arguments exit with status 2.
+Run `opencamstudio --help` for usage. The headless build rejects `--setup`;
+startup loading requires the `gui` feature.
+
 ### System libraries (Linux)
 
 On Debian/Ubuntu, install these once. On other distros use the equivalents; on

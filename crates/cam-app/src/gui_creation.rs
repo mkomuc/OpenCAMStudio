@@ -67,6 +67,9 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.profile_contour_selection = 0;
+        self.profile_side_overrides.clear();
+        self.profile_entry_editor = None;
         self.operation_tab = OperationTab::Tool;
         self.creation_edited_fields.clear();
         self.inspector_active = true;
@@ -118,6 +121,15 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
+        if let Operation::Profile(profile) = &mut draft {
+            if profile.selections.is_some() {
+                let binding = crate::cad_operations::resolve_profile_entries(
+                    self.controller.document(),
+                    profile,
+                )?;
+                return Ok((draft, binding));
+            }
+        }
         if let Some(kind) = self.cad_pending_kind {
             let mut document = self.controller.document().clone();
             document
@@ -140,6 +152,7 @@ impl App {
                     op.additional_chains = new.additional_chains;
                     op.side = new.side;
                     op.comp = new.comp;
+                    self.apply_profile_side_overrides(op);
                 }
                 (Operation::Pocket(op), Operation::Pocket(new)) => {
                     op.boundary = new.boundary;
@@ -162,6 +175,9 @@ impl App {
                 &draft,
                 &self.controller.pending_operation_geometry(),
             )?;
+            if let Operation::Profile(profile) = &mut operation {
+                self.apply_profile_side_overrides(profile);
+            }
             if self.creation_edited_fields.contains(&Field::MajorDia) {
                 if let (Operation::Thread(op), Operation::Thread(edited)) = (&mut operation, &draft)
                 {

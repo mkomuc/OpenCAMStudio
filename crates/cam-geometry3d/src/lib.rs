@@ -2,9 +2,11 @@
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
 mod profile_contours;
+mod profile_entries;
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
 pub use profile_contours::coplanar_faces as coplanar_profile_faces;
+pub use profile_entries::profile_entry_contours;
 use std::{collections::BTreeSet, f64::consts::TAU};
 
 /// Recognition and machining budgets are independent of display tessellation.
@@ -82,6 +84,9 @@ pub fn resolve_binding(
     state: &GeometryState,
     binding: &GeometryBinding,
 ) -> Result<ResolvedInput, String> {
+    if let ExtractionRecipe::ProfileEntries { entries } = &binding.recipe {
+        return profile_entries::resolve(state, binding, entries);
+    }
     // Cached contour or status is never sufficient: validate every entity revision.
     let (regions, holes, base) = derive(state, binding, binding.heights.top)?;
     let heights = CuttingHeights {
@@ -794,6 +799,15 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+    if let ExtractionRecipe::ProfileEntries { entries } = &binding.recipe {
+        let (profiles, heights) = profile_entries::extract(state, entries, stock_top)?;
+        let regions = profiles
+            .into_iter()
+            .filter(|p| p.closed)
+            .map(|p| Polygon::new(p.chain).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok((regions, vec![], heights));
+    }
     if binding.recipe == ExtractionRecipe::ProfileContours {
         let (profiles, heights) = profile_contours::extract(state, &binding.selected)?;
         let regions = profiles
@@ -1046,7 +1060,9 @@ fn derive(
             Ok((vec![region], vec![], heights))
         }
         ExtractionRecipe::DrillHoles => derive_holes(&view, refs),
-        ExtractionRecipe::ProfileContours => unreachable!(),
+        ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileEntries { .. } => {
+            unreachable!()
+        }
         ExtractionRecipe::ProfileSilhouette => Err("Select one body for its silhouette".into()),
     }
 }

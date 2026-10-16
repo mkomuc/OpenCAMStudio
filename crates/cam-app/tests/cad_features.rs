@@ -371,6 +371,56 @@ fn face_profile_and_open_chain_replace_each_other_transactionally_and_survive_re
 }
 
 #[test]
+fn cad_face_contours_preserve_independent_sides_through_resolution_save_and_undo() {
+    let mut fixture = Fixture::new();
+    let rings = |z| vec![square(0., 20., 0., 20., z), square(8., 12., 8., 12., z)];
+    let top = fixture.face(rings(0.), [0., 0., 1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    fixture.walls(8., 12., 8., 12., -5., 0.);
+    fixture.face(rings(-5.), [0., 0., -1.]);
+    let state = fixture.state();
+    let mut app = controller();
+    app.edit_tool(0, |tool| tool.flute_length = 10.);
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![reference(top, EntityKind::Face)])
+        .unwrap();
+    let before = app.document().clone();
+    let mut operation = app.operation(id).unwrap().clone();
+    let Operation::Profile(profile) = &mut operation else {
+        unreachable!()
+    };
+    assert_eq!(profile.additional_chains.len(), 1);
+    profile.side = Side::Inside;
+    profile.additional_chains[0].side = Side::On;
+    app.apply_operation_settings(operation, None).unwrap();
+    assert!(
+        matches!(app.operation(id),Some(Operation::Profile(p)) if p.side==Side::Inside && p.additional_chains[0].side==Side::On)
+    );
+    let outcome = app.run(&CancelToken::new());
+    assert_eq!(
+        outcome.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        outcome.diagnostics
+    );
+    let path = std::env::temp_dir().join(format!("cad-contour-sides-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = controller();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.operation(id), app.operation(id));
+    assert_eq!(
+        reopened.run(&CancelToken::new()).completion,
+        JobCompletion::Complete
+    );
+    assert!(app.undo());
+    assert_eq!(app.document(), &before);
+}
+
+#[test]
 fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
     let (state, selected) = blind_bore_with_unrelated_surface();
     let mut app = controller();

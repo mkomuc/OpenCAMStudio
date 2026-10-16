@@ -235,6 +235,8 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         // v20 adds closed=true and empty additional profile chains by default.
         // Existing silhouette recipes retain their envelope-only behavior.
         19 => Ok(()),
+        // Existing profiles retain their original source collections.
+        20 => Ok(()),
         _ => Err(MigrationError::MissingStep { from }),
     }
 }

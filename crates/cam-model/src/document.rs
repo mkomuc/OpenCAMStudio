@@ -76,7 +76,8 @@ use crate::Tool;
 /// v18: reference-plus-offset definitions for all five operation heights.
 /// v19: setup model lists are explicit; an empty list selects no solid bodies.
 /// v20: profiles support open chains, multiple contours, and complete silhouettes.
-pub const SCHEMA_VERSION: u32 = 20;
+/// v21: named profile geometry entries with independent extraction settings.
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// Operation safety planes (also used as legacy setup defaults), all
 /// **absolute Z in millimetres**. By
@@ -344,6 +345,9 @@ fn profile_closed_default() -> bool {
 /// A profile operation may contain several independently retracted contours.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    /// None preserves legacy selections; Some(empty) is an explicitly empty collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selections: Option<Vec<crate::ProfileGeometryEntry>>,
     #[serde(default = "profile_closed_default")]
     pub closed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -412,6 +416,49 @@ pub struct ProfileOp {
     /// keeps plain concentric roughing.
     #[serde(default)]
     pub clearing: Clearing,
+}
+
+impl ProfileOp {
+    /// Contours in the same stable order used by selection markers and machining.
+    pub fn contours(&self) -> impl Iterator<Item = ProfileContour> + '_ {
+        std::iter::once(ProfileContour {
+            chain: self.chain.clone(),
+            closed: self.closed,
+            side: self.side,
+        })
+        .chain(self.additional_chains.iter().cloned())
+    }
+
+    pub fn contour_reversed(&self, index: usize) -> bool {
+        let mut offset = 0;
+        for entry in self.selections.iter().flatten() {
+            if index < offset + entry.contour_count {
+                return entry.kind == crate::ProfileGeometryKind::Chain
+                    && entry.reversed
+                    && if index == 0 {
+                        self.closed
+                    } else {
+                        self.additional_chains
+                            .get(index - 1)
+                            .is_some_and(|c| c.closed)
+                    };
+            }
+            offset += entry.contour_count;
+        }
+        false
+    }
+
+    pub fn set_contour_side(&mut self, index: usize, side: Side) -> bool {
+        if index == 0 {
+            self.side = side;
+            true
+        } else if let Some(contour) = self.additional_chains.get_mut(index - 1) {
+            contour.side = side;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// A drilling operation: a set of holes taken to a depth, optionally pecked and
@@ -1548,6 +1595,7 @@ mod tests {
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            selections: None,
             closed: true,
             additional_chains: Vec::new(),
             tabs: Default::default(),

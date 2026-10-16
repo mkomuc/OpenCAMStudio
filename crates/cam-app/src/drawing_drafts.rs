@@ -46,7 +46,13 @@ impl AppController {
             (Operation::Profile(op), Operation::Profile(new)) => {
                 op.chain = new.chain;
                 op.closed = new.closed;
+                let old = op.additional_chains.clone();
                 op.additional_chains = new.additional_chains;
+                for contour in &mut op.additional_chains {
+                    if let Some(previous) = old.iter().find(|p| p.chain == contour.chain && p.closed == contour.closed) {
+                        contour.side = previous.side;
+                    }
+                }
             }
             (Operation::Pocket(op), Operation::Pocket(new)) => {
                 op.boundary = new.boundary;

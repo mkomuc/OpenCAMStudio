@@ -20,6 +20,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        selections: None,
         closed: true,
         additional_chains: Vec::new(),
         tabs: Default::default(),

@@ -474,14 +474,6 @@ impl App {
         match op {
             Operation::Profile(p) => {
                 if tab == OperationTab::Geometry {
-                    list = list.push(profile_picker(
-                        if p.closed { "Side" } else { "Side (Outside = left)" },
-                        if p.closed { help::SIDE } else { "For an open chain, Outside offsets left and Inside offsets right of its selected direction. On follows the chain with the tool centre." },
-                        self.tooltips,
-                        p.side,
-                        &Side::ALL[..],
-                        Message::SideChanged,
-                    ));
                     if linked.is_none() {
                         let comp = if p.comp == Comp::Computed {
                             p.comp
@@ -918,9 +910,11 @@ impl App {
                 })
                 .style(inspector_primary)
                 .on_press_maybe(if creating {
-                    self.creation_ready().then_some(Message::ConfirmOp)
+                    (self.profile_entry_editor.is_none() && self.creation_ready())
+                        .then_some(Message::ConfirmOp)
                 } else {
-                    (!self.any_field_invalid()
+                    (self.profile_entry_editor.is_none()
+                        && !self.any_field_invalid()
                         && self.operation_height_overrides_valid()
                         && self.inspector_dirty())
                     .then_some(Message::Apply)

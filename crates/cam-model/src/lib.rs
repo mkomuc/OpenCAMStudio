@@ -14,6 +14,8 @@
 //! design rule (see `ARCHITECTURE.md`).
 
 mod document;
+mod profile_selection;
+pub use profile_selection::*;
 mod operation_heights;
 pub use operation_heights::*;
 mod geometry;

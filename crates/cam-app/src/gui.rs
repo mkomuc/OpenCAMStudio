@@ -78,6 +78,10 @@ mod operation_preview;
 mod picking_view;
 #[path = "gui_profile_tabs.rs"]
 mod profile_tabs;
+#[path = "gui_profile_sides.rs"]
+mod profile_sides;
+#[path = "gui_profile_entries.rs"]
+mod profile_entries_view;
 #[path = "gui_wcs.rs"]
 mod wcs_view;
 use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
@@ -362,7 +366,21 @@ const SAMPLE_DXF: &str = "\
 
 /// Launch the desktop application.
 pub fn run() -> iced::Result {
-    iced::application(App::new, App::update, App::view)
+    run_app(App::new)
+}
+
+/// Open a saved setup/project before launching the desktop application.
+/// Load errors are returned before creating a window so automation can detect them.
+pub fn run_with_setup(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let initial = App::new_with_setup(path)
+        .map_err(|error| format!("Could not load setup {}: {error}", path.display()))?;
+    let initial = std::cell::RefCell::new(Some(initial));
+    run_app(move || initial.borrow_mut().take().expect("application boots once"))?;
+    Ok(())
+}
+
+fn run_app(boot: impl iced::application::BootFn<App, Message> + 'static) -> iced::Result {
+    iced::application(boot, App::update, App::view)
         .title("Open CAM Studio")
         .theme(theme)
         .subscription(App::subscription)
@@ -1825,6 +1843,9 @@ struct App {
     geometry_additive: bool,
     profile_tab_picking: bool,
     profile_tab_selection: Option<usize>,
+    profile_contour_selection: usize,
+    profile_side_overrides: Vec<cam_model::ProfileContour>,
+    profile_entry_editor: Option<profile_entries_view::EntryEditor>,
     operation_binding_preview: Option<cam_model::GeometryBinding>,
     drawing_editing_op: Option<u32>,
     operation_tab: OperationTab,
@@ -2417,6 +2438,8 @@ enum Message {
     ConfirmOp,
     /// Change the selected profile's cut side.
     SideChanged(Side),
+    ProfileContourSideCycle(usize),
+    ProfileEntry(profile_entries_view::EntryMessage),
     /// Change the selected thread between internal (bore) and external (boss).
     ThreadInternalChanged(bool),
     /// Change the selected thread's hand.
@@ -2782,6 +2805,9 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.profile_contour_selection = 0;
+        self.profile_side_overrides.clear();
+        self.profile_entry_editor = None;
         self.profile_tab_picking = false;
         self.profile_tab_selection = None;
         self.model_view = None;
@@ -3008,6 +3034,12 @@ impl App {
         }
     }
 
+    fn new_with_setup(path: &Path) -> Result<(Self, iced::Task<Message>), crate::ProjectError> {
+        let (mut app, task) = Self::new();
+        app.open_project(path)?;
+        Ok((app, task))
+    }
+
     fn new() -> (Self, iced::Task<Message>) {
         // Destructured rather than discarded: a library that failed to load is the one
         // thing at startup the operator must be *told* about, or they meet the stock
@@ -3047,6 +3079,9 @@ impl App {
             geometry_additive: false,
             profile_tab_picking: false,
             profile_tab_selection: None,
+            profile_contour_selection: 0,
+            profile_side_overrides: Vec::new(),
+            profile_entry_editor: None,
             operation_binding_preview: None,
             drawing_editing_op: None,
             operation_tab: OperationTab::default(),
@@ -3189,6 +3224,11 @@ impl App {
     }
 
     fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        if self.profile_entry_editor.is_some() && matches!(message,Message::Apply|Message::ConfirmOp) {
+            self.status="Finish or cancel the geometry entry settings first.".into();
+            return iced::Task::none();
+        }
+        if matches!(message,Message::CancelOp|Message::CancelOperationDraft|Message::NewProject) { self.profile_entry_editor=None; }
         if self.notice.is_some() {
             if matches!(&message, Message::CadEscape | Message::Apply) {
                 return self.update(Message::NoticeDismissed);
@@ -4204,25 +4244,9 @@ impl App {
                 );
             }
             Message::ProjectToOpen(Some(path)) => {
-                self.status = match self.controller.open_project(&path) {
-                    Ok(()) => {
-                        self.reset_model_browser();
-                        self.planar_selection.clear();
-                        // Reconcile the project's tool numbers against the shop library
-                        // (TOOLING_PLAN §6): matched tools adopt the shop's numbering.
-                        let report = self.controller.reconcile_tools(&self.library.tools);
-                        self.focus_ops.clear();
-                        self.controller.select(Selection::Setup);
-                        self.end_setup_draft();
-                        self.refresh_fields();
-                        self.rerun();
-                        match report.summary() {
-                            Some(s) => format!("Opened {}. Tools: {s}.", path.display()),
-                            None => format!("Opened {}.", path.display()),
-                        }
-                    }
-                    Err(e) => format!("Open failed: {e}"),
-                };
+                if let Err(error) = self.open_project(&path) {
+                    self.status = format!("Open failed: {error}");
+                }
             }
             Message::SaveProject => match self.controller.current_path().map(PathBuf::from) {
                 Some(path) => self.save_to(&path),
@@ -4386,6 +4410,10 @@ impl App {
             }
             Message::CadHover(entity) => self.cad_hover = entity,
             Message::CadPicked(candidates) => {
+                if self.profile_entry_editor.as_ref().is_some_and(|e|e.picking) {
+                    if let Some(candidate)=candidates.first(){self.profile_entry_cad_pick(candidate.entity.clone());}
+                    return iced::Task::none();
+                }
                 if self.setup_model_pick {
                     if let Some(candidate) = candidates.first() {
                         return self.update(Message::SetupModelToggled(
@@ -4429,6 +4457,7 @@ impl App {
                     self.cad_candidates = candidates;
                 }
             }
+            Message::ProfileEntry(message) => self.profile_entry_message(message),
             Message::ProfileSelectionModeChanged(mode) => {
                 if self.profile_selection_mode != mode {
                     let _ = self.pick_operation_geometry();
@@ -4521,36 +4550,18 @@ impl App {
                 }
                 if let Some(id) = self.cad_editing_op {
                     let selected = self.controller.cad_selection().to_vec();
+                    let profile_geometry = self.profile_selection_geometry().map(|p| p.0);
                     match self.preview_geometry_draft(id, selected.clone()) {
                         Ok(binding) => {
-                            if let Ok(geometry) = crate::cad_operations::geometry_for_setup(
-                                self.controller.document(),
-                            ) {
-                                if let Ok(input) =
-                                    cam_geometry3d::resolve_binding(&geometry, &binding)
-                                {
-                                    if let Some(Operation::Profile(profile)) =
-                                        &mut self.operation_draft
-                                    {
-                                        if let Some(first) = input.profiles.first() {
-                                            profile.chain = first.chain.clone();
-                                            profile.closed = first.closed;
-                                            profile.side = first.side;
-                                            profile.additional_chains =
-                                                input.profiles.iter().skip(1).cloned().collect();
-                                        } else if let Some(region) = input.regions.first() {
-                                            profile.chain = region.outer().clone();
-                                            profile.closed = true;
-                                            profile.additional_chains.clear();
-                                            if let cam_model::ExtractionRecipe::ProfileLoop {
-                                                side,
-                                            } = binding.recipe
-                                            {
-                                                profile.side = side;
-                                            }
-                                        }
+                            if let Some(profile) = profile_geometry {
+                                self.edit_operation_draft(|operation| {
+                                    if let Operation::Profile(draft) = operation {
+                                        draft.chain = profile.chain;
+                                        draft.closed = profile.closed;
+                                        draft.side = profile.side;
+                                        draft.additional_chains = profile.additional_chains;
                                     }
-                                }
+                                });
                             }
                             self.operation_binding_preview = Some(binding);
                             self.operation_geometry = Some(selected);
@@ -4964,6 +4975,7 @@ impl App {
                 }
             }
             Message::PickWorld(w, aperture) => {
+                if self.profile_entry_drawing_pick(w,aperture){return iced::Task::none();}
                 if let Some(plane) = self.height_reference_pick {
                     if let Some((reference, _)) = self
                         .controller
@@ -5643,14 +5655,20 @@ impl App {
                 self.refresh_operation_fields();
             }
             Message::SideChanged(side) => {
-                self.edit_operation_draft(|op| match op {
-                    Operation::Profile(p) => p.side = side,
-                    Operation::Chamfer(c) => c.side = side,
-                    _ => {}
-                });
-                // The visible field set can change with this choice, so reseed the
-                // buffers -- a newly revealed field would otherwise render blank.
-                self.refresh_operation_fields();
+                if self.profile_geometry_active() {
+                    self.set_profile_contour_side(self.profile_contour_selection, side);
+                } else {
+                    self.edit_operation_draft(|op| { if let Operation::Chamfer(c) = op { c.side = side; } });
+                    self.refresh_operation_fields();
+                }
+            }
+            Message::ProfileContourSideCycle(index) => {
+                if let Some((profile, _)) = self.profile_selection_geometry() {
+                    if let Some(contour) = profile.contours().nth(index) {
+                        let next = match contour.side { Side::Outside => Side::Inside, Side::Inside => Side::On, Side::On => Side::Outside };
+                        self.set_profile_contour_side(index, next);
+                    }
+                }
             }
             Message::ThreadInternalChanged(internal) => {
                 self.edit_operation_draft(|op| {
@@ -7381,6 +7399,25 @@ impl App {
         self.rerun();
     }
 
+    /// Shared by startup loading and the native Open dialog.
+    fn open_project(&mut self, path: &Path) -> Result<(), crate::ProjectError> {
+        self.controller.open_project(path)?;
+        self.reset_model_browser();
+        self.planar_selection.clear();
+        // Matched project tools adopt the shop library's numbering.
+        let report = self.controller.reconcile_tools(&self.library.tools);
+        self.focus_ops.clear();
+        self.controller.select(Selection::Setup);
+        self.end_setup_draft();
+        self.refresh_fields();
+        self.rerun();
+        self.status = match report.summary() {
+            Some(summary) => format!("Opened {}. Tools: {summary}.", path.display()),
+            None => format!("Opened {}.", path.display()),
+        };
+        Ok(())
+    }
+
     /// Save the project to `path` and report the result.
     fn save_to(&mut self, path: &Path) {
         self.status = match self.controller.save_project(path) {
@@ -8403,6 +8440,7 @@ impl App {
     }
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
+        if self.profile_entry_cad_pick(entity.clone()){return;}
         if self.cad_editing_op.is_none()
             && self.cad_pending_kind.is_none()
             && (self.setup_draft_dirty()
@@ -11559,6 +11597,48 @@ impl canvas::Program<Message> for ToolCanvas {
         }
 
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_loads_saved_geometry_setups_and_editor_state() {
+        let path = std::env::temp_dir()
+            .join(format!("startup setup with spaces-{}.ocam", std::process::id()));
+        let mut source = AppController::new(crate::default_machine());
+        source.open_dxf(SAMPLE_DXF, "startup sample.dxf").unwrap();
+        source.edit_setup(|setup| setup.name = "Top".into());
+        source.add_setup();
+        source.edit_setup(|setup| setup.name = "Bottom".into());
+        source.save_project(&path).unwrap();
+
+        let (app, _) = App::new_with_setup(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(app.controller.current_path(), Some(path.as_path()));
+        assert_eq!(app.controller.setups().len(), 2);
+        assert_eq!(app.controller.setups()[0].name, "Top");
+        assert_eq!(app.controller.setups()[1].name, "Bottom");
+        assert_eq!(app.controller.regions().len(), source.regions().len());
+        assert!(app.controller.has_geometry());
+        assert_eq!(app.controller.selection(), Selection::Setup);
+        assert!(app.setup_draft.is_none());
+        assert!(app.status.starts_with("Opened "));
+    }
+
+    #[test]
+    fn startup_returns_load_errors_before_opening_a_window() {
+        let path = std::env::temp_dir()
+            .join(format!("invalid-startup-{}.ocam", std::process::id()));
+        std::fs::write(&path, "not a project").unwrap();
+        let invalid = run_with_setup(&path).unwrap_err().to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(invalid.contains("project format error"), "{invalid}");
+        assert!(invalid.contains(&path.display().to_string()), "{invalid}");
+        let missing = run_with_setup(&path).unwrap_err().to_string();
+        assert!(missing.contains("file error"), "{missing}");
     }
 }
 

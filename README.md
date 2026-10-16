@@ -126,10 +126,19 @@ source in one command — see below.
 cargo build --workspace                # headless: geometry, toolpaths, posts, sim
 cargo test  --workspace                # the full test suite
 cargo run -p cam-app --features gui,occt    # the desktop GUI - occt for 3d STEP/IGES support
+cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam" # open setup directly
 ```
 
 Stable Rust, pinned in `rust-toolchain.toml`. GUI prerequisites and platform
 notes: [RUNNING.md](RUNNING.md).
+
+Load a saved setup/project at startup (useful for automated GUI tests):
+
+```bash
+cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam"
+```
+
+Packaged builds accept the same `--setup <path.ocam>` option.
 
 ## Acknowledgements
 

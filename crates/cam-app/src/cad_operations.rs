@@ -287,6 +287,54 @@ pub(crate) fn validate_selection(
     Ok(())
 }
 
+/// Rebuild the machining cache from independently configured profile entries.
+pub(crate) fn resolve_profile_entries(
+    document: &Document,
+    profile: &mut ProfileOp,
+) -> Result<Option<GeometryBinding>, String> {
+    let geometry = geometry_for_setup(document)?;
+    let entries = profile
+        .selections
+        .as_mut()
+        .ok_or("Profile entries are unavailable")?;
+    for entry in entries.iter_mut() {
+        entry.contour_count = cam_geometry3d::profile_entry_contours(&geometry, entry)?
+            .0
+            .len();
+    }
+    let mut selected = Vec::new();
+    for entry in entries.iter() {
+        if let ProfileGeometrySource::Cad(refs) = &entry.source {
+            for reference in refs {
+                if !selected.contains(reference) {
+                    selected.push(reference.clone());
+                }
+            }
+        }
+    }
+    let binding = cam_geometry3d::resolve_selection(
+        &geometry,
+        &selected,
+        ExtractionRecipe::ProfileEntries {
+            entries: entries.clone(),
+        },
+        stock_top(document),
+    )?;
+    let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
+    let mut contours = input.profiles;
+    let first = contours.remove(0);
+    profile.chain = first.chain;
+    profile.closed = first.closed;
+    profile.side = first.side;
+    profile.additional_chains = contours;
+    if selected.is_empty() {
+        Ok(None)
+    } else {
+        profile.depth = input.heights.depth();
+        Ok(Some(binding))
+    }
+}
+
 pub(crate) fn create_operation(
     document: &Document,
     kind: OpKind,
@@ -337,6 +385,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            selections: None,
             closed: resolved.profiles.first().map_or(true, |p| p.closed),
             additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
             tabs: Default::default(),
@@ -465,8 +514,10 @@ pub(crate) fn resolve_document_checked(
             if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
                 return Err(format!("Operation {id}: Needs reselection — {reason}"));
             }
-            validate_selection(&resolved.geometry, &binding.selected)
-                .map_err(|e| format!("Operation {id}: {e}"))?;
+            if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
+                validate_selection(&resolved.geometry, &binding.selected)
+                    .map_err(|e| format!("Operation {id}: {e}"))?;
+            }
             let mut current_binding = binding.clone();
             if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
                 current_binding.heights.top = stock_top(document);
@@ -481,30 +532,54 @@ pub(crate) fn resolve_document_checked(
                     p.islands = region()?.holes().to_vec();
                     p.depth = depth;
                 }
+                (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {
+                    if p.comp != Comp::Computed || p.offset < 0. || p.stepover > 0. {
+                        return Err("CAD profiles require computed compensation, nonnegative allowance and no radial roughing".into());
+                    }
+                    let mut contours = input.profiles.clone();
+                    let first = contours.remove(0);
+                    p.chain = first.chain;
+                    p.closed = first.closed;
+                    p.side = first.side;
+                    p.additional_chains = contours;
+                    p.selections = Some(entries.clone());
+                    p.depth = depth;
+                }
                 (
                     Operation::Profile(p),
                     ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette,
                 ) => {
                     let first = input.profiles.first().ok_or("No resolved profile chains")?;
-                    if p.side != first.side
-                        || p.comp != Comp::Computed
-                        || p.offset < 0.
-                        || p.stepover > 0.
-                    {
-                        return Err(format!("Operation {id}: profile compensation is outside the certified CAD adapter"));
+                    if p.comp != Comp::Computed || p.offset < 0. || p.stepover > 0. {
+                        return Err(format!("Operation {id}: CAD profiles require computed compensation, nonnegative allowance and no radial roughing"));
                     }
                     p.chain = first.chain.clone();
                     p.closed = first.closed;
-                    p.additional_chains = input.profiles.iter().skip(1).cloned().collect();
+                    let sides: Vec<_> = p
+                        .additional_chains
+                        .iter()
+                        .map(|contour| contour.side)
+                        .collect();
+                    p.additional_chains = input
+                        .profiles
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .enumerate()
+                        .map(|(index, mut contour)| {
+                            if let Some(side) = sides.get(index) {
+                                contour.side = *side;
+                            }
+                            contour
+                        })
+                        .collect();
                     p.depth = depth;
                 }
-                (Operation::Profile(p), ExtractionRecipe::ProfileLoop { side }) => {
-                    if p.side != *side
-                        || p.comp != Comp::Computed
-                        || p.offset < 0.0
-                        || p.stepover > 0.0
-                    {
-                        return Err(format!("Operation {id}: profile side/compensation/roughing is outside the certified CAD adapter"));
+                (Operation::Profile(p), ExtractionRecipe::ProfileLoop { .. }) => {
+                    // The recipe certifies the source geometry and cutting interval.
+                    // Cutter side is an independent, per-contour operation setting.
+                    if p.comp != Comp::Computed || p.offset < 0.0 || p.stepover > 0.0 {
+                        return Err(format!("Operation {id}: CAD profiles require computed compensation, nonnegative allowance and no radial roughing"));
                     }
                     p.chain = region()?.outer().clone();
                     p.closed = true;
