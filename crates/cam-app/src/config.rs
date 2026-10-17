@@ -47,6 +47,10 @@ pub(crate) trait ConfigFile: Serialize + DeserializeOwned + Default {
     /// Force values into range after loading. A config file is hand-editable text; a
     /// nonsense number must not be able to produce an unusable app.
     fn normalise(&mut self) {}
+    /// Reject inconsistent registries without overwriting the original file.
+    fn validate(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// **The value used whenever the file provides none** — missing, unreadable, or
     /// written by a newer build.
     ///
@@ -120,6 +124,9 @@ pub(crate) fn load_from<T: ConfigFile>(path: &Path) -> (T, ConfigLoad) {
     }
     value.migrate(value.stated_version());
     value.normalise();
+    if let Err(error) = value.validate() {
+        return reject(error);
+    }
     (value, ConfigLoad::Loaded)
 }
 
@@ -141,6 +148,9 @@ pub(crate) fn save<T: ConfigFile>(value: &T) {
 
 /// Write `T` to `path`, creating the directory if needed.
 pub(crate) fn save_to<T: ConfigFile>(value: &T, path: &Path) -> std::io::Result<()> {
+    value
+        .validate()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

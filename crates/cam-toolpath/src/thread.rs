@@ -519,6 +519,7 @@ mod tests {
     fn op(internal: bool, hand: Hand, climb: bool) -> ThreadOp {
         ThreadOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,

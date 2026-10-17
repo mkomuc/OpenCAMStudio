@@ -105,6 +105,9 @@ impl OcamFile {
         if let OcamFile::Project(project) = self {
             project.validate().map_err(serde::ser::Error::custom)?;
         }
+        if let OcamFile::Library(library) = self {
+            library.validate().map_err(serde::ser::Error::custom)?;
+        }
         serde_json::to_string_pretty(self)
     }
 
@@ -127,13 +130,15 @@ impl OcamFile {
         let tag = value.get("ocam").and_then(serde_json::Value::as_str);
         match tag {
             Some("library") => {
-                let lib: crate::ToolLibrary = serde_json::from_value(value)?;
+                let mut lib: crate::ToolLibrary = serde_json::from_value(value)?;
                 if lib.library_version > crate::LIBRARY_VERSION {
                     return Err(LoadError::LibraryVersion {
                         found: lib.library_version,
                         supported: crate::LIBRARY_VERSION,
                     });
                 }
+                lib.library_version = crate::LIBRARY_VERSION;
+                lib.validate().map_err(LoadError::Json)?;
                 Ok(OcamFile::Library(lib))
             }
             Some("project") => {
@@ -301,7 +306,13 @@ impl Project {
                     ));
                 }
             }
+            for tool in &setup.tools {
+                tool.validate_presets()?;
+            }
             for operation in &setup.operations {
+                if let Some(preset) = operation.tool_preset() {
+                    preset.validate()?;
+                }
                 if !operation_ids.insert(operation.id()) {
                     return Err(format!(
                         "operation ID {} is used by more than one setup",

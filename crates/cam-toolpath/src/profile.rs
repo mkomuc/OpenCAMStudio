@@ -2035,6 +2035,7 @@ mod tests {
             additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             clearing: cam_model::Clearing::default(),
             id: 0,
@@ -2163,6 +2164,7 @@ mod tests {
             additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             clearing: cam_model::Clearing {
                 engagement,

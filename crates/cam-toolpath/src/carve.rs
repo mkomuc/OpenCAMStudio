@@ -1387,6 +1387,7 @@ mod tests {
     fn op(depth: f64) -> CarveOp {
         CarveOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -1506,8 +1507,8 @@ mod tests {
     fn depth_past_the_cone_flare_is_rejected() {
         // 90° V-bit, ⌀6 (r=3), sharp tip → full ⌀ at depth 3.0.
         let t = vbit(90.0, 0.0);
-        assert!(errors(&run(op(2.9), t)).is_empty());
-        let e = errors(&run(op(3.1), t));
+        assert!(errors(&run(op(2.9), t.clone())).is_empty());
+        let e = errors(&run(op(3.1), t.clone()));
         assert_eq!(e.len(), 1, "{e:?}");
         assert!(e[0].contains("shank rubs"), "{e:?}");
     }
@@ -2589,7 +2590,7 @@ mod tests {
         assert!((shape.full_depth - 10.0).abs() < 2e-3, "{shape:?}");
         assert!((shape.tool_max_depth - 3.0).abs() < 1e-9, "{shape:?}");
         assert_eq!(shape.flat_areas, 1);
-        let i = infos(&run(o, t));
+        let i = infos(&run(o, t.clone()));
         assert!(i[0].contains(&format!("{:.3}", shape.full_depth)), "{i:?}");
 
         // A shape the carve consumes reports no flat areas, live.

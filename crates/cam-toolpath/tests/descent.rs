@@ -211,6 +211,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
         additional_chains: Vec::new(),
         tabs: Default::default(),
         spindle_rpm: 0.0,
+        tool_preset: None,
         work_offset: 1,
         clearing: Clearing::default(),
         id: 0,
@@ -235,6 +236,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
 fn pocket() -> Operation {
     Operation::Pocket(PocketOp {
         spindle_rpm: 0.0,
+        tool_preset: None,
         work_offset: 1,
         id: 1,
         tool: 1,
@@ -260,6 +262,7 @@ fn pocket() -> Operation {
 fn chamfer() -> Operation {
     Operation::Chamfer(ChamferOp {
         spindle_rpm: 0.0,
+        tool_preset: None,
         work_offset: 1,
         id: 2,
         tool: 2,
@@ -295,6 +298,7 @@ fn doc(ops: Vec<Operation>) -> Document {
             id: 0,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
         name: "descent".into(),

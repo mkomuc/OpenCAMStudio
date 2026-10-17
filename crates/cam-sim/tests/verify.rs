@@ -31,6 +31,7 @@ fn profile_square(id: u32, chain: Contour) -> ProfileOp {
         additional_chains: Vec::new(),
         tabs: Default::default(),
         spindle_rpm: 0.0,
+        tool_preset: None,
         work_offset: 1,
         clearing: cam_model::Clearing::default(),
         id,
@@ -57,6 +58,7 @@ fn setup(operations: Vec<Operation>) -> Document {
             id: 0,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
         name: "verify".into(),
@@ -109,6 +111,7 @@ fn run(doc: &Document) -> cam_sim::SimResult {
 fn a_pocket_clears_its_floor_without_collisions() {
     let op = PocketOp {
         spindle_rpm: 0.0,
+        tool_preset: None,
         work_offset: 1,
         id: 0,
         tool: 1,
@@ -178,6 +181,7 @@ fn pocket_target(intended_depth: f64) -> Heightfield {
 fn pocket_op() -> PocketOp {
     PocketOp {
         spindle_rpm: 0.0,
+        tool_preset: None,
         work_offset: 1,
         id: 0,
         tool: 1,
@@ -239,6 +243,7 @@ fn a_bad_setup_that_rapids_low_is_caught() {
             id: 0,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
         name: "unsafe".into(),

@@ -206,6 +206,7 @@ mod tests {
         // retract *per level*, not per ring — and the rings are still all cut.
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -247,6 +248,7 @@ mod tests {
     fn helix_plunge_pocket_enters_on_helical_arcs() {
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -303,6 +305,7 @@ mod tests {
     fn tool_too_large_for_pocket_errors() {
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -356,6 +359,7 @@ mod tests {
         let run = |overlap: f64| {
             let mut op = PocketOp {
                 spindle_rpm: 0.0,
+                tool_preset: None,
                 work_offset: 1,
                 id: 0,
                 tool: 1,
@@ -398,6 +402,7 @@ mod tests {
         let run = |offset: f64| {
             let op = PocketOp {
                 spindle_rpm: 0.0,
+                tool_preset: None,
                 work_offset: 1,
                 id: 0,
                 tool: 1,
@@ -459,6 +464,7 @@ mod tests {
     fn leaded_op(islands: Vec<Contour>) -> PocketOp {
         PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -578,6 +584,7 @@ mod tests {
         // `frontadvance::CERT_ENGAGEMENT_SLACK`.
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -710,6 +717,7 @@ mod tests {
         // multiple rings that put the wall ring on the leaded path in the first place.
         let small = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,

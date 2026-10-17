@@ -137,6 +137,7 @@ mod tests {
     fn op(depth: f64, start_offset: f64) -> DrillOp {
         DrillOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 7,
             tool: 1,

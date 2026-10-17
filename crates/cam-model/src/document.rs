@@ -77,7 +77,8 @@ use crate::Tool;
 /// v19: setup model lists are explicit; an empty list selects no solid bodies.
 /// v20: profiles support open chains, multiple contours, and complete silhouettes.
 /// v21: named profile geometry entries with independent extraction settings.
-pub const SCHEMA_VERSION: u32 = 21;
+/// v22: managed stock material IDs, tool presets and operation preset snapshots.
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// Operation safety planes (also used as legacy setup defaults), all
 /// **absolute Z in millimetres**. By
@@ -387,6 +388,9 @@ pub struct ProfileOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -490,6 +494,9 @@ pub struct DrillOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -646,6 +653,9 @@ pub struct PocketOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -800,6 +810,9 @@ pub struct FaceOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -877,6 +890,9 @@ pub struct ThreadOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -931,6 +947,9 @@ pub struct ChamferOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1001,6 +1020,9 @@ pub struct EngraveOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1082,6 +1104,9 @@ pub struct CarveOp {
     /// Applies to the whole carve, including any clearing pass.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1301,7 +1326,7 @@ impl Operation {
     }
 
     /// Whether two operations describe the **same work** — identical in every
-    /// field *except* their `id` (and so the same kind, tool, geometry, depths,
+    /// field *except* their `id` and preset provenance (same kind, tool, geometry, depths,
     /// feeds, leads…). Two such operations emit byte-identical toolpaths, so if
     /// both reach the post the machine cuts the same path twice. Used to flag
     /// exact duplicates before export.
@@ -1310,7 +1335,10 @@ impl Operation {
         // equality — which automatically covers any field added later.
         let mut probe = self.clone();
         probe.set_id(other.id());
-        &probe == other
+        probe.clear_tool_preset();
+        let mut other = other.clone();
+        other.clear_tool_preset();
+        probe == other
     }
 }
 
@@ -1343,6 +1371,9 @@ pub struct Setup {
     /// Material name for the blank.
     #[serde(default)]
     pub material: String,
+    /// Link to the managed material registry; name remains a portable display snapshot.
+    #[serde(default)]
+    pub material_id: Option<u64>,
     /// Model instance identities included in machining for this setup. Empty selects none.
     #[serde(default)]
     pub model_instances: Vec<u64>,
@@ -1600,6 +1631,7 @@ mod tests {
             additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             clearing: Clearing::default(),
             id,
@@ -1674,6 +1706,7 @@ mod tests {
     fn carve(clear_tool: Option<u32>) -> Operation {
         Operation::Carve(CarveOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 3,
             tool: 4,
@@ -1823,6 +1856,7 @@ mod tests {
         let prof = profile(0);
         let drill = Operation::Drill(DrillOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
             work_offset: 1,
             id: 0,
             tool: 1,

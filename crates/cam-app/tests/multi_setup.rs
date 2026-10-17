@@ -10,6 +10,7 @@ fn profile(id: u32, depth: f64) -> Operation {
         additional_chains: Vec::new(),
         tabs: Default::default(),
         spindle_rpm: 0.0,
+        tool_preset: None,
         work_offset: 1,
         clearing: Clearing::default(),
         id,

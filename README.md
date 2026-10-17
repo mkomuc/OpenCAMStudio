@@ -49,7 +49,9 @@ to export.*
   profile shown in a **live 2D cross-section preview** as you edit; import/export
   `.ocam` libraries; gap-filling / swap / bulk tool numbering. Operations pick a
   tool by **family, then tool**, with the families bounded by what the operation
-  can actually cut.
+  can actually cut. [Material-linked cutting presets](docs/tool-presets.md)
+  automatically seed operations from a shared stock-material list; each operation
+  can select another preset or override its cutting values.
 - **Setup** — workpiece origin (datum) + program start point; part-relative
   stock; first-class clearance/retract heights.
 - **Verify** — heightfield material-removal simulation with gouge and
