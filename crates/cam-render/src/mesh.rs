@@ -45,7 +45,7 @@ pub(crate) fn transparent_indices(
     view_proj: [[f32; 4]; 4],
 ) -> Vec<u32> {
     let mut triangles: Vec<_> = indices
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .map(|triangle| {
             let depth: f32 = triangle
                 .iter()

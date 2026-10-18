@@ -1096,8 +1096,10 @@ mod tests {
                 .resolve_references(&state, refs)
                 .is_err());
         }
-        let mut refs = FrameReferences::default();
-        refs.stock_axes = [Some([1., 0., 0.]), Some([1., 0., 0.]), None];
+        let mut refs = FrameReferences {
+            stock_axes: [Some([1., 0., 0.]), Some([1., 0., 0.]), None],
+            ..Default::default()
+        };
         assert!(SetupFrame::default()
             .resolve_references(&state, refs.clone())
             .is_err());

@@ -94,7 +94,7 @@ mod tests {
             assert_eq!((z_min, z_max), (0., 40.));
             assert!(vertices.iter().any(|v| (v.position[0] - 4.).abs() < 1e-5));
             assert!(vertices.iter().any(|v| v.color != vertices[0].color));
-            for triangle in indices.chunks_exact(3) {
+            for triangle in indices.as_chunks::<3>().0 {
                 let [a, b, c] = std::array::from_fn(|i| vertices[triangle[i] as usize]);
                 let u: [f32; 3] = std::array::from_fn(|i| b.position[i] - a.position[i]);
                 let v: [f32; 3] = std::array::from_fn(|i| c.position[i] - a.position[i]);

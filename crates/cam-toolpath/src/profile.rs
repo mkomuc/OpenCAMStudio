@@ -698,6 +698,8 @@ fn roughing_region(op: &ProfileOp, stock: Option<([f64; 2], [f64; 2])>) -> Optio
 
 /// Emit approach, stepdown passes, and retract for one closed tool-path loop.
 /// When `comp` is set, the cut is bracketed by controller cutter compensation.
+// Keep the emission inputs explicit, matching the other profile emitters.
+#[allow(clippy::too_many_arguments)]
 fn emit_loop(
     prog: &mut Program,
     pts: &[cam_geo::Point],
@@ -776,6 +778,8 @@ fn emit_loop(
 /// to the entry footprint (off the contour when there is a lead-in), rapid down
 /// through the already-cut air to the previous level, enter Z per the plunge
 /// strategy, lead onto the contour, cut the loop, lead off, and retract.
+// Keep the emission inputs explicit, matching the other profile emitters.
+#[allow(clippy::too_many_arguments)]
 fn emit_loop_rich(
     prog: &mut Program,
     pts: &[Point],
