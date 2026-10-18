@@ -69,6 +69,7 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
             id: 0,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
         name: "clearing".into(),
@@ -178,6 +179,8 @@ fn assert_no_rapid_onto_uncut_stock(program: &Program, floor: f64) {
 fn pocket_doc() -> Document {
     let op = PocketOp {
         spindle_rpm: 0.0,
+        tool_preset: None,
+        entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,
         tool: 1,
@@ -209,6 +212,8 @@ fn roughing_doc() -> Document {
         additional_chains: Vec::new(),
         tabs: Default::default(),
         spindle_rpm: 0.0,
+        tool_preset: None,
+        entry_feeds: Default::default(),
         work_offset: 1,
         clearing: Clearing::default(),
         id: 0,
@@ -237,6 +242,8 @@ fn roughing_doc() -> Document {
 fn face_doc(overshoot: f64) -> Document {
     let op = FaceOp {
         spindle_rpm: 0.0,
+        tool_preset: None,
+        entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,
         tool: 1,
@@ -269,6 +276,8 @@ fn carve_doc() -> Document {
     };
     let op = CarveOp {
         spindle_rpm: 0.0,
+        tool_preset: None,
+        entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,
         tool: 1,

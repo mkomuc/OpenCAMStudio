@@ -72,18 +72,21 @@ use geometry_selection::{
 };
 #[path = "gui_creation.rs"]
 mod creation;
+#[path = "gui_tool_presets.rs"]
+mod tool_presets;
+use tool_presets::{MaterialChoice, PresetChoice, PresetField};
 #[path = "gui_grid.rs"]
 mod grid_view;
 #[path = "gui_operation_preview.rs"]
 mod operation_preview;
 #[path = "gui_picking.rs"]
 mod picking_view;
-#[path = "gui_profile_tabs.rs"]
-mod profile_tabs;
-#[path = "gui_profile_sides.rs"]
-mod profile_sides;
 #[path = "gui_profile_entries.rs"]
 mod profile_entries_view;
+#[path = "gui_profile_sides.rs"]
+mod profile_sides;
+#[path = "gui_profile_tabs.rs"]
+mod profile_tabs;
 #[path = "gui_wcs.rs"]
 mod wcs_view;
 use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
@@ -1079,6 +1082,9 @@ enum Field {
     SpindleRpm,
     Feed,
     PlungeFeed,
+    RampFeed,
+    LeadInFeed,
+    LeadOutFeed,
     /// Thread major diameter (mm).
     MajorDia,
     /// Thread pitch (mm).
@@ -1205,6 +1211,9 @@ impl Field {
             Field::SpindleRpm => "Spindle (rpm)",
             Field::Feed => "Feed (mm/min)",
             Field::PlungeFeed => "Plunge feed (mm/min)",
+            Field::RampFeed => "Ramp feed (0=cutting)",
+            Field::LeadInFeed => "Lead-in feed (0=cutting)",
+            Field::LeadOutFeed => "Lead-out feed (0=cutting)",
             Field::MajorDia => "Major ⌀ (mm)",
             Field::Pitch => "Pitch (mm)",
             Field::ThreadTop => "Thread top (mm)",
@@ -1415,6 +1424,9 @@ impl Field {
                  0 falls back to the job default."
             }
             Field::Feed => "Cutting feed rate — how fast the tool advances while cutting (mm/min).",
+            Field::RampFeed => "Ramp, helix and zigzag entry feed in mm/min. Zero inherits the cutting feed.",
+            Field::LeadInFeed => "Lead-in feed in mm/min. Zero inherits the cutting feed. Used when a lead-in is generated.",
+            Field::LeadOutFeed => "Lead-out feed in mm/min. Zero inherits the cutting feed. Used when a lead-out is generated.",
             Field::PlungeFeed => {
                 "Feed rate for downward (Z) entry moves — usually slower than the \
                  cutting feed, since end mills cut poorly straight down (mm/min)."
@@ -1953,6 +1965,9 @@ struct App {
     /// an Apply); the committed library entry is only overwritten on Apply. `None` outside
     /// Tools mode. Dirty ⇔ this differs from the committed entry.
     tool_edit: Option<cam_model::Tool>,
+    library_preset: Option<u64>,
+    preset_values: BTreeMap<PresetField, String>,
+    new_material_name: String,
     /// Which internal tab the Tool Library pane shows (Serial / Family).
     library_view: LibraryView,
     /// The operation whose right-click context menu is open, and where to anchor it
@@ -2337,7 +2352,6 @@ enum Message {
     SetupTabChanged(SetupEditorTab),
     SetupNameChanged(String),
     SetupProgramChanged(String),
-    SetupMaterialChanged(String),
     SetupUseModelFrame(u64),
     SetupUseModelOrigin(u64),
     SetupOriginChanged(usize, String),
@@ -2601,6 +2615,18 @@ enum Message {
     ThreadGradualToggled(bool),
     /// Create a new default tool and select it.
     NewTool,
+    LibraryPresetSelected(u64),
+    AddPreset,
+    DeletePreset,
+    PresetNameChanged(String),
+    PresetMaterialChanged(MaterialChoice),
+    PresetValueChanged(PresetField, String),
+    OperationPresetPicked(PresetChoice),
+    SetupMaterialPicked(MaterialChoice),
+    NewMaterialNameChanged(String),
+    AddMaterial,
+    MaterialRenamed(u64, String),
+    DeleteMaterial(u64),
     /// Delete the selected tool.
     DeleteTool,
     /// Switch the Tool Library pane's internal tab (Serial / Family).
@@ -2856,22 +2882,32 @@ impl App {
     }
 
     fn stage_operation_tool(&mut self, mut tool: cam_model::Tool) -> u32 {
-        if let Some(existing) = self
+        if let Some(number) = self
             .controller
             .document()
             .setup()
             .tools
             .iter()
             .find(|saved| saved.identity() == tool.identity())
+            .map(|t| t.number)
         {
-            return existing.number;
+            tool.number = number;
+            if let Some(staged) = self.operation_tools.iter_mut().find(|t| t.number == number) {
+                *staged = tool;
+            } else {
+                self.operation_tools.push(tool);
+            }
+            return number;
         }
         if let Some(existing) = self
             .operation_tools
-            .iter()
+            .iter_mut()
             .find(|saved| saved.identity() == tool.identity())
         {
-            return existing.number;
+            tool.number = existing.number;
+            let number = tool.number;
+            *existing = tool;
+            return number;
         }
         let number = self
             .controller
@@ -3151,6 +3187,9 @@ impl App {
             machine_post_edit: None,
             lib_sel: 0,
             tool_edit: None,
+            library_preset: None,
+            preset_values: BTreeMap::new(),
+            new_material_name: String::new(),
             library_view: LibraryView::Ordered,
             open_op_menu: None,
             pending_toolpath_export: None,
@@ -3660,7 +3699,7 @@ impl App {
                     return self.update(Message::SetPendingLibraryTool(index));
                 }
                 if let (Some(tool), Selection::Operation(id)) = (
-                    self.library.tools.get(index).copied(),
+                    self.library.tools.get(index).cloned(),
                     self.controller.selection(),
                 ) {
                     let Some(op) = self.current_operation(id) else {
@@ -3674,8 +3713,12 @@ impl App {
                         return iced::Task::none();
                     }
                     let number = self.stage_operation_tool(tool);
-                    self.edit_operation_draft(|op| op.set_tool(number));
+                    self.edit_operation_draft(|op| {
+                        op.set_tool(number);
+                        op.clear_tool_preset();
+                    });
                     self.refresh_operation_fields();
+                    self.auto_operation_preset();
                 }
             }
             Message::EditDrawingGeometry(id) => {
@@ -3802,11 +3845,6 @@ impl App {
             Message::SetupProgramChanged(value) => {
                 if let Some(draft) = &mut self.setup_draft {
                     draft.program_name = value;
-                }
-            }
-            Message::SetupMaterialChanged(value) => {
-                if let Some(draft) = &mut self.setup_draft {
-                    draft.material = value;
                 }
             }
             Message::SetupUseModelFrame(instance) => {
@@ -4972,7 +5010,7 @@ impl App {
                 };
             }
             Message::SetPendingLibraryTool(i) => {
-                if let Some(&tool) = self.library.tools.get(i) {
+                if let Some(tool) = self.library.tools.get(i).cloned() {
                     if let Some(op) = self.operation_draft.as_ref() {
                         if !families_for(AppController::operation_kind(op))
                             .contains(&ToolKindPick::of(tool.kind))
@@ -5771,7 +5809,7 @@ impl App {
                             .find(|t| {
                                 matches!(t.kind, ToolKind::EndMill | ToolKind::BullNose { .. })
                             })
-                            .copied()
+                            .cloned()
                     })
                     .flatten()
                     .map(|t| self.stage_operation_tool(t));
@@ -5797,7 +5835,7 @@ impl App {
                 self.refresh_operation_fields();
             }
             Message::CarveClearToolChanged(index) => {
-                let Some(tool) = self.library.tools.get(index).copied() else {
+                let Some(tool) = self.library.tools.get(index).cloned() else {
                     return iced::Task::none();
                 };
                 let number = self.stage_operation_tool(tool);
@@ -5861,6 +5899,43 @@ impl App {
                 // buffers -- a newly revealed field would otherwise render blank.
                 self.refresh_operation_fields();
             }
+            Message::LibraryPresetSelected(id) => {
+                if !self.preset_edit_invalid() {
+                    self.select_library_preset(Some(id));
+                } else {
+                    self.status = "Correct the current preset before selecting another.".into();
+                }
+            }
+            Message::AddPreset => self.add_library_preset(),
+            Message::DeletePreset => self.delete_library_preset(),
+            Message::PresetNameChanged(name) => {
+                if let Some(preset) = self.library_preset_mut() {
+                    preset.name = name;
+                }
+            }
+            Message::PresetMaterialChanged(material) => {
+                if let Some(preset) = self.library_preset_mut() {
+                    preset.material_id = material.id;
+                }
+            }
+            Message::PresetValueChanged(field, value) => {
+                self.edit_preset_value(field, value);
+            }
+            Message::OperationPresetPicked(choice) => self.pick_operation_preset(choice.id),
+            Message::SetupMaterialPicked(choice) => {
+                if let Some(draft) = &mut self.setup_draft {
+                    draft.material_id = choice.id;
+                    draft.material = if choice.id.is_some() {
+                        choice.name
+                    } else {
+                        String::new()
+                    };
+                }
+            }
+            Message::NewMaterialNameChanged(name) => self.new_material_name = name,
+            Message::AddMaterial => self.add_managed_material(),
+            Message::MaterialRenamed(id, name) => self.rename_managed_material(id, name),
+            Message::DeleteMaterial(id) => self.delete_managed_material(id),
             Message::NewTool => {
                 // Add a tool to the library and select it for editing. Its **type**
                 // seeds from the currently-selected tool (a chamfer mill begets a
@@ -5875,7 +5950,7 @@ impl App {
                 self.lib_sel = self.library.add_of_kind(seed_kind);
                 self.library.save();
                 if self.controller.pending_op().is_some() {
-                    if let Some(&tool) = self.library.tools.get(self.lib_sel) {
+                    if let Some(tool) = self.library.tools.get(self.lib_sel).cloned() {
                         let number = self.controller.use_tool(tool);
                         self.controller.set_pending_tool(number);
                     }
@@ -5906,7 +5981,7 @@ impl App {
                     .tools
                     .iter()
                     .find(|t| t.number == number)
-                    .copied();
+                    .cloned();
                 if let Some(tool) = tool {
                     self.library.add_tool(tool);
                     self.library.save();
@@ -6419,10 +6494,15 @@ impl App {
     /// tab switch, post-Apply), but *not* on an in-place field/picker edit.
     fn reload_tool_edit(&mut self) {
         self.tool_edit = if self.library_mode() {
-            self.library.tools.get(self.lib_sel).copied()
+            self.library.tools.get(self.lib_sel).cloned()
         } else {
             None
         };
+        self.select_library_preset(
+            self.tool_edit
+                .as_ref()
+                .and_then(|t| t.presets.first().map(|p| p.id)),
+        );
         self.refresh_fields();
     }
 
@@ -6541,6 +6621,7 @@ impl App {
             // entry) immediately drives the kind-specific field set, labels and validation.
             return self
                 .tool_edit
+                .as_ref()
                 .map(|t| t.kind)
                 .or_else(|| self.library.tools.get(self.lib_sel).map(|t| t.kind));
         }
@@ -6795,6 +6876,9 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
+        if self.library_mode() && self.preset_edit_invalid() {
+            return true;
+        }
         if let Selection::Operation(id) = self.controller.selection() {
             if !self.library_mode()
                 && !self.creating_operation()
@@ -6870,10 +6954,11 @@ impl App {
             // the committed tool before the first edit / working copy is set.
             return self
                 .tool_edit
-                .or(self.library.tools.get(self.lib_sel).copied());
+                .clone()
+                .or(self.library.tools.get(self.lib_sel).cloned());
         }
         match self.controller.selection() {
-            Selection::Tool(i) => self.controller.document().setup().tools.get(i).copied(),
+            Selection::Tool(i) => self.controller.document().setup().tools.get(i).cloned(),
             _ => None,
         }
     }
@@ -6915,7 +7000,7 @@ impl App {
                 self.field_value(f)
             });
         }
-        match (self.tool_edit, self.library.tools.get(self.lib_sel)) {
+        match (self.tool_edit.clone(), self.library.tools.get(self.lib_sel)) {
             (Some(edit), Some(saved)) => {
                 edit != *saved
                     || fields_are_dirty(&self.inspector_fields(), &self.fields, |field| {
@@ -7288,9 +7373,14 @@ impl App {
         // copy already carries every live edit, so committing is a copy-through; refresh
         // then resets it as the new clean baseline.
         if self.library_mode() {
-            if let (Some(edit), Some(slot)) =
-                (self.tool_edit, self.library.tools.get_mut(self.lib_sel))
-            {
+            if self.preset_edit_invalid() {
+                self.status = "Correct invalid preset values before applying.".into();
+                return;
+            }
+            if let (Some(edit), Some(slot)) = (
+                self.tool_edit.clone(),
+                self.library.tools.get_mut(self.lib_sel),
+            ) {
                 *slot = edit;
             }
             self.library.save();
@@ -7340,7 +7430,7 @@ impl App {
             let tools = self
                 .operation_tools
                 .iter()
-                .copied()
+                .cloned()
                 .filter(|tool| used_tools.contains(&tool.number))
                 .collect();
             let heights = self.preview_safety_heights(id);
@@ -8807,6 +8897,8 @@ impl App {
             );
         }
 
+        list = list.push(self.library_preset_editor());
+        list = list.push(self.managed_material_editor());
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -9431,6 +9523,9 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Carve(op), Field::OperationTop) => Some(op.top),
         // Spindle speed is common to every operation kind.
         (op, Field::SpindleRpm) => Some(op.spindle_rpm()),
+        (op, Field::RampFeed) => Some(op.entry_feeds().ramp.unwrap_or(0.)),
+        (op, Field::LeadInFeed) => Some(op.entry_feeds().lead_in.unwrap_or(0.)),
+        (op, Field::LeadOutFeed) => Some(op.entry_feeds().lead_out.unwrap_or(0.)),
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
         (Operation::Profile(o), Field::Stepover) => Some(o.stepover),
         (Operation::Profile(o), Field::TabWidth) => Some(o.tabs.width),
@@ -9519,6 +9614,9 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
 /// Write the parsed inspector fields onto an operation.
 fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
     let get = |f: Field| parsed.get(&f).copied();
+    if let Some(value) = get(Field::RampFeed) { op.entry_feeds_mut().ramp = (value > 0.).then_some(value); }
+    if let Some(value) = get(Field::LeadInFeed) { op.entry_feeds_mut().lead_in = (value > 0.).then_some(value); }
+    if let Some(value) = get(Field::LeadOutFeed) { op.entry_feeds_mut().lead_out = (value > 0.).then_some(value); }
     // Spindle speed is common to every operation kind.
     if let Some(v) = get(Field::SpindleRpm) {
         op.set_spindle_rpm(v.max(0.0));
@@ -11867,7 +11965,7 @@ mod multi_setup_draft_tests {
             .tools
             .iter()
             .find(|tool| matches!(tool.kind, ToolKind::VBit { .. }))
-            .copied()
+            .cloned()
             .expect("starter library includes a V-bit");
         let tool = app.controller.use_tool(vbit);
         app.controller
@@ -11887,6 +11985,8 @@ mod multi_setup_draft_tests {
                 ring_step: 0.0,
                 scallop: 0.0,
                 spindle_rpm: 0.0,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: 300.0,
                 plunge_feed: 100.0,
@@ -12078,7 +12178,13 @@ mod multi_setup_draft_tests {
         let mut app = blank_app();
         let committed = app.controller.document().setup().clone();
         send(&mut app, Message::SetupNameChanged("Top fixture".into()));
-        send(&mut app, Message::SetupMaterialChanged("Aluminum".into()));
+        send(
+            &mut app,
+            Message::SetupMaterialPicked(MaterialChoice {
+                id: Some(1),
+                name: "Aluminum".into(),
+            }),
+        );
         send(&mut app, Message::SetupProgramChanged("TOP-01".into()));
         send(&mut app, Message::SetupTabChanged(SetupEditorTab::Stock));
         send(
@@ -12317,7 +12423,7 @@ mod inspector_field_tests {
         };
         let vbit = Tool {
             kind: ToolKindPick::VBit.to_kind(),
-            ..cham
+            ..cham.clone()
         };
         assert!(!cham.profile().has_cutting_tip(), "flat tip must not cut");
         assert!(vbit.profile().has_cutting_tip(), "rounded tip must cut");
@@ -12401,6 +12507,8 @@ mod inspector_field_tests {
     fn drill(peck: Option<f64>, dwell: Option<f64>) -> Operation {
         Operation::Drill(DrillOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 1,
             tool: 1,
@@ -12439,6 +12547,8 @@ mod inspector_field_tests {
             step: 0.0,
             gradual: false,
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             feed: 200.0,
             plunge_feed: 100.0,

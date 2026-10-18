@@ -146,7 +146,7 @@ impl App {
                 .iter()
                 .any(|saved| saved.number == tool.number)
             {
-                document.setup_mut().tools.push(*tool);
+                document.setup_mut().tools.push(tool.clone());
             }
         }
         let mut op = if self.creating_operation() {

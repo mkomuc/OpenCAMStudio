@@ -12,17 +12,14 @@ impl App {
                 .tools
                 .iter()
                 .find(|tool| Some(tool.number) == self.cad_tool_pick)
-                .copied()
+                .cloned()
         } else {
             let number = self.controller.pending_op()?.tool?;
-            self.controller
-                .document()
-                .setup()
-                .tools
+            self.operation_tools
                 .iter()
-                .chain(self.operation_tools.iter())
+                .chain(self.controller.document().setup().tools.iter())
                 .find(|tool| tool.number == number)
-                .copied()
+                .cloned()
         }
     }
     pub(super) fn wizard_seeded_cutting(&self) -> Option<CuttingData> {
@@ -88,12 +85,17 @@ impl App {
         self.edit_operation_draft(|op| op.set_work_offset(work_offset));
         self.refresh_fields();
         self.seed_wizard_cutting();
+        self.auto_operation_preset();
     }
 
     pub(super) fn sync_creation_tool(&mut self) {
         if let Some(tool) = self.wizard_tool() {
             let number = self.stage_operation_tool(tool);
-            self.edit_operation_draft(|op| op.set_tool(number));
+            self.edit_operation_draft(|op| {
+                op.set_tool(number);
+                op.clear_tool_preset();
+            });
+            self.auto_operation_preset();
         }
     }
 
@@ -132,10 +134,13 @@ impl App {
         }
         if let Some(kind) = self.cad_pending_kind {
             let mut document = self.controller.document().clone();
-            document
-                .setup_mut()
-                .tools
-                .extend(self.operation_tools.iter().copied());
+            for tool in &self.operation_tools {
+                if let Some(existing) = document.setup_mut().tools.iter_mut().find(|t| t.number == tool.number) {
+                    *existing = tool.clone();
+                } else {
+                    document.setup_mut().tools.push(tool.clone());
+                }
+            }
             let (geometry, binding) = crate::cad_operations::create_operation(
                 &document,
                 kind,
@@ -199,10 +204,13 @@ impl App {
         self.creation_operation()
             .and_then(|(op, binding)| {
                 let mut document = self.controller.document().clone();
-                document
-                    .setup_mut()
-                    .tools
-                    .extend(self.operation_tools.iter().copied());
+                for tool in &self.operation_tools {
+                    if let Some(existing) = document.setup_mut().tools.iter_mut().find(|t| t.number == tool.number) {
+                        *existing = tool.clone();
+                    } else {
+                        document.setup_mut().tools.push(tool.clone());
+                    }
+                }
                 if let Some(binding) = binding {
                     document.geometry.bindings.insert(0, binding);
                 }

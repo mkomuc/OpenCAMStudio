@@ -51,6 +51,9 @@ impl Strategy for ChamferStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if let Err(reason) = op.entry_feeds.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         let mut diagnostics = Vec::new();
 
         macro_rules! bail {
@@ -337,7 +340,7 @@ impl Strategy for ChamferStrategy {
                     out,
                     lead_in,
                     z,
-                    op.feed,
+                    op.entry_feeds.lead_in(op.feed),
                     lead,
                 );
                 crate::emit::cut_polyline(&mut program, &loop_pts, op.feed, cut, z);
@@ -349,7 +352,7 @@ impl Strategy for ChamferStrategy {
                     out_exit,
                     lead_out,
                     z,
-                    op.feed,
+                    op.entry_feeds.lead_out(op.feed),
                     lead,
                 );
                 // Lift only when the next pass starts somewhere else; the final retract
@@ -456,6 +459,8 @@ mod tests {
     fn op(width: f64) -> ChamferOp {
         ChamferOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,

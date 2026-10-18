@@ -501,6 +501,13 @@ impl AppController {
                             .into(),
                     );
                 }
+                let index = document
+                    .setup()
+                    .tools
+                    .iter()
+                    .position(|t| t.number == tool.number)
+                    .unwrap();
+                document.setup_mut().tools[index] = tool;
             } else {
                 document.setup_mut().tools.push(tool);
             }
@@ -908,6 +915,8 @@ mod tests {
             peck: None,
             dwell: None,
             spindle_rpm: 1000.,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             feed: 100.,
         })

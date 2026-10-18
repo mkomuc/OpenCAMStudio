@@ -33,13 +33,16 @@ impl std::fmt::Display for OperationTab {
     }
 }
 
-/// All numeric fields have exactly one tab. Availability is still determined by
-/// operation_fields, independently of the currently visible tab.
+/// The primary tab for each numeric field. Preset pass parameters also appear
+/// on Tool; operation_fields determines availability independently of the tab.
 pub(super) fn field_tab(field: Field) -> OperationTab {
     match field {
         Field::SpindleRpm
         | Field::Feed
         | Field::PlungeFeed
+        | Field::RampFeed
+        | Field::LeadInFeed
+        | Field::LeadOutFeed
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
         Field::MajorDia | Field::TabWidth | Field::TabHeight | Field::TabSpacing => {
@@ -348,8 +351,9 @@ impl App {
                 .style(inspector_picker)
                 .width(Length::Fill),
             );
+            list = list.push(self.operation_preset_picker(op));
             list = list.push(
-                text("Cutter changes preserve manual feed and RPM values.")
+                text("A matching material preset is applied when choosing a cutter. All cutting values can be edited below.")
                     .size(11)
                     .color(palette::GROUP_LABEL),
             );
@@ -437,7 +441,12 @@ impl App {
             ) {
                 continue; // Grouped beneath the holding-tabs toggle.
             }
-            if field_tab(field) != tab || is_clear_field(field) {
+            let preset_parameter = tab == OperationTab::Tool
+                && matches!(
+                    field,
+                    Field::Stepdown | Field::Overlap | Field::Peck | Field::ChamferStep
+                );
+            if (!preset_parameter && field_tab(field) != tab) || is_clear_field(field) {
                 continue;
             }
             if linked.is_some()
@@ -988,7 +997,7 @@ impl App {
         let tools = self
             .operation_tools
             .iter()
-            .copied()
+            .cloned()
             .filter(|tool| used.contains(&tool.number))
             .collect();
         self.controller.preview_operation_settings_with_geometry(

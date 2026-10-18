@@ -491,6 +491,8 @@ mod tests {
             peck: None,
             dwell: None,
             spindle_rpm: 1000.,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             feed: 100.,
         }));

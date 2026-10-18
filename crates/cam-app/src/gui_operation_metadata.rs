@@ -200,6 +200,13 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             fields
         }
     };
+    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Carve(_)) {
+        fields.push(Field::RampFeed);
+    }
+    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Chamfer(_) | Operation::Thread(_))
+        || matches!(op, Operation::Carve(c) if c.clear.is_some()) {
+        fields.extend([Field::LeadInFeed, Field::LeadOutFeed]);
+    }
     if super::operation_tabs::operation_start(op).is_some() {
         fields.extend([Field::StartX, Field::StartY]);
     }

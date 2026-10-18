@@ -594,6 +594,8 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         tool: 1,
         work_offset: 1,
         spindle_rpm: 1000.,
+        tool_preset: None,
+        entry_feeds: Default::default(),
         boundary: contour(2., 18., 2., 18.),
         islands: vec![contour(8., 12., 8., 12.)],
         depth: 3.,
@@ -1277,13 +1279,14 @@ fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
         .unwrap();
     let before = app.document().clone();
     let revision = app.revision();
-    let mut staged_tool = *app
+    let mut staged_tool = app
         .document()
         .setup()
         .tools
         .iter()
         .find(|t| t.number == old_tool)
-        .unwrap();
+        .unwrap()
+        .clone();
     staged_tool.number = app
         .document()
         .setup()
@@ -1314,7 +1317,7 @@ fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
         .preview_operation_settings_with_geometry(
             draft.clone(),
             overrides.clone(),
-            vec![staged_tool],
+            vec![staged_tool.clone()],
             vec![new_bore.clone()],
         )
         .unwrap();
@@ -1339,7 +1342,7 @@ fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
     app.apply_operation_settings_with_geometry(
         draft,
         overrides,
-        vec![staged_tool],
+        vec![staged_tool.clone()],
         Some(vec![new_bore.clone()]),
     )
     .unwrap();

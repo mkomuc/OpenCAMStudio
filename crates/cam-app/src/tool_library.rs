@@ -69,8 +69,8 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
 /// Its own counter, like the settings file's — `cam_model::SCHEMA_VERSION` describes
 /// the *document*, and a library is not a document. v1 is the shape every library
 /// ever written already has, which is why an unversioned file reads as v1 rather
-/// than being refused.
-pub const LIBRARY_VERSION: u32 = 1;
+/// than being refused. v2 adds managed materials and named cutter presets.
+pub const LIBRARY_VERSION: u32 = 2;
 
 /// A library file with no `library_version` predates the field. Every such file is
 /// the v1 shape — the field was added *because* the format needed a version, not
@@ -92,13 +92,15 @@ impl crate::config::ConfigFile for ToolLibrary {
     }
 
     fn migrate(&mut self, _from: u32) {
-        // v1 is the first version and every file predating the field *is* the v1 shape,
-        // so there is nothing to step through yet.
+        // v2 adds preset/material registries with serde defaults.
         self.library_version = LIBRARY_VERSION;
     }
 
     fn seed() -> Self {
         Self::defaults()
+    }
+    fn validate(&self) -> Result<(), String> {
+        self.validate()
     }
 }
 
@@ -137,6 +139,11 @@ pub struct ToolLibrary {
     #[serde(default = "unversioned_is_v1")]
     pub library_version: u32,
     pub tools: Vec<Tool>,
+    /// Centrally managed stock materials; exported with the tool library.
+    #[serde(default)]
+    pub materials: Vec<cam_model::Material>,
+    #[serde(default)]
+    pub material_id_floor: u64,
 }
 
 impl Default for ToolLibrary {
@@ -146,12 +153,27 @@ impl Default for ToolLibrary {
     fn default() -> Self {
         Self {
             library_version: LIBRARY_VERSION,
+            materials: Vec::new(),
+            material_id_floor: 0,
             tools: Vec::new(),
         }
     }
 }
 
 impl ToolLibrary {
+    pub fn validate(&self) -> Result<(), String> {
+        let mut ids = std::collections::BTreeSet::new();
+        for material in &self.materials {
+            if material.id == 0 || material.name.trim().is_empty() || !ids.insert(material.id) {
+                return Err("Material IDs must be nonzero and unique, with nonempty names".into());
+            }
+        }
+        for tool in &self.tools {
+            tool.validate_presets()?;
+        }
+        Ok(())
+    }
+
     /// The starter library seeded on first run.
     ///
     /// **Catalogue-grounded, not invented.** A fresh install previously held three end
@@ -336,6 +358,8 @@ impl ToolLibrary {
         });
         Self {
             library_version: LIBRARY_VERSION,
+            materials: Vec::new(),
+            material_id_floor: 0,
             tools,
         }
     }
@@ -458,7 +482,7 @@ impl ToolLibrary {
             // reason it is chosen by angle, not by size.
             OpKind::Engrave | OpKind::Carve => nearest_vbit(),
         };
-        preferred.or_else(|| self.tools.first()).copied()
+        preferred.or_else(|| self.tools.first()).cloned()
     }
 
     /// Append a fresh default tool (numbered one past the highest) and return its
@@ -696,11 +720,9 @@ mod library_file_tests {
         assert_eq!(again, lib);
     }
 
-    /// Every library ever written predates the version field, and every one of them is
-    /// the v1 shape. Reading them as v1 is the truth; refusing them would be a
-    /// self-inflicted data loss on upgrade.
+    /// Unversioned libraries are v1 and migrate to the current additive format.
     #[test]
-    fn a_library_written_before_the_version_field_loads_as_v1() {
+    fn a_library_written_before_the_version_field_migrates_to_current() {
         let s = Scratch::new("library");
         let old = ToolLibrary::defaults();
         let mut value = serde_json::to_value(&old).unwrap();
@@ -710,7 +732,7 @@ mod library_file_tests {
 
         let (lib, outcome) = ToolLibrary::load_from(&s.file("tools.json"));
         assert_eq!(outcome, LibraryLoad::Loaded);
-        assert_eq!(lib.library_version, 1);
+        assert_eq!(lib.library_version, LIBRARY_VERSION);
         assert_eq!(lib.tools, old.tools, "the tools must survive untouched");
         assert!(!s.file("tools.json.bak").exists(), "an unversioned file is valid, not rejected");
     }
@@ -811,8 +833,10 @@ mod tests {
             let t = lib
                 .tools
                 .iter()
-                .find(|t| matches!(t.kind, ToolKind::VBit { included_angle_deg, .. }
-                                   if (included_angle_deg - angle).abs() < 1e-9))
+                .find(|t| {
+                    matches!(t.kind, ToolKind::VBit { included_angle_deg, .. }
+                                   if (included_angle_deg - angle).abs() < 1e-9)
+                })
                 .unwrap_or_else(|| panic!("no {angle}° V-bit in the starter library"));
             let ToolKind::VBit { tip_radius, .. } = t.kind else {
                 unreachable!()
@@ -1117,7 +1141,7 @@ mod tests {
 
         // Re-adding an *existing* library tool (its exact geometry) is a no-op that
         // returns its number, regardless of the number on the copy.
-        let mut existing = lib.tools[1]; // the ⌀6 starter end mill (#2)
+        let mut existing = lib.tools[1].clone(); // the ⌀6 starter end mill (#2)
         existing.number = 77;
         assert_eq!(lib.add_tool(existing), 2);
         assert_eq!(lib.tools.len(), before + 1);
@@ -1148,4 +1172,33 @@ mod tests {
         assert_eq!(lib.default_tool_for(OpKind::Chamfer).unwrap().number, 1);
     }
 
+}
+
+#[cfg(test)]
+mod preset_file_tests {
+    use super::*;
+    use crate::config::tests::Scratch;
+
+    #[test]
+    fn malformed_presets_are_rejected_without_overwriting_the_library() {
+        let scratch = Scratch::new("preset-library");
+        let mut library = ToolLibrary::defaults();
+        library.materials.push(cam_model::Material { id: 17, name: "Aluminum".into() });
+        library.tools[0].presets.push(cam_model::ToolPreset {
+            id: 1, name: "Roughing".into(), material_id: Some(17),
+            spindle_rpm: 6000., feed: 500., plunge_feed: 100., stepdown: None, overlap: None,
+            entry_feeds: Default::default(),
+        });
+        let path = scratch.file("tools.json");
+        library.save_to(&path).unwrap();
+        assert_eq!(ToolLibrary::load_from(&path).0, library);
+        let mut value = serde_json::to_value(&library).unwrap();
+        value["tools"][0]["presets"][0]["feed"] = (-1.).into();
+        let invalid = serde_json::to_string(&value).unwrap();
+        std::fs::write(&path, &invalid).unwrap();
+        let (_, outcome) = ToolLibrary::load_from(&path);
+        assert!(matches!(outcome, LibraryLoad::Rejected(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        assert_eq!(std::fs::read_to_string(scratch.file("tools.json.bak")).unwrap(), invalid);
+    }
 }

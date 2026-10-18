@@ -767,6 +767,8 @@ mod tests {
                     peck: Some(1.),
                     dwell: Some(0.2),
                     spindle_rpm: 1000.,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed: 100.,
                 }));
@@ -899,6 +901,8 @@ mod tests {
                 peck: None,
                 dwell: None,
                 spindle_rpm: 1000.,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: 100.,
             }));
@@ -1225,16 +1229,16 @@ mod tests {
     fn dirty_tool_cannot_be_abandoned_by_workspace_or_library_navigation() {
         let (mut app, _) = App::new();
         app.switch_workspace(Workspace::Tools);
-        let original = app.library.tools[app.lib_sel];
+        let original = app.library.tools[app.lib_sel].clone();
         app.tool_edit.as_mut().unwrap().length += 1.;
         app.switch_workspace(Workspace::Machining);
         assert_eq!(app.workspace, Workspace::Tools);
         let _ = app.update(Message::SelectLibraryTool(
             (app.lib_sel + 1) % app.library.tools.len(),
         ));
-        assert_eq!(app.tool_edit.unwrap().length, original.length + 1.);
+        assert_eq!(app.tool_edit.clone().unwrap().length, original.length + 1.);
         let _ = app.update(Message::CancelToolDraft);
-        assert_eq!(app.tool_edit.unwrap(), original);
+        assert_eq!(app.tool_edit.clone().unwrap(), original);
         app.switch_workspace(Workspace::Machining);
         assert_eq!(app.workspace, Workspace::Machining);
     }

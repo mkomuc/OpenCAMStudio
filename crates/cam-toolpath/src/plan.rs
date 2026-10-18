@@ -852,6 +852,7 @@ mod tests {
             id: 0,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
             name: "completion test".into(),
@@ -882,6 +883,8 @@ mod tests {
                         peck: None,
                         dwell: None,
                         spindle_rpm: 1000.0,
+                        tool_preset: None,
+                        entry_feeds: Default::default(),
                         work_offset: 1,
                         feed: 100.0,
                     })

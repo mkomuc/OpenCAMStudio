@@ -237,6 +237,7 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         19 => Ok(()),
         // Existing profiles retain their original source collections.
         20 => Ok(()),
+        21 => Ok(()), // Additive cutting presets and managed material references.
         _ => Err(MigrationError::MissingStep { from }),
     }
 }

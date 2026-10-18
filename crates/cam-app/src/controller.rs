@@ -982,7 +982,7 @@ impl AppController {
         tool: u32,
     ) -> Result<u32, String> {
         let id = self.next_op_id();
-        let (op, binding) = crate::cad_operations::create_operation(
+        let (mut op, binding) = crate::cad_operations::create_operation(
             self.document(),
             kind,
             entities,
@@ -995,6 +995,10 @@ impl AppController {
             return Err(
                 "Choose a tool from the tool library before creating the CAD operation".into(),
             );
+        }
+        if let Some(preset) = self.setup().tools.iter().find(|t| t.number == tool)
+            .and_then(|t| t.preset_for_material(self.setup().material_id)) {
+            op.apply_tool_preset(preset)?;
         }
         let mut preview = self.document().clone();
         preview
@@ -1829,6 +1833,13 @@ impl AppController {
             .tools
             .iter()
             .find(|t| t.number == tool);
+        if let Some(preset) = td.and_then(|t| t.preset_for_material(self.setup().material_id)) {
+            return CuttingData {
+                rpm: preset.spindle_rpm,
+                feed: preset.feed,
+                plunge_feed: preset.plunge_feed,
+            };
+        }
         CuttingData {
             rpm: td.map_or(0.0, |t| t.nominal_rpm),
             feed: td
@@ -1909,7 +1920,7 @@ impl AppController {
             plunge_feed,
         } = cutting.unwrap_or_else(|| self.seeded_cutting_for(tool));
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
-        let op = match kind {
+        let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
                 selections: None,
                 closed,
@@ -1940,6 +1951,8 @@ impl AppController {
                 stepdown: p.stepdown,
                 stepover: 0.0,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
                 plunge_feed,
@@ -1961,6 +1974,8 @@ impl AppController {
                     islands: island_contours,
                     depth: p.depth,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     start,
                     clear: ClearParams {
@@ -1986,6 +2001,8 @@ impl AppController {
                 peck: None,
                 dwell: None,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: plunge_feed,
             }),
@@ -2013,6 +2030,8 @@ impl AppController {
                     overshoot: 5.0,
                     direction,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
                     plunge_feed,
@@ -2030,6 +2049,8 @@ impl AppController {
                 step: 0.0,
                 gradual: false,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
                 plunge_feed,
@@ -2075,6 +2096,8 @@ impl AppController {
                     drill_clearance: 0.0,
                     blind_allowance: 0.0,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
                     plunge_feed,
@@ -2104,6 +2127,8 @@ impl AppController {
                     ring_step: 0.0,
                     scallop: 0.0,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
                     plunge_feed,
@@ -2129,12 +2154,25 @@ impl AppController {
                 depth: 0.3,
                 stepdown: 0.0,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
                 plunge_feed,
                 start,
             }),
         };
+        if cutting.is_none() {
+            if let Some(preset) = self
+                .setup()
+                .tools
+                .iter()
+                .find(|t| t.number == tool)
+                .and_then(|t| t.preset_for_material(self.setup().material_id))
+            {
+                op.apply_tool_preset(preset).ok()?;
+            }
+        }
         Some(op)
     }
 
@@ -2373,6 +2411,8 @@ impl AppController {
                     stepdown: p.stepdown,
                     stepover: 0.0,
                     spindle_rpm: 0.0,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed: p.feed,
                     plunge_feed: p.plunge_feed,
@@ -2410,6 +2450,8 @@ impl AppController {
                             peck: None,
                             dwell: None,
                             spindle_rpm: 0.0,
+                            tool_preset: None,
+                            entry_feeds: Default::default(),
                             work_offset: 1,
                             feed: p.plunge_feed,
                         }));
@@ -2421,6 +2463,8 @@ impl AppController {
                             islands: Vec::new(),
                             depth: p.depth,
                             spindle_rpm: 0.0,
+                            tool_preset: None,
+                            entry_feeds: Default::default(),
                             work_offset: 1,
                             start: None,
                             clear: ClearParams {
@@ -2446,6 +2490,7 @@ impl AppController {
             id: 1,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
             name: self.program_name(),
@@ -2881,6 +2926,7 @@ fn empty_document(p: &JobParams) -> Document {
         id: 1,
         frame: Default::default(),
         material: String::new(),
+        material_id: None,
         model_instances: Vec::new(),
         program_name: String::new(),
         name: "Untitled".to_string(),
@@ -4298,7 +4344,7 @@ mod tests {
             kind: ToolKind::EndMill,
             ..Default::default()
         };
-        let n1 = app.use_tool(bit);
+        let n1 = app.use_tool(bit.clone());
         assert_eq!(app.document().setup().tools.len(), base + 1);
         assert_ne!(
             n1, 99,
