@@ -572,6 +572,15 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         .any(|s| matches!(s,cam_cldata::Step::Linear{to,..} if (to.z-37.).abs()<1e-8)));
     // Build independent explicit 2D geometry; do not call the CAD resolver.
     let mut planar = controller();
+    // Match the CAD stock top after translating this reference program by 40 mm.
+    planar.edit_stock(|s| {
+        *s = Stock::BoundingBox {
+            x_offset: 0.,
+            y_offset: 0.,
+            top: 0.,
+            thickness: 5.,
+        };
+    });
     let contour = |x0, x1, y0, y1| {
         Contour::new(vec![
             Point::new(x0, y0),

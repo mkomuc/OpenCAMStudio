@@ -294,7 +294,9 @@ impl LineRenderer {
         let mut lines = Vec::new();
         let mut highlights = Vec::new();
         if vertices
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|segment| segment[0].width > 1.0)
         {
             for segment in vertices.as_chunks::<2>().0 {
