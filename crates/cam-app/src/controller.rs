@@ -249,6 +249,7 @@ pub struct AppController {
     setup_id_floor: u64,
     asset_id_floor: u64,
     instance_id_floor: u64,
+    pattern_id_floor: u64,
 }
 
 /// Which closed loop of an imported region a pick refers to.
@@ -545,6 +546,7 @@ impl AppController {
             setup_id_floor: 1,
             asset_id_floor: 1,
             instance_id_floor: 1,
+            pattern_id_floor: 1,
         }
     }
 
@@ -609,6 +611,10 @@ impl AppController {
     /// The current document.
     pub fn document(&self) -> &Document {
         self.document.current()
+    }
+
+    pub fn next_pattern_id(&self) -> u64 {
+        self.pattern_id_floor.max(self.document().pattern_id_floor).max(1)
     }
 
     /// The current setup (shorthand for `document().setup()`).
@@ -1237,12 +1243,14 @@ impl AppController {
         let setup_floor = self.setup_id_floor;
         let asset_floor = self.asset_id_floor;
         let instance_floor = self.instance_id_floor;
+        let pattern_floor = self.pattern_id_floor;
         self.document.update_view(|doc| {
             doc.record_ids();
             doc.operation_id_floor = doc.operation_id_floor.max(op_floor);
             doc.setup_id_floor = doc.setup_id_floor.max(setup_floor);
             doc.asset_id_floor = doc.asset_id_floor.max(asset_floor);
             doc.instance_id_floor = doc.instance_id_floor.max(instance_floor);
+            doc.pattern_id_floor = doc.pattern_id_floor.max(pattern_floor);
         });
         let project = Project {
             schema_version: cam_model::SCHEMA_VERSION,
@@ -1492,6 +1500,9 @@ impl AppController {
 
     /// Reassign operation `id` to origin `index` (its group), as one undoable change.
     pub fn set_operation_origin(&mut self, id: u32, index: u32) {
+        if self.setup().patterns.iter().any(|pattern| pattern.members.contains(&id)) {
+            return;
+        }
         self.edit_document(move |doc| {
             if let Some(op) = doc.setup_mut().operations.iter_mut().find(|o| o.id() == id) {
                 op.set_work_offset(index);
@@ -1776,6 +1787,11 @@ impl AppController {
         let Some(mut copy) = self.operation(sel).cloned() else {
             return;
         };
+        let insert_after = self.setup().patterns.iter().find(|p| p.members.contains(&sel))
+            .and_then(|p| p.members.last())
+            .and_then(|last| self.setup().operations.iter().position(|op| op.id() == *last))
+            .or_else(|| self.setup().operations.iter().position(|op| op.id() == sel))
+            .map(|index| index + 1).unwrap_or(self.setup().operations.len());
         let new_id = self.next_op_id();
         set_op_id(&mut copy, new_id);
         self.edit_document(move |doc| {
@@ -1785,13 +1801,7 @@ impl AppController {
             if doc.cad_linked_operations.contains(&sel) {
                 doc.cad_linked_operations.insert(new_id);
             }
-            let at = doc
-                .setup_mut()
-                .operations
-                .iter()
-                .position(|o| o.id() == sel)
-                .map_or(doc.setup_mut().operations.len(), |p| p + 1);
-            doc.setup_mut().operations.insert(at, copy);
+            doc.setup_mut().operations.insert(insert_after, copy);
         });
         self.selection = Selection::Operation(new_id);
         self.invalidate();
@@ -2498,6 +2508,7 @@ impl AppController {
             stock: self.stock(p.top_of_stock, p.depth),
             tools,
             operations,
+            patterns: Vec::new(),
             origin: [0.0, 0.0, 0.0],
             extra_origins: vec![],
             origin_index: 1,
@@ -2569,12 +2580,14 @@ impl AppController {
         let setup_floor = self.setup_id_floor;
         let asset_floor = self.asset_id_floor;
         let instance_floor = self.instance_id_floor;
+        let pattern_floor = self.pattern_id_floor;
         self.document.edit(|doc| {
             doc.record_ids();
             doc.operation_id_floor = doc.operation_id_floor.max(op_floor);
             doc.setup_id_floor = doc.setup_id_floor.max(setup_floor);
             doc.asset_id_floor = doc.asset_id_floor.max(asset_floor);
             doc.instance_id_floor = doc.instance_id_floor.max(instance_floor);
+            doc.pattern_id_floor = doc.pattern_id_floor.max(pattern_floor);
             f(doc);
             doc.record_ids();
         });
@@ -2586,6 +2599,7 @@ impl AppController {
         self.instance_id_floor = self
             .instance_id_floor
             .max(self.document().instance_id_floor);
+        self.pattern_id_floor = self.pattern_id_floor.max(self.document().pattern_id_floor);
     }
 
     fn invalidate_export(&mut self) {
@@ -2941,6 +2955,7 @@ fn empty_document(p: &JobParams) -> Document {
             ..Default::default()
         }],
         operations: Vec::new(),
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
@@ -3180,6 +3195,170 @@ mod tests {
             .iter()
             .map(|o| o.id())
             .collect()
+    }
+
+    #[test]
+    fn patterns_group_noncontiguous_sources_and_round_trip_through_history_and_disk() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let existing = op_ids(&app);
+        assert_eq!(existing.len(), 2);
+        let unselected = existing[1];
+        let third = 900;
+        app.edit_document(|doc| {
+            doc.setup_mut().operations.push(Operation::Drill(cam_model::DrillOp {
+                id: third,
+                tool: 1,
+                points: vec![[25.0, 25.0]],
+                depth: 1.0,
+                start_offset: 0.0,
+                peck: None,
+                dwell: None,
+                spindle_rpm: 1000.0,
+                tool_preset: None,
+                entry_feeds: Default::default(),
+                work_offset: 1,
+                feed: 100.0,
+            }));
+        });
+        let first = existing[0];
+        let setup_id = app.active_setup_id();
+        let pattern_id = app.create_pattern(
+            setup_id,
+            &[first, third],
+            "Pair".into(),
+            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 12.0, dy: 0.0 },
+            cam_model::PatternOrder::ByInstance,
+        ).unwrap();
+        let setup = app.document().setup();
+        assert_eq!(setup.patterns[0].members, vec![first, third]);
+        assert_eq!(op_ids(&app), vec![first, third, unselected]);
+        setup.validate_patterns().unwrap();
+        app.move_operation(unselected, true);
+        assert_eq!(op_ids(&app), vec![first, third, unselected], "plain operations cannot split a neighboring group");
+        app.document().setup().validate_patterns().unwrap();
+
+        assert!(app.undo());
+        assert!(app.document().setup().patterns.is_empty());
+        assert_eq!(op_ids(&app), vec![first, unselected, third]);
+        // Undo must not return an allocated identifier to the pool.
+        let next_id = app.create_pattern(
+            setup_id, &[first], "Next".into(),
+            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
+            cam_model::PatternOrder::ByOperation,
+        ).unwrap();
+        assert!(next_id > pattern_id);
+        assert!(app.undo());
+        assert!(app.redo());
+        assert_eq!(app.document().setup().patterns[0].id, next_id);
+
+        let path = temp_path("patterns.ocam");
+        app.save_project(&path).unwrap();
+        let expected = app.document().clone();
+        app.new_project();
+        app.open_project(&path).unwrap();
+        assert_eq!(app.document(), &expected);
+        assert_eq!(app.next_pattern_id(), expected.pattern_id_floor);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn pattern_id_exhaustion_does_not_mutate_the_document() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let setup_id = app.active_setup_id();
+        let source = op_ids(&app)[0];
+        app.edit_document(|doc| doc.pattern_id_floor = u64::MAX);
+        let before = app.document().clone();
+
+        let error = app.create_pattern(
+            setup_id,
+            &[source],
+            "Exhausted".into(),
+            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
+            cam_model::PatternOrder::ByInstance,
+        ).unwrap_err();
+
+        assert_eq!(error, "Pattern ID range exhausted");
+        assert_eq!(app.document(), &before);
+    }
+
+    #[test]
+    fn pattern_commands_reject_mixed_datums_and_dissolve_or_delete_atomically() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let ids = op_ids(&app);
+        assert!(ids.len() >= 2);
+        let setup_id = app.active_setup_id();
+        app.edit_document(|doc| {
+            if let Some(op) = doc.setup_mut().operations.iter_mut().find(|op| op.id() == ids[1]) {
+                op.set_work_offset(2);
+            }
+        });
+        let rect = cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 };
+        assert!(app.create_pattern(setup_id, &ids, "Bad datum".into(), rect, cam_model::PatternOrder::ByInstance).is_err());
+        app.edit_document(|doc| {
+            if let Some(op) = doc.setup_mut().operations.iter_mut().find(|op| op.id() == ids[1]) {
+                op.set_work_offset(1);
+            }
+        });
+        let pattern = app.create_pattern(setup_id, &ids, "Group".into(), rect, cam_model::PatternOrder::ByInstance).unwrap();
+        app.edit_pattern(
+            setup_id, pattern, &[ids[0]], "Reduced".into(),
+            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 2.0, dy: 0.0 },
+            cam_model::PatternOrder::ByOperation,
+        ).unwrap();
+        assert_eq!(app.document().setup().patterns[0].members, vec![ids[0]]);
+        assert_eq!(op_ids(&app), ids, "removed members remain immediately after the group");
+        app.document().setup().validate_patterns().unwrap();
+        assert!(app.undo());
+        assert_eq!(app.document().setup().patterns[0].members, ids);
+        app.dissolve_pattern(setup_id, pattern);
+        assert!(app.document().setup().patterns.is_empty());
+        assert_eq!(op_ids(&app), ids);
+        assert!(app.undo());
+        assert_eq!(app.document().setup().patterns[0].id, pattern);
+        app.delete_pattern_and_operations(setup_id, pattern);
+        assert!(app.document().setup().operations.is_empty());
+        assert!(app.document().setup().patterns.is_empty());
+        assert!(app.undo());
+        assert_eq!(app.document().setup().operations.len(), ids.len());
+        assert_eq!(app.document().setup().patterns[0].id, pattern);
+    }
+
+    #[test]
+    fn duplicating_a_setup_remaps_pattern_sources_and_blocks_individual_transfer() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let source_id = app.active_setup_id();
+        let source_members = op_ids(&app);
+        let pattern = app.create_pattern(
+            source_id, &source_members, "Duplicated group".into(),
+            cam_model::PatternKind::Circular {
+                center_xy: [3.0, 4.0], count: 3,
+                distribution: cam_model::CircularDistribution::Partial { sweep_degrees: 90.0 },
+                direction: cam_model::PatternDirection::Cw,
+            }, cam_model::PatternOrder::ByOperation,
+        ).unwrap();
+        let datum = app.document().setup().operations[0].work_offset();
+        app.set_pattern_suppressed(source_id, pattern, true);
+        app.edit_document(|doc| {
+            doc.excluded_operations.insert(source_members[0]);
+            doc.disabled_origins.entry(source_id).or_default().insert(datum);
+        });
+        let target_id = app.duplicate_setup(source_id).unwrap();
+        let source = app.setups().iter().find(|s| s.id == source_id).unwrap();
+        let target = app.setups().iter().find(|s| s.id == target_id).unwrap();
+        assert_eq!(target.patterns.len(), 1);
+        assert_ne!(target.patterns[0].id, pattern);
+        assert_ne!(target.patterns[0].members, source_members);
+        assert_eq!(target.patterns[0].kind, source.patterns[0].kind);
+        assert!(target.patterns[0].suppressed, "pattern suppression is preserved");
+        assert!(target.patterns[0].members.iter().all(|id| target.operations.iter().any(|op| op.id() == *id)));
+        assert!(app.document().excluded_operations.contains(&target.patterns[0].members[0]), "excluded source state follows remapped IDs");
+        assert!(app.document().disabled_origins.get(&target_id).is_some_and(|indices| indices.contains(&datum)), "disabled datum state is copied to the new setup");
+        assert!(target.validate_patterns().is_ok());
+        assert!(app.transfer_operation_to_setup(source_members[0], target_id, false).is_err());
     }
 
     #[test]

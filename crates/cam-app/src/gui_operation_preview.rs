@@ -1,7 +1,75 @@
 //! Draft geometry and holding-tab solids, without a generated cutting program.
 use super::*;
 
+fn pattern_preview_world_point(
+    frame: &cam_model::SetupFrame,
+    world: [f64; 3],
+    center: [f64; 2],
+    translation: [f64; 2],
+    degrees: f64,
+) -> [f64; 3] {
+    let local = frame.to_setup_vector(world);
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    let x = local[0] - center[0];
+    let y = local[1] - center[1];
+    frame.to_world_vector([
+        center[0] + x * cos - y * sin + translation[0],
+        center[1] + x * sin + y * cos + translation[1],
+        local[2],
+    ])
+}
+
 impl App {
+    /// Setup-frame placement anchors for a pattern draft. These are deliberately
+    /// distinct from generated paths: they remain available while a draft is dirty.
+    pub(super) fn pattern_placement_preview(&self) -> Scene {
+        let mut scene = Scene::new();
+        let Some(draft) = &self.pattern_draft else { return scene; };
+        let Ok(kind) = super::pattern_editor_view::kind_from_draft(draft) else { return scene; };
+        let Some(count) = kind.instance_count() else { return scene; };
+        let center = match kind {
+            cam_model::PatternKind::Circular { center_xy, .. } => center_xy,
+            _ => [0.0, 0.0],
+        };
+        let frame = &self.controller.setups().iter().find(|setup| setup.id == draft.setup_id)
+            .unwrap_or_else(|| self.controller.document().setup()).frame;
+        for index in 0..count.min(1000) {
+            let Some((translation, degrees)) = kind.transform_xy(index) else { break; };
+            let radians = degrees.to_radians();
+            let (sin, cos) = radians.sin_cos();
+            // The source-frame origin transformed by this instance, useful as a
+            // placement marker when no generated seed path is available.
+            let x = center[0] - center[0] * cos + center[1] * sin + translation[0];
+            let y = center[1] - center[0] * sin - center[1] * cos + translation[1];
+            let color = if index == 0 { PICK_BOUNDARY } else { [0.50, 0.50, 0.50, 1.0] };
+            let size = 1.5;
+            let line = |a: [f64; 3], b: [f64; 3]| vec![
+                frame.to_world_vector(a).map(|v| v as f32),
+                frame.to_world_vector(b).map(|v| v as f32),
+            ];
+            scene.add_strip(line([x - size, y, 0.0], [x + size, y, 0.0]), color);
+            scene.add_strip(line([x, y - size, 0.0], [x, y + size, 0.0]), color);
+            // Reuse the current generated source paths when they are available;
+            // drafts with stale/missing paths still retain the placement crosses.
+            if let Some(outcome) = self.controller.outcome() {
+                for strip in outcome.scene.strips.iter().filter(|strip| {
+                    strip.op.is_some_and(|op| draft.members.contains(&op))
+                        && (strip.pattern_id.is_none() || strip.instance_index == Some(0))
+                }) {
+                    let points = strip.points.iter().map(|point| {
+                        pattern_preview_world_point(frame, point.map(f64::from), center, translation, degrees)
+                            .map(|v| v as f32)
+                    }).collect();
+                    let mut color = if index == 0 { strip.color } else { [0.95, 0.62, 0.18, 0.9] };
+                    if index > 0 { color[3] = 0.85; }
+                    scene.add_strip_with_owner(points, color, strip.op, strip.dashed, draft.pattern_id, Some(index as u32));
+                    if let Some(preview_strip) = scene.strips.last_mut() { preview_strip.width = strip.width; }
+                }
+            }
+        }
+        scene
+    }
+
     pub(super) fn operation_preview_active(&self) -> bool {
         self.workspace == Workspace::Machining
             && self.inspector_enabled
@@ -270,6 +338,21 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pattern_preview_unframes_world_paths_before_setup_xy_transform() {
+        let frame = cam_model::SetupFrame {
+            world_from_setup: cam_model::RigidTransform {
+                rotation: [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                translation: [0.0; 3],
+            },
+            references: Default::default(),
+        };
+        let world_source = frame.to_world_vector([10.0, 0.0, 0.0]);
+        let placed = pattern_preview_world_point(&frame, world_source, [0.0; 2], [2.0, 0.0], 0.0);
+        assert!((placed[0] - 0.0).abs() < 1e-9);
+        assert!((placed[1] - 12.0).abs() < 1e-9);
+    }
 
     fn profile_editor() -> (App, u32) {
         let (mut app, _) = App::new();

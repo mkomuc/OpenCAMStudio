@@ -3,6 +3,7 @@ use super::*;
 use iced::widget::column;
 impl App {
     pub(super) fn inspector(&self) -> Element<'_, Message> {
+        if self.pattern_draft.is_some() { return self.pattern_editor(); }
         if self.library_mode() {
             return self.library_editor();
         }

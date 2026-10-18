@@ -535,7 +535,7 @@ pub(crate) fn resolve_document_checked(
     // Resolve all reference geometry in its source placement, before rotating
     // instances for the strategy adapters. Keep a worker-only absolute snapshot.
     for operation in &document.setup().operations {
-        if document.excluded_operations.contains(&operation.id()) || document.disabled_origins.get(&document.setup().id).is_some_and(|set|set.contains(&operation.work_offset())) { continue; }
+        if !document.operation_is_included(document.setup().id, operation.id()) { continue; }
         if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
             let heights = settings.resolve(document, operation).map_err(|reason| {
                 error(format!("Operation {}: {reason}", operation.id())).for_op(operation.id())
@@ -551,6 +551,7 @@ pub(crate) fn resolve_document_checked(
     resolved.geometry = geometry_for_setup(document).map_err(error)?;
     let mut operations = std::mem::take(&mut resolved.setup_mut().operations);
     for operation in &mut operations {
+        if !document.operation_is_included(document.setup().id, operation.id()) { continue; }
         if cancelled() {
             return Err(error("Geometry resolution cancelled".into())
                 .with_code(cam_toolpath::DiagnosticCode::Cancelled));

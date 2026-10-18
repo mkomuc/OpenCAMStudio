@@ -139,6 +139,9 @@ impl App {
                 ));
             }
         }
+        if let (Some(pattern), Some(instance)) = (diagnostic.source.pattern_id, diagnostic.source.instance_index) {
+            context.push(format!("Pattern #{pattern}, instance {instance}"));
+        }
         format!(
             "{:?} [{:?}{}]: {}",
             diagnostic.severity,
@@ -178,7 +181,13 @@ impl App {
                 outcome
                     .collisions
                     .iter()
-                    .map(|c| format!("Verification {:?}: {}", c.kind, c.message)),
+                    .map(|c| {
+                        let owner = match (c.pattern_id, c.instance_index) {
+                            (Some(pattern), Some(instance)) => format!(" (pattern #{pattern}, instance {instance}, operation #{})", c.op_id.unwrap_or(0)),
+                            _ => c.op_id.map_or(String::new(), |op| format!(" (operation #{op})")),
+                        };
+                        format!("Verification {:?}{}: {}", c.kind, owner, c.message)
+                    }),
             );
         }
         let output = lines.join("\n\n");

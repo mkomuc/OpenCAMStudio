@@ -1,6 +1,94 @@
 //! Headless controller service.
 use super::*;
 impl AppController {
+    /// Atomically group eligible operations into a new setup pattern.
+    pub fn create_pattern(&mut self, setup_id: u64, requested: &[u32], name: String, kind: cam_model::PatternKind, order: cam_model::PatternOrder) -> Result<u64, String> {
+        kind.validate()?;
+        let setup = self.setups().iter().find(|s| s.id == setup_id).ok_or("setup not found")?;
+        let members: Vec<u32> = setup.operations.iter().map(Operation::id).filter(|id| requested.contains(id)).collect();
+        if members.is_empty() || members.len() != requested.iter().collect::<BTreeSet<_>>().len() { return Err("select one or more existing source operations".into()); }
+        if members.iter().any(|id| setup.patterns.iter().any(|p| p.members.contains(id))) { return Err("a source operation already belongs to a pattern".into()); }
+        let mut datum = None;
+        for id in &members {
+            let op = setup.operations.iter().find(|op| op.id() == *id).ok_or("source operation not found")?;
+            if datum.is_some_and(|d| d != op.work_offset()) { return Err("pattern sources must share one work datum".into()); }
+            datum = Some(op.work_offset());
+        }
+        let first = setup.operations.iter().position(|op| op.id() == members[0]).ok_or("source operation not found")?;
+        let id = self.next_pattern_id().max(self.setups().iter().flat_map(|s| &s.patterns).map(|p| p.id.saturating_add(1)).max().unwrap_or(1));
+        let next_floor = id.checked_add(1).ok_or("Pattern ID range exhausted")?;
+        self.edit_document(|doc| {
+            let setup = doc.setups.iter_mut().find(|s| s.id == setup_id).expect("prevalidated setup");
+            let selected: BTreeSet<u32> = members.iter().copied().collect();
+            let selected_ops: Vec<Operation> = setup.operations.iter().filter(|o| selected.contains(&o.id())).cloned().collect();
+            setup.operations.retain(|o| !selected.contains(&o.id()));
+            setup.operations.splice(first..first, selected_ops);
+            setup.patterns.push(cam_model::OperationPattern { id, name, members: members.clone(), kind, order, suppressed: false });
+            doc.pattern_id_floor = next_floor;
+        });
+        self.invalidate();
+        Ok(id)
+    }
+
+    /// Edit a pattern and its ordered membership as one history transaction.
+    pub fn edit_pattern(&mut self, setup_id: u64, pattern_id: u64, requested: &[u32], name: String, kind: cam_model::PatternKind, order: cam_model::PatternOrder) -> Result<(), String> {
+        kind.validate()?;
+        let setup = self.setups().iter().find(|s| s.id == setup_id).ok_or("setup not found")?;
+        let pattern = setup.patterns.iter().find(|p| p.id == pattern_id).ok_or("pattern not found")?;
+        let members: Vec<u32> = setup.operations.iter().map(Operation::id).filter(|id| requested.contains(id)).collect();
+        if members.is_empty() || members.len() != requested.iter().collect::<BTreeSet<_>>().len() { return Err("select one or more existing source operations".into()); }
+        for id in &members {
+            if setup.patterns.iter().any(|p| p.id != pattern_id && p.members.contains(id)) { return Err("a source operation already belongs to another pattern".into()); }
+            let op = setup.operations.iter().find(|op| op.id() == *id).ok_or("source operation not found")?;
+            if pattern.members.iter().find_map(|old| setup.operations.iter().find(|op| op.id() == *old)).is_some_and(|first| first.work_offset() != op.work_offset()) { return Err("pattern sources must share one work datum".into()); }
+        }
+        let old_members: BTreeSet<u32> = pattern.members.iter().copied().collect();
+        let selected: BTreeSet<u32> = members.iter().copied().collect();
+        let affected: BTreeSet<u32> = old_members.union(&selected).copied().collect();
+        let first = setup.operations.iter().position(|op| affected.contains(&op.id())).ok_or("pattern has no source operations")?;
+        let grouped: Vec<Operation> = setup.operations.iter().filter(|op| selected.contains(&op.id())).cloned().collect();
+        let removed_old: Vec<Operation> = setup.operations.iter().filter(|op| old_members.contains(&op.id()) && !selected.contains(&op.id())).cloned().collect();
+        let mut candidate = setup.clone();
+        candidate.operations.retain(|op| !affected.contains(&op.id()));
+        candidate.operations.splice(first..first, grouped.into_iter().chain(removed_old));
+        let pattern = candidate.patterns.iter_mut().find(|p| p.id == pattern_id).unwrap();
+        pattern.name = name;
+        pattern.members = members;
+        pattern.kind = kind;
+        pattern.order = order;
+        candidate.validate_patterns()?;
+        self.edit_document(|doc| {
+            *doc.setups.iter_mut().find(|s| s.id == setup_id).unwrap() = candidate;
+        });
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Dissolve a pattern while retaining its source operations and their order.
+    pub fn dissolve_pattern(&mut self, setup_id: u64, pattern_id: u64) {
+        self.edit_document(|doc| if let Some(setup) = doc.setups.iter_mut().find(|s| s.id == setup_id) { setup.patterns.retain(|p| p.id != pattern_id); });
+        self.invalidate();
+    }
+
+    /// Delete a pattern and all its source operations as one history edit.
+    pub fn delete_pattern_and_operations(&mut self, setup_id: u64, pattern_id: u64) {
+        self.edit_document(|doc| {
+            if let Some(setup) = doc.setups.iter_mut().find(|s| s.id == setup_id) {
+                if let Some(pattern) = setup.patterns.iter().find(|p| p.id == pattern_id).cloned() {
+                    let ids: BTreeSet<u32> = pattern.members.into_iter().collect();
+                    setup.operations.retain(|o| !ids.contains(&o.id()));
+                    setup.patterns.retain(|p| p.id != pattern_id);
+                    for id in &ids { setup.operation_heights.remove(id); setup.height_settings.remove(id); doc.excluded_operations.remove(id); doc.cad_linked_operations.remove(id); doc.geometry.bindings.remove(id); }
+                }
+            }
+        });
+        self.invalidate();
+    }
+
+    pub fn set_pattern_suppressed(&mut self, setup_id: u64, pattern_id: u64, suppressed: bool) {
+        self.edit_document(|doc| if let Some(pattern) = doc.setups.iter_mut().find(|s| s.id == setup_id).and_then(|s| s.patterns.iter_mut().find(|p| p.id == pattern_id)) { pattern.suppressed = suppressed; });
+        self.invalidate();
+    }
     /// Delete the selected operation, selecting a neighbour (or the setup). A
     /// no-op unless an operation is selected.
     pub fn delete_selected_operation(&mut self) {
@@ -8,9 +96,12 @@ impl AppController {
             return;
         };
         self.edit_document(|doc| {
-            doc.setup_mut().operations.retain(|o| o.id() != id);
-            doc.setup_mut().operation_heights.remove(&id);
-            doc.setup_mut().height_settings.remove(&id);
+            let setup = doc.setup_mut();
+            setup.operations.retain(|o| o.id() != id);
+            for pattern in &mut setup.patterns { pattern.members.retain(|member| *member != id); }
+            setup.patterns.retain(|pattern| !pattern.members.is_empty());
+            setup.operation_heights.remove(&id);
+            setup.height_settings.remove(&id);
             doc.geometry.bindings.remove(&id);
             doc.excluded_operations.remove(&id);
             doc.cad_linked_operations.remove(&id);
@@ -118,26 +209,24 @@ impl AppController {
         } else {
             return;
         }
-        self.edit_document(|doc| {
-            let ops = &mut doc.setup_mut().operations;
-            if let Some(i) = ops.iter().position(|o| o.id() == id) {
-                // Reorder within the operation's own origin group: swap with the nearest
-                // sibling of the same `work_offset` in the chosen direction. This keeps
-                // moves confined to a group, matching how the tree renders them.
-                let wo = ops[i].work_offset();
-                let j = if up {
-                    ops[..i].iter().rposition(|o| o.work_offset() == wo)
-                } else {
-                    ops[i + 1..]
-                        .iter()
-                        .position(|o| o.work_offset() == wo)
-                        .map(|k| i + 1 + k)
-                };
-                if let Some(j) = j {
-                    ops.swap(i, j);
-                }
-            }
-        });
+        if self.setup().patterns.iter().any(|pattern| pattern.members.contains(&id)) { return; }
+        let setup = self.setup();
+        let Some(i) = setup.operations.iter().position(|o| o.id() == id) else { return; };
+        // Reorder within the operation's own origin group: swap with the nearest
+        // sibling of the same `work_offset` in the chosen direction. This keeps
+        // moves confined to a group, matching how the tree renders them.
+        let wo = setup.operations[i].work_offset();
+        let j = if up {
+            setup.operations[..i].iter().rposition(|o| o.work_offset() == wo)
+        } else {
+            setup.operations[i + 1..].iter().position(|o| o.work_offset() == wo).map(|k| i + 1 + k)
+        };
+        let Some(j) = j else { return; };
+        // A plain operation cannot move one member across a grouped block:
+        // swapping only that member would invalidate contiguity.
+        let moved_id = setup.operations[j].id();
+        if setup.patterns.iter().any(|pattern| pattern.members.contains(&moved_id)) { return; }
+        self.edit_document(|doc| doc.setup_mut().operations.swap(i, j));
         self.invalidate();
     }
 

@@ -11,6 +11,7 @@ pub(super) enum TreeNode {
     Asset(u64),
     Model(InstanceId),
     Setup(u64),
+    Pattern(u64),
     Operation(u32),
 }
 
@@ -65,6 +66,7 @@ impl App {
 
     fn tree_edit_blocked(&mut self) -> bool {
         if self.controller.pending_op().is_some()
+            || self.pattern_draft.is_some()
             || self.cad_pending_kind.is_some()
             || self.cad_editing_op.is_some()
             || self.drawing_editing_op.is_some()
@@ -108,6 +110,18 @@ impl App {
                     }
                 }
                 self.update(Message::ClickOp(*id))
+            }
+            TreeNode::Pattern(id) => {
+                if let Some((setup_id, pattern)) = self.controller.setups().iter().find_map(|s| s.patterns.iter().find(|p| p.id == *id).map(|p| (s.id, p.clone()))) {
+                    if setup_id != self.controller.active_setup_id() { self.controller.activate_setup(setup_id).ok(); }
+                    self.focus_ops = pattern.members.iter().copied().collect();
+                    self.controller.select(Selection::Setup);
+                    self.model_view = None;
+                    self.expanded_patterns.insert(*id);
+                    self.simulation = None;
+                    self.pending_simulation = None;
+                }
+                iced::Task::none()
             }
             _ => {
                 self.simulation = None;
@@ -171,9 +185,11 @@ impl App {
                         let _ = self.update(Message::OpMenu(*id));
                     }
                     TreeNode::Setup(id) => {
-                        let _ = self.update(Message::SelectSetup(*id));
+                        if self.controller.active_setup_id() != *id {
+                            let _ = self.update(Message::SelectSetup(*id));
+                        }
                     }
-                    TreeNode::Asset(_) | TreeNode::Model(_) => {
+                    TreeNode::Asset(_) | TreeNode::Model(_) | TreeNode::Pattern(_) => {
                         let _ = self.select_tree_node(&node);
                     }
                     _ => {}
@@ -508,6 +524,15 @@ impl App {
                     group = Some(op.work_offset());
                 }
                 let id = op.id();
+                if let Some(pattern) = setup.patterns.iter().find(|pattern| pattern.members.first() == Some(&id)) {
+                    let count = pattern.kind.instance_count().unwrap_or(0);
+                    let expanded = self.expanded_patterns.contains(&pattern.id);
+                    let pattern_row = row![button(text(if expanded { "▾" } else { "▸" }).size(11)).padding(2).style(inspector_secondary).on_press(Message::TogglePatternExpanded(pattern.id)), text(format!("▦ {} · {count} instances{}", pattern.name, if pattern.suppressed { " · suppressed" } else { "" })).size(11).width(Length::Fill)].align_y(Alignment::Center);
+                    list = list.push(self.tree_row(TreeNode::Pattern(pattern.id), pattern_row.into(), false));
+                }
+                if let Some(pattern) = setup.patterns.iter().find(|p| p.members.contains(&id)) {
+                    if !self.expanded_patterns.contains(&pattern.id) { continue; }
+                }
                 let excluded = self.controller.is_operation_excluded(id);
                 let generated = active
                     && self.controller.outcome().is_some_and(|outcome| {
@@ -528,7 +553,7 @@ impl App {
                 };
                 let expanded = self.expanded_operations.contains(&id);
                 let controls = row![
-                    Space::new().width(Length::Fixed(14.0)),
+                    Space::new().width(Length::Fixed(if setup.patterns.iter().any(|p| p.members.contains(&id)) { 28.0 } else { 14.0 })),
                     button(text(if expanded { "▾" } else { "▸" }).size(11))
                         .padding(2)
                         .style(inspector_secondary)
@@ -631,6 +656,9 @@ impl App {
                 items = items.push(item("New setup".into(), Message::SetupNew));
             }
             TreeNode::Setup(id) => {
+                items = items.push(item("New pattern → Rectangular…".into(), Message::BeginPattern(false)));
+                items = items.push(item("New pattern → Circular…".into(), Message::BeginPattern(true)));
+                items = items.push(popup_separator());
                 items = items.push(item("Duplicate setup".into(), Message::SetupDuplicate(*id)));
                 if self.controller.setups().len() > 1 {
                     items = items.push(popup_separator());
@@ -641,6 +669,8 @@ impl App {
                 items = items
                     .push(item("Duplicate".into(), Message::DuplicateOp))
                     .push(item("Reinitialize".into(), Message::ReinitOp))
+                    .push(item("Add to new pattern → Rectangular…".into(), Message::BeginPattern(false)))
+                    .push(item("Add to new pattern → Circular…".into(), Message::BeginPattern(true)))
                     .push(item(
                         if self.controller.is_operation_excluded(*id) {
                             "Include in machining"
@@ -674,6 +704,18 @@ impl App {
                 }
                 items = items.push(popup_separator());
                 items = items.push(item("Delete operation".into(), Message::DeleteOp));
+            }
+            TreeNode::Pattern(id) => {
+                if let Some(pattern) = self.controller.setups().iter().find_map(|s| s.patterns.iter().find(|p| p.id == *id)) {
+                    items = items.push(item("Edit pattern…".into(), Message::EditPattern(*id)));
+                    items = items.push(item(if pattern.suppressed { "Include pattern" } else { "Suppress pattern" }.into(), Message::PatternSuppression(*id, !pattern.suppressed)));
+                    items = items.push(item("Dissolve pattern".into(), Message::PatternDissolve(*id)));
+                    items = items.push(item(format!("Delete pattern and {} source operation(s)", pattern.members.len()), Message::PatternDelete(*id)));
+                    items = items.push(popup_separator());
+                    for (label, action) in [("Recompute toolpath", ToolpathAction::Recompute), ("Simulate toolpath", ToolpathAction::Simulate), ("Post process and export…", ToolpathAction::Export)] {
+                        items = items.push(item(label.into(), Message::ToolpathCommand(node.clone(), action)));
+                    }
+                }
             }
             TreeNode::Models => {
                 items = items
@@ -917,6 +959,18 @@ mod tests {
         send(&mut app, Message::ClickOp(ids[0]));
         assert!(app.operation_draft.is_none());
         assert!(app.pane_handle(Pane::Inspector).is_none());
+    }
+
+    #[test]
+    fn selected_operation_context_menu_preserves_multiselection_for_pattern_creation() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.focus_ops = ids.iter().copied().collect();
+        send(&mut app, Message::Tree(TreeMessage::Open(TreeNode::Operation(ids[1]))));
+        assert_eq!(app.focus_ops, ids.iter().copied().collect());
+        assert_eq!(app.controller.selection(), Selection::Operation(ids[1]));
+        send(&mut app, Message::Tree(TreeMessage::Command(Box::new(Message::BeginPattern(false)))));
+        assert_eq!(app.pattern_draft.as_ref().unwrap().members, ids);
     }
 
     #[test]

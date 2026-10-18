@@ -178,6 +178,9 @@ pub struct Collision {
     pub kind: CollisionKind,
     pub at: [f64; 3],
     pub message: String,
+    pub op_id: Option<u32>,
+    pub pattern_id: Option<u64>,
+    pub instance_index: Option<u32>,
 }
 
 /// The outcome of a simulation: the final stock, any collisions, and how much
@@ -234,6 +237,9 @@ pub fn check_gouge(field: &Heightfield, target: &Heightfield, tol: f64) -> Optio
             "gouge: cut {:.3} mm below target at ({:.2}, {:.2}) — {} cells, {:.1} mm³ over-cut",
             diff.max_gouge, at[0], at[1], diff.cells_gouged, diff.gouge_volume
         ),
+        op_id: None,
+        pattern_id: None,
+        instance_index: None,
     })
 }
 

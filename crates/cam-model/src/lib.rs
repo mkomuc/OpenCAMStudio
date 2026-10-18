@@ -31,6 +31,7 @@ pub use document::{
     Axis, CarveClearing, CarveOp, ChamferOp, ClearParams, Clearing, Comp, Document, DrillOp,
     EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp, ProfileContour,
     ProfileOp, ProfileTabs, Setup, Side, Stock, ThreadOp, SCHEMA_VERSION,
+    CircularDistribution, ExecutionItem, OperationPattern, PatternDirection, PatternKind, PatternOrder,
 };
 pub use geometry::*;
 pub use history::History;

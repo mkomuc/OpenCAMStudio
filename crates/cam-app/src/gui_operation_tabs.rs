@@ -997,8 +997,8 @@ impl App {
         let tools = self
             .operation_tools
             .iter()
-            .cloned()
             .filter(|tool| used.contains(&tool.number))
+            .cloned()
             .collect();
         self.controller.preview_operation_settings_with_geometry(
             operation,

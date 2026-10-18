@@ -110,6 +110,7 @@ pub(super) struct ViewportKey {
     snap_prefs: crate::settings::SnapPrefs,
     draft: Option<cam_model::Setup>,
     editor: Option<EditorKey>,
+    pattern: Option<PatternDraft>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -343,7 +344,7 @@ impl App {
                     .filter(move |id| hidden_setup || self.hidden_ops.contains(id))
             })
             .collect();
-        let editing = self.operation_preview_active();
+        let editing = self.operation_preview_active() || self.pattern_draft.is_some();
         let selected_geometry = self.editor_selected_geometry();
         // Playback publishes fresh material meshes independently of the document.
         // Keep it live, while sharing the CAD acceleration structure. Drafts have
@@ -377,6 +378,7 @@ impl App {
             view_prefs: self.settings.view.clone(),
             snap_prefs: self.settings.snapping.clone(),
             draft: self.setup_draft.clone(),
+            pattern: self.pattern_draft.clone(),
             editor: editing.then(|| EditorKey {
                 creating: self.creating_operation(),
                 cad_kind: self.cad_pending_kind,
@@ -489,6 +491,8 @@ impl App {
             if editing {
                 let preview = self.operation_geometry_preview();
                 Arc::make_mut(&mut viewport.vertices).extend(preview.line_vertices());
+                let pattern_preview = self.pattern_placement_preview();
+                Arc::make_mut(&mut viewport.vertices).extend(pattern_preview.line_vertices());
                 let (vertices, indices) = self.profile_tab_mesh();
                 let offset = viewport.mesh_vertices.len() as u32;
                 Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);

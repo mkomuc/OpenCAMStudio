@@ -82,6 +82,7 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
         },
         tools,
         operations,
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,

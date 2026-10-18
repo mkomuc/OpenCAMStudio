@@ -223,7 +223,9 @@ impl Project {
         }
         let mut setup_ids = BTreeSet::new();
         let mut operation_ids = BTreeSet::new();
+        let mut pattern_ids = BTreeSet::new();
         for setup in &self.document.setups {
+            setup.validate_patterns()?;
             if setup.id == 0 || !setup_ids.insert(setup.id) {
                 return Err("setup IDs must be nonzero and unique".into());
             }
@@ -319,6 +321,11 @@ impl Project {
                         "operation ID {} is used by more than one setup",
                         operation.id()
                     ));
+                }
+            }
+            for pattern in &setup.patterns {
+                if !pattern_ids.insert(pattern.id) {
+                    return Err(format!("pattern ID {} is used more than once", pattern.id));
                 }
             }
         }
@@ -668,6 +675,24 @@ mod tests {
             .validate()
             .unwrap_err()
             .contains("missing operation 99"));
+    }
+
+    #[test]
+    fn project_loader_rejects_malformed_pattern_membership() {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+            panic!("expected a project");
+        };
+        project.document.setup_mut().patterns.push(cam_model::OperationPattern {
+            id: 1,
+            name: "Invalid source".into(),
+            members: vec![999],
+            kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
+            order: cam_model::PatternOrder::ByInstance,
+            suppressed: false,
+        });
+        assert!(OcamFile::Project(project.clone()).to_json().unwrap_err().to_string().contains("missing operation 999"));
+        let json = serde_json::to_string(&OcamFile::Project(project)).unwrap();
+        assert!(OcamFile::from_json(&json).unwrap_err().to_string().contains("missing operation 999"));
     }
 
     #[test]

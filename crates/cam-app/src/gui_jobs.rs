@@ -30,6 +30,7 @@ impl App {
         action: ToolpathAction,
     ) -> iced::Task<Message> {
         if self.setup_draft_dirty()
+            || self.pattern_draft.is_some()
             || self.inspector_dirty()
             || self.any_field_invalid()
             || !self.operation_height_overrides_valid()
@@ -41,8 +42,15 @@ impl App {
             self.status = "Apply or cancel inspector changes and geometry selection before processing toolpaths.".into();
             return iced::Task::none();
         }
-        let (setup, operation) = match node {
-            TreeNode::Setup(id) => (id, None),
+        let (setup, operation, pattern) = match node {
+            TreeNode::Setup(id) => (id, None, None),
+            TreeNode::Pattern(id) => {
+                let Some(setup) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == id)) else {
+                    self.status = "Pattern no longer exists.".into();
+                    return iced::Task::none();
+                };
+                (setup.id, None, Some(id))
+            }
             TreeNode::Operation(id) => {
                 let Some(setup) = self
                     .controller
@@ -53,7 +61,7 @@ impl App {
                     self.status = "Operation no longer exists.".into();
                     return iced::Task::none();
                 };
-                (setup.id, Some(id))
+                (setup.id, Some(id), None)
             }
             _ => return iced::Task::none(),
         };
@@ -70,16 +78,21 @@ impl App {
         self.model_view = None;
         self.focus_ops.clear();
         self.focus_ops.extend(operation);
+        if let Some(pattern_id) = pattern {
+            if let Some(pattern) = self.controller.setups().iter().find_map(|s| s.patterns.iter().find(|p| p.id == pattern_id)) { self.focus_ops.extend(pattern.members.iter().copied()); }
+        }
         self.end_setup_draft();
         self.operation_draft = None;
         self.controller
             .select(operation.map_or(Selection::Setup, Selection::Operation));
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
-        match self
-            .controller
-            .start_toolpath_run(operation, action == ToolpathAction::Recompute)
-        {
+        let run = if let Some(pattern_id) = pattern {
+            self.controller.start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)
+        } else {
+            self.controller.start_toolpath_run(operation, action == ToolpathAction::Recompute)
+        };
+        match run {
             Ok(stamp) => {
                 if action == ToolpathAction::Export {
                     self.pending_toolpath_export = Some(stamp.clone());

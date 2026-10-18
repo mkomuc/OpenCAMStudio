@@ -101,6 +101,7 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
             ..Default::default()
         }],
         operations: ops,
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,

@@ -45,7 +45,7 @@ impl State {
                     .find(|t| t.number == *number)
                     .map_or(default_tool, |t| t.profile);
             }
-            Step::Rapid { to, .. } => {
+            Step::Rapid { to, tag } => {
                 if let Some(a) = self.cur {
                     // A vertical lift (no XY travel, moving up) is always safe: the tool
                     // retreats straight up through the column it just cut, so it cannot
@@ -79,6 +79,9 @@ impl State {
                                         "rapid at Z {:.3} passes through stock standing at Z {:.3}",
                                         to.z, stock
                                     ),
+                                    op_id: Some(tag.op_id),
+                                    pattern_id: tag.pattern_id,
+                                    instance_index: tag.instance_index,
                                 });
                             }
                         }

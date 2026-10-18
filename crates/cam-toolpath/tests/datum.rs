@@ -364,6 +364,7 @@ fn doc(ops: Vec<Operation>) -> Document {
         },
         tools: vec![tool(1), tool(2)],
         operations: ops,
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,

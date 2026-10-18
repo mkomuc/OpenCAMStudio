@@ -343,6 +343,9 @@ mod tests {
             kind: cam_sim::CollisionKind::RapidThroughStock,
             at: [0.; 3],
             message: "rapid through stock".into(),
+            op_id: None,
+            pattern_id: None,
+            instance_index: None,
         });
         let _ = app.queue_notice(job_notice(&outcome).unwrap());
         assert_eq!(app.notice_queue.len(), 1);

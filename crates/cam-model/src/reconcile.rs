@@ -396,6 +396,7 @@ mod tests {
             },
             tools: vec![t(7, 12.0, ToolKind::EndMill), t(4, 8.0, ToolKind::EndMill)],
             operations: vec![mk_drill(1, 7), mk_drill(2, 4)],
+            patterns: Vec::new(),
             origin: [0.0, 0.0, 0.0],
             extra_origins: vec![],
             origin_index: 1,

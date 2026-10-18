@@ -238,6 +238,15 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         // Existing profiles retain their original source collections.
         20 => Ok(()),
         21 => Ok(()), // Additive cutting presets and managed material references.
+        22 => {
+            if let Some(setups) = doc.get_mut("setups").and_then(Value::as_array_mut) {
+                for setup in setups {
+                    if let Some(object) = setup.as_object_mut() { object.entry("patterns").or_insert_with(|| Value::Array(Vec::new())); }
+                }
+            }
+            if let Some(object) = doc.as_object_mut() { object.entry("pattern_id_floor").or_insert(Value::from(1)); }
+            Ok(())
+        }
         _ => Err(MigrationError::MissingStep { from }),
     }
 }
@@ -465,6 +474,24 @@ mod tests {
             current["setups"][0]["model_instances"],
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn v22_projects_receive_empty_patterns_and_a_pattern_id_floor() {
+        let mut doc = serde_json::json!({
+            "schema_version": 22,
+            "pattern_id_floor": 7,
+            "setups": [{"id": 1, "operations": []}, {"id": 2, "operations": []}]
+        });
+        document(&mut doc, 22).unwrap();
+        assert_eq!(doc["schema_version"], SCHEMA_VERSION);
+        assert_eq!(doc["pattern_id_floor"], 7, "existing high-water values survive");
+        assert_eq!(doc["setups"][0]["patterns"], serde_json::json!([]));
+        assert_eq!(doc["setups"][1]["patterns"], serde_json::json!([]));
+
+        let mut legacy = serde_json::json!({"schema_version": 22, "setups": [{"id": 1, "operations": []}]});
+        document(&mut legacy, 22).unwrap();
+        assert_eq!(legacy["pattern_id_floor"], 1);
     }
 
     #[test]

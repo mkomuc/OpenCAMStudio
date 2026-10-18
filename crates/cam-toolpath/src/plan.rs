@@ -124,6 +124,13 @@ fn build_job_with_compute(
     let mut program = Program::new();
     let mut diagnostics = Vec::new();
     let mut completion = JobCompletion::Complete;
+    if let Err(reason) = setup.validate_patterns() {
+        return JobResult {
+            program,
+            diagnostics: vec![Diagnostic::error(format!("invalid operation pattern: {reason}")).for_setup(setup.id)],
+            completion: JobCompletion::Failed,
+        };
+    }
 
     // Every use of this value assumes it is *above* the work: `lift_to_tool_change`
     // is named for what it is supposed to do, and the cross that follows travels at
@@ -134,13 +141,7 @@ fn build_job_with_compute(
     let max_clearance = setup
         .operations
         .iter()
-        .filter(|op| {
-            !doc.excluded_operations.contains(&op.id())
-                && !doc
-                    .disabled_origins
-                    .get(&setup.id)
-                    .is_some_and(|set| set.contains(&op.work_offset()))
-        })
+        .filter(|op| doc.operation_is_included(setup.id, op.id()))
         .map(|op| {
             setup
                 .height_settings
@@ -167,14 +168,9 @@ fn build_job_with_compute(
 
     // Compute every operation's fragment once. Coordinates are in the part frame; the
     // post re-references each group to its origin.
-    let mut planned: Vec<Planned> = Vec::new();
+    let mut seeds: Vec<Planned> = Vec::new();
     for operation in &setup.operations {
-        if doc.excluded_operations.contains(&operation.id())
-            || doc
-                .disabled_origins
-                .get(&setup.id)
-                .is_some_and(|set| set.contains(&operation.work_offset()))
-        {
+        if !doc.operation_is_included(setup.id, operation.id()) {
             continue;
         }
         if cancel.is_cancelled() {
@@ -299,7 +295,7 @@ fn build_job_with_compute(
         } else {
             spindle_rpm
         };
-        planned.push(Planned {
+        seeds.push(Planned {
             op_id: operation.id(),
             clearance: env.heights.clearance,
             tool: operation.tools()[0],
@@ -310,7 +306,67 @@ fn build_job_with_compute(
             ends_with: last_tool_change(&result.program),
             datum: operation.work_offset(),
             fragment: result.program,
+            pattern_id: None,
+            instance_index: None,
         });
+    }
+
+    // Expand only after every included seed has been computed exactly once.
+    // Transitions and machine control are assembled later around each derived fragment.
+    let seeds_by_id: std::collections::HashMap<u32, Planned> = seeds.into_iter().map(|p| (p.op_id, p)).collect();
+    let mut planned: Vec<Planned> = Vec::new();
+    if cancel.is_cancelled() {
+        // Preserve completed ordinary work as a preview if cancellation arrived while
+        // computing seed fragments. Pattern expansion can multiply that work many
+        // thousands of times, so a canceled run never begins or continues expansion.
+        let grouped: std::collections::HashSet<u32> = setup.patterns.iter()
+            .flat_map(|pattern| pattern.members.iter().copied())
+            .collect();
+        for operation in &setup.operations {
+            if !grouped.contains(&operation.id()) {
+                if let Some(seed) = seeds_by_id.get(&operation.id()) { planned.push(seed.clone()); }
+            }
+        }
+        completion = JobCompletion::Cancelled;
+    } else {
+        for item in setup.execution_items() {
+            if cancel.is_cancelled() { completion = JobCompletion::Cancelled; break; }
+            match item {
+                cam_model::ExecutionItem::Operation(operation) => {
+                    if let Some(seed) = seeds_by_id.get(&operation.id()) { planned.push(seed.clone()); }
+                }
+                cam_model::ExecutionItem::Pattern(pattern) => {
+                    if pattern.suppressed { continue; }
+                    let count = match pattern.kind.instance_count() { Some(n) if n <= 10_000 => n, _ => { diagnostics.push(Diagnostic::error("pattern instance count exceeds the supported limit").for_setup(setup.id)); completion = JobCompletion::Failed; continue; } };
+                    let required = pattern.members.iter().filter_map(|id| seeds_by_id.get(id)).try_fold(0usize, |sum, seed| seed.fragment.steps().len().checked_mul(count)?.checked_add(sum));
+                    let current = planned.iter().try_fold(0usize, |sum, p| sum.checked_add(p.fragment.steps().len()));
+                    if required.is_none() || current.and_then(|n| n.checked_add(required.unwrap_or(usize::MAX))).is_none_or(|n| n > 5_000_000) {
+                        diagnostics.push(Diagnostic::error("expanded pattern run exceeds 5,000,000 motion steps").for_setup(setup.id));
+                        completion = JobCompletion::Failed;
+                        continue;
+                    }
+                    let center = match pattern.kind { cam_model::PatternKind::Circular { center_xy, .. } => center_xy, _ => [0.0, 0.0] };
+                    let mut append = |op_id: u32, index: usize| {
+                        if cancel.is_cancelled() { return; }
+                        let Some(seed) = seeds_by_id.get(&op_id) else { return; };
+                        let Some((translation, degrees)) = pattern.kind.transform_xy(index) else { completion = JobCompletion::Failed; return; };
+                        let fragment = seed.fragment.transformed_xy(center, translation, degrees).with_pattern_owner(pattern.id, index as u32);
+                        planned.push(Planned { fragment, pattern_id: Some(pattern.id), instance_index: Some(index as u32), ..seed.clone() });
+                    };
+                    match pattern.order {
+                        cam_model::PatternOrder::ByInstance => for index in 0..count { for member in &pattern.members { append(*member, index); } },
+                        cam_model::PatternOrder::ByOperation => for member in &pattern.members { for index in 0..count { append(*member, index); } },
+                    }
+                    drop(append);
+                    if cancel.is_cancelled() { completion = JobCompletion::Cancelled; }
+                }
+            }
+        }
+    }
+    if planned.iter().try_fold(0usize, |sum, p| sum.checked_add(p.fragment.steps().len())).is_none_or(|n| n > 5_000_000) {
+        diagnostics.push(Diagnostic::error("expanded pattern run exceeds 5,000,000 motion steps").for_setup(setup.id));
+        completion = JobCompletion::Failed;
+        planned.clear();
     }
 
     // Group the operations by origin, in the setup's origin order, so each datum's
@@ -367,6 +423,11 @@ fn build_job_with_compute(
         let mut diagnostic = Diagnostic::error(error.to_string());
         if let Some(op) = error.op {
             diagnostic = diagnostic.for_op(op);
+        }
+        if let Some(tag) = program.steps().get(error.step).and_then(Step::tag) {
+            if let (Some(pattern_id), Some(instance_index)) = (tag.pattern_id, tag.instance_index) {
+                diagnostic = diagnostic.for_pattern(pattern_id, instance_index);
+            }
         }
         diagnostics.push(
             diagnostic
@@ -613,6 +674,7 @@ fn apply_feed_height(
 
 /// One operation, computed and ready to be emitted. The fragment's coordinates are in
 /// the part frame; the post re-references them to the operation's origin.
+#[derive(Clone)]
 struct Planned {
     /// The emitting operation's id — for tagging the group's start-point rapid.
     op_id: u32,
@@ -624,6 +686,17 @@ struct Planned {
     ends_with: Option<u32>,
     /// The operation's origin index (its `work_offset`) — the group it belongs to.
     datum: u32,
+    pattern_id: Option<u64>,
+    instance_index: Option<u32>,
+}
+
+impl Planned {
+    fn tag(&self, kind: MoveKind) -> Tag {
+        let mut tag = Tag::new(self.op_id, kind);
+        tag.pattern_id = self.pattern_id;
+        tag.instance_index = self.instance_index;
+        tag
+    }
 }
 
 /// Running machine state threaded across emitted operation instances, so a tool,
@@ -633,6 +706,7 @@ struct EmitState {
     current_rpm: Option<f64>,
     current_tool: Option<u32>,
     current_datum: u32,
+    last_clearance: Option<f64>,
 }
 
 impl EmitState {
@@ -644,6 +718,7 @@ impl EmitState {
             current_rpm: None,
             current_tool: None,
             current_datum: 1,
+            last_clearance: None,
         }
     }
 }
@@ -718,11 +793,11 @@ fn emit_instance(
         if let Some(start) = first_position(&pl.fragment) {
             program.push(Step::Rapid {
                 to: Point3::new(start.x, start.y, tool_change_height),
-                tag: Tag::new(pl.op_id, MoveKind::Traverse),
+                tag: pl.tag(MoveKind::Traverse),
             });
             program.push(Step::Rapid {
                 to: Point3::new(start.x, start.y, clearance),
-                tag: Tag::new(pl.op_id, MoveKind::Traverse),
+                tag: pl.tag(MoveKind::Traverse),
             });
         }
     } else if let (Some(previous), Some(start)) =
@@ -732,8 +807,8 @@ fn emit_instance(
         // crossing XY, then descend at the destination; never traverse diagonally
         // upward from a lower operation's clearance into a taller workpiece.
         if (previous.z - clearance).abs() > 1e-9 {
-            let travel_z = previous.z.max(clearance);
-            let tag = Tag::new(pl.op_id, MoveKind::Traverse);
+            let travel_z = previous.z.max(clearance).max(st.last_clearance.unwrap_or(previous.z));
+            let tag = pl.tag(MoveKind::Traverse);
             program.push(Step::Rapid {
                 to: Point3::new(previous.x, previous.y, travel_z),
                 tag,
@@ -749,6 +824,7 @@ fn emit_instance(
         }
     }
     program.extend(pl.fragment.clone());
+    st.last_clearance = Some(clearance);
     if let Some(t) = pl.ends_with {
         st.current_tool = Some(t);
     }
@@ -890,6 +966,7 @@ mod tests {
                     })
                 })
                 .collect(),
+            patterns: Vec::new(),
             origin: [0.0; 3],
             extra_origins: Vec::new(),
             origin_index: 1,
@@ -897,6 +974,84 @@ mod tests {
             height_settings: Default::default(),
             tool_change_height: None,
         })
+    }
+
+    #[test]
+    fn rectangular_pattern_expands_row_major_with_each_seed_once_and_instance_provenance() {
+        let mut doc = document(2);
+        doc.setup_mut().patterns.push(cam_model::OperationPattern {
+            id: 77, name: "Grid".into(), members: vec![0, 1],
+            kind: cam_model::PatternKind::Rectangular { nx: 3, ny: 2, dx: 20.0, dy: -15.0 },
+            order: cam_model::PatternOrder::ByInstance, suppressed: false,
+        });
+        let mut cache = crate::OperationCache::default();
+        let request = crate::PlanRequest { document: &doc, spindle_rpm: 1000.0, dir: SpindleDir::Cw, stock: None, tool_change_height: 50.0 };
+        let result = crate::build_job_cached(request, &CancelToken::new(), &mut cache, |_| {});
+        assert_eq!(result.completion, JobCompletion::Complete, "{:?}", result.diagnostics);
+        assert_eq!(cache.stats.computed, 2, "each source fragment is generated once");
+        let holes: Vec<_> = result.program.steps().iter().filter_map(|step| match step { Step::Drill(c) => Some((c.points[0], c.tag)), _ => None }).collect();
+        assert_eq!(holes.len(), 12);
+        let expected = [[10.,10.],[11.,10.],[30.,10.],[31.,10.],[50.,10.],[51.,10.],[10.,-5.],[11.,-5.],[30.,-5.],[31.,-5.],[50.,-5.],[51.,-5.]];
+        for ((point, tag), [x,y]) in holes.iter().zip(expected) {
+            assert!((point[0]-x).abs() < 1e-9 && (point[1]-y).abs() < 1e-9);
+            assert_eq!(tag.pattern_id, Some(77));
+            assert!(tag.instance_index.is_some());
+        }
+    }
+
+    #[test]
+    fn suppressed_pattern_skips_seed_generation_and_bad_membership_fails_headless_planning() {
+        let mut doc = document(1);
+        doc.setup_mut().patterns.push(cam_model::OperationPattern {
+            id: 78, name: "Off".into(), members: vec![0],
+            kind: cam_model::PatternKind::Circular { center_xy: [1.0, 1.0], count: 4, distribution: cam_model::CircularDistribution::Full, direction: cam_model::PatternDirection::Ccw },
+            order: cam_model::PatternOrder::ByInstance, suppressed: true,
+        });
+        let mut cache = crate::OperationCache::default();
+        let request = crate::PlanRequest { document: &doc, spindle_rpm: 1000.0, dir: SpindleDir::Cw, stock: None, tool_change_height: 50.0 };
+        let result = crate::build_job_cached(request, &CancelToken::new(), &mut cache, |_| {});
+        assert_eq!(result.completion, JobCompletion::Complete);
+        assert_eq!(cache.stats.computed, 0);
+        doc.setup_mut().patterns[0].members.push(404);
+        let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result.diagnostics[0].message.contains("missing operation 404"));
+    }
+
+    #[test]
+    fn circular_pattern_rotates_drill_cycles_about_nonzero_center_and_by_operation_orders_instances() {
+        let mut doc = document(1);
+        doc.setup_mut().patterns.push(cam_model::OperationPattern {
+            id: 79, name: "Rotor".into(), members: vec![0],
+            kind: cam_model::PatternKind::Circular {
+                center_xy: [5.0, 5.0], count: 4,
+                distribution: cam_model::CircularDistribution::Full,
+                direction: cam_model::PatternDirection::Ccw,
+            },
+            order: cam_model::PatternOrder::ByInstance, suppressed: false,
+        });
+        let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Complete, "{:?}", result.diagnostics);
+        let cycles: Vec<_> = result.program.steps().iter().filter_map(|step| match step {
+            Step::Drill(cycle) => Some((cycle.points[0], cycle.tag.instance_index)), _ => None,
+        }).collect();
+        assert_eq!(cycles.len(), 4);
+        assert_eq!(cycles[0].0, [10.0, 10.0]);
+        assert!((cycles[1].0[0] - 0.0).abs() < 1e-9);
+        assert!((cycles[1].0[1] - 10.0).abs() < 1e-9);
+        assert_eq!(cycles.iter().map(|(_, index)| *index).collect::<Vec<_>>(), vec![Some(0), Some(1), Some(2), Some(3)]);
+
+        let mut ordered = document(2);
+        ordered.setup_mut().patterns.push(cam_model::OperationPattern {
+            id: 80, name: "Operations".into(), members: vec![0, 1],
+            kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 3.0, dy: 0.0 },
+            order: cam_model::PatternOrder::ByOperation, suppressed: false,
+        });
+        let result = build_job(&ordered, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+        let ownership: Vec<_> = result.program.steps().iter().filter_map(|step| match step {
+            Step::Drill(cycle) => Some((cycle.tag.op_id, cycle.tag.instance_index)), _ => None,
+        }).collect();
+        assert_eq!(ownership, vec![(0, Some(0)), (0, Some(1)), (1, Some(0)), (1, Some(1))]);
     }
 
     #[test]

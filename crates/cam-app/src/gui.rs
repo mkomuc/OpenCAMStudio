@@ -58,6 +58,8 @@ mod operation_metadata;
 mod operation_tabs;
 #[path = "gui_setup_editor.rs"]
 mod setup_editor_view;
+#[path = "gui_pattern_editor.rs"]
+mod pattern_editor_view;
 use operation_tabs::OperationTab;
 #[path = "gui_project_tree.rs"]
 mod project_tree_view;
@@ -1847,6 +1849,18 @@ impl std::fmt::Display for ToolChoice {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct PatternDraft {
+    setup_id: u64,
+    pattern_id: Option<u64>,
+    name: String,
+    members: Vec<u32>,
+    circular: bool,
+    by_operation: bool,
+    clockwise: bool,
+    values: [String; 5],
+}
+
 struct App {
     controller: AppController,
     viewport_cache: std::cell::RefCell<Option<(workspace_view::ViewportKey, Viewport)>>,
@@ -1856,6 +1870,7 @@ struct App {
     /// Shared transactional editor for setup, stock and postprocess settings. The
     /// draft survives tab changes; only the footer can commit or discard it.
     setup_draft: Option<cam_model::Setup>,
+    pattern_draft: Option<PatternDraft>,
     setup_model_selection: Option<InstanceId>,
     setup_model_pick: bool,
     setup_values: BTreeMap<usize, String>,
@@ -1893,6 +1908,7 @@ struct App {
     expanded_setups: BTreeSet<u64>,
     collapsed_assets: BTreeSet<u64>,
     expanded_operations: BTreeSet<u32>,
+    expanded_patterns: BTreeSet<u64>,
     tools_expanded: bool,
     hidden_assets: BTreeSet<u64>,
     /// None scopes display and picking to the active setup.
@@ -2363,6 +2379,19 @@ enum Message {
     SetupStockNumberChanged(usize, String),
     SetupStockPositionChanged(usize, BoxAnchor),
     SetupAxisPick(usize),
+    BeginPattern(bool),
+    EditPattern(u64),
+    PatternName(String),
+    PatternValue(usize, String),
+    PatternMember(u32, bool),
+    PatternOrderChanged(bool),
+    PatternDirectionChanged(bool),
+    TogglePatternExpanded(u64),
+    PatternSuppression(u64, bool),
+    PatternDissolve(u64),
+    PatternDelete(u64),
+    PatternCommit,
+    PatternCancel,
     SetupAxisFlip(usize, bool),
     SetupAxisToggle(usize),
     SetupAxisClear(usize),
@@ -3122,6 +3151,7 @@ impl App {
             notice: None,
             notice_queue: VecDeque::new(),
             setup_draft: None,
+            pattern_draft: None,
             setup_model_selection: None,
             setup_model_pick: false,
             setup_values: BTreeMap::new(),
@@ -3157,6 +3187,7 @@ impl App {
             expanded_setups: BTreeSet::from([1]),
             collapsed_assets: BTreeSet::new(),
             expanded_operations: BTreeSet::new(),
+            expanded_patterns: BTreeSet::new(),
             tools_expanded: false,
             hidden_assets: BTreeSet::new(),
             model_view: Some(TreeNode::Models),
@@ -3272,6 +3303,38 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
+        if self.pattern_draft.is_some()
+            && matches!(
+                &message,
+                Message::Select(_)
+                    | Message::SelectSetup(_)
+                    | Message::EditSetup(_)
+                    | Message::ClickOp(_)
+                    | Message::BeginOp(_)
+                    | Message::SelectOrigin(_)
+                    | Message::AddOrigin
+                    | Message::SetupNew
+                    | Message::SetupDuplicate(_)
+                    | Message::SetupDelete(_)
+                    | Message::DuplicateOp
+                    | Message::DeleteOp
+                    | Message::ReinitOp
+                    | Message::MoveOpToOrigin(_)
+                    | Message::TransferOpToSetup(_, _)
+                    | Message::SetOpExcluded(_, _)
+                    | Message::Undo
+                    | Message::Redo
+                    | Message::RunJob
+                    | Message::ExportNc
+                    | Message::ToolpathCommand(_, _)
+                    | Message::OpenSample
+                    | Message::NewProject
+                    | Message::OpenProject
+            )
+        {
+            self.status = "Apply or cancel the pattern draft before changing selection or processing toolpaths.".into();
+            return iced::Task::none();
+        }
         let validate_geometry = match &message {
             Message::ProfileEntry(
                 profile_entries_view::EntryMessage::Name(_)
@@ -3771,6 +3834,7 @@ impl App {
                 Err(e) => self.status = format!("Import failed: {e}"),
             },
             Message::SelectSetup(id) => {
+                if self.pattern_draft.is_some() { self.status = "Apply or cancel the pattern draft before switching setups.".into(); return iced::Task::none(); }
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before switching setups.".into();
                 } else if let Err(error) = self.controller.activate_setup(id) {
@@ -4022,6 +4086,74 @@ impl App {
                     ["X", "Y", "Z"][axis]
                 );
             }
+            Message::BeginPattern(circular) => {
+                let Some(setup) = self.controller.setups().iter().find(|s| s.id == self.controller.active_setup_id()) else { return iced::Task::none(); };
+                let members: Vec<u32> = if self.focus_ops.is_empty() { Vec::new() } else { self.focus_ops.iter().copied().collect() };
+                let origin = setup.origin_position(self.controller.active_origin());
+                self.pattern_draft = Some(PatternDraft {
+                    setup_id: setup.id, pattern_id: None, name: "Pattern".into(), members, circular, by_operation: false, clockwise: false,
+                    values: if circular { ["4".into(), origin[0].to_string(), origin[1].to_string(), "360".into(), String::new()] } else { ["2".into(), "1".into(), "20".into(), "0".into(), String::new()] },
+                });
+                self.controller.select(Selection::Setup);
+                self.inspector_active = true;
+                self.status = "Choose source operations and pattern placement, then create or cancel the draft.".into();
+            }
+            Message::EditPattern(id) => {
+                let Some((setup_id, pattern)) = self.controller.setups().iter().find_map(|setup| setup.patterns.iter().find(|p| p.id == id).map(|p| (setup.id, p.clone()))) else { self.status = "Pattern no longer exists.".into(); return iced::Task::none(); };
+                let (circular, clockwise, values) = match pattern.kind {
+                    cam_model::PatternKind::Rectangular { nx, ny, dx, dy } => (false, false, [nx.to_string(), ny.to_string(), dx.to_string(), dy.to_string(), String::new()]),
+                    cam_model::PatternKind::Circular { center_xy, count, distribution, direction } => {
+                        let sweep = match distribution { cam_model::CircularDistribution::Full => 360.0, cam_model::CircularDistribution::Partial { sweep_degrees } => sweep_degrees };
+                        (true, direction == cam_model::PatternDirection::Cw, [count.to_string(), center_xy[0].to_string(), center_xy[1].to_string(), sweep.to_string(), String::new()])
+                    }
+                };
+                self.pattern_draft = Some(PatternDraft { setup_id, pattern_id: Some(id), name: pattern.name, members: pattern.members, circular, by_operation: pattern.order == cam_model::PatternOrder::ByOperation, clockwise, values });
+                self.controller.activate_setup(setup_id).ok();
+                self.controller.select(Selection::Setup);
+                self.inspector_active = true;
+            }
+            Message::PatternName(value) => if let Some(draft) = self.pattern_draft.as_mut() { draft.name = value; },
+            Message::PatternValue(index, value) => if let Some(draft) = self.pattern_draft.as_mut() { if index < 5 { draft.values[index] = value; } },
+            Message::PatternMember(id, checked) => if let Some(draft) = self.pattern_draft.as_mut() {
+                if checked { if !draft.members.contains(&id) { draft.members.push(id); } } else { draft.members.retain(|member| *member != id); }
+            },
+            Message::PatternOrderChanged(by_operation) => if let Some(draft) = self.pattern_draft.as_mut() { draft.by_operation = by_operation; },
+            Message::PatternDirectionChanged(clockwise) => if let Some(draft) = self.pattern_draft.as_mut() { draft.clockwise = clockwise; },
+            Message::TogglePatternExpanded(id) => { if !self.expanded_patterns.remove(&id) { self.expanded_patterns.insert(id); } },
+            Message::PatternCancel => { self.pattern_draft = None; self.status = "Pattern draft cancelled.".into(); },
+            Message::PatternCommit => {
+                if let Some(draft) = self.pattern_draft.clone() {
+                    let parsed = (|| -> Result<cam_model::PatternKind, String> {
+                        if draft.circular {
+                            let count = draft.values[0].parse::<u32>().map_err(|_| "Enter an integer instance count")?;
+                            let cx = draft.values[1].parse::<f64>().map_err(|_| "Enter a finite center X")?;
+                            let cy = draft.values[2].parse::<f64>().map_err(|_| "Enter a finite center Y")?;
+                            let sweep = draft.values[3].parse::<f64>().map_err(|_| "Enter a sweep angle")?;
+                            let distribution = if sweep == 360.0 { cam_model::CircularDistribution::Full } else { cam_model::CircularDistribution::Partial { sweep_degrees: sweep } };
+                            Ok(cam_model::PatternKind::Circular { center_xy: [cx, cy], count, distribution, direction: if draft.clockwise { cam_model::PatternDirection::Cw } else { cam_model::PatternDirection::Ccw } })
+                        } else {
+                            let nx = draft.values[0].parse::<u32>().map_err(|_| "Enter an integer X count")?;
+                            let ny = draft.values[1].parse::<u32>().map_err(|_| "Enter an integer Y count")?;
+                            let dx = draft.values[2].parse::<f64>().map_err(|_| "Enter X pitch")?;
+                            let dy = draft.values[3].parse::<f64>().map_err(|_| "Enter Y pitch")?;
+                            Ok(cam_model::PatternKind::Rectangular { nx, ny, dx, dy })
+                        }
+                    })();
+                    match parsed.and_then(|kind| { kind.validate()?; if let Some(id) = draft.pattern_id { self.controller.edit_pattern(draft.setup_id, id, &draft.members, draft.name.clone(), kind, if draft.by_operation { cam_model::PatternOrder::ByOperation } else { cam_model::PatternOrder::ByInstance })?; } else { self.controller.create_pattern(draft.setup_id, &draft.members, draft.name.clone(), kind, if draft.by_operation { cam_model::PatternOrder::ByOperation } else { cam_model::PatternOrder::ByInstance })?; } Ok(kind) }) {
+                        Ok(_) => { self.pattern_draft = None; self.inspector_active = false; self.status = "Pattern created. Seed operations remain editable inside the group.".into(); }
+                        Err(reason) => self.status = reason,
+                    }
+                }
+            }
+            Message::PatternSuppression(id, suppressed) => {
+                if let Some(setup_id) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == id)).map(|s| s.id) { self.controller.set_pattern_suppressed(setup_id, id, suppressed); }
+            }
+            Message::PatternDissolve(id) => {
+                if let Some(setup_id) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == id)).map(|s| s.id) { self.controller.dissolve_pattern(setup_id, id); self.status = "Pattern dissolved; source operations remain in place.".into(); }
+            }
+            Message::PatternDelete(id) => {
+                if let Some((setup_id, count)) = self.controller.setups().iter().find_map(|s| s.patterns.iter().find(|p| p.id == id).map(|p| (s.id, p.members.len()))) { self.controller.delete_pattern_and_operations(setup_id, id); self.status = format!("Deleted pattern and {count} source operation(s)."); }
+            }
             Message::SetupAxisFlip(axis, flipped) => self.set_setup_axis_flip(axis, flipped),
             Message::SetupAxisToggle(axis) => {
                 if let Some(draft) = &self.setup_draft {
@@ -4105,6 +4237,7 @@ impl App {
                 }
             }
             Message::Select(selection) => {
+                if self.pattern_draft.is_some() { self.status = "Apply or cancel the pattern draft before changing selection.".into(); return iced::Task::none(); }
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before changing selection.".into();
                     return iced::Task::none();
@@ -4127,6 +4260,7 @@ impl App {
                 self.refresh_fields();
             }
             Message::ClickOp(id) => {
+                if self.pattern_draft.is_some() { self.status = "Apply or cancel the pattern draft before changing selection.".into(); return iced::Task::none(); }
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before changing selection.".into();
                     return iced::Task::none();
@@ -6077,9 +6211,16 @@ impl App {
             Message::OpMenu(id) => {
                 self.simulation = None;
                 self.pending_simulation = None;
-                self.controller.select(Selection::Operation(id));
-                self.focus_ops.clear();
-                self.focus_ops.insert(id);
+                // Context-clicking a member of the current highlight set keeps the
+                // whole set available to group commands; a fresh row establishes a
+                // one-operation selection.
+                if !self.focus_ops.contains(&id) {
+                    self.controller.select(Selection::Operation(id));
+                    self.focus_ops.clear();
+                    self.focus_ops.insert(id);
+                } else {
+                    self.controller.select(Selection::Operation(id));
+                }
                 self.end_setup_draft();
                 self.operation_draft = None;
                 self.operation_tools.clear();
@@ -7430,8 +7571,8 @@ impl App {
             let tools = self
                 .operation_tools
                 .iter()
-                .cloned()
                 .filter(|tool| used_tools.contains(&tool.number))
+                .cloned()
                 .collect();
             let heights = self.preview_safety_heights(id);
             let result = if self.height_rules_dirty()
@@ -11904,6 +12045,57 @@ mod multi_setup_draft_tests {
         assert_eq!(app.controller.document().setup().name, "Applied edit");
         assert!(app.setup_draft.is_none());
         assert!(app.pane_handle(Pane::Inspector).is_none());
+    }
+
+    #[test]
+    fn pattern_editor_create_apply_and_cancel_are_transactional() {
+        let (mut app, _) = App::new();
+        send(&mut app, Message::OpenSample);
+        let operation = app.controller.document().setup().operations[0].id();
+        app.focus_ops.insert(operation);
+        send(&mut app, Message::BeginPattern(false));
+        assert_eq!(app.pattern_draft.as_ref().unwrap().members, vec![operation]);
+        send(&mut app, Message::ClickOp(operation));
+        assert!(app.pattern_draft.is_some(), "selection changes do not discard a draft");
+        send(&mut app, Message::RunJob);
+        assert!(app.controller.outcome().is_none(), "generation is blocked until the draft is resolved");
+        send(&mut app, Message::PatternValue(0, "1".into()));
+        send(&mut app, Message::PatternCommit);
+        assert!(app.pattern_draft.is_some(), "invalid drafts remain open");
+        assert!(app.controller.document().setup().patterns.is_empty());
+        send(&mut app, Message::PatternValue(0, "2".into()));
+        send(&mut app, Message::PatternCommit);
+        let pattern = app.controller.document().setup().patterns[0].clone();
+        assert_eq!(pattern.members, vec![operation]);
+        assert_eq!(pattern.kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 20.0, dy: 0.0 });
+        assert!(app.pattern_draft.is_none());
+
+        send(&mut app, Message::EditPattern(pattern.id));
+        send(&mut app, Message::PatternValue(2, "35".into()));
+        send(&mut app, Message::PatternCancel);
+        assert_eq!(app.controller.document().setup().patterns[0].kind, pattern.kind);
+
+        send(&mut app, Message::EditPattern(pattern.id));
+        send(&mut app, Message::PatternValue(2, "35".into()));
+        send(&mut app, Message::PatternCommit);
+        assert_eq!(app.controller.document().setup().patterns[0].kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 35.0, dy: 0.0 });
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document().setup().patterns[0].kind, pattern.kind);
+    }
+
+    #[test]
+    fn circular_pattern_draft_defaults_to_the_active_origin_in_setup_xy() {
+        let (mut app, _) = App::new();
+        send(&mut app, Message::OpenSample);
+        app.controller.add_origin();
+        app.controller.edit_active_origin(|origin| *origin = [17.25, -8.5, 0.0]);
+        let setup = app.controller.document().setup();
+        let expected = setup.origin_position(app.controller.active_origin());
+        send(&mut app, Message::BeginPattern(true));
+        let draft = app.pattern_draft.as_ref().unwrap();
+        assert_eq!(draft.values[1].parse::<f64>().unwrap(), expected[0]);
+        assert_eq!(draft.values[2].parse::<f64>().unwrap(), expected[1]);
+        send(&mut app, Message::PatternCancel);
     }
 
     #[test]
