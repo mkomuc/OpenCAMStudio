@@ -163,10 +163,12 @@ impl App {
     }
 }
 
+type SceneMesh = (Arc<Vec<MeshVertex>>, Arc<Vec<u32>>);
+
 pub(super) struct TabOverlay {
     camera: OrbitCamera,
     triangles: Vec<(usize, [[f64; 3]; 3])>,
-    scene_mesh: Option<(Arc<Vec<MeshVertex>>, Arc<Vec<u32>>)>,
+    scene_mesh: Option<SceneMesh>,
     browser_width: f32,
     points: Vec<[f64; 2]>,
     positions: Vec<[f64; 2]>,

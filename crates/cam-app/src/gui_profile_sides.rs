@@ -37,7 +37,7 @@ impl App {
             let mut entries = self.preview_profile_entries();
             for entry in &mut entries {
                 if let Ok((contours, heights)) =
-                    cam_geometry3d::profile_entry_contours(&geometry, &entry)
+                    cam_geometry3d::profile_entry_contours(&geometry, entry)
                 {
                     if all.is_empty() && entry.kind != cam_model::ProfileGeometryKind::Silhouette {
                         plane = match &entry.source {
@@ -371,7 +371,7 @@ impl SideOverlay {
                 if length < 1. {
                     continue;
                 }
-                direction = direction / length;
+                direction /= length;
                 let mut centre = anchor;
                 if contour.side != Side::On {
                     let Some(beside) = self.project(
@@ -414,7 +414,7 @@ impl SideOverlay {
                     }
                 };
                 if reverse {
-                    direction = direction * -1.;
+                    direction *= -1.;
                 }
                 let arrow = SideArrow {
                     index,
