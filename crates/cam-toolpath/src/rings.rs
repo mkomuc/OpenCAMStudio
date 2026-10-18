@@ -117,6 +117,7 @@ fn enter_with_plunge(
     h: &Heights,
     plunge: Plunge,
     plunge_feed: f64,
+    entry_feeds: cam_model::EntryFeeds,
     feed: f64,
     id: u32,
     ring: &[Point],
@@ -146,7 +147,7 @@ fn enter_with_plunge(
             path,
             *top,
             z,
-            feed,
+            entry_feeds.ramp(feed),
             Tag::new(id, MoveKind::Plunge),
         );
         return Some(*on_ring);
@@ -160,7 +161,7 @@ fn enter_with_plunge(
         z,
         plunge,
         plunge_feed,
-        feed,
+        entry_feeds.ramp(feed),
         Tag::new(id, MoveKind::Plunge),
     );
     None
@@ -197,6 +198,7 @@ fn approach(
     plunge: Plunge,
     feed: f64,
     plunge_feed: f64,
+    entry_feeds: cam_model::EntryFeeds,
     id: u32,
     link_threshold: f64,
     ring: &[Point],
@@ -216,7 +218,7 @@ fn approach(
         tag: Tag::new(id, MoveKind::Link),
     });
     enter_with_plunge(
-        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, feed, id, ring, lead_path,
+        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path,
     )
 }
 
@@ -239,6 +241,7 @@ fn emit_wall_ring(
     id: u32,
     feed: f64,
     plunge_feed: f64,
+    entry_feeds: cam_model::EntryFeeds,
     lead_overlap: f64,
     lead_in: Lead,
     lead_out: Lead,
@@ -267,7 +270,7 @@ fn emit_wall_ring(
     // and then along the ring. So the lead is handed to the entry rather than emitted
     // after it.
     let ramped = approach(
-        prog, prev_end, entry, tan_in, cin, from_z, z, h, plunge, feed, plunge_feed, id,
+        prog, prev_end, entry, tan_in, cin, from_z, z, h, plunge, feed, plunge_feed, entry_feeds, id,
         link_threshold, &ri,
         crate::profile::lead_in_path(start, entry, cin, eff_in),
     );
@@ -286,13 +289,13 @@ fn emit_wall_ring(
             let exit = crate::leads::lead_end_point(last, tan_out, cout, eff_out);
             crate::emit::cut_polyline(prog, &walked, feed, cut, z);
             // The lead-**out** stays flat at depth; only the lead-in descends.
-            crate::leads::emit_lead(prog, last, exit, last, cout, eff_out, z, feed, lead);
+            crate::leads::emit_lead(prog, last, exit, last, cout, eff_out, z, entry_feeds.lead_out(feed), lead);
             exit
         }
         None => {
-            crate::leads::emit_lead(prog, entry, start, start, cin, eff_in, z, feed, lead);
+            crate::leads::emit_lead(prog, entry, start, start, cin, eff_in, z, entry_feeds.lead_in(feed), lead);
             crate::emit::cut_polyline(prog, &loop_pts, feed, cut, z);
-            crate::leads::emit_lead(prog, exit_on, exit, exit_on, cout, eff_out, z, feed, lead);
+            crate::leads::emit_lead(prog, exit_on, exit, exit_on, cout, eff_out, z, entry_feeds.lead_out(feed), lead);
             exit
         }
     }
@@ -321,6 +324,7 @@ pub(crate) fn emit_stay_down(
     id: u32,
     feed: f64,
     plunge_feed: f64,
+    entry_feeds: cam_model::EntryFeeds,
     plunge: Plunge,
     lead_overlap: f64,
     lead_in: Lead,
@@ -361,6 +365,7 @@ pub(crate) fn emit_stay_down(
             h,
             plunge,
             plunge_feed,
+            entry_feeds,
             feed,
             id,
             &r0,
@@ -402,6 +407,7 @@ pub(crate) fn emit_stay_down(
                     id,
                     feed,
                     plunge_feed,
+                    entry_feeds,
                     lead_overlap,
                     lead_in,
                     lead_out,
@@ -435,6 +441,7 @@ pub(crate) fn emit_stay_down(
                 plunge,
                 feed,
                 plunge_feed,
+                entry_feeds,
                 id,
                 link_threshold,
                 &ri,

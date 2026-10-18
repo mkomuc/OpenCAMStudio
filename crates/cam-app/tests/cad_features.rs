@@ -586,6 +586,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         work_offset: 1,
         spindle_rpm: 1000.,
         tool_preset: None,
+        entry_feeds: Default::default(),
         boundary: contour(2., 18., 2., 18.),
         islands: vec![contour(8., 12., 8., 12.)],
         depth: 3.,

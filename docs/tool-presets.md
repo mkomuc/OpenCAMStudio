@@ -10,8 +10,8 @@ imports and exports.
 2. Select a cutter and use **Add / duplicate** under **Cutting presets**. With a
    preset selected this copies its values. Give the new preset a name and select
    its material, or leave it at **Any material**.
-3. Enter spindle RPM, cutting feed, and plunge feed. Optionally enter stepdown and
-   overlap. Click **Apply changes** to save the cutter and presets together.
+3. Enter spindle RPM, cutting feed, and plunge feed. Optionally enter ramp,
+   lead-in, and lead-out feeds, as well as stepdown and overlap. Click **Apply changes** to save the cutter and presets together.
 4. In **Setup → Stock**, choose the stock material from the managed list.
 5. Create an operation and choose a cutter. Its first preset matching the stock
    material is applied automatically. If none matches, its first **Any material**
@@ -43,3 +43,22 @@ presets or managed material IDs retain their existing cutting data and material 
 A material used by a library preset or stock in the current project must be
 unlinked before it can be deleted. Saved projects remain self-contained when a
 material is unavailable in the local library.
+
+## Independent entry and exit feeds
+
+The operation's **Tool** tab provides cutting and plunge feeds, plus independent
+**Ramp feed**, **Lead-in feed**, and **Lead-out feed** where the strategy supports
+them. Rates are in mm/min. For these three optional overrides, `0` inherits the
+cutting feed. In a library preset, leave the corresponding field blank to leave
+that operation setting unchanged when applying the preset.
+
+Ramp feed controls inclined, helical and zigzag entries in profiles, pockets and
+V-carving, including ramped lead-ins. Straight Z entries continue to use plunge
+feed. Lead-in and lead-out feeds control generated entry and exit leads in closed
+profiles, pockets, chamfers and thread milling. For a two-tool V-carve operation,
+these overrides also apply to the clearing pass, using its cutting feed when unset.
+A thread's helical cutting motion uses cutting feed; it is not a ramp entry.
+Engraving, facing and drilling keep their existing cutting/plunge or axial feeds.
+
+These settings change the feeds written into generated toolpaths and posted G-code;
+changes are included in the operation's save, undo and toolpath-cache state.

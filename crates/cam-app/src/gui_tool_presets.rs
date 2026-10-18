@@ -28,14 +28,20 @@ pub(super) enum PresetField {
     Rpm,
     Feed,
     Plunge,
+    Ramp,
+    LeadIn,
+    LeadOut,
     Stepdown,
     Overlap,
 }
 impl PresetField {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 8] = [
         Self::Rpm,
         Self::Feed,
         Self::Plunge,
+        Self::Ramp,
+        Self::LeadIn,
+        Self::LeadOut,
         Self::Stepdown,
         Self::Overlap,
     ];
@@ -44,13 +50,19 @@ impl PresetField {
             Self::Rpm => "Spindle (rpm)",
             Self::Feed => "Cutting feed (mm/min)",
             Self::Plunge => "Plunge feed (mm/min)",
+            Self::Ramp => "Ramp feed (mm/min, optional)",
+            Self::LeadIn => "Lead-in feed (mm/min, optional)",
+            Self::LeadOut => "Lead-out feed (mm/min, optional)",
             Self::Stepdown => "Stepdown (mm, optional)",
             Self::Overlap => "Overlap (%, optional)",
         }
     }
     fn valid(self, value: &str) -> bool {
         if value.trim().is_empty() {
-            return matches!(self, Self::Stepdown | Self::Overlap);
+            return matches!(
+                self,
+                Self::Stepdown | Self::Overlap | Self::Ramp | Self::LeadIn | Self::LeadOut
+            );
         }
         value.trim().parse::<f64>().ok().is_some_and(|v| {
             v.is_finite()
@@ -125,6 +137,18 @@ impl App {
                 (PresetField::Feed, fmt_num(p.feed)),
                 (PresetField::Plunge, fmt_num(p.plunge_feed)),
                 (
+                    PresetField::Ramp,
+                    p.entry_feeds.ramp.map(fmt_num).unwrap_or_default(),
+                ),
+                (
+                    PresetField::LeadIn,
+                    p.entry_feeds.lead_in.map(fmt_num).unwrap_or_default(),
+                ),
+                (
+                    PresetField::LeadOut,
+                    p.entry_feeds.lead_out.map(fmt_num).unwrap_or_default(),
+                ),
+                (
                     PresetField::Stepdown,
                     p.stepdown.map(fmt_num).unwrap_or_default(),
                 ),
@@ -172,6 +196,7 @@ impl App {
                 },
                 stepdown: None,
                 overlap: None,
+                entry_feeds: Default::default(),
             })
         };
         tool.presets.push(preset);
@@ -192,6 +217,9 @@ impl App {
                     PresetField::Rpm => p.spindle_rpm = parsed.unwrap(),
                     PresetField::Feed => p.feed = parsed.unwrap(),
                     PresetField::Plunge => p.plunge_feed = parsed.unwrap(),
+                    PresetField::Ramp => p.entry_feeds.ramp = parsed,
+                    PresetField::LeadIn => p.entry_feeds.lead_in = parsed,
+                    PresetField::LeadOut => p.entry_feeds.lead_out = parsed,
                     PresetField::Stepdown => p.stepdown = parsed,
                     PresetField::Overlap => p.overlap = parsed.map(|v| v / 100.),
                 }
@@ -433,6 +461,9 @@ impl App {
             Field::SpindleRpm,
             Field::Feed,
             Field::PlungeFeed,
+            Field::RampFeed,
+            Field::LeadInFeed,
+            Field::LeadOutFeed,
             Field::Stepdown,
             Field::Overlap,
             Field::Peck,
@@ -441,6 +472,12 @@ impl App {
                 continue;
             }
             if field == Field::Overlap && preset.overlap.is_none() {
+                continue;
+            }
+            if (field == Field::RampFeed && preset.entry_feeds.ramp.is_none())
+                || (field == Field::LeadInFeed && preset.entry_feeds.lead_in.is_none())
+                || (field == Field::LeadOutFeed && preset.entry_feeds.lead_out.is_none())
+            {
                 continue;
             }
             if let Some(value) = op_field(op, field) {
@@ -525,6 +562,7 @@ mod tests {
             plunge_feed: 100.,
             stepdown: Some(0.5),
             overlap: Some(0.25),
+            entry_feeds: Default::default(),
         }
     }
     fn app() -> App {
@@ -752,5 +790,50 @@ mod tests {
                 .len(),
             2
         );
+    }
+    #[test]
+    fn independent_entry_feeds_seed_from_presets_and_remain_editable_per_operation() {
+        let mut app = app();
+        app.library.tools[0].presets[0].entry_feeds = cam_model::EntryFeeds {
+            ramp: Some(170.),
+            lead_in: Some(210.),
+            lead_out: Some(220.),
+        };
+        send(&mut app, Message::BeginOp(OpKind::Profile));
+        for (field, expected) in [
+            (Field::RampFeed, "170"),
+            (Field::LeadInFeed, "210"),
+            (Field::LeadOutFeed, "220"),
+        ] {
+            assert!(app.inspector_fields().contains(&field));
+            assert_eq!(app.fields[&field], expected);
+            assert_eq!(operation_tabs::field_tab(field), OperationTab::Tool);
+        }
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        send(
+            &mut app,
+            Message::FieldChanged(Field::RampFeed, "180".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadInFeed, "0".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadOutFeed, "230".into()),
+        );
+        send(&mut app, Message::ConfirmOp);
+        let op = app.controller.document().setup().operations.last().unwrap();
+        assert_eq!(
+            *op.entry_feeds(),
+            cam_model::EntryFeeds {
+                ramp: Some(180.),
+                lead_in: None,
+                lead_out: Some(230.)
+            }
+        );
+        assert_eq!(op.tool_preset().unwrap().entry_feeds.ramp, Some(170.));
     }
 }

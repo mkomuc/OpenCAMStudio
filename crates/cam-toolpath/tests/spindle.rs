@@ -26,6 +26,7 @@ fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
         tabs: Default::default(),
         spindle_rpm,
         tool_preset: None,
+        entry_feeds: Default::default(),
         work_offset: 1,
         clearing: cam_model::Clearing::default(),
         id,

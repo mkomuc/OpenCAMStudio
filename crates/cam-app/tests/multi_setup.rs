@@ -11,6 +11,7 @@ fn profile(id: u32, depth: f64) -> Operation {
         tabs: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
+        entry_feeds: Default::default(),
         work_offset: 1,
         clearing: Clearing::default(),
         id,

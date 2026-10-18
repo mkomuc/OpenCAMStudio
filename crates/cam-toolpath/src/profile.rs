@@ -132,6 +132,9 @@ impl Strategy for ProfileStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if let Err(reason) = op.entry_feeds.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         if !op.additional_chains.is_empty() {
             if op.tabs.enabled || op.stepover > 0. {
                 return StrategyResult { diagnostics: vec![Diagnostic::error("Holding tabs and radial roughing require one closed profile chain; use separate operations")], ..Default::default() };
@@ -343,6 +346,7 @@ impl Strategy for ProfileStrategy {
                     plunge: op.plunge,
                     feed: op.feed,
                     plunge_feed: op.plunge_feed,
+                    entry_feeds: op.entry_feeds,
                     lead_overlap: op.lead_overlap,
                     lead_in: Lead::None,
                     lead_out: Lead::None,
@@ -915,9 +919,9 @@ fn emit_loop_rich(
             // lead and contour can merge their arcs and cut below the stock top
             // before the lead reaches the contour.
             emit_descending_path(
-                prog, &path[..=lead_end], *top, ramp_top, op.feed, plunge_tag,
+                prog, &path[..=lead_end], *top, ramp_top, op.entry_feeds.ramp(op.feed), plunge_tag,
             );
-            emit_descending_path(prog, &path[lead_end..], ramp_top, z, op.feed, plunge_tag);
+            emit_descending_path(prog, &path[lead_end..], ramp_top, z, op.entry_feeds.ramp(op.feed), plunge_tag);
         } else {
             emit_plunge(
                 prog,
@@ -928,12 +932,12 @@ fn emit_loop_rich(
                 z,
                 op.plunge,
                 op.plunge_feed,
-                op.feed,
+                op.entry_feeds.ramp(op.feed),
                 plunge_tag,
             );
 
             // Lead onto the contour at depth: entry → start.
-            crate::leads::emit_lead(prog, entry, start, start, out, lead_in, z, op.feed, lead);
+            crate::leads::emit_lead(prog, entry, start, start, out, lead_in, z, op.entry_feeds.lead_in(op.feed), lead);
         }
 
         if let Some(c) = comp {
@@ -950,7 +954,7 @@ fn emit_loop_rich(
 
         // Lead off the contour at depth — **flat**. Only the lead-in descends.
         crate::leads::emit_lead(
-            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.feed, lead,
+            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.entry_feeds.lead_out(op.feed), lead,
         );
 
         // Lift only when the next pass has somewhere else to start from; the final
@@ -2036,6 +2040,7 @@ mod tests {
             tabs: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             clearing: cam_model::Clearing::default(),
             id: 0,
@@ -2165,6 +2170,7 @@ mod tests {
             tabs: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             clearing: cam_model::Clearing {
                 engagement,

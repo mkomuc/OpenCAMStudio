@@ -11,6 +11,7 @@ fn preset(id: u64, material_id: Option<u64>, feed: f64) -> ToolPreset {
         plunge_feed: 120.,
         stepdown: Some(0.75),
         overlap: Some(0.3),
+        entry_feeds: Default::default(),
     }
 }
 fn cutter() -> Tool {

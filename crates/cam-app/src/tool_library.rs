@@ -1187,6 +1187,7 @@ mod preset_file_tests {
         library.tools[0].presets.push(cam_model::ToolPreset {
             id: 1, name: "Roughing".into(), material_id: Some(17),
             spindle_rpm: 6000., feed: 500., plunge_feed: 100., stepdown: None, overlap: None,
+            entry_feeds: Default::default(),
         });
         let path = scratch.file("tools.json");
         library.save_to(&path).unwrap();

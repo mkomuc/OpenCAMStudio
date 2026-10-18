@@ -40,6 +40,9 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         Field::SpindleRpm
         | Field::Feed
         | Field::PlungeFeed
+        | Field::RampFeed
+        | Field::LeadInFeed
+        | Field::LeadOutFeed
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
         Field::MajorDia | Field::TabWidth | Field::TabHeight | Field::TabSpacing => {

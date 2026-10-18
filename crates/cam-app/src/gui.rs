@@ -1082,6 +1082,9 @@ enum Field {
     SpindleRpm,
     Feed,
     PlungeFeed,
+    RampFeed,
+    LeadInFeed,
+    LeadOutFeed,
     /// Thread major diameter (mm).
     MajorDia,
     /// Thread pitch (mm).
@@ -1208,6 +1211,9 @@ impl Field {
             Field::SpindleRpm => "Spindle (rpm)",
             Field::Feed => "Feed (mm/min)",
             Field::PlungeFeed => "Plunge feed (mm/min)",
+            Field::RampFeed => "Ramp feed (0=cutting)",
+            Field::LeadInFeed => "Lead-in feed (0=cutting)",
+            Field::LeadOutFeed => "Lead-out feed (0=cutting)",
             Field::MajorDia => "Major ⌀ (mm)",
             Field::Pitch => "Pitch (mm)",
             Field::ThreadTop => "Thread top (mm)",
@@ -1418,6 +1424,9 @@ impl Field {
                  0 falls back to the job default."
             }
             Field::Feed => "Cutting feed rate — how fast the tool advances while cutting (mm/min).",
+            Field::RampFeed => "Ramp, helix and zigzag entry feed in mm/min. Zero inherits the cutting feed.",
+            Field::LeadInFeed => "Lead-in feed in mm/min. Zero inherits the cutting feed. Used when a lead-in is generated.",
+            Field::LeadOutFeed => "Lead-out feed in mm/min. Zero inherits the cutting feed. Used when a lead-out is generated.",
             Field::PlungeFeed => {
                 "Feed rate for downward (Z) entry moves — usually slower than the \
                  cutting feed, since end mills cut poorly straight down (mm/min)."
@@ -9514,6 +9523,9 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Carve(op), Field::OperationTop) => Some(op.top),
         // Spindle speed is common to every operation kind.
         (op, Field::SpindleRpm) => Some(op.spindle_rpm()),
+        (op, Field::RampFeed) => Some(op.entry_feeds().ramp.unwrap_or(0.)),
+        (op, Field::LeadInFeed) => Some(op.entry_feeds().lead_in.unwrap_or(0.)),
+        (op, Field::LeadOutFeed) => Some(op.entry_feeds().lead_out.unwrap_or(0.)),
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
         (Operation::Profile(o), Field::Stepover) => Some(o.stepover),
         (Operation::Profile(o), Field::TabWidth) => Some(o.tabs.width),
@@ -9602,6 +9614,9 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
 /// Write the parsed inspector fields onto an operation.
 fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
     let get = |f: Field| parsed.get(&f).copied();
+    if let Some(value) = get(Field::RampFeed) { op.entry_feeds_mut().ramp = (value > 0.).then_some(value); }
+    if let Some(value) = get(Field::LeadInFeed) { op.entry_feeds_mut().lead_in = (value > 0.).then_some(value); }
+    if let Some(value) = get(Field::LeadOutFeed) { op.entry_feeds_mut().lead_out = (value > 0.).then_some(value); }
     // Spindle speed is common to every operation kind.
     if let Some(v) = get(Field::SpindleRpm) {
         op.set_spindle_rpm(v.max(0.0));
@@ -11971,6 +11986,7 @@ mod multi_setup_draft_tests {
                 scallop: 0.0,
                 spindle_rpm: 0.0,
                 tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: 300.0,
                 plunge_feed: 100.0,
@@ -12492,6 +12508,7 @@ mod inspector_field_tests {
         Operation::Drill(DrillOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 1,
             tool: 1,
@@ -12531,6 +12548,7 @@ mod inspector_field_tests {
             gradual: false,
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             feed: 200.0,
             plunge_feed: 100.0,

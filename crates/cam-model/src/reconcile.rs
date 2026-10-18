@@ -367,6 +367,7 @@ mod tests {
             Operation::Drill(DrillOp {
                 spindle_rpm: 0.0,
                 tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 id,
                 tool,

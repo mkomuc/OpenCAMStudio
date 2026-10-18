@@ -760,4 +760,4 @@ mod tests {
 }
 
 mod tool_presets;
-pub use tool_presets::{Material, ToolPreset};
+pub use tool_presets::{EntryFeeds, Material, ToolPreset};

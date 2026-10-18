@@ -33,6 +33,9 @@ impl Strategy for PocketStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if let Err(reason) = op.entry_feeds.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         let mut diagnostics = Vec::new();
 
         macro_rules! fail {
@@ -111,6 +114,7 @@ impl Strategy for PocketStrategy {
             plunge: op.clear.plunge,
             feed: op.clear.feed,
             plunge_feed: op.clear.plunge_feed,
+            entry_feeds: op.entry_feeds,
             lead_overlap: op.clear.lead_overlap,
             lead_in: op.clear.lead_in,
             lead_out: op.clear.lead_out,
@@ -207,6 +211,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -249,6 +254,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -306,6 +312,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -360,6 +367,7 @@ mod tests {
             let mut op = PocketOp {
                 spindle_rpm: 0.0,
                 tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 id: 0,
                 tool: 1,
@@ -403,6 +411,7 @@ mod tests {
             let op = PocketOp {
                 spindle_rpm: 0.0,
                 tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 id: 0,
                 tool: 1,
@@ -465,6 +474,7 @@ mod tests {
         PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -585,6 +595,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -718,6 +729,7 @@ mod tests {
         let small = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,

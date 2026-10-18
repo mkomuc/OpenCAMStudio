@@ -391,6 +391,9 @@ pub struct ProfileOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -497,6 +500,9 @@ pub struct DrillOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -656,6 +662,9 @@ pub struct PocketOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -813,6 +822,9 @@ pub struct FaceOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -893,6 +905,9 @@ pub struct ThreadOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -950,6 +965,9 @@ pub struct ChamferOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1023,6 +1041,9 @@ pub struct EngraveOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1107,6 +1128,9 @@ pub struct CarveOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1632,6 +1656,7 @@ mod tests {
             tabs: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             clearing: Clearing::default(),
             id,
@@ -1707,6 +1732,7 @@ mod tests {
         Operation::Carve(CarveOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 3,
             tool: 4,
@@ -1857,6 +1883,7 @@ mod tests {
         let drill = Operation::Drill(DrillOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,

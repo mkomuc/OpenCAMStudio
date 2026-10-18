@@ -45,6 +45,7 @@ pub(crate) struct ClearJob<'a> {
     pub feed: f64,
     /// Plunge feed, mm/min.
     pub plunge_feed: f64,
+    pub entry_feeds: cam_model::EntryFeeds,
     /// Re-machine distance past a loop's start before leading/closing off.
     pub lead_overlap: f64,
     /// Finishing lead onto the walls (pocket only; roughing passes `None`).
@@ -241,6 +242,7 @@ pub(crate) fn clear(
         job.id,
         job.feed,
         job.plunge_feed,
+        job.entry_feeds,
         job.plunge,
         job.lead_overlap,
         job.lead_in,
@@ -314,10 +316,10 @@ fn emit_adaptive_moves(
             Some(len) => {
                 let path: Vec<_> = moves.iter().map(|&(p, _)| p).collect();
                 let ramp = crate::profile::advance_along_path(&path, len);
-                crate::profile::emit_open_ramp(prog, &ramp, from_z, z, job.feed, plunge_tag);
+                crate::profile::emit_open_ramp(prog, &ramp, from_z, z, job.entry_feeds.ramp(job.feed), plunge_tag);
             }
             None => crate::profile::emit_plunge(
-                prog, start, tan, out, from_z, z, job.plunge, job.plunge_feed, job.feed,
+                prog, start, tan, out, from_z, z, job.plunge, job.plunge_feed, job.entry_feeds.ramp(job.feed),
                 plunge_tag,
             ),
         }
@@ -467,6 +469,7 @@ mod tests {
             plunge: Plunge::Straight,
             feed: 300.0,
             plunge_feed: 100.0,
+            entry_feeds: Default::default(),
             lead_overlap: 0.0,
             lead_in: Lead::None,
             lead_out: Lead::None,

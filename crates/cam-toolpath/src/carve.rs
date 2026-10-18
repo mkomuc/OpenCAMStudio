@@ -142,6 +142,9 @@ impl Strategy for CarveStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if let Err(reason) = op.entry_feeds.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         let mut diagnostics = Vec::new();
 
         macro_rules! bail {
@@ -436,6 +439,7 @@ impl Strategy for CarveStrategy {
                             plunge: cp.plunge,
                             feed,
                             plunge_feed,
+                            entry_feeds: op.entry_feeds,
                             lead_overlap: cp.lead_overlap,
                             lead_in: cp.lead_in,
                             lead_out: cp.lead_out,
@@ -870,7 +874,7 @@ fn emit_loop(
                     path,
                     *top,
                     z,
-                    op.feed,
+                    op.entry_feeds.ramp(op.feed),
                     tags.plunge,
                 ),
                 // Only when there is a descent at all. `emit_plunge` emits a move for a
@@ -887,7 +891,7 @@ fn emit_loop(
                     z,
                     op.plunge,
                     op.plunge_feed,
-                    op.feed,
+                    op.entry_feeds.ramp(op.feed),
                     tags.plunge,
                 ),
                 None => {}
@@ -914,7 +918,7 @@ fn emit_loop(
                     // below: that lands above the surface and the plunge feeds from there,
                     // whereas a ramp starts *at* the material and must be brought to it.
                     crate::emit::descend_to(body, start, top.max(z), heights, op.feed, op.id);
-                    crate::profile::emit_descending_path(body, path, *top, z, op.feed, tags.plunge);
+                    crate::profile::emit_descending_path(body, path, *top, z, op.entry_feeds.ramp(op.feed), tags.plunge);
                 }
                 None => {
                     let from_z = heights.retract.max(op.top);
@@ -931,7 +935,7 @@ fn emit_loop(
                         z,
                         op.plunge,
                         op.plunge_feed,
-                        op.feed,
+                        op.entry_feeds.ramp(op.feed),
                         tags.plunge,
                     );
                 }
@@ -1388,6 +1392,7 @@ mod tests {
         CarveOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,

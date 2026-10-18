@@ -310,6 +310,7 @@ impl Project {
                 tool.validate_presets()?;
             }
             for operation in &setup.operations {
+                operation.entry_feeds().validate()?;
                 if let Some(preset) = operation.tool_preset() {
                     preset.validate()?;
                 }

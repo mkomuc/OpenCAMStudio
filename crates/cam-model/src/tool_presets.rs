@@ -9,6 +9,36 @@ pub struct Material {
     pub name: String,
 }
 
+/// Optional entry/exit feed rates in mm/min. Unset values retain the strategy's
+/// cutting-feed fallback, keeping existing projects and presets unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EntryFeeds {
+    pub ramp: Option<f64>,
+    pub lead_in: Option<f64>,
+    pub lead_out: Option<f64>,
+}
+impl EntryFeeds {
+    pub fn validate(&self) -> Result<(), String> {
+        if [self.ramp, self.lead_in, self.lead_out]
+            .into_iter()
+            .flatten()
+            .any(|v| !v.is_finite() || v <= 0.)
+        {
+            return Err("Ramp and lead feeds must be finite and positive, or unset.".into());
+        }
+        Ok(())
+    }
+    pub fn ramp(&self, cutting: f64) -> f64 {
+        self.ramp.unwrap_or(cutting)
+    }
+    pub fn lead_in(&self, cutting: f64) -> f64 {
+        self.lead_in.unwrap_or(cutting)
+    }
+    pub fn lead_out(&self, cutting: f64) -> f64 {
+        self.lead_out.unwrap_or(cutting)
+    }
+}
+
 /// Named cutting parameters for one cutter. IDs are local to the cutter.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolPreset {
@@ -20,6 +50,8 @@ pub struct ToolPreset {
     pub spindle_rpm: f64,
     pub feed: f64,
     pub plunge_feed: f64,
+    #[serde(default)]
+    pub entry_feeds: EntryFeeds,
     /// Optional axial depth per pass, mm; only applied where supported.
     #[serde(default)]
     pub stepdown: Option<f64>,
@@ -30,6 +62,7 @@ pub struct ToolPreset {
 
 impl ToolPreset {
     pub fn validate(&self) -> Result<(), String> {
+        self.entry_feeds.validate()?;
         if self.id == 0 || self.name.trim().is_empty() {
             return Err("A preset needs an ID and a name.".into());
         }
@@ -83,6 +116,31 @@ impl Tool {
 }
 
 impl Operation {
+    pub fn entry_feeds(&self) -> &EntryFeeds {
+        match self {
+            Self::Profile(o) => &o.entry_feeds,
+            Self::Pocket(o) => &o.entry_feeds,
+            Self::Face(o) => &o.entry_feeds,
+            Self::Drill(o) => &o.entry_feeds,
+            Self::Chamfer(o) => &o.entry_feeds,
+            Self::Thread(o) => &o.entry_feeds,
+            Self::Engrave(o) => &o.entry_feeds,
+            Self::Carve(o) => &o.entry_feeds,
+        }
+    }
+    pub fn entry_feeds_mut(&mut self) -> &mut EntryFeeds {
+        match self {
+            Self::Profile(o) => &mut o.entry_feeds,
+            Self::Pocket(o) => &mut o.entry_feeds,
+            Self::Face(o) => &mut o.entry_feeds,
+            Self::Drill(o) => &mut o.entry_feeds,
+            Self::Chamfer(o) => &mut o.entry_feeds,
+            Self::Thread(o) => &mut o.entry_feeds,
+            Self::Engrave(o) => &mut o.entry_feeds,
+            Self::Carve(o) => &mut o.entry_feeds,
+        }
+    }
+
     pub fn tool_preset(&self) -> Option<&ToolPreset> {
         match self {
             Self::Profile(o) => o.tool_preset.as_ref(),
@@ -114,6 +172,16 @@ impl Operation {
     pub fn apply_tool_preset(&mut self, preset: &ToolPreset) -> Result<(), String> {
         preset.validate()?;
         self.set_spindle_rpm(preset.spindle_rpm);
+        let feeds = self.entry_feeds_mut();
+        if let Some(v) = preset.entry_feeds.ramp {
+            feeds.ramp = Some(v);
+        }
+        if let Some(v) = preset.entry_feeds.lead_in {
+            feeds.lead_in = Some(v);
+        }
+        if let Some(v) = preset.entry_feeds.lead_out {
+            feeds.lead_out = Some(v);
+        }
         let (feed, plunge, stepdown, overlap, slot) = match self {
             Self::Profile(o) => (
                 &mut o.feed,

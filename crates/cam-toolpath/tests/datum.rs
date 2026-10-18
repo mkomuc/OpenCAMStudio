@@ -313,6 +313,7 @@ fn profile(id: u32, chain: Contour, side: Side, tool: u32, work_offset: u32) -> 
         tabs: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
+        entry_feeds: Default::default(),
         work_offset,
         clearing: cam_model::Clearing::default(),
         id,

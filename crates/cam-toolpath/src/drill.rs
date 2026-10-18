@@ -138,6 +138,7 @@ mod tests {
         DrillOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 7,
             tool: 1,
