@@ -1587,6 +1587,26 @@ impl Document {
     }
 }
 
+// Internally tagged project files buffer JSON object keys as strings.
+fn deserialize_operation_map<'de, D, T>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<u32, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let encoded =
+        <std::collections::BTreeMap<String, T> as serde::Deserialize>::deserialize(deserializer)?;
+    let mut values = std::collections::BTreeMap::new();
+    for (key, value) in encoded {
+        let id = key.parse::<u32>().map_err(serde::de::Error::custom)?;
+        if values.insert(id, value).is_some() {
+            return Err(serde::de::Error::custom("duplicate operation height ID"));
+        }
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1835,24 +1855,4 @@ mod tests {
         });
         assert!(!prof.same_work(&drill));
     }
-}
-
-// Internally tagged project files buffer JSON object keys as strings.
-fn deserialize_operation_map<'de, D, T>(
-    deserializer: D,
-) -> Result<std::collections::BTreeMap<u32, T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    let encoded =
-        <std::collections::BTreeMap<String, T> as serde::Deserialize>::deserialize(deserializer)?;
-    let mut values = std::collections::BTreeMap::new();
-    for (key, value) in encoded {
-        let id = key.parse::<u32>().map_err(serde::de::Error::custom)?;
-        if values.insert(id, value).is_some() {
-            return Err(serde::de::Error::custom("duplicate operation height ID"));
-        }
-    }
-    Ok(values)
 }

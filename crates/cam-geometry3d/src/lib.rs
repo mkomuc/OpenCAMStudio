@@ -2378,7 +2378,7 @@ mod tests {
         projection.mesh.triangle_faces = vec![face; 8];
         let binding = resolve_selection(
             &geometry,
-            &[selected.clone()],
+            std::slice::from_ref(&selected),
             ExtractionRecipe::ProfileSilhouette,
             0.,
         )

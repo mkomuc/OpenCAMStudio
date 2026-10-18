@@ -134,7 +134,7 @@ impl App {
         }
         let (vertices, indices) = self.profile_tab_mesh();
         let triangles = indices
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .enumerate()
             .map(|(index, triangle)| {
                 (
@@ -163,10 +163,12 @@ impl App {
     }
 }
 
+type SceneMesh = (Arc<Vec<MeshVertex>>, Arc<Vec<u32>>);
+
 pub(super) struct TabOverlay {
     camera: OrbitCamera,
     triangles: Vec<(usize, [[f64; 3]; 3])>,
-    scene_mesh: Option<(Arc<Vec<MeshVertex>>, Arc<Vec<u32>>)>,
+    scene_mesh: Option<SceneMesh>,
     browser_width: f32,
     points: Vec<[f64; 2]>,
     positions: Vec<[f64; 2]>,
@@ -202,7 +204,7 @@ impl TabOverlay {
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((index, depth)) = hit {
             let blocked = self.scene_mesh.as_ref().is_some_and(|(vertices, indices)| {
-                indices.chunks_exact(3).any(|triangle| {
+                indices.as_chunks::<3>().0.iter().any(|triangle| {
                     let points = std::array::from_fn(|i| {
                         vertices[triangle[i] as usize].position.map(f64::from)
                     });
@@ -856,7 +858,7 @@ mod tests {
                     .map(|v| v.position[2])
                     .fold(f32::NEG_INFINITY, f32::max);
                 let face = indices[36..]
-                    .chunks_exact(3)
+                    .as_chunks::<3>().0.iter()
                     .find(|t| {
                         t.iter()
                             .all(|i| (vertices[*i as usize].position[2] - top).abs() < 1e-5)

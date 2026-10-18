@@ -473,24 +473,22 @@ impl App {
         }
         match op {
             Operation::Profile(p) => {
-                if tab == OperationTab::Geometry {
-                    if linked.is_none() {
-                        let comp = if p.comp == Comp::Computed {
-                            p.comp
-                        } else if p.clearing.climb {
-                            Comp::ControlLeft
-                        } else {
-                            Comp::ControlRight
-                        };
-                        list = list.push(profile_picker(
-                            "Compensation",
-                            "Computed offsets the geometry; Control uses the machine's G41/G42 cutter compensation. Climb in Passes also determines the compensation side.",
-                            self.tooltips,
-                            Compensation::of(comp),
-                            Compensation::available(self.controller.post_kind()),
-                            |value| Message::ProfileCompChanged(value.value()),
-                        ));
-                    }
+                if tab == OperationTab::Geometry && linked.is_none() {
+                    let comp = if p.comp == Comp::Computed {
+                        p.comp
+                    } else if p.clearing.climb {
+                        Comp::ControlLeft
+                    } else {
+                        Comp::ControlRight
+                    };
+                    list = list.push(profile_picker(
+                        "Compensation",
+                        "Computed offsets the geometry; Control uses the machine's G41/G42 cutter compensation. Climb in Passes also determines the compensation side.",
+                        self.tooltips,
+                        Compensation::of(comp),
+                        Compensation::available(self.controller.post_kind()),
+                        |value| Message::ProfileCompChanged(value.value()),
+                    ));
                 }
                 if tab == OperationTab::Geometry {
                     list = list.push(iced::widget::rule::horizontal(1));
