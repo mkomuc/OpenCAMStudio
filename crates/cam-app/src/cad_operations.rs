@@ -432,7 +432,7 @@ pub(crate) fn create_operation(
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
             selections: None,
-            closed: resolved.profiles.first().map_or(true, |p| p.closed),
+            closed: resolved.profiles.first().is_none_or(|p| p.closed),
             additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
             tabs: Default::default(),
             id,
