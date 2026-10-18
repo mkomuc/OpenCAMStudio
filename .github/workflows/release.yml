@@ -3,15 +3,36 @@ name: Release
 on:
   push:
     tags: [ "v*" ]
+  release:
+    types: [published]
   # Build all three platforms without tagging, to prove the pipeline before a real
   # release. No Release is published on this path -- see the `release` job's `if`.
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize tag-push and release-published runs for the same tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: Validate the release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check tag against the workspace version
+        run: .github/scripts/version.sh
+      - name: Test runtime packaging scripts
+        run: python -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
   linux:
+    needs: version
     name: linux x86_64 (AppImage)
     # 22.04 deliberately, NOT ubuntu-latest: a dynamically linked binary's glibc floor
     # is whatever the builder has, and 24.04 produced a GLIBC_2.39 requirement that
@@ -31,16 +52,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
+            cmake g++ pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
             libxcursor-dev libxrandr-dev libxi-dev \
             libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev
       - name: Version
         id: ver
         run: .github/scripts/version.sh
+      - uses: ./.github/actions/setup-occt
+      - name: Test native STEP/IGES imports
+        run: |
+          cargo test --locked --release -p cam-kernel --features occt
+          # Tigerente.step is a local, untracked fixture; the authored corpus ships in git.
+          cargo test --locked --release -p cam-app --features occt --test native_step --test native_iges \
+            -- --include-ignored --skip tigerente \
+            --skip silhouette_projection_is_independent_of_display_quality_on_curved_step_models
+          cargo build --locked --release -p cam-kernel --features occt --example occt_smoke
       # `--features gui` is the whole point: cam-app's `default = []`, so without it
       # the packaged binary is the headless stub that prints "run cargo run" and exits.
       - name: Build the desktop app
-        run: cargo build --release -p cam-app --features gui --bin opencamstudio
+        run: cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio
       - name: Build the AppImage
         run: |
           set -euo pipefail
@@ -50,6 +80,7 @@ jobs:
                    $APP/usr/share/applications \
                    $APP/usr/share/icons/hicolor/256x256/apps
           cp target/release/opencamstudio $APP/usr/bin/
+          python .github/scripts/package-occt.py stage "$APP"
           cp crates/cam-app/assets/opencamstudio-256.png \
              $APP/usr/share/icons/hicolor/256x256/apps/opencamstudio.png
           cat > $APP/usr/share/applications/opencamstudio.desktop <<'DESKTOP'
@@ -72,12 +103,11 @@ jobs:
           cat > $APP/AppRun <<'APPRUN'
           #!/bin/sh
           HERE=$(dirname "$(readlink -f "$0")")
+          export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           exec "$HERE/usr/bin/opencamstudio" "$@"
           APPRUN
           chmod +x $APP/AppRun
-          # No library bundling: the binary NEEDs only libc/libm/libgcc, because winit
-          # and wgpu dlopen the X11/Wayland/GL stack at runtime. Verified by objdump on
-          # a real artifact -- OpenCADStudio's AppImage bundles nothing either.
+          # OCCT's shared libraries are inside usr/lib; libc/libstdc++ come from the OS.
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
           # --appimage-extract-and-run because CI runners have no FUSE.
@@ -92,27 +122,34 @@ jobs:
           set -euo pipefail
           ./OpenCAMStudio-*.AppImage --appimage-extract >/dev/null
           BIN=squashfs-root/usr/bin/opencamstudio
-          FLOOR=$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+          FLOOR=$(objdump -T "$BIN" squashfs-root/usr/lib/*.so* | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
                   | sort -uV | tail -1 | cut -d_ -f2)
           echo "glibc floor: $FLOOR"
           [ "$(printf '%s\n2.35\n' "$FLOOR" | sort -V | tail -1)" = "2.35" ] \
             || { echo "::error::glibc floor $FLOOR exceeds 2.35; Debian 12 cannot run this"; exit 1; }
           # The packaged binary must be the GUI app, not the headless stub that
           # cam-app builds without --features gui.
-          ! strings -a "$BIN" | grep -q 'headless build' \
+          ! strings -a "$BIN" | grep 'headless build' >/dev/null \
             || { echo "::error::packaged the headless stub, not the desktop app"; exit 1; }
           test -f squashfs-root/.DirIcon
           test -f squashfs-root/opencamstudio.desktop
+          python .github/scripts/package-occt.py verify squashfs-root \
+            --smoke target/release/examples/occt_smoke
           rm -rf squashfs-root
+      - name: OCCT corresponding source
+        run: python .github/scripts/package-occt.py source OpenCAMStudio-OCCT-7.9.3-source.tar.gz
       - name: Checksum
-        run: .github/scripts/sha256.sh OpenCAMStudio-*.AppImage
+        run: .github/scripts/sha256.sh OpenCAMStudio-*.AppImage OpenCAMStudio-OCCT-*-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: OpenCAMStudio-*.AppImage*
+          path: |
+            OpenCAMStudio-*.AppImage*
+            OpenCAMStudio-OCCT-*-source.tar.gz*
           if-no-files-found: error
 
   macos:
+    needs: version
     name: macos arm64 (dmg)
     runs-on: macos-latest
     steps:
@@ -123,17 +160,29 @@ jobs:
       - name: Version
         id: ver
         run: .github/scripts/version.sh
+      - uses: ./.github/actions/setup-occt
+      - name: Test native STEP/IGES imports
+        run: |
+          cargo test --locked --release -p cam-kernel --features occt --target aarch64-apple-darwin
+          # Tigerente.step is a local, untracked fixture; the authored corpus ships in git.
+          cargo test --locked --release -p cam-app --features occt --test native_step --test native_iges \
+            --target aarch64-apple-darwin -- --include-ignored --skip tigerente \
+            --skip silhouette_projection_is_independent_of_display_quality_on_curved_step_models
+          cargo build --locked --release -p cam-kernel --features occt --example occt_smoke --target aarch64-apple-darwin
       - name: Build the desktop app
         run: >
-          cargo build --release -p cam-app --features gui --bin opencamstudio
+          cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio
           --target aarch64-apple-darwin
       - name: Build the .app bundle and .dmg
         run: |
           set -euo pipefail
           V=${{ steps.ver.outputs.v }}
           APP="Open CAM Studio.app"
+          BUNDLE_VERSION=${V#v}
+          BUNDLE_VERSION=${BUNDLE_VERSION%-dev}
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/aarch64-apple-darwin/release/opencamstudio "$APP/Contents/MacOS/"
+          python .github/scripts/package-occt.py stage "$APP"
           # .icns from the committed 1024 PNG. sips and iconutil are part of macOS, so
           # this needs no rasteriser and no third-party tool.
           ICONSET=opencamstudio.iconset
@@ -152,8 +201,8 @@ jobs:
             <key>CFBundleName</key>              <string>Open CAM Studio</string>
             <key>CFBundleDisplayName</key>       <string>Open CAM Studio</string>
             <key>CFBundleIdentifier</key>        <string>io.github.pr0m1th3as.OpenCAMStudio</string>
-            <key>CFBundleVersion</key>           <string>${V#v}</string>
-            <key>CFBundleShortVersionString</key><string>${V#v}</string>
+            <key>CFBundleVersion</key>           <string>${BUNDLE_VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${BUNDLE_VERSION}</string>
             <key>CFBundleExecutable</key>        <string>opencamstudio</string>
             <key>CFBundleIconFile</key>          <string>opencamstudio</string>
             <key>CFBundlePackageType</key>       <string>APPL</string>
@@ -162,6 +211,8 @@ jobs:
           </dict>
           </plist>
           PLIST
+          python .github/scripts/package-occt.py verify "$APP" \
+            --smoke target/aarch64-apple-darwin/release/examples/occt_smoke
           mkdir -p dmg && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname "Open CAM Studio" -srcfolder dmg -ov -format UDZO \
             "OpenCAMStudio-$V-macos-arm64.dmg"
@@ -176,7 +227,7 @@ jobs:
           plutil -lint "$APP/Contents/Info.plist"
           file "$APP/Contents/MacOS/opencamstudio" | grep -q 'arm64' \
             || { echo "::error::binary is not arm64"; exit 1; }
-          ! strings -a "$APP/Contents/MacOS/opencamstudio" | grep -q 'headless build' \
+          ! strings -a "$APP/Contents/MacOS/opencamstudio" | grep 'headless build' >/dev/null \
             || { echo "::error::packaged the headless stub, not the desktop app"; exit 1; }
           file "$APP/Contents/Resources/opencamstudio.icns" | grep -qi 'icon' \
             || { echo "::error::icns is not a Mac OS X icon file"; exit 1; }
@@ -196,30 +247,51 @@ jobs:
           if-no-files-found: error
 
   windows:
-    name: windows x86_64 (msi + zip)
-    runs-on: windows-latest
+    needs: version
+    name: windows x86_64 (msi + portable zip)
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: Version
         id: ver
         shell: bash
         run: .github/scripts/version.sh
+      - uses: ./.github/actions/setup-occt
+      - name: Test native STEP/IGES imports
+        shell: bash
+        run: |
+          cargo test --locked --release -p cam-kernel --features occt
+          # Tigerente.step is a local, untracked fixture; the authored corpus ships in git.
+          cargo test --locked --release -p cam-app --features occt --test native_step --test native_iges \
+            -- --include-ignored --skip tigerente \
+            --skip silhouette_projection_is_independent_of_display_quality_on_curved_step_models
+          cargo build --locked --release -p cam-kernel --features occt --example occt_smoke
       - name: Build the desktop app
-        run: cargo build --release -p cam-app --features gui --bin opencamstudio
-      # A bare .exe, not a zip: a Rust GUI binary is already self-contained, so
-      # zipping it only forces the user to extract before they can double-click. The
-      # licence obligation that made a zip tempting is met inside the program itself
-      # -- the full GPL text is embedded via include_str! and shown under About --
-      # so the executable carries its own licence wherever it goes.
-      # Built first and unconditionally: it is the artifact that cannot fail, so a
-      # Windows download exists even if the installer step does not.
-      - name: Portable exe
+        run: cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio
+      # The portable application now needs OCCT DLLs beside the executable.
+      - name: Stage portable app and installer dependencies
         shell: bash
         run: |
           set -euo pipefail
-          V=${{ steps.ver.outputs.v }}
-          cp target/release/opencamstudio.exe "OpenCAMStudio-$V-windows-x86_64-portable.exe"
+          mkdir -p target/occt-windows
+          cp target/release/opencamstudio.exe target/occt-windows/
+          python .github/scripts/package-occt.py stage target/occt-windows
+          python .github/scripts/package-occt.py verify target/occt-windows \
+            --smoke target/release/examples/occt_smoke.exe
+          python .github/scripts/package-occt.py wix target/occt-windows
+      - name: Portable ZIP
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.v }}
+        run: |
+          Compress-Archive -Path target/occt-windows/* -DestinationPath "OpenCAMStudio-$env:RELEASE_VERSION-windows-x86_64-portable.zip"
+          Expand-Archive -Path "OpenCAMStudio-$env:RELEASE_VERSION-windows-x86_64-portable.zip" -DestinationPath target/portable-check
+          python .github/scripts/package-occt.py verify target/portable-check --smoke target/release/examples/occt_smoke.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
       - name: Build the MSI
@@ -235,36 +307,50 @@ jobs:
           # for the life of the product.
           test -f crates/cam-app/wix/main.wxs
           cargo wix -p cam-app --no-build --nocapture \
+            --include crates/cam-app/wix/main.wxs --include target/occt-runtime.wxs \
             --output "OpenCAMStudio-$V-windows-x86_64-installer.msi"
       - name: Verify the artifacts
         shell: bash
         run: |
           set -euo pipefail
-          for f in OpenCAMStudio-*portable.exe OpenCAMStudio-*.msi; do
+          for f in OpenCAMStudio-*portable.zip OpenCAMStudio-*.msi; do
             test -s "$f" || { echo "::error::$f is empty"; exit 1; }
           done
           # An MSI is an OLE compound file: it must begin D0 CF 11 E0. A zero-byte or
           # half-written installer would otherwise sail through as a valid artifact.
           head -c 8 OpenCAMStudio-*.msi | od -An -tx1 | tr -d ' \n' | grep -qi '^d0cf11e0' \
             || { echo "::error::MSI is not an OLE compound file"; exit 1; }
-          ! strings -a OpenCAMStudio-*portable.exe | grep -q 'headless build' \
+          ! strings -a target/portable-check/opencamstudio.exe | grep 'headless build' >/dev/null \
             || { echo "::error::packaged the headless stub, not the desktop app"; exit 1; }
+      - name: Verify installed MSI runtime
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem OpenCAMStudio-*.msi).FullName
+          $result = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+          if ($result.ExitCode -notin @(0, 3010)) { throw "MSI installation failed: $($result.ExitCode)" }
+          try {
+            python .github/scripts/package-occt.py verify "$env:ProgramFiles/Open CAM Studio/bin" --smoke target/release/examples/occt_smoke.exe
+            if ($LASTEXITCODE -ne 0) { throw 'Installed STEP/IGES runtime failed' }
+          } finally {
+            $result = Start-Process msiexec.exe -ArgumentList @('/x', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+            if ($result.ExitCode -notin @(0, 3010)) { throw "MSI uninstall failed: $($result.ExitCode)" }
+          }
       - name: Checksums
         shell: bash
-        run: .github/scripts/sha256.sh OpenCAMStudio-*.msi OpenCAMStudio-*portable.exe
+        run: .github/scripts/sha256.sh OpenCAMStudio-*.msi OpenCAMStudio-*portable.zip
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
             OpenCAMStudio-*.msi*
-            OpenCAMStudio-*portable.exe*
+            OpenCAMStudio-*portable.zip*
           if-no-files-found: error
 
   release:
     name: publish the GitHub Release
     needs: [linux, macos, windows]
     # Tags only. A workflow_dispatch run is a rehearsal and publishes nothing.
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -284,6 +370,15 @@ jobs:
         run: |
           set -euo pipefail
           ls -l artifacts/
+          # Validate the downloaded assets before attaching them to the release.
+          (cd artifacts && sha256sum --check --strict *.sha256)
+          # Publishing through the GitHub UI creates the release before this job;
+          # reruns must also be able to replace assets after a partial upload.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            exit 0
+          fi
           # A written release note if one exists for this tag, GitHub's generated
           # one otherwise. `--generate-notes` alone would list every commit since the
           # previous tag -- and with no previous tag, that is the entire history:
@@ -292,6 +387,7 @@ jobs:
           if [ -f "$NOTES" ]; then
             echo "using $NOTES"
             gh release create "${GITHUB_REF_NAME}" \
+              --verify-tag \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Open CAM Studio ${GITHUB_REF_NAME}" \
               --notes-file "$NOTES" \
@@ -299,6 +395,7 @@ jobs:
           else
             echo "::warning::no $NOTES; falling back to generated notes"
             gh release create "${GITHUB_REF_NAME}" \
+              --verify-tag \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Open CAM Studio ${GITHUB_REF_NAME}" \
               --generate-notes \

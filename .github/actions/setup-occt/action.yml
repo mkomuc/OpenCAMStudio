@@ -1,0 +1,15 @@
+name: Build OCCT
+description: Build the pinned OCCT 7.9.3 STEP/IGES runtime from source
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v5
+      with:
+        repository: Open-Cascade-SAS/OCCT
+        # V7_9_3, pinned so release builds cannot silently change SDKs.
+        ref: a016080bf6738d6aeae020badee4e888ad1540a5
+        path: .local/occt-source
+        persist-credentials: false
+    - name: Build and install OCCT
+      shell: bash
+      run: python .github/scripts/build-occt.py

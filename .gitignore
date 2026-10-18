@@ -1,6 +1,9 @@
 # Build output
 /target
 
+# Release packaging helpers
+__pycache__/
+
 # Machine-local native CAD SDK and Cargo environment configuration.
 /.local/
 /.cargo/config.toml

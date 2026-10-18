@@ -79,8 +79,8 @@ must agree at release, and `git describe` makes a mismatch *loud* rather than si
 
 - **Forgot the manifest bump.** Tag `v0.2.0`, manifest still `0.1.0`: a clean build
   computes `0.1.0 (v0.2.0, DATE)` — the semver and the tag visibly contradict each
-  other in the About box. The build is still shippable, but it screams "you skipped
-  the bump."
+  other in the About box for a local build. The release workflow rejects this
+  mismatch before starting the platform builds.
 - **Bumped correctly.** Manifest `0.2.0`, tag `v0.2.0`: `git describe` returns exactly
   `v0.2.0`, which matches the version, so the About box shows a clean `0.2.0`.
 
