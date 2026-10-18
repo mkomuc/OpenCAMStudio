@@ -40,7 +40,8 @@ to export.*
   dimension preview, shaded bodies with face/edge/loop picking, and linked Pocket,
   Drill, Profile and Face operations in the qualified fixed-axis subset. Geometry
   links, height overrides and model replacement/reselection survive `.ocam` saves
-  and undo. Requires OCCT 7.9.3 and `--features gui,occt`; see the
+  and undo. Included in release packages. Source builds require OCCT 7.9.3 and
+  `--features gui,occt`; see the
   [native build and qualification notes](docs/cad-import-implementation.md).
 - **Tooling** — a cross-project tool library with every cutter kind fully
   characterised: square / ball-nose / rounded-edge end mills, drill, V-bit,
@@ -68,13 +69,16 @@ for the phased plan toward an EdgeCAM-class north star.
 ## Install
 
 Downloads for each release are on the
-[Releases page](https://github.com/pr0m1th3as/OpenCAMStudio/releases).
+[Releases page](https://github.com/mkomuc/OpenCAMStudio/releases).
+
+Native packages are built for each release using GitHub Actions. See
+[RELEASING.md](RELEASING.md) for publishing and manual build instructions.
 
 | Platform | Download | Notes |
 |---|---|---|
 | **Linux** x86‑64 | `OpenCAMStudio-vX.Y.Z-linux-x86_64.AppImage` | `chmod +x` it and run. Needs glibc 2.35 or newer — Ubuntu 22.04, Debian 12 and anything later. |
 | **Windows** x86‑64 | `…-windows-x86_64-installer.msi` | Installs to Program Files with a Start Menu entry. |
-| | `…-windows-x86_64-portable.exe` | A single self-contained executable — no install, run it from anywhere. |
+| | `…-windows-x86_64-portable.zip` | Extract the whole ZIP, then run `opencamstudio.exe`; keep the bundled DLLs beside it. |
 | **macOS** Apple silicon | `…-macos-arm64.dmg` | Drag to Applications. Apple silicon only; there is no Intel build. |
 
 Every download has a `.sha256` beside it:
@@ -83,10 +87,14 @@ Every download has a `.sha256` beside it:
 sha256sum -c OpenCAMStudio-vX.Y.Z-linux-x86_64.AppImage.sha256
 ```
 
+All packages include OCCT 7.9.3 for STEP/IGES import, its shared libraries and
+license notices. No separate OCCT installation is needed. The corresponding OCCT
+source is attached to each release as `OpenCAMStudio-OCCT-7.9.3-source.tar.gz`.
+
 ### The binaries are not code-signed
 
 They are built in the open by
-[GitHub Actions](https://github.com/pr0m1th3as/OpenCAMStudio/actions) from the
+[GitHub Actions](https://github.com/mkomuc/OpenCAMStudio/actions) from the
 tagged commit, but they carry no Authenticode or Apple Developer signature —
 those require paid certificates. **Both operating systems will warn you, and the
 warning is expected rather than a sign that something is wrong:**
