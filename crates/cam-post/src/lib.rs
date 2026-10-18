@@ -13,6 +13,7 @@
 //! (grbl). See [`grbl::GrblPost`].
 
 mod dialect;
+mod estlcam;
 mod fanuc;
 mod grbl;
 mod okuma;
@@ -21,6 +22,7 @@ mod words;
 mod writer;
 
 pub use fanuc::FanucPost;
+pub use estlcam::{EstlcamOptions, EstlcamPost};
 pub use grbl::GrblPost;
 pub use okuma::OkumaPost;
 
@@ -57,11 +59,13 @@ pub enum PostKind {
     /// work offsets, `G56 H` tool length, `M02` end, `G71`/`M53` cycles). See
     /// [`okuma`].
     Okuma,
+    /// Estlcam CNC control (explicit motion words, a single work datum).
+    Estlcam,
 }
 
 impl PostKind {
     /// Every post, in a stable order — for the picker.
-    pub const ALL: [PostKind; 7] = [
+    pub const ALL: [PostKind; 8] = [
         PostKind::Grbl,
         PostKind::FluidNc,
         PostKind::GrblHal,
@@ -69,6 +73,7 @@ impl PostKind {
         PostKind::Fanuc,
         PostKind::Haas,
         PostKind::Okuma,
+        PostKind::Estlcam,
     ];
 
     /// The flat-knob [`dialect::Dialect`] backing this post, or `None` for families
@@ -82,12 +87,15 @@ impl PostKind {
             PostKind::LinuxCnc => &dialect::LINUXCNC,
             PostKind::Fanuc => &dialect::FANUC,
             PostKind::Haas => &dialect::HAAS,
-            PostKind::Okuma => return None,
+            PostKind::Okuma | PostKind::Estlcam => return None,
         })
     }
 
     /// The display label for the picker.
     fn label(self) -> &'static str {
+        if self == Self::Estlcam {
+            return "Estlcam";
+        }
         match self.dialect() {
             Some(d) => d.name,
             None => "Okuma",
@@ -107,6 +115,8 @@ impl PostKind {
     pub fn datum_label(self, datum: u32, base: WorkOffset) -> Option<String> {
         let steps_up = datum.checked_sub(1)?;
         match self {
+            PostKind::Estlcam => (datum == 1 && base == WorkOffset::G54)
+                .then(|| "Estlcam origin".to_string()),
             // OSP work-coordinate select; the emitter states any index it is given, so
             // no ceiling is claimed here that the post would not honour.
             PostKind::Okuma => Some(format!("H{datum}")),
@@ -146,6 +156,9 @@ impl PostKind {
         machine: &Machine,
         options: &PostOptions,
     ) -> Result<String, PostError> {
+        if self == Self::Estlcam {
+            return EstlcamPost.post(program, machine, options);
+        }
         match self.dialect() {
             Some(d) => dialect::emit(program, machine, options, d),
             None => okuma::emit(program, machine, options),
@@ -288,6 +301,8 @@ pub struct PostOptions {
     pub precision: usize,
     /// Optional program name, emitted as a header comment.
     pub program_name: Option<String>,
+    /// Estlcam's two auxiliary outputs, ignored by other posts.
+    pub estlcam: EstlcamOptions,
 }
 
 impl Default for PostOptions {
@@ -296,6 +311,7 @@ impl Default for PostOptions {
             work_offset: WorkOffset::G54,
             precision: 3,
             program_name: None,
+            estlcam: EstlcamOptions::default(),
         }
     }
 }

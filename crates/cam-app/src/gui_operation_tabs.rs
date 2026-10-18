@@ -212,7 +212,7 @@ impl Compensation {
         }
     }
     fn available(post: PostKind) -> &'static [Self] {
-        if matches!(post, PostKind::Grbl | PostKind::FluidNc | PostKind::GrblHal) {
+        if matches!(post, PostKind::Grbl | PostKind::FluidNc | PostKind::GrblHal | PostKind::Estlcam) {
             &Self::ALL[..1]
         } else {
             &Self::ALL
@@ -1372,7 +1372,7 @@ mod tests {
 
     #[test]
     fn compensation_availability_and_radial_passes_follow_post_and_strategy() {
-        for post in [PostKind::Grbl, PostKind::FluidNc, PostKind::GrblHal] {
+        for post in [PostKind::Grbl, PostKind::FluidNc, PostKind::GrblHal, PostKind::Estlcam] {
             assert_eq!(Compensation::available(post), &[Compensation::Computed]);
         }
         for post in [

@@ -264,7 +264,7 @@ pub(crate) fn emit(
 /// Expand a drilling cycle into explicit moves (no canned cycle). Peck drilling
 /// follows `G83` semantics: full retract after each peck to clear chips, then a
 /// rapid back down to just above the last depth.
-fn expanded_drill(w: &mut Writer, c: &DrillCycle) -> Result<(), PostError> {
+pub(crate) fn expanded_drill(w: &mut Writer, c: &DrillCycle) -> Result<(), PostError> {
     // Canned cycles stay compact. Explicit expansion must be bounded even for
     // otherwise valid tiny pecks, so posting cannot allocate an unbounded file.
     if let Some(peck) = c.peck {

@@ -1914,6 +1914,7 @@ struct App {
     /// instant: switching machines is a navigation, not an edit.
     machine_name_edit: Option<String>,
     machine_post_edit: Option<PostKind>,
+    machine_estlcam_edit: Option<cam_post::EstlcamOptions>,
     /// The user's preferences, as loaded at startup and written back on change.
     ///
     /// The view/snap/pane fields below stay the live state — the settings copy is
@@ -2380,6 +2381,7 @@ enum Message {
     MachineNameChanged(String),
     /// Choose the post/controller dialect for export.
     PostKindChanged(PostKind),
+    EstlcamOutputChanged(u8, bool),
     /// Commit the inspector fields (one undo step) and recompute the toolpath.
     Apply,
     Undo,
@@ -3149,6 +3151,7 @@ impl App {
             active_machine,
             machine_name_edit: None,
             machine_post_edit: None,
+            machine_estlcam_edit: None,
             lib_sel: 0,
             tool_edit: None,
             library_view: LibraryView::Ordered,
@@ -3199,6 +3202,7 @@ impl App {
         // The active machine carries its control, so resolving the machine above chose
         // the post too — one source of truth, which is why `session.post` was retired.
         app.controller.set_post_kind(active.post);
+        app.controller.set_estlcam_options(active.estlcam);
         if stale {
             app.status = format!(
                 "The machine you last used is no longer in the library; using \"{}\" \
@@ -4243,6 +4247,16 @@ impl App {
                 // Also buffered. The picker sits in the Machine inspector, so it edits
                 // *this machine's* control — and an edit waits for Apply.
                 self.machine_post_edit = Some(kind);
+            }
+            Message::EstlcamOutputChanged(output, enabled) => {
+                let mut options = self.machine_estlcam_edit
+                    .unwrap_or(self.controller.estlcam_options());
+                match output {
+                    1 => options.output_1 = enabled,
+                    2 => options.output_2 = enabled,
+                    _ => return iced::Task::none(),
+                }
+                self.machine_estlcam_edit = Some(options);
             }
             Message::Apply => {
                 if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
@@ -5446,18 +5460,21 @@ impl App {
                     // across would apply it to the wrong one.
                     self.machine_name_edit = None;
                     self.machine_post_edit = None;
+                    self.machine_estlcam_edit = None;
                     self.active_machine = name;
                     self.controller.set_machine(entry.machine);
                     // The machine carries its control: picking the machine picks the
                     // post. This is the error the library itself would otherwise create
                     // — right machine, wrong control, because the last job used another.
                     self.controller.set_post_kind(entry.post);
+                    self.controller.set_estlcam_options(entry.estlcam);
                     self.remember();
                     self.rerun();
                     self.status = format!("Machine: {} ({}).", self.active_machine, entry.post);
                 }
             }
             Message::NewMachine => {
+                self.machine_estlcam_edit = None;
                 // A copy of the active one: machines in a shop differ from each other in
                 // one or two numbers, so duplicating beats starting from nothing.
                 let mut entry = self
@@ -5473,12 +5490,14 @@ impl App {
             }
             Message::DeleteMachine => {
                 if self.machines.remove(&self.active_machine) {
+                    self.machine_estlcam_edit = None;
                     self.machines.save();
                     // `remove` refuses the last one, so there is always something here.
                     let entry = self.machines.machines[0].clone();
                     self.active_machine = entry.name().to_string();
                     self.controller.set_machine(entry.machine);
                     self.controller.set_post_kind(entry.post);
+                    self.controller.set_estlcam_options(entry.estlcam);
                     self.remember();
                     self.rerun();
                     self.status = format!("Machine: {}.", self.active_machine);
@@ -6260,6 +6279,7 @@ impl App {
         let entry = crate::MachineEntry {
             machine: self.controller.machine().clone(),
             post: self.controller.post_kind(),
+            estlcam: self.controller.estlcam_options(),
         };
         let settled = self.machines.replace(&self.active_machine, entry);
         // `replace` keeps names unique, so a rename onto a name already taken comes back
@@ -7237,7 +7257,9 @@ impl App {
         let post = self
             .machine_post_edit
             .is_some_and(|p| p != self.controller.post_kind());
-        name || post
+        let estlcam = self.machine_estlcam_edit
+            .is_some_and(|o| o != self.controller.estlcam_options());
+        name || post || estlcam
     }
 
     /// Commit any pending machine name / post, writing them into the library.
@@ -7251,12 +7273,16 @@ impl App {
         if let Some(post) = self.machine_post_edit {
             self.controller.set_post_kind(post);
         }
+        if let Some(options) = self.machine_estlcam_edit {
+            self.controller.set_estlcam_options(options);
+        }
         self.sync_active_machine();
         // Re-seed from what was actually stored — `sync_active_machine` may have
         // disambiguated a rename onto a name already taken, and the box must show what
         // the library holds, not what was typed.
         self.machine_name_edit = None;
         self.machine_post_edit = None;
+        self.machine_estlcam_edit = None;
         self.status = format!(
             "Machine: {} ({}).",
             self.active_machine,

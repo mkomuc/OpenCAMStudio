@@ -56,9 +56,10 @@ to export.*
   rapid-through-stock detection, both **profile-aware**: a pointed tool is modelled
   as wide as its cone has actually opened at that depth, and the grid refines to
   resolve the narrowest cut (a sub-millimetre engraved groove is visible).
-- **G-code out** — six posts across three families (grbl / FluidNC / grblHAL,
-  LinuxCNC, Fanuc / Haas) from one controller-neutral IR, with canned cycles where
-  supported and expanded where not.
+- **G-code out** — eight posts (grbl / FluidNC / grblHAL, LinuxCNC, Fanuc / Haas,
+  Okuma OSP, Estlcam) from one controller-neutral IR, with canned cycles where
+  supported and expanded where not. Estlcam includes configurable coolant/MMS
+  outputs; see [Estlcam setup](docs/estlcam.md).
 - **Shell** — a `wgpu` viewport (backplot, solid stock, orientation cube) in an
   `iced` desktop GUI.
 
