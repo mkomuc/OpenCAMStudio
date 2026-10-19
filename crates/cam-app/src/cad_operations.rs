@@ -526,6 +526,8 @@ pub(crate) fn create_operation(
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             chain: resolved.profiles[0].chain.clone(),
             side: resolved.profiles[0].side,
             width: 1.,
@@ -545,6 +547,8 @@ pub(crate) fn create_operation(
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             chain: resolved.profiles[0].chain.clone(),
             closed: resolved.profiles[0].closed,
             top: resolved.heights.top,
@@ -559,6 +563,8 @@ pub(crate) fn create_operation(
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             boundary: boundary()?,
             islands: resolved.regions[0].holes().to_vec(),
             top: resolved.heights.top,
@@ -578,6 +584,8 @@ pub(crate) fn create_operation(
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             points: resolved
                 .holes
                 .iter()

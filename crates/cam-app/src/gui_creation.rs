@@ -108,10 +108,18 @@ impl App {
             return;
         };
         let mut document = self.controller.document().clone();
-        document
-            .setup_mut()
-            .tools
-            .extend(self.operation_tools.iter().copied());
+        for tool in &self.operation_tools {
+            if let Some(existing) = document
+                .setup_mut()
+                .tools
+                .iter_mut()
+                .find(|existing| existing.number == tool.number)
+            {
+                *existing = tool.clone();
+            } else {
+                document.setup_mut().tools.push(tool.clone());
+            }
+        }
         let defaults = crate::cad_operations::selection_height_defaults(&document, &operation);
         let previous = self
             .creation_geometry_height_defaults
