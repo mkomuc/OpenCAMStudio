@@ -243,12 +243,11 @@ impl Scene {
                         first_strip,
                         &mut previous_cone_role,
                     );
-                    if tag.kind == MoveKind::Retract {
-                        if pending_exit_cone.take().is_none()
-                            && scene.path_cones.len() > cone_count
-                        {
-                            scene.path_cones.last_mut().unwrap().at = point3_f32(*to);
-                        }
+                    if tag.kind == MoveKind::Retract
+                        && pending_exit_cone.take().is_none()
+                        && scene.path_cones.len() > cone_count
+                    {
+                        scene.path_cones.last_mut().unwrap().at = point3_f32(*to);
                     }
                     if scene.path_cones.len() > cone_count {
                         let index = scene.path_cones.len() - 1;
