@@ -168,6 +168,8 @@ enum Icon {
     Redo,
     Run,
     Toolpath,
+    Pattern,
+    CircularPattern,
     Profile,
     Pocket,
     Drill,
@@ -200,7 +202,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 33] = [
+    const ALL: [Icon; 35] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -210,6 +212,8 @@ impl Icon {
         Icon::Redo,
         Icon::Run,
         Icon::Toolpath,
+        Icon::Pattern,
+        Icon::CircularPattern,
         Icon::Profile,
         Icon::Pocket,
         Icon::Drill,
@@ -249,6 +253,8 @@ impl Icon {
             Icon::Redo => include_bytes!("../assets/icons/redo.svg"),
             Icon::Run => include_bytes!("../assets/icons/run.svg"),
             Icon::Toolpath => include_bytes!("../assets/icons/toolpath.svg"),
+            Icon::Pattern => include_bytes!("../assets/icons/pattern.svg"),
+            Icon::CircularPattern => include_bytes!("../assets/icons/pattern_circular.svg"),
             Icon::Profile => include_bytes!("../assets/icons/profile.svg"),
             Icon::Pocket => include_bytes!("../assets/icons/pocket.svg"),
             Icon::Drill => include_bytes!("../assets/icons/drill.svg"),
@@ -290,6 +296,8 @@ impl Icon {
             Icon::Redo => "Redo the change just undone.",
             Icon::Run => "Generate toolpaths for every operation and simulate the result.",
             Icon::Toolpath => "Recompute the selected toolpaths.",
+            Icon::Pattern => "Repeat source operations in a rectangular or circular pattern.",
+            Icon::CircularPattern => "Repeat source operations around a circular pattern.",
             Icon::Profile => {
                 "Add a Profile operation — cut along a chain, inside/outside/on the line."
             }
@@ -1874,6 +1882,7 @@ struct App {
     /// draft survives tab changes; only the footer can commit or discard it.
     setup_draft: Option<cam_model::Setup>,
     pattern_draft: Option<PatternDraft>,
+    pattern_tab: pattern_editor_view::PatternTab,
     setup_model_selection: Option<InstanceId>,
     setup_model_pick: bool,
     setup_values: BTreeMap<usize, String>,
@@ -1905,6 +1914,7 @@ struct App {
     tree_drag: Option<TreeDrag>,
     tree_hover: Option<(TreeNode, bool)>,
     tree_menu: Option<TreeNode>,
+    pattern_menu_y: Option<f32>,
     /// Tools selected by an operation draft but not yet published to the setup.
     operation_tools: Vec<cam_model::Tool>,
     setup_tab: SetupEditorTab,
@@ -2385,6 +2395,7 @@ enum Message {
     SetupStockPositionChanged(usize, BoxAnchor),
     SetupAxisPick(usize),
     BeginPattern(bool),
+    PatternTabChanged(pattern_editor_view::PatternTab),
     EditPattern(u64),
     PatternName(String),
     PatternValue(usize, String),
@@ -3160,6 +3171,7 @@ impl App {
             notice_queue: VecDeque::new(),
             setup_draft: None,
             pattern_draft: None,
+            pattern_tab: pattern_editor_view::PatternTab::Placement,
             setup_model_selection: None,
             setup_model_pick: false,
             setup_values: BTreeMap::new(),
@@ -3191,6 +3203,7 @@ impl App {
             tree_drag: None,
             tree_hover: None,
             tree_menu: None,
+            pattern_menu_y: None,
             operation_tools: Vec::new(),
             setup_tab: SetupEditorTab::Setup,
             setup_axis_pick: None,
@@ -4101,7 +4114,9 @@ impl App {
                     ["X", "Y", "Z"][axis]
                 );
             }
+            Message::PatternTabChanged(tab) => self.pattern_tab = tab,
             Message::BeginPattern(circular) => {
+                self.pattern_tab = pattern_editor_view::PatternTab::Placement;
                 let Some(setup) = self.controller.setups().iter().find(|s| s.id == self.controller.active_setup_id()) else { return iced::Task::none(); };
                 let members: Vec<u32> = if self.focus_ops.is_empty() { Vec::new() } else { self.focus_ops.iter().copied().collect() };
                 let origin = setup.origin_position(self.controller.active_origin());
@@ -4111,9 +4126,11 @@ impl App {
                 });
                 self.controller.select(Selection::Setup);
                 self.inspector_active = true;
+                self.inspector_enabled = true;
                 self.status = "Choose source operations and pattern placement, then create or cancel the draft.".into();
             }
             Message::EditPattern(id) => {
+                self.pattern_tab = pattern_editor_view::PatternTab::Placement;
                 let Some((setup_id, pattern)) = self.controller.setups().iter().find_map(|setup| setup.patterns.iter().find(|p| p.id == id).map(|p| (setup.id, p.clone()))) else { self.status = "Pattern no longer exists.".into(); return iced::Task::none(); };
                 let (circular, clockwise, values) = match pattern.kind {
                     cam_model::PatternKind::Rectangular { nx, ny, dx, dy } => (false, false, [nx.to_string(), ny.to_string(), dx.to_string(), dy.to_string(), String::new()]),
@@ -4126,6 +4143,7 @@ impl App {
                 self.controller.activate_setup(setup_id).ok();
                 self.controller.select(Selection::Setup);
                 self.inspector_active = true;
+                self.inspector_enabled = true;
             }
             Message::PatternName(value) => if let Some(draft) = self.pattern_draft.as_mut() { draft.name = value; },
             Message::PatternValue(index, value) => if let Some(draft) = self.pattern_draft.as_mut() { if index < 5 { draft.values[index] = value; } },
@@ -6497,7 +6515,8 @@ impl App {
     /// Close the pane itself so an idle inspector gives its space to the viewport.
     /// Creation and geometry picking belong to the active operation editor.
     fn sync_inspector_visibility(&mut self) {
-        let editing = self.library_mode()
+        let editing = self.pattern_draft.is_some()
+            || self.library_mode()
             || (self.active_tab == RibbonTab::Machinery
                 && self.controller.selection() == Selection::Machine)
             || self.creating_operation()
@@ -12233,6 +12252,7 @@ mod multi_setup_draft_tests {
         app.focus_ops.insert(operation);
         send(&mut app, Message::BeginPattern(false));
         assert_eq!(app.pattern_draft.as_ref().unwrap().members, vec![operation]);
+        assert!(app.pane_handle(Pane::Inspector).is_some());
         send(&mut app, Message::ClickOp(operation));
         assert!(app.pattern_draft.is_some(), "selection changes do not discard a draft");
         send(&mut app, Message::RunJob);
@@ -12248,7 +12268,9 @@ mod multi_setup_draft_tests {
         assert_eq!(pattern.kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 20.0, dy: 0.0 });
         assert!(app.pattern_draft.is_none());
 
+        app.inspector_enabled = false;
         send(&mut app, Message::EditPattern(pattern.id));
+        assert!(app.pane_handle(Pane::Inspector).is_some());
         send(&mut app, Message::PatternValue(2, "35".into()));
         send(&mut app, Message::PatternCancel);
         assert_eq!(app.controller.document().setup().patterns[0].kind, pattern.kind);
