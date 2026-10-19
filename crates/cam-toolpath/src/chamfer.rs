@@ -366,7 +366,7 @@ impl Strategy for ChamferStrategy {
                     lead_out,
                     z,
                     op.entry_feeds.lead_out(op.feed),
-                    lead,
+                    Tag::new(op.id, MoveKind::LeadOut),
                 );
                 // Lift only when the next pass starts somewhere else; the final retract
                 // is unconditional (the operation must leave the tool clear).
@@ -781,7 +781,7 @@ mod tests {
         let lead_arcs: Vec<Point3> = steps
             .iter()
             .filter_map(|s| match s {
-                Step::Arc { end, tag, .. } if tag.kind == MoveKind::LeadIn => Some(*end),
+                Step::Arc { end, tag, .. } if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) => Some(*end),
                 _ => None,
             })
             .collect();
@@ -828,7 +828,7 @@ mod tests {
             .program
             .steps()
             .iter()
-            .filter(|s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadIn))
+            .filter(|s| matches!(s, Step::Arc { tag, .. } if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut)))
             .count();
         assert_eq!(leads, 2, "a lead-in and a lead-out on the bore edge");
     }

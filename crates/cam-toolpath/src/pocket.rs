@@ -459,7 +459,7 @@ mod tests {
             match s {
                 Step::Rapid { to, .. } | Step::Linear { to, .. } => pos = Point::new(to.x, to.y),
                 Step::Arc { end, tag, .. } => {
-                    if tag.kind == MoveKind::LeadIn {
+                    if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) {
                         arcs.push((pos, Point::new(end.x, end.y)));
                     }
                     pos = Point::new(end.x, end.y);

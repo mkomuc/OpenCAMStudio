@@ -9,30 +9,62 @@ struct Corner {
     normal: Option<[f32; 3]>,
 }
 impl SurfaceMesh {
-    fn top_quad(&mut self, p: [[f32; 3]; 4], n: [[f32; 3]; 4], cut: bool, top: f32) {
+    fn top_quad(
+        &mut self,
+        p: [[f32; 3]; 4],
+        n: [[f32; 3]; 4],
+        cut: bool,
+        top: f32,
+        op: Option<u32>,
+    ) {
         let flags = [[0, 1, 2], [0, 2, 3]].map(|ids| cut && ids.iter().any(|&i| p[i][2] < top));
         if flags[0] == flags[1] {
-            self.quad(p, n, flags[0]);
+            self.quad(p, n, flags[0], op);
         } else {
             for (ids, cut) in [[0, 1, 2], [0, 2, 3]].into_iter().zip(flags) {
                 let base = self.positions.len() as u32;
                 self.positions.extend(ids.map(|i| p[i]));
                 self.normals.extend(ids.map(|i| n[i]));
                 self.machined.extend([cut; 3]);
+                self.operations.extend([op.filter(|_| cut); 3]);
                 self.indices.extend([base, base + 1, base + 2]);
             }
         }
     }
-    fn quad(&mut self, p: [[f32; 3]; 4], n: [[f32; 3]; 4], cut: bool) {
+    fn quad(&mut self, p: [[f32; 3]; 4], n: [[f32; 3]; 4], cut: bool, op: Option<u32>) {
         let base = self.positions.len() as u32;
         self.positions.extend(p);
         self.normals.extend(n);
         self.machined.extend([cut; 4]);
+        self.operations.extend([op.filter(|_| cut); 4]);
         self.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 }
 impl Heightfield {
+    /// Smoothing can lower an uncut cell's displayed edge beside a shallow cut.
+    /// Give that fringe the neighbouring cut's owner, just as its height/normal
+    /// come from the compatible neighbouring surface.
+    fn top_operation(&self, x: usize, y: usize, wall_step: f32) -> Option<u32> {
+        self.operation_at(x, y).or_else(|| {
+            let z = self.z[y * self.nx + x];
+            (-1..=1)
+                .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                .filter_map(|(dx, dy)| {
+                    let (nx, ny) = (x as isize + dx, y as isize + dy);
+                    let height = self.height(nx, ny)?;
+                    if height < self.top && (z - height).abs() <= wall_step {
+                        self.operation_at(nx as usize, ny as usize)
+                            .map(|op| (height, op))
+                    } else {
+                        None
+                    }
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, op)| op)
+        })
+    }
+
     fn height(&self, x: isize, y: isize) -> Option<f32> {
         if x < 0 || y < 0 || x >= self.nx as isize || y >= self.ny as isize {
             None
@@ -274,17 +306,22 @@ impl Heightfield {
                     continue;
                 }
                 let z = self.z[id];
+                let op = self.operation_at(x, y);
                 let mut end_x = x + 1;
                 while end_x < self.nx
                     && flat[y * self.nx + end_x] == 1
                     && self.z[y * self.nx + end_x] == z
+                    && self.operation_at(end_x, y) == op
                 {
                     end_x += 1;
                 }
                 let mut end_y = y + 1;
                 while end_y < self.ny
-                    && (x..end_x)
-                        .all(|i| flat[end_y * self.nx + i] == 1 && self.z[end_y * self.nx + i] == z)
+                    && (x..end_x).all(|i| {
+                        flat[end_y * self.nx + i] == 1
+                            && self.z[end_y * self.nx + i] == z
+                            && self.operation_at(i, end_y) == op
+                    })
                 {
                     if cancelled() {
                         return None;
@@ -308,6 +345,7 @@ impl Heightfield {
                     ],
                     up,
                     z < self.top,
+                    op,
                 );
                 mesh.quad(
                     [
@@ -318,6 +356,7 @@ impl Heightfield {
                     ],
                     down,
                     false,
+                    None,
                 );
             }
         }
@@ -341,11 +380,18 @@ impl Heightfield {
                 let p: [[f32; 3]; 4] =
                     std::array::from_fn(|i| [c[i].xy[0], c[i].xy[1], h[i].0.max(f)]);
                 if !interior {
-                    mesh.top_quad(p, h.map(|v| v.1), h.iter().any(|v| v.2), self.top);
+                    mesh.top_quad(
+                        p,
+                        h.map(|v| v.1),
+                        h.iter().any(|v| v.2),
+                        self.top,
+                        self.top_operation(x, y, wall_step),
+                    );
                     mesh.quad(
                         [p[0], p[3], p[2], p[1]].map(|v| [v[0], v[1], f]),
                         down,
                         false,
+                        None,
                     );
                 }
                 // CCW boundary of this top; reverse it for outward-facing walls.
@@ -370,19 +416,142 @@ impl Heightfield {
                             .filter(|n| n[0] * axis[0] + n[1] * axis[1] > 0.01)
                             .unwrap_or(axis)
                     };
-                    mesh.quad(
-                        [
-                            p[a],
-                            p[b],
-                            [p[b][0], p[b][1], lower(b)],
-                            [p[a][0], p[a][1], lower(a)],
-                        ],
-                        [n(a), n(b), n(b), n(a)],
-                        nb.is_some(),
-                    );
+                    let top = [p[a], p[b]];
+                    let mut bottom = [[p[a][0], p[a][1], lower(a)], [p[b][0], p[b][1], lower(b)]];
+                    let mut wall = |upper: [[f32; 3]; 2], lower: [[f32; 3]; 2], op| {
+                        if (0..2).any(|i| upper[i][2] - lower[i][2] > 1e-5) {
+                            mesh.quad(
+                                [upper[0], upper[1], lower[1], lower[0]],
+                                [n(a), n(b), n(b), n(a)],
+                                nb.is_some(),
+                                op,
+                            );
+                        }
+                    };
+                    let mut op = None;
+                    if nb.is_some() {
+                        let (nx, ny) = ((x as isize + dx) as usize, (y as isize + dy) as usize);
+                        op = self.operation_at(nx, ny);
+                        let mut previous = self.previous_layers[ny * self.nx + nx];
+                        while let Some(layer) = self.layers.get(previous as usize) {
+                            let split = std::array::from_fn(|i| {
+                                [
+                                    top[i][0],
+                                    top[i][1],
+                                    layer.height.max(bottom[i][2]).min(top[i][2]),
+                                ]
+                            });
+                            wall(split, bottom, op);
+                            bottom = split;
+                            op = layer.operation;
+                            previous = layer.previous;
+                        }
+                    }
+                    wall(top, bottom, op);
                 }
             }
         }
         Some(mesh)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolProfile;
+
+    #[test]
+    fn coplanar_surfaces_do_not_merge_across_operation_boundaries() {
+        let mut field = Heightfield::new([0., 0.], [20., 10.], 1., 0.);
+        for (x, op) in [(0., 10), (20., 20)] {
+            field.cut_segment_profile_controlled(
+                [x, 0., -2.],
+                [x, 10., -2.],
+                &ToolProfile::flat(10.),
+                Some(op),
+                &|| false,
+            );
+        }
+        let mesh = field.to_solid_mesh(-5.);
+        assert_eq!(mesh.operations.len(), mesh.positions.len());
+        assert!(mesh.operations.contains(&Some(10)) && mesh.operations.contains(&Some(20)));
+        for triangle in mesh.indices.as_chunks::<3>().0 {
+            let i = triangle[0] as usize;
+            if mesh.normals[i][2] > 0.9 {
+                let x = triangle
+                    .iter()
+                    .map(|&id| mesh.positions[id as usize][0])
+                    .sum::<f32>()
+                    / 3.;
+                let expected = if x < 10. { Some(10) } else { Some(20) };
+                for &id in triangle {
+                    assert_eq!(mesh.operations[id as usize], expected);
+                }
+            } else {
+                assert!(triangle
+                    .iter()
+                    .all(|&id| mesh.operations[id as usize].is_none()));
+            }
+        }
+    }
+
+    #[test]
+    fn cut_walls_belong_to_the_operation_that_removed_the_neighbour() {
+        let mut field = Heightfield::new([0., 0.], [20., 10.], 0.5, 0.);
+        field.cut_segment_profile_controlled(
+            [0., 5., -2.],
+            [20., 5., -2.],
+            &ToolProfile::flat(20.),
+            Some(10),
+            &|| false,
+        );
+        field.cut_segment_profile_controlled(
+            [4., 5., -4.],
+            [16., 5., -4.],
+            &ToolProfile::flat(2.),
+            Some(20),
+            &|| false,
+        );
+        let mesh = field.to_solid_mesh(-6.);
+        let mut walls = 0;
+        for (i, &cut) in mesh.machined.iter().enumerate() {
+            if cut && mesh.normals[i][2].abs() < 0.1 {
+                walls += 1;
+                assert_eq!(mesh.operations[i], Some(20));
+            }
+        }
+        assert!(walls > 0);
+    }
+
+    #[test]
+    fn deepening_a_pocket_preserves_the_previous_operations_upper_wall_band() {
+        let mut field = Heightfield::new([0., 0.], [20., 10.], 0.5, 0.);
+        for (depth, op) in [(-2., 10), (-4., 20)] {
+            field.cut_segment_profile_controlled(
+                [4., 5., depth],
+                [16., 5., depth],
+                &ToolProfile::flat(2.),
+                Some(op),
+                &|| false,
+            );
+        }
+        let mesh = field.to_solid_mesh(-6.);
+        let mut bands = [0; 2];
+        for triangle in mesh.indices.as_chunks::<3>().0 {
+            let i = triangle[0] as usize;
+            if mesh.machined[i] && mesh.normals[i][2].abs() < 0.1 {
+                let z = triangle
+                    .iter()
+                    .map(|&id| mesh.positions[id as usize][2])
+                    .sum::<f32>()
+                    / 3.;
+                let (band, expected) = if z > -2. { (0, 10) } else { (1, 20) };
+                bands[band] += 1;
+                assert!(triangle
+                    .iter()
+                    .all(|&id| mesh.operations[id as usize] == Some(expected)));
+            }
+        }
+        assert!(bands.iter().all(|&count| count > 0));
     }
 }
