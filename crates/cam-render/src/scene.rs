@@ -275,7 +275,31 @@ impl Scene {
                 _ => {}
             }
         }
+        scene.deduplicate_path_cones();
         Some(scene)
+    }
+
+    /// Stepdown passes revisit the same contour entry and exit at different Z
+    /// levels. Keep the first marker at each XY location (the shallowest pass in
+    /// generated toolpaths), while preserving distinct contours and drill points.
+    fn deduplicate_path_cones(&mut self) {
+        const SAME_CONTOUR_XY_MM: f32 = 0.1;
+        let tolerance_sq = SAME_CONTOUR_XY_MM * SAME_CONTOUR_XY_MM;
+        let mut unique: Vec<PathCone> = Vec::with_capacity(self.path_cones.len());
+        for cone in self.path_cones.drain(..) {
+            let same_contour = unique.iter().any(|kept| {
+                if kept.op != cone.op || kept.color != cone.color {
+                    return false;
+                }
+                let dx = kept.at[0] - cone.at[0];
+                let dy = kept.at[1] - cone.at[1];
+                dx * dx + dy * dy <= tolerance_sq
+            });
+            if !same_contour {
+                unique.push(cone);
+            }
+        }
+        self.path_cones = unique;
     }
 
     fn mark_path_motion(
