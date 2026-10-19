@@ -2,7 +2,7 @@ use cam_cldata::{
     ArcDir, DrillCycle, MoveKind, Point3, Program, ProgramBuilder, SpindleDir, Step, Tag,
 };
 use cam_model::{Envelope, Machine};
-use cam_post::{FanucPost, GrblPost, OkumaPost, Post, PostError, PostKind, PostOptions};
+use cam_post::{EstlcamPost, FanucPost, GrblPost, OkumaPost, Post, PostError, PostKind, PostOptions};
 
 fn machine() -> Machine {
     Machine {
@@ -87,7 +87,7 @@ fn direct_post_implementations_use_the_same_preflight() {
         .feed(-1.0)
         .linear(Point3::new(0.0, 0.0, 0.0), MoveKind::Cutting)
         .build();
-    for post in [&GrblPost as &dyn Post, &FanucPost, &OkumaPost] {
+    for post in [&GrblPost as &dyn Post, &FanucPost, &OkumaPost, &EstlcamPost] {
         assert!(matches!(
             post.post(&p, &machine(), &PostOptions::default()),
             Err(PostError::InvalidProgram(_))

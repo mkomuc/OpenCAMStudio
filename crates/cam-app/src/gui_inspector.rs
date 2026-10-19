@@ -110,6 +110,20 @@ impl App {
                 Message::PostKindChanged,
                 INSPECTOR_PICKER_W,
             ));
+            if self.machine_post_edit.unwrap_or(self.controller.post_kind()) == PostKind::Estlcam {
+                let options = self.machine_estlcam_edit
+                    .unwrap_or(self.controller.estlcam_options());
+                list = list
+                    .push(text("Coolant / MMS outputs").size(12))
+                    .push(checkbox(options.output_1)
+                        .label("Output 1 (M8 / M9)")
+                        .on_toggle(|on| Message::EstlcamOutputChanged(1, on)))
+                    .push(checkbox(options.output_2)
+                        .label("Output 2 (M10 / M11)")
+                        .on_toggle(|on| Message::EstlcamOutputChanged(2, on)))
+                    .push(text("Selected outputs follow coolant on/off and switch off at program end. Enable the output wired to your MMS system.").size(11).color(palette::GROUP_LABEL))
+                    .push(text("Set Estlcam to mm and mm/min. Export each workpiece origin separately.").size(11).color(palette::GROUP_LABEL));
+            }
             list = list.push(
                 text("Dry-run / air-cut generated code on your control before cutting.")
                     .size(11)

@@ -18,6 +18,7 @@ pub(crate) struct Writer<'a> {
     cur: Option<Point3>,
     mode: Option<u8>,
     feed: Option<f64>,
+    explicit_motion: bool,
 }
 
 impl<'a> Writer<'a> {
@@ -29,7 +30,13 @@ impl<'a> Writer<'a> {
             cur: None,
             mode: None,
             feed: None,
+            explicit_motion: false,
         }
+    }
+
+    /// Controls such as Estlcam require a G word on every motion line.
+    pub(crate) fn explicit_motion(&mut self) {
+        self.explicit_motion = true;
     }
 
     /// Coordinate precision (decimals).
@@ -98,7 +105,7 @@ impl<'a> Writer<'a> {
         let p = self.precision;
         let mut words: Vec<String> = Vec::new();
 
-        if self.mode != Some(g) {
+        if self.explicit_motion || self.mode != Some(g) {
             words.push(format!("G{g}"));
             self.mode = Some(g);
         }

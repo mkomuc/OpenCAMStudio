@@ -12,5 +12,5 @@ repository.workspace = true
 cam-cldata = { path = "../cam-cldata" }
 cam-model = { path = "../cam-model" }
 # `PostKind` is saved in a project (schema v11) so it reopens posting for the same
-# control. Nothing else in this crate is serialized.
+# control. Estlcam output wiring is saved in the local machine library.
 serde = { workspace = true }

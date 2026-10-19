@@ -57,8 +57,7 @@ fn okuma(program: &Program) -> String {
 }
 
 #[test]
-fn okuma_appears_in_the_picker_as_a_seventh_post() {
-    assert_eq!(PostKind::ALL.len(), 7);
+fn okuma_appears_in_the_picker() {
     assert!(PostKind::ALL.contains(&PostKind::Okuma));
     assert_eq!(PostKind::Okuma.to_string(), "Okuma");
 }

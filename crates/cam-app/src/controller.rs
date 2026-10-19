@@ -219,6 +219,7 @@ pub struct AppController {
     /// The selected post/controller dialect for export. **Session state, never read
     /// from a project file** — see [`open_project`](Self::open_project).
     post_kind: PostKind,
+    estlcam: cam_post::EstlcamOptions,
     /// What the last opened project said it was built for. Reported, not applied.
     provenance: Provenance,
     regions: Vec<Polygon>,
@@ -523,6 +524,7 @@ impl AppController {
         Self {
             machine,
             post_kind: PostKind::default(),
+            estlcam: cam_post::EstlcamOptions::default(),
             provenance: Provenance::default(),
             regions: Vec::new(),
             open_paths: Vec::new(),
@@ -570,12 +572,26 @@ impl AppController {
         }
     }
 
+    /// The active machine's Estlcam coolant/MMS output wiring.
+    pub fn estlcam_options(&self) -> cam_post::EstlcamOptions {
+        self.estlcam
+    }
+
+    /// Changing output wiring requires re-posting, but no toolpath recalculation.
+    pub fn set_estlcam_options(&mut self, options: cam_post::EstlcamOptions) {
+        if self.estlcam != options {
+            self.estlcam = options;
+            self.invalidate_export();
+        }
+    }
+
     /// The options every export posts with. One construction, so anything that needs
     /// to *predict* the output (see [`datum_label`](Self::datum_label)) reads the same
     /// settings the file is actually written from.
     fn post_options(&self) -> PostOptions {
         PostOptions {
             program_name: Some(self.program_name()),
+            estlcam: self.estlcam,
             ..Default::default()
         }
     }
@@ -3159,6 +3175,27 @@ mod tests {
 
         let nc = app.export_nc().unwrap();
         assert!(nc.contains("M30") && nc.contains("G54"));
+    }
+
+    #[test]
+    fn estlcam_output_changes_repost_the_same_toolpath() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        app.set_post_kind(PostKind::Estlcam);
+        app.run(&CancelToken::new());
+        let first = app.export_nc().unwrap().to_string();
+        assert!(first.lines().any(|line| line == "M8"));
+        let program = app.outcome().unwrap().program.clone();
+        let mms = cam_post::EstlcamOptions { output_1: false, output_2: true };
+        app.set_estlcam_options(mms);
+        assert!(app.exported_nc().is_none());
+        assert_eq!(app.outcome().unwrap().program, program);
+        let nc = app.export_nc().unwrap();
+        assert!(nc.lines().any(|line| line == "M10"));
+        assert!(!nc.lines().any(|line| matches!(line, "M8" | "M9")));
+        assert!(nc.ends_with("M5\nM11\n"));
+        app.new_project();
+        assert_eq!(app.estlcam_options(), mms);
     }
 
     #[test]

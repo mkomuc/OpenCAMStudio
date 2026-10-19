@@ -71,6 +71,9 @@ pub struct MachineEntry {
     /// job used" is a mistake the library itself creates. Tying the two removes it.
     #[serde(default)]
     pub post: cam_post::PostKind,
+    /// Local Estlcam coolant/MMS output wiring.
+    #[serde(default)]
+    pub estlcam: cam_post::EstlcamOptions,
 }
 
 impl MachineEntry {
@@ -79,6 +82,7 @@ impl MachineEntry {
         Self {
             machine,
             post: cam_post::PostKind::default(),
+            estlcam: cam_post::EstlcamOptions::default(),
         }
     }
 
@@ -421,7 +425,22 @@ mod tests {
         assert_eq!(lib.machines.len(), 1);
         assert_eq!(lib.machines[0].name(), "Router");
         assert_eq!(lib.machines[0].post, cam_post::PostKind::default());
+        assert_eq!(lib.machines[0].estlcam, cam_post::EstlcamOptions::default());
         assert_eq!(lib.machines[0].machine.max_feed, 800.0);
+    }
+
+    #[test]
+    fn estlcam_output_wiring_round_trips_per_machine() {
+        let mut router = named("Estlcam router");
+        router.post = cam_post::PostKind::Estlcam;
+        router.estlcam = cam_post::EstlcamOptions { output_1: false, output_2: true };
+        let mut lib = MachineLibrary::default();
+        lib.add(router.clone());
+        lib.add(named("Other machine"));
+        let saved = serde_json::to_string(&lib).unwrap();
+        let restored: MachineLibrary = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.by_name("Estlcam router"), Some(&router));
+        assert_eq!(restored.by_name("Other machine").unwrap().estlcam, cam_post::EstlcamOptions::default());
     }
 
     /// Editing the active machine can rename it — and the name is the handle the
