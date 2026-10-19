@@ -2,6 +2,7 @@
 //! backplot, plus the pure mapping to GPU vertices. Nothing here touches a GPU,
 //! so it is unit-tested like the rest of the pipeline.
 
+use crate::{PathCone, PATH_IN, PATH_OUT};
 use cam_cldata::{MoveKind, Point3, Program, Step};
 use cam_geo::{Arc, Point, Polygon};
 
@@ -68,6 +69,7 @@ fn dashed_for(kind: MoveKind) -> bool {
 fn color_for(kind: MoveKind) -> Color {
     match kind {
         MoveKind::Link | MoveKind::Retract => RAPID,
+        MoveKind::LeadOut => PLUNGE,
         MoveKind::Traverse => TRAVERSE,
         MoveKind::Cutting => CUT,
         MoveKind::Plunge | MoveKind::LeadIn => PLUNGE,
@@ -109,6 +111,7 @@ pub struct LineStrip {
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     pub strips: Vec<LineStrip>,
+    pub path_cones: Vec<PathCone>,
 }
 
 impl Scene {
@@ -197,17 +200,21 @@ impl Scene {
         }
         let mut scene = Scene::new();
         let mut cur: Option<Point3> = None;
+        let mut previous_cone_role = None;
         for step in program.steps() {
             if cancelled() {
                 return None;
             }
             match step {
-                Step::Rapid { to, tag } => {
+                Step::Rapid { to, tag } | Step::Linear { to, tag, .. } => {
+                    let first_strip = scene.strips.len();
                     push_segment(&mut scene, cur, *to, tag.kind, tag.op_id);
-                    cur = Some(*to);
-                }
-                Step::Linear { to, tag, .. } => {
-                    push_segment(&mut scene, cur, *to, tag.kind, tag.op_id);
+                    scene.mark_path_motion(
+                        tag.kind,
+                        tag.op_id,
+                        first_strip,
+                        &mut previous_cone_role,
+                    );
                     cur = Some(*to);
                 }
                 Step::Arc {
@@ -218,7 +225,14 @@ impl Scene {
                     ..
                 } => {
                     if let Some(start) = cur {
+                        let first_strip = scene.strips.len();
                         push_arc(&mut scene, start, *end, *center, *dir, tag.kind, tag.op_id);
+                        scene.mark_path_motion(
+                            tag.kind,
+                            tag.op_id,
+                            first_strip,
+                            &mut previous_cone_role,
+                        );
                     }
                     cur = Some(*end);
                 }
@@ -233,17 +247,70 @@ impl Scene {
                             color_for(cycle.tag.kind),
                             Some(cycle.tag.op_id),
                         );
+                        for (a, b, color) in [
+                            (cycle.z_top, cycle.depth, PATH_IN),
+                            (cycle.depth, cycle.retract, PATH_OUT),
+                        ] {
+                            if let Some(cone) = PathCone::on_segment(
+                                [x as f32, y as f32, a as f32],
+                                [x as f32, y as f32, b as f32],
+                                color,
+                                cycle.tag.op_id,
+                            ) {
+                                scene.path_cones.push(cone);
+                            }
+                        }
                     }
                     cur = None;
+                    previous_cone_role = None;
                 }
                 // A work-datum change or a program stop breaks the toolpath: the next
                 // group is a different fixturing/orientation, so lift the pen — don't
                 // draw a rapid linking it to where the previous group ended.
-                Step::Datum(_) | Step::Stop => cur = None,
+                Step::Datum(_) | Step::Stop => {
+                    cur = None;
+                    previous_cone_role = None;
+                }
+                Step::ToolChange { .. } => previous_cone_role = None,
                 _ => {}
             }
         }
         Some(scene)
+    }
+
+    fn mark_path_motion(
+        &mut self,
+        kind: MoveKind,
+        op: u32,
+        first_strip: usize,
+        previous: &mut Option<(u32, bool)>,
+    ) {
+        let role = match kind {
+            MoveKind::Plunge | MoveKind::LeadIn => Some((op, false)),
+            MoveKind::LeadOut | MoveKind::Retract => Some((op, true)),
+            _ => None,
+        };
+        if role.is_none() {
+            *previous = None;
+            return;
+        }
+        if role != *previous {
+            if let Some(strip) = self.strips.get(first_strip) {
+                let mut pairs = strip.points.windows(2).filter(|p| p[0] != p[1]);
+                let middle = pairs.clone().count() / 2;
+                if let Some(pair) = pairs.nth(middle) {
+                    let color = if matches!(kind, MoveKind::LeadOut | MoveKind::Retract) {
+                        PATH_OUT
+                    } else {
+                        PATH_IN
+                    };
+                    if let Some(cone) = PathCone::on_segment(pair[0], pair[1], color, op) {
+                        self.path_cones.push(cone);
+                        *previous = role;
+                    }
+                }
+            }
+        }
     }
 
     /// Fade every operation's strips except those in `focus` toward a muted grey,
@@ -517,6 +584,82 @@ fn push_arc(
 mod tests {
     use super::*;
     use cam_cldata::ProgramBuilder;
+
+    #[test]
+    fn entry_is_red_exit_is_green_and_linking_moves_have_no_cones() {
+        let program = ProgramBuilder::new()
+            .op(7)
+            .feed(100.)
+            .rapid(Point3::new(1., 2., 5.), MoveKind::Link)
+            .linear(Point3::new(1., 2., 5.), MoveKind::Plunge)
+            .linear(Point3::new(1., 2., 0.), MoveKind::Plunge)
+            .linear(Point3::new(2., 2., -1.), MoveKind::LeadIn)
+            .linear(Point3::new(5., 2., -1.), MoveKind::Cutting)
+            .rapid(Point3::new(5., 2., 5.), MoveKind::Retract)
+            .rapid(Point3::new(5., 2., 20.), MoveKind::Traverse)
+            .build();
+        let scene = Scene::from_program(&program);
+        assert_eq!(
+            scene.path_cones.len(),
+            2,
+            "one cone per continuous entry/exit"
+        );
+        let [entry, exit] = [scene.path_cones[0], scene.path_cones[1]];
+        assert_eq!((entry.op, exit.op), (7, 7));
+        assert_eq!((entry.color, exit.color), (PATH_IN, PATH_OUT));
+        assert_eq!(
+            (entry.direction, exit.direction),
+            ([0., 0., -1.], [0., 0., 1.])
+        );
+    }
+
+    #[test]
+    fn drilling_gets_an_entry_and_exit_cone_at_each_hole() {
+        let program = Program {
+            steps: vec![Step::Drill(cam_cldata::DrillCycle {
+                points: vec![[2., 3.], [5., 6.]],
+                z_top: 0.,
+                depth: -3.,
+                retract: 5.,
+                peck: Some(1.),
+                dwell: None,
+                feed: 100.,
+                tag: cam_cldata::Tag::new(9, MoveKind::Plunge),
+            })],
+        };
+        let scene = Scene::from_program(&program);
+        assert_eq!(scene.path_cones.len(), 4);
+        for pair in scene.path_cones.as_chunks::<2>().0 {
+            assert_eq!((pair[0].color, pair[1].color), (PATH_IN, PATH_OUT));
+            assert_eq!((pair[0].op, pair[1].op), (9, 9));
+            assert!(pair[0].direction[2] < 0. && pair[1].direction[2] > 0.);
+        }
+    }
+
+    #[test]
+    fn a_curved_lead_out_has_a_green_cone_tangent_to_the_arc() {
+        let program = ProgramBuilder::new()
+            .op(4)
+            .feed(100.)
+            .rapid(Point3::new(1., 0., 0.), MoveKind::Link)
+            .linear(Point3::new(1., 0., -1.), MoveKind::Plunge)
+            .linear(Point3::new(2., 0., -1.), MoveKind::Cutting)
+            .arc(
+                Point3::new(3., 1., -1.),
+                Point3::new(2., 1., -1.),
+                cam_cldata::ArcDir::Ccw,
+                MoveKind::LeadOut,
+            )
+            .rapid(Point3::new(3., 1., 5.), MoveKind::Retract)
+            .build();
+        let scene = Scene::from_program(&program);
+        assert_eq!(scene.path_cones.len(), 2);
+        let exit = scene.path_cones[1];
+        assert_eq!((exit.color, exit.op), (PATH_OUT, 4));
+        assert_eq!(exit.at[2], -1.);
+        assert_eq!(exit.direction[2], 0.);
+        assert!(exit.direction[0] > 0. && exit.direction[1] > 0.);
+    }
 
     #[test]
     fn backplot_colors_moves_by_kind() {

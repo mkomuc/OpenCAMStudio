@@ -64,6 +64,8 @@ impl Point3 {
 pub enum MoveKind {
     /// Approach into the cut (ramp/lead-in).
     LeadIn,
+    /// Departure from the cut (linear/arc lead-out), before the safe-height retract.
+    LeadOut,
     /// Material-removing motion.
     Cutting,
     /// A non-cutting reposition between cutting motions (usually a rapid).
