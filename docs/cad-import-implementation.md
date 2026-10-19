@@ -42,10 +42,30 @@ redo. Absolute height overrides are explicit; blank height inputs follow geometr
 **Edit / repair geometry** changes the source selection while preserving machining
 parameters and overrides. Unsupported selections give an incompatibility reason.
 
-On the Geometry tab, Chamfer and Engrave offer **Boundary loop** and
-**Individual edges**. Chamfer requires a closed rim; Engrave also accepts one
-connected open chain and preserves its endpoints. Carve offers **Face and
-islands** (all inner boundaries remain uncut) or a single **Boundary loop**.
+On the Geometry tab, Chamfer, Engrave, Carve and Thread share Profile's
+icon-based collection list. The chain, face and thread icons add supported
+geometry; delete removes the selected item and the gear opens its settings.
+Hover over an icon for its selection description. Settings use OK/Cancel to
+stage or discard geometry without changing other operation tabs. Chamfer offers
+**Modeled faces**, **Boundary loop**, and **Individual edges**. Modeled upward
+inclined planar faces supply their actual upper and lower boundaries; select
+multiple adjacent bevel faces with the face icon. Straight trimmed strips that
+widen toward the lower edge are supported. The cutter's included angle must
+match the modeled bevel. On **Passes**, **Stepdown** limits each finishing band;
+zero automatically uses the cutter's straight cutting flank, so a cutter smaller
+than the whole bevel finishes it in several descending bands. Each band's XY
+position follows the face slope, with a feed approach from the air side. Both
+boundaries appear at their actual Z heights in the geometry preview. Face width
+and total depth follow the model. For an edge or loop, set **Chamfer width** on
+**Geometry** and optional width increments on **Passes**. A single planar edge
+or connected open chain retains its endpoints, with a retract before each return;
+no closing cut is added. Side is inferred from adjoining planar surfaces and can
+be changed explicitly. Schema v24 preserves open chains, while legacy chamfers
+remain closed; modeled-face inputs were introduced in v23.
+
+Engrave offers boundary-loop and individual-edge modes and also accepts a
+connected open chain, preserving its endpoints. Carve offers a face with islands
+(all inner boundaries remain uncut) or a single closed boundary loop.
 Thread accepts cylindrical bore or boss faces, including picks on their circular
 rims; multiple centres must share diameter and cutting heights. The selected
 cylinder seeds internal/external type and diameter; nominal thread diameter and

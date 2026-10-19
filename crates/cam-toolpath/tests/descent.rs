@@ -263,6 +263,9 @@ fn pocket() -> Operation {
 
 fn chamfer() -> Operation {
     Operation::Chamfer(ChamferOp {
+        closed: true,
+        faces: Vec::new(),
+        stepdown: 0.,
         spindle_rpm: 0.0,
         tool_preset: None,
         entry_feeds: Default::default(),

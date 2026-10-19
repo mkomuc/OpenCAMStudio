@@ -1580,7 +1580,7 @@ fn surface_operations_select_exact_geometry_at_the_placed_surface_and_reopen() {
 }
 
 #[test]
-fn engraving_open_chain_replacement_preserves_parameters_and_chamfer_rejects_it() {
+fn engraving_open_chain_replacement_preserves_parameters_and_chamfer_accepts_it() {
     let mut app = controller();
     let floor = install_pocket(&mut app);
     let topology = &app.geometry_state().assets[0].topology;
@@ -1619,10 +1619,9 @@ fn engraving_open_chain_replacement_preserves_parameters_and_chamfer_rejects_it(
     assert!(
         matches!(app.operation(id), Some(Operation::Engrave(op)) if !op.closed && op.chain.len() == 3 && op.feed == 245. && (op.depth - 0.6).abs() < 1e-8)
     );
-    assert!(app
-        .preview_cad_operation(OpKind::Chamfer, &edges)
-        .unwrap_err()
-        .contains("closed rim"));
+    let chamfer = app.preview_cad_operation(OpKind::Chamfer, &edges).unwrap();
+    assert!(!chamfer.profiles[0].closed);
+    assert_eq!(chamfer.profiles[0].chain.len(), 3);
     assert!(app.undo());
     assert_eq!(app.document(), &before);
 }

@@ -656,6 +656,22 @@ impl AppController {
         if document.geometry.bindings.contains_key(&id) {
             crate::cad_operations::validate_binding_edit(&mut document, id)?;
         }
+        if let Some(after @ Operation::Chamfer(_)) =
+            document.setup().operations.iter().find(|op| op.id() == id)
+        {
+            if matches!(old, Operation::Chamfer(_)) {
+                let previous =
+                    crate::cad_operations::selection_height_defaults(self.document(), old);
+                let defaults = crate::cad_operations::selection_height_defaults(&document, after);
+                if let Some(settings) = document.setup_mut().height_settings.get_mut(&id) {
+                    for plane in cam_model::HeightPlaneKind::ALL {
+                        if settings.definition(plane) == previous.definition(plane) {
+                            *settings.definition_mut(plane) = defaults.definition(plane).clone();
+                        }
+                    }
+                }
+            }
+        }
         Ok(document)
     }
 

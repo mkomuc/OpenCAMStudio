@@ -609,6 +609,8 @@ pub enum ExtractionRecipe {
     DrillHoles,
     /// One closed planar rim; the operation defines the bevel dimensions.
     ChamferLoop,
+    /// Modeled inclined planar faces bounded by two horizontal edges.
+    ChamferFaces,
     /// One planar loop or connected open/closed chain, at an operator-defined depth.
     EngravePath,
     /// A planar face (including islands) or closed loop to V-carve.

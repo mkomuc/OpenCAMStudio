@@ -1,7 +1,7 @@
 //! Operation geometry collections shared by creation, replacement and editing.
 use super::*;
 use crate::LoopPart;
-use iced::widget::column;
+use iced::widget::{column, svg};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ProfileSelectionMode {
@@ -85,10 +85,110 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
     }
 }
 
+pub(super) fn selection_icon(name: &str, size: f32) -> iced::widget::Svg<'static> {
+    let bytes: &'static [u8] = match name {
+        "face" => include_bytes!("../assets/icons/profile-selection/face.svg"),
+        "chain" => include_bytes!("../assets/icons/profile-selection/chain.svg"),
+        "silhouette" => include_bytes!("../assets/icons/profile-selection/silhouette.svg"),
+        "closed" => include_bytes!("../assets/icons/profile-selection/closed.svg"),
+        "open" => include_bytes!("../assets/icons/profile-selection/open.svg"),
+        "all" => include_bytes!("../assets/icons/profile-selection/all.svg"),
+        "outer" => include_bytes!("../assets/icons/profile-selection/outer.svg"),
+        "inner" => include_bytes!("../assets/icons/profile-selection/inner.svg"),
+        "thread" => include_bytes!("../assets/icons/thread.svg"),
+        "remove" => include_bytes!("../assets/icons/delete_operation.svg"),
+        _ => include_bytes!("../assets/icons/profile-selection/settings.svg"),
+    };
+    svg(svg::Handle::from_memory(bytes))
+        .width(size)
+        .height(size)
+}
+
+pub(super) fn selection_hint<'a>(
+    control: impl Into<Element<'a, Message>>,
+    label: impl Into<String>,
+) -> Element<'a, Message> {
+    delayed_tooltip(
+        control,
+        container(text(label.into()).size(12).width(260))
+            .padding(10)
+            .style(popup_surface),
+        tooltip::Position::Left,
+    )
+    .into()
+}
+
+/// Shared frame, rows and toolbar placement for every operation's collection.
+pub(super) struct GeometryRow {
+    pub icon: &'static str,
+    pub label: String,
+    pub action: Option<Message>,
+}
+pub(super) fn geometry_collection<'a>(
+    title: &'static str,
+    rows: Vec<GeometryRow>,
+    selected: Option<usize>,
+    select: Option<Message>,
+    toolbar: iced::widget::Row<'a, Message>,
+) -> Element<'a, Message> {
+    let empty = rows.is_empty();
+    let mut items = column![].spacing(2);
+    for (index, item) in rows.into_iter().enumerate() {
+        let active = selected == Some(index);
+        items = items.push(
+            button(
+                row![
+                    selection_icon(item.icon, 25.),
+                    text(item.label).size(12).width(Length::Fill)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([7, 8])
+            .style(move |theme, status| inspector_tab(theme, status, active))
+            .on_press_maybe(item.action),
+        );
+    }
+    if empty {
+        items = items.push(
+            container(text("No geometry selected").size(12).color(INSPECTOR_MUTED)).padding(8),
+        );
+    }
+    column![
+        row![
+            text(title).size(12).width(Length::Fill),
+            inspector_button("Select").on_press_maybe(select)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+        container(scrollable(items).height(120).width(Length::Fill))
+            .padding(4)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgb(0.12, 0.14, 0.17))),
+                border: Border {
+                    color: Color::from_rgb(0.25, 0.28, 0.32),
+                    width: 1.,
+                    radius: 5.0.into()
+                },
+                ..Default::default()
+            }),
+        toolbar
+    ]
+    .spacing(6)
+    .into()
+}
+
 impl App {
     pub(super) fn geometry_list(&self, labels: Vec<String>) -> Element<'_, Message> {
         if self.profile_geometry_active() {
             return self.profile_geometry_collection();
+        }
+        if let Some(kind @ (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)) =
+            self.geometry_operation_kind()
+        {
+            return self.operation_geometry_collection(kind, labels);
         }
         let count = labels.len();
         let selected = self
@@ -151,60 +251,17 @@ impl App {
         if self.profile_geometry_active() {
             selection = selection.push(self.profile_selection_controls());
         }
-        let kind = self
-            .cad_pending_kind
-            .or_else(|| {
-                self.cad_editing_op
-                    .and_then(|id| self.current_operation(id))
-                    .map(AppController::operation_kind)
-            })
+        selection.into()
+    }
+
+    pub(super) fn geometry_operation_kind(&self) -> Option<OpKind> {
+        self.cad_pending_kind
+            .or_else(|| self.controller.pending_op().map(|p| p.kind))
             .or_else(|| {
                 self.operation_draft
                     .as_ref()
                     .map(AppController::operation_kind)
-            });
-        let cad_geometry = self.cad_pending_kind.is_some()
-            || self.cad_editing_op.is_some()
-            || self.operation_draft.as_ref().is_some_and(|op| {
-                self.controller
-                    .geometry_state()
-                    .bindings
-                    .contains_key(&op.id())
-            });
-        if cad_geometry {
-            match kind {
-                Some(OpKind::Chamfer | OpKind::Engrave) => {
-                    selection = selection.push(
-                        row![
-                            inspector_button("Boundary loop")
-                                .on_press(Message::GeometryFilterChanged(CadFilter::Loop)),
-                            inspector_button("Individual edges")
-                                .on_press(Message::GeometryFilterChanged(CadFilter::Edge)),
-                        ]
-                        .spacing(4),
-                    );
-                    selection = selection.push(text(if kind == Some(OpKind::Chamfer) {
-                        "Select a closed rim, or connected edges forming a closed rim."
-                    } else { "Select a boundary loop, or connected edges for an open or closed engraving path." }).size(12));
-                }
-                Some(OpKind::Carve) => {
-                    selection = selection.push(
-                        row![
-                            inspector_button("Face and islands")
-                                .on_press(Message::GeometryFilterChanged(CadFilter::Face)),
-                            inspector_button("Boundary loop")
-                                .on_press(Message::GeometryFilterChanged(CadFilter::Loop)),
-                        ]
-                        .spacing(4),
-                    );
-                }
-                Some(OpKind::Thread) => {
-                    selection = selection.push(text("Select cylindrical bore or boss faces. Selected features must share diameter and cutting heights.").size(12));
-                }
-                _ => {}
-            }
-        }
-        selection.into()
+            })
     }
 
     pub(super) fn profile_geometry_active(&self) -> bool {

@@ -303,9 +303,9 @@ impl LoopRef {
     }
 }
 
-/// Profile and Engrave can machine open paths without inventing a closing edge.
+/// Profile, Chamfer and Engrave can machine open paths without inventing a closing edge.
 pub fn op_accepts_open_paths(kind: OpKind) -> bool {
-    matches!(kind, OpKind::Engrave | OpKind::Profile)
+    matches!(kind, OpKind::Engrave | OpKind::Profile | OpKind::Chamfer)
 }
 
 /// Whether an operation kind takes **islands** — enclosed areas left standing. Only the
@@ -2043,6 +2043,9 @@ impl AppController {
                 })
             }
             OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+                closed,
+                faces: Vec::new(),
+                stepdown: 0.,
                 id: 0,
                 tool,
                 chain,
@@ -2288,6 +2291,12 @@ impl AppController {
     /// Cancel the pending operation without creating anything.
     pub fn cancel_operation(&mut self) {
         self.pending_op = None;
+    }
+
+    /// Cancel a nested geometry edit without losing the outer wizard's selections.
+    #[cfg(feature = "gui")]
+    pub(crate) fn restore_pending_operation(&mut self, pending: Option<PendingOp>) {
+        self.pending_op = pending;
     }
 
     /// Finalise the pending operation — the **single commit point** for every kind.
@@ -3496,7 +3505,6 @@ mod tests {
             OpKind::Face,
             OpKind::Drill,
             OpKind::Thread,
-            OpKind::Chamfer,
         ] {
             assert!(
                 app.build_op(kind, LoopRef::open(0), &[], 1, None, None)
@@ -3526,6 +3534,12 @@ mod tests {
         };
         assert!(!profile.closed);
         assert_eq!(profile.chain.points(), app.open_paths()[0].points());
+
+        app.begin_operation(OpKind::Chamfer);
+        assert!(app.open_paths_pickable());
+        let Operation::Chamfer(chamfer) = app.build_op(OpKind::Chamfer, LoopRef::open(0), &[], 1, None, None).unwrap() else { unreachable!() };
+        assert!(!chamfer.closed);
+        assert_eq!(chamfer.chain.points(), app.open_paths()[0].points());
 
         app.begin_operation(OpKind::Engrave);
         assert!(app.open_paths_pickable());

@@ -14,7 +14,7 @@ pub(super) fn is_surface_recipe(recipe: &ExtractionRecipe) -> bool {
 pub(super) fn path(
     state: &GeometryState,
     refs: &[EntityRef],
-    require_closed: bool,
+    chamfer: bool,
 ) -> Result<(Vec<ProfileContour>, f64), String> {
     let view = View::new(state, refs)?;
     let (chain, closed, z, side) = if refs.len() == 1 && refs[0].kind == EntityKind::Loop {
@@ -103,21 +103,23 @@ pub(super) fn path(
             points.pop();
         }
         let chain = Contour::new(points.into_iter().map(|p| Point::new(p[0], p[1])).collect());
-        // Closed chamfers need the same certified free-side inference as profiles.
-        let side = if require_closed && closed {
-            let profiles = profile_contours::extract(state, refs)?.0;
-            profiles.first().ok_or("Select a closed chamfer rim")?.side
+        if chain.len() < if closed { 3 } else { 2 } {
+            return Err("Degenerate machining path".into());
+        }
+        let side = if chamfer {
+            if closed {
+                profile_contours::extract(state, refs)
+                    .ok()
+                    .and_then(|p| p.0.first().map(|p| p.side))
+                    .unwrap_or_else(|| chamfer_side(&view, refs, &chain, true))
+            } else {
+                chamfer_side(&view, refs, &chain, false)
+            }
         } else {
             Side::Outside
         };
         (chain, closed, z.unwrap(), side)
     };
-    if require_closed && !closed {
-        return Err(
-            "Chamfer requires a closed rim; complete the edge chain or select a boundary loop"
-                .into(),
-        );
-    }
     if chain.points().len() < if closed { 3 } else { 2 } {
         return Err("Degenerate machining path".into());
     }
@@ -132,6 +134,60 @@ pub(super) fn path(
         }],
         z,
     ))
+}
+
+// Joining may reverse an edge. Compare the actual chain tangent to an
+// adjoining planar surface's outward normal in setup coordinates.
+fn chamfer_side(view: &View<'_>, refs: &[EntityRef], chain: &Contour, closed: bool) -> Side {
+    let points = chain.points();
+    let a = points[0];
+    let b = points[1];
+    for reference in refs {
+        let Ok(edge) = view.edge(reference.id) else {
+            continue;
+        };
+        let Ok(samples) = view.curve_points(edge, false, MACHINING_CHORD_TOLERANCE) else {
+            continue;
+        };
+        if !samples.windows(2).any(|p| {
+            let same = |p: [f64; 3], q: Point| (p[0] - q.x).hypot(p[1] - q.y) < T;
+            (same(p[0], a) && same(p[1], b)) || (same(p[1], a) && same(p[0], b))
+        }) {
+            continue;
+        }
+        for id in &edge.face_ids {
+            let Ok(face) = view.face(*id) else { continue };
+            let CadSurface::Plane { normal, .. } = face.surface else {
+                continue;
+            };
+            let normal = view.vector(normal);
+            let left = -(b.y - a.y) * normal[0] + (b.x - a.x) * normal[1];
+            if left.abs() <= T {
+                continue;
+            }
+            if closed {
+                // Polygon offsets use winding-independent Outside/Inside.
+                let area = points
+                    .iter()
+                    .zip(points.iter().cycle().skip(1))
+                    .take(points.len())
+                    .map(|(a, b)| a.x * b.y - b.x * a.y)
+                    .sum::<f64>();
+                return if left * area < 0. {
+                    Side::Outside
+                } else {
+                    Side::Inside
+                };
+            }
+            return if left > 0. {
+                Side::Outside
+            } else {
+                Side::Inside
+            };
+        }
+    }
+    // Unsupported adjoining surfaces can still be machined with an explicit Side.
+    Side::Outside
 }
 
 pub(super) fn derive(

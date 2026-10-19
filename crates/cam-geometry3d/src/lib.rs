@@ -4,6 +4,7 @@
 mod profile_contours;
 mod profile_entries;
 mod surface_geometry;
+mod chamfer_faces;
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
 pub use profile_contours::coplanar_faces as coplanar_profile_faces;
@@ -21,6 +22,7 @@ pub struct ResolvedHole {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedInput {
+    pub chamfers: Vec<ChamferFace>,
     pub profiles: Vec<ProfileContour>,
     pub regions: Vec<Polygon>,
     pub holes: Vec<ResolvedHole>,
@@ -166,6 +168,11 @@ pub fn resolve_binding(
         Vec::new()
     };
     Ok(ResolvedInput {
+        chamfers: if binding.recipe == ExtractionRecipe::ChamferFaces {
+            chamfer_faces::extract(state, &binding.selected)?.0
+        } else {
+            Vec::new()
+        },
         profiles,
         regions,
         holes,
@@ -929,6 +936,22 @@ fn derive(
             .collect::<Result<Vec<_>, _>>()?;
         return Ok((regions, vec![], heights));
     }
+    if binding.recipe == ExtractionRecipe::ChamferFaces {
+        let (faces, heights) = chamfer_faces::extract(state, &binding.selected)?;
+        let regions = faces
+            .iter()
+            .map(|face| {
+                Polygon::new(Contour::new(
+                    [face.lower[0], face.lower[1], face.upper[1], face.upper[0]]
+                        .into_iter()
+                        .map(|p| Point::new(p[0], p[1]))
+                        .collect(),
+                ))
+                .map_err(|e| e.to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        return Ok((regions, Vec::new(), heights));
+    }
     if surface_geometry::is_surface_recipe(&binding.recipe) {
         return surface_geometry::derive(state, binding);
     }
@@ -1185,7 +1208,8 @@ fn derive(
         }
         ExtractionRecipe::DrillHoles => derive_holes(&view, refs, true),
         ExtractionRecipe::ThreadCylinders { internal } => derive_holes(&view, refs, internal),
-        ExtractionRecipe::ChamferLoop
+        ExtractionRecipe::ChamferFaces
+        | ExtractionRecipe::ChamferLoop
         | ExtractionRecipe::EngravePath
         | ExtractionRecipe::CarveRegion => unreachable!(),
         ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileEntries { .. } => {

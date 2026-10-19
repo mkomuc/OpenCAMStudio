@@ -214,7 +214,7 @@ impl Operation {
             Self::Chamfer(o) => (
                 &mut o.feed,
                 Some(&mut o.plunge_feed),
-                None, // Chamfer steps measure width, not axial stepdown.
+                Some(&mut o.stepdown), // Modeled-face bands; legacy edge mode uses width steps.
                 None,
                 &mut o.tool_preset,
             ),

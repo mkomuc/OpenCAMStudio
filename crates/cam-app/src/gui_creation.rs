@@ -64,6 +64,7 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.geometry_editor = None;
         self.creation_geometry_height_defaults = None;
         self.profile_contour_selection = 0;
         self.profile_side_overrides.clear();
@@ -224,8 +225,18 @@ impl App {
                 (Operation::Drill(op), Operation::Drill(new)) => op.points = new.points,
                 (Operation::Chamfer(op), Operation::Chamfer(new)) => {
                     op.chain = new.chain;
+                    op.closed = new.closed;
+                    if !op.closed {
+                        op.start = None;
+                        op.lead_overlap = 0.;
+                    }
                     op.side = new.side;
                     op.top = new.top;
+                    op.faces = new.faces;
+                    if !op.faces.is_empty() {
+                        op.width = new.width;
+                        op.depth = new.depth;
+                    }
                 }
                 (Operation::Engrave(op), Operation::Engrave(new)) => {
                     op.chain = new.chain;

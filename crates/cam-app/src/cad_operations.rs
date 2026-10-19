@@ -171,6 +171,9 @@ pub(crate) fn recipe(
     Ok(match kind {
         OpKind::Pocket => ExtractionRecipe::PocketFloor,
         OpKind::Drill => ExtractionRecipe::DrillHoles,
+        OpKind::Chamfer if selected.first().is_some_and(|r| r.kind == EntityKind::Face) => {
+            ExtractionRecipe::ChamferFaces
+        }
         OpKind::Chamfer => ExtractionRecipe::ChamferLoop,
         OpKind::Engrave => ExtractionRecipe::EngravePath,
         OpKind::Carve => ExtractionRecipe::CarveRegion,
@@ -522,17 +525,28 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
         }),
         OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+            closed: resolved.profiles.first().is_none_or(|p| p.closed),
+            faces: resolved.chamfers.clone(),
+            stepdown: 0.,
             id,
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
             entry_feeds: Default::default(),
-            chain: resolved.profiles[0].chain.clone(),
-            side: resolved.profiles[0].side,
-            width: 1.,
+            chain: if resolved.chamfers.is_empty() {
+                resolved.profiles[0].chain.clone()
+            } else {
+                boundary()?
+            },
+            side: resolved.profiles.first().map_or(Side::Outside, |p| p.side),
+            width: resolved.chamfers.first().map_or(1., ChamferFace::width),
             top: resolved.heights.top,
-            depth: 0.,
+            depth: if resolved.chamfers.is_empty() {
+                0.
+            } else {
+                depth
+            },
             step: 0.,
             gradual: false,
             feed: defaults.feed,
@@ -757,12 +771,25 @@ pub(crate) fn resolve_document_checked(
                     p.additional_chains.clear();
                     p.depth = depth;
                 }
+                (Operation::Chamfer(p), ExtractionRecipe::ChamferFaces) => {
+                    p.faces = input.chamfers.clone();
+                    p.chain = region()?.outer().clone();
+                    p.width = p.faces.first().ok_or("No modeled chamfer faces")?.width();
+                    p.top = input.heights.top;
+                    p.depth = depth;
+                }
                 (Operation::Chamfer(p), ExtractionRecipe::ChamferLoop) => {
+                    p.faces.clear();
                     let path = input.profiles.first().ok_or("No chamfer rim")?;
                     if p.chain != path.chain {
                         p.side = path.side;
                     }
                     p.chain = path.chain.clone();
+                    p.closed = path.closed;
+                    if !p.closed {
+                        p.start = None;
+                        p.lead_overlap = 0.;
+                    }
                     p.top = input.heights.top;
                 }
                 (Operation::Engrave(p), ExtractionRecipe::EngravePath) => {

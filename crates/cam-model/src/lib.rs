@@ -28,9 +28,9 @@ mod validate;
 
 pub use cam_cldata::Point3;
 pub use document::{
-    Axis, CarveClearing, CarveOp, ChamferOp, ClearParams, Clearing, Comp, Document, DrillOp,
-    EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp, ProfileContour,
-    ProfileOp, ProfileTabs, Setup, Side, Stock, ThreadOp, SCHEMA_VERSION,
+    Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
+    DrillOp, EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp,
+    ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, ThreadOp, SCHEMA_VERSION,
 };
 pub use geometry::*;
 pub use history::History;
