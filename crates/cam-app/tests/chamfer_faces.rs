@@ -104,7 +104,7 @@ fn supplied_faces_define_exact_boundaries_and_a_small_cutter_uses_multiple_bands
     let paths = cuts(&outcome.program);
     // A 6 mm cutter with a 1 mm flat has 2.5 mm of 45° cutting flank.
     assert_eq!(paths.len(), 16);
-    for (face, paths) in resolved.chamfers.iter().zip(paths.chunks_exact(4)) {
+    for (face, paths) in resolved.chamfers.iter().zip(paths.as_chunks::<4>().0) {
         for (index, (start, end)) in paths.iter().enumerate() {
             let z = 50. - (index + 1) as f64 * 2.5;
             assert!((start.z - z).abs() < 1e-8 && (end.z - z).abs() < 1e-8);
@@ -290,7 +290,7 @@ fn single_upper_and_lower_edges_accept_width_without_a_closing_cut_and_roundtrip
             ..faces[0].clone()
         };
         let preview = app
-            .preview_cad_operation(OpKind::Chamfer, &[edge.clone()])
+            .preview_cad_operation(OpKind::Chamfer, std::slice::from_ref(&edge))
             .unwrap();
         assert!(!preview.profiles[0].closed);
         assert_eq!(preview.profiles[0].chain.len(), 2);
