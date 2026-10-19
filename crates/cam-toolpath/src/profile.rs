@@ -956,7 +956,7 @@ fn emit_loop_rich(
 
         // Lead off the contour at depth — **flat**. Only the lead-in descends.
         crate::leads::emit_lead(
-            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.entry_feeds.lead_out(op.feed), lead,
+            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.entry_feeds.lead_out(op.feed), Tag::new(op.id, MoveKind::LeadOut),
         );
 
         // Lift only when the next pass has somewhere else to start from; the final
@@ -2094,7 +2094,7 @@ mod tests {
             match s {
                 Step::Rapid { to, .. } | Step::Linear { to, .. } => pos = Point::new(to.x, to.y),
                 Step::Arc { end, tag, .. } => {
-                    if tag.kind == MoveKind::LeadIn {
+                    if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) {
                         arcs.push((pos, Point::new(end.x, end.y)));
                     }
                     pos = Point::new(end.x, end.y);
@@ -2893,7 +2893,7 @@ mod tests {
         let r = run_outside_rough(op);
         for st in r.program.steps() {
             if let Step::Arc { end, tag, .. } = st {
-                if tag.kind == MoveKind::LeadIn {
+                if tag.kind == MoveKind::LeadOut {
                     assert!(
                         (end.z + 1.0).abs() < 1e-9,
                         "a lead arc ended at {} — the lead-out must stay at depth",

@@ -178,6 +178,18 @@ impl JobInputs {
                     .map(|n| n as f32);
             }
         }
+        for cone in &mut scene.path_cones {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let frame = &self.document.setup().frame;
+            cone.at = frame
+                .to_world_vector(cone.at.map(f64::from))
+                .map(|n| n as f32);
+            cone.direction = frame
+                .to_world_vector(cone.direction.map(f64::from))
+                .map(|n| n as f32);
+        }
         for region in self.regions.iter() {
             if cancel.is_cancelled() {
                 break;
@@ -190,12 +202,11 @@ impl JobInputs {
             }
             scene.add_open_path(path.points(), PART);
         }
-        let (stock_vertices, stock_indices, stock_machined, collisions) =
-            if completion == JobCompletion::Complete && !cancel.is_cancelled() {
-                self.simulate_stock(&job.program, cancel, progress, simulation)
-            } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            };
+        let stock = if completion == JobCompletion::Complete && !cancel.is_cancelled() {
+            self.simulate_stock(&job.program, cancel, progress, simulation)
+        } else {
+            simulation::StockSimulation::default()
+        };
         if cancel.is_cancelled() {
             completion = JobCompletion::Cancelled;
         }
@@ -208,10 +219,11 @@ impl JobInputs {
             program: job.program,
             diagnostics: job.diagnostics,
             scene,
-            stock_vertices,
-            stock_machined,
-            stock_indices,
-            collisions,
+            stock_vertices: stock.vertices,
+            stock_machined: stock.machined,
+            stock_operations: stock.operations,
+            stock_indices: stock.indices,
+            collisions: stock.collisions,
         }
     }
 }

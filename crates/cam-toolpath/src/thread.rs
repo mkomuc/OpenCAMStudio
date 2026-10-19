@@ -465,7 +465,7 @@ fn emit_pass(prog: &mut Program, p: &HoleParams, cx: f64, cy: f64, orbit_r: f64)
         center: Point3::new(lc_out.0, lc_out.1, p.z_end),
         dir: lead_dir,
         feed: p.entry_feeds.lead_out(p.feed),
-        tag: lead,
+        tag: Tag::new(p.op_id, MoveKind::LeadOut),
     });
     prog.push(Step::Rapid {
         to: Point3::new(a_end.0, a_end.1, p.clearance),
@@ -756,11 +756,10 @@ mod tests {
         let r = run(op(true, Hand::Right, true), tool(5.0));
         let s = &r.program.steps;
         assert!(matches!(s[0], Step::Comment(_)));
-        let leads = s
-            .iter()
-            .filter(|st| matches!(st, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadIn))
-            .count();
-        assert_eq!(leads, 2, "one lead-in + one lead-out");
+        for kind in [MoveKind::LeadIn, MoveKind::LeadOut] {
+            let leads = s.iter().filter(|st| matches!(st, Step::Arc { tag, .. } if tag.kind == kind)).count();
+            assert_eq!(leads, 1, "one arc for {kind:?}");
+        }
         let plunges = s
             .iter()
             .filter(|st| matches!(st, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge))

@@ -388,9 +388,10 @@ that have no other control:
 - **Snap marker size** — how large the engaged snap glyph draws. Unlike the catch
   distance this *is* its own control: it is a visual size, not a tolerance, so a large
   marker with a tight aperture is a reasonable thing to want.
-- **Stock color** — RGB sliders with a live color preview. Stock starts green; the
-  chosen color applies to both raw stock and remaining simulated material, including
-  transparent stock, and survives a restart.
+- **Stock color** — RGB sliders with a live color preview. The chosen color (green
+  by default) highlights surfaces machined by the selected toolpaths, including
+  transparent stock, and survives a restart. Original stock and surfaces from
+  unselected operations remain grey.
 - **Origin marker size** — the workpiece-datum cross-and-ring. It is sized from the
   scene (6% of its extent), so it already stays legible on a 20 mm part and a 500 mm
   one; this scales that, for a louder or quieter datum against a busy backplot.
@@ -495,6 +496,9 @@ can be hidden, and a refusal is the one message that must not be missable.
   line. **Output** shows toolpath diagnostics (e.g. a tool too large)
   *and* material-removal **collisions** from the simulation (e.g. a rapid plowing
   through remaining stock, which a green backplot would hide).
+  Directional cones mark the **in path in red** and the **out path in green**,
+  including drilling entry and withdrawal. They stay legible when zooming and
+  follow toolpath selection and visibility.
 - **View → Envelope** draws the active machine's **travel** as a dashed violet box
   around the job, turning **red** when the job does not fit. This is the same check the
   export makes, shown *before* the refusal instead of after.
@@ -645,8 +649,10 @@ things worth eyeballing:
   drag pans, wheel zooms; the orientation cube tracks the view and its faces snap.
   With **Show stock** on, the solid occludes itself while the toolpath stays on top.
   Original stock surfaces are grey. Simulation exposes cut floors, walls and
-  slopes in the configured stock colour (green by default); rewinding restores
-  the grey stock. Transparency applies to both colours. Preferences → Stock cut
+  slopes from the selected toolpaths in the configured stock colour (green by
+  default). Earlier unselected operations stay grey, including upper wall sections
+  when a later operation deepens a pocket; rewinding restores the grey stock.
+  Transparency applies to both colours. Preferences → Stock cut
   simulation → Accuracy adjusts grid density from 0.25× to 2×; higher values resolve
   smaller cuts and use more time and memory. Releasing the slider rebuilds the
   simulation. Playback uses the same grid as the completed preview, with cached

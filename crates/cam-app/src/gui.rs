@@ -10359,6 +10359,7 @@ struct Viewport {
     planar_features: Vec<LoopRef>,
     planar_outlines: Arc<Vec<(LoopRef, Vec<Vertex>)>>,
     vertices: Arc<Vec<Vertex>>,
+    path_cones: Arc<Vec<cam_render::PathCone>>,
     mesh_vertices: Arc<Vec<MeshVertex>>,
     mesh_indices: Arc<Vec<u32>>,
     transparent_stock_vertices: Arc<Vec<MeshVertex>>,
@@ -10464,6 +10465,9 @@ impl Viewport {
                 .op
                 .is_none_or(|id| focus_ops.contains(&id) && !hidden_ops.contains(&id))
         });
+        scene
+            .path_cones
+            .retain(|cone| focus_ops.contains(&cone.op) && !hidden_ops.contains(&cone.op));
         // Drilling annotations from the backplot (peck rings + dwell bars), once a
         // run has produced a program. Anchors only — sized to the screen at draw.
         let drill_marks = outcome
@@ -10659,7 +10663,8 @@ impl Viewport {
         let [r, g, b] = prefs.view.stock_color;
         for (index, vertex) in mesh_vertices.iter_mut().enumerate() {
             if stock_outcome
-                .is_some_and(|outcome| outcome.stock_machined.get(index).copied().unwrap_or(false))
+                .and_then(|outcome| outcome.stock_operations.get(index).copied().flatten())
+                .is_some_and(|op| focus_ops.contains(&op) && !hidden_ops.contains(&op))
             {
                 vertex.color = [r, g, b, 1.0];
             }
@@ -10728,6 +10733,7 @@ impl Viewport {
                     .collect(),
             ),
             vertices: Arc::new(scene.line_vertices()),
+            path_cones: Arc::new(scene.path_cones),
             mesh_vertices: Arc::new(mesh_vertices),
             mesh_indices: Arc::new(mesh_indices),
             transparent_stock_vertices: Arc::new(transparent_stock_vertices),
@@ -11202,7 +11208,13 @@ impl shader::Program<Message> for Viewport {
             );
         }
         overlays.extend(setup_scene.line_vertices());
+        let (cone_vertices, cone_indices) = cam_render::path_cone_mesh(
+            &self.path_cones,
+            12.0 * self.camera().world_per_pixel(bounds.height) / aspect.min(1.0),
+        );
         ScenePrimitive {
+            cone_vertices: Arc::new(cone_vertices),
+            cone_indices: Arc::new(cone_indices),
             grid_vertices: Arc::new(
                 grid_view::GridLayout::new(self.camera(), bounds.size()).vertices(),
             ),
@@ -11264,6 +11276,7 @@ struct ViewportPipeline {
     overlays: cam_render::LineRenderer,
     uploaded: Option<ScenePrimitive>,
     mesh: cam_render::MeshRenderer,
+    cones: cam_render::MeshRenderer,
     transparent_stock: cam_render::MeshRenderer,
     cad_edges: cam_render::LineRenderer,
     gizmo: cam_render::GizmoRenderer,
@@ -11277,6 +11290,7 @@ impl shader::Pipeline for ViewportPipeline {
             overlays: cam_render::LineRenderer::new(device, format),
             uploaded: None,
             mesh: cam_render::MeshRenderer::new(device, format),
+            cones: cam_render::MeshRenderer::new_overlay(device, format),
             transparent_stock: cam_render::MeshRenderer::new_transparent(device, format),
             grid: cam_render::LineRenderer::new_depth_tested(device, format),
             cad_edges: cam_render::LineRenderer::new_depth_tested(device, format),
@@ -11317,6 +11331,8 @@ impl ViewportPipeline {
 
 #[derive(Clone, Debug)]
 struct ScenePrimitive {
+    cone_vertices: Arc<Vec<MeshVertex>>,
+    cone_indices: Arc<Vec<u32>>,
     grid_vertices: Arc<Vec<Vertex>>,
     overlay_vertices: Arc<Vec<Vertex>>,
     vertices: Arc<Vec<Vertex>>,
@@ -11361,6 +11377,13 @@ impl shader::Primitive for ScenePrimitive {
         }
         if previous.is_none_or(|p| p.overlay_vertices != self.overlay_vertices) {
             pipeline.overlays.upload(device, &self.overlay_vertices);
+        }
+        if previous.is_none_or(|p| {
+            p.cone_vertices != self.cone_vertices || p.cone_indices != self.cone_indices
+        }) {
+            pipeline
+                .cones
+                .upload(device, &self.cone_vertices, &self.cone_indices);
         }
         if previous.is_none_or(|p| {
             !Arc::ptr_eq(&p.mesh_vertices, &self.mesh_vertices)
@@ -11417,6 +11440,9 @@ impl shader::Primitive for ScenePrimitive {
             .set_camera(queue, self.view_proj, logical_size);
         pipeline
             .mesh
+            .set_camera(queue, self.view_proj, self.view_rotation);
+        pipeline
+            .cones
             .set_camera(queue, self.view_proj, self.view_rotation);
         pipeline
             .gizmo
@@ -11482,6 +11508,7 @@ impl shader::Primitive for ScenePrimitive {
         pipeline.cad_edges.draw(&mut pass);
         pipeline.transparent_stock.draw(&mut pass);
         pipeline.lines.draw(&mut pass);
+        pipeline.cones.draw(&mut pass);
         pipeline.overlays.draw(&mut pass);
         drop(pass);
 

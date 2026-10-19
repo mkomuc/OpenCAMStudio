@@ -15,6 +15,7 @@ mod cad;
 mod camera;
 mod gizmo;
 mod mesh;
+mod path_cone;
 mod scene;
 mod tool;
 
@@ -24,10 +25,11 @@ pub use camera::{orientation, top_view, OrbitCamera, Ray, IDENTITY};
 pub use gizmo::label_atlas;
 pub use gizmo::{pick_face, unit_cube, GizmoVertex};
 pub use mesh::{mesh_vertices, MeshVertex};
-pub use tool::tool_mesh;
+pub use path_cone::{path_cone_mesh, PathCone, PATH_IN, PATH_OUT};
 pub use scene::{
     Color, LineStrip, Scene, Vertex, CUT, ENVELOPE, ENVELOPE_OVER, PART, PLUNGE, RAPID,
 };
+pub use tool::tool_mesh;
 
 #[cfg(feature = "gpu")]
 mod gpu;

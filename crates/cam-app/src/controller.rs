@@ -136,6 +136,8 @@ pub struct RunOutcome {
     pub stock_vertices: Vec<MeshVertex>,
     /// Per-vertex flag distinguishing cut surfaces from original stock faces.
     pub stock_machined: Vec<bool>,
+    /// Operation that exposed each stock vertex, used for selection highlighting.
+    pub stock_operations: Vec<Option<u32>>,
     /// Triangle indices into `stock_vertices`.
     pub stock_indices: Vec<u32>,
     /// Collisions the material-removal simulation found (e.g. a rapid plowing

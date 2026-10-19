@@ -289,13 +289,13 @@ fn emit_wall_ring(
             let exit = crate::leads::lead_end_point(last, tan_out, cout, eff_out);
             crate::emit::cut_polyline(prog, &walked, feed, cut, z);
             // The lead-**out** stays flat at depth; only the lead-in descends.
-            crate::leads::emit_lead(prog, last, exit, last, cout, eff_out, z, entry_feeds.lead_out(feed), lead);
+            crate::leads::emit_lead(prog, last, exit, last, cout, eff_out, z, entry_feeds.lead_out(feed), Tag::new(id, MoveKind::LeadOut));
             exit
         }
         None => {
             crate::leads::emit_lead(prog, entry, start, start, cin, eff_in, z, entry_feeds.lead_in(feed), lead);
             crate::emit::cut_polyline(prog, &loop_pts, feed, cut, z);
-            crate::leads::emit_lead(prog, exit_on, exit, exit_on, cout, eff_out, z, entry_feeds.lead_out(feed), lead);
+            crate::leads::emit_lead(prog, exit_on, exit, exit_on, cout, eff_out, z, entry_feeds.lead_out(feed), Tag::new(id, MoveKind::LeadOut));
             exit
         }
     }
