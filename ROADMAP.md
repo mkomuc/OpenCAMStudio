@@ -58,6 +58,12 @@ diagnostics, undo, determinism) that P2–P5 must honor.
 
 ## After the slice (unordered candidates)
 
+[Setup operation patterns](docs/operation-patterns-implementation.md) provide
+rectangular and circular toolpath repetition for one or multiple operations,
+created through setup/operation context menus. The implementation note records
+delivered behavior, verification and qualification limits; the
+[feature plan](docs/operation-patterns-plan.md) retains the broader acceptance gates.
+
 The active delivery sequence is in the
 [implementation milestones](docs/implementation-plan.md), updated 2026-10-14 from
 the [high-level requirements](docs/high-level-requirements-analysis.md).

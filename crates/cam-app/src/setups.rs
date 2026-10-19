@@ -46,6 +46,7 @@ impl AppController {
         setup.program_name = format!("setup-{}", setup.id);
         setup.model_instances.clear();
         setup.operations.clear();
+        setup.patterns.clear();
         setup.operation_heights.clear();
         setup.height_settings.clear();
         setup.stock = default_stock(self.defaults.top_of_stock, self.defaults.depth);
@@ -69,9 +70,11 @@ impl AppController {
         let mut next_id = self.next_op_id();
         let mut bindings = Vec::new();
         let mut linked = Vec::new();
+        let mut operation_ids = std::collections::HashMap::new();
         let old_heights = std::mem::take(&mut copy.operation_heights);
         let old_settings = std::mem::take(&mut copy.height_settings);
         for op in &mut copy.operations {
+            let old_id = op.id();
             if let Some(settings) = old_settings.get(&op.id()) {
                 copy.height_settings.insert(next_id, settings.clone());
             }
@@ -86,16 +89,33 @@ impl AppController {
                 bindings.push((next_id, binding));
             }
             op.set_id(next_id);
+            operation_ids.insert(old_id, next_id);
             next_id = next_id
                 .checked_add(1)
                 .ok_or("Operation ID range exhausted")?;
         }
+        let mut next_pattern_id = self.next_pattern_id();
+        for pattern in &mut copy.patterns {
+            pattern.id = next_pattern_id;
+            next_pattern_id = next_pattern_id.checked_add(1).ok_or("Pattern ID range exhausted")?;
+            for member in &mut pattern.members {
+                *member = *operation_ids.get(member).ok_or("Pattern refers to a missing operation")?;
+            }
+        }
         let new_id = copy.id;
+        let excluded: Vec<u32> = self.document().excluded_operations.iter()
+            .filter_map(|old| operation_ids.get(old).copied())
+            .collect();
+        let disabled_origins = self.document().disabled_origins.get(&id).cloned();
         self.edit_document(move |doc| {
             let at = doc.setups.iter().position(|s| s.id == id).unwrap() + 1;
             doc.setups.insert(at, copy);
             doc.geometry.bindings.extend(bindings);
             doc.cad_linked_operations.extend(linked);
+            doc.excluded_operations.extend(excluded);
+            if let Some(disabled) = disabled_origins {
+                doc.disabled_origins.insert(new_id, disabled);
+            }
         });
         self.activate_setup(new_id)?;
         Ok(new_id)
@@ -200,6 +220,33 @@ impl AppController {
                 .ok_or("Drop target is not in the destination setup")?,
             None => target.operations.len(),
         };
+        let source_pattern = source.patterns.iter().find(|p| p.members.contains(&id));
+        let target_pattern = before.and_then(|anchor| target.patterns.iter().find(|p| p.members.contains(&anchor)));
+        if let Some(pattern) = source_pattern {
+            if source.id != destination || target_pattern.map(|p| p.id) != Some(pattern.id) {
+                return Err("Pattern members move within their group; dissolve the pattern before moving a source elsewhere".into());
+            }
+            if before == Some(id) { return Ok(()); }
+            let mut reordered = pattern.members.clone();
+            reordered.retain(|member| *member != id);
+            let insert_at = before.and_then(|anchor| reordered.iter().position(|member| *member == anchor)).unwrap_or(reordered.len());
+            reordered.insert(insert_at, id);
+            let first = target.operations.iter().position(|op| op.id() == pattern.members[0]).unwrap();
+            let pattern_id = pattern.id;
+            let selected: BTreeSet<u32> = pattern.members.iter().copied().collect();
+            let by_id: std::collections::HashMap<u32, Operation> = target.operations.iter().filter(|op| selected.contains(&op.id())).cloned().map(|op| (op.id(), op)).collect();
+            self.edit_document(move |doc| {
+                let setup = doc.setups.iter_mut().find(|s| s.id == destination).unwrap();
+                setup.operations.drain(first..first + reordered.len());
+                setup.operations.splice(first..first, reordered.iter().filter_map(|id| by_id.get(id).cloned()));
+                setup.patterns.iter_mut().find(|p| p.id == pattern_id).unwrap().members = reordered;
+            });
+            self.invalidate();
+            return Ok(());
+        }
+        if target_pattern.is_some() {
+            return Err("A drop cannot insert an ungrouped operation into the middle of a pattern; edit pattern membership instead".into());
+        }
         if source.id != destination {
             self.transfer_operation_to_setup_at(id, destination, false, before)?;
             return Ok(());
@@ -260,6 +307,9 @@ impl AppController {
             .iter()
             .find(|s| s.operations.iter().any(|op| op.id() == id))
             .ok_or("Missing operation")?;
+        if source.patterns.iter().any(|pattern| pattern.members.contains(&id)) {
+            return Err("Dissolve the pattern before transferring or copying one of its source operations".into());
+        }
         let target = self
             .setups()
             .iter()

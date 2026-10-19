@@ -22,24 +22,10 @@ impl AppController {
     }
 
     pub(crate) fn job_inputs(&self) -> JobInputs {
-        let mut document = self.document().clone();
-        let excluded = document.excluded_operations.clone();
-        let disabled = document
-            .disabled_origins
-            .get(&self.active_setup_id)
-            .cloned()
-            .unwrap_or_default();
-        document
-            .setup_mut()
-            .operations
-            .retain(|o| !excluded.contains(&o.id()) && !disabled.contains(&o.work_offset()));
-        let ids: BTreeSet<_> = document
-            .setup()
-            .operations
-            .iter()
-            .map(Operation::id)
-            .collect();
-        document.geometry.bindings.retain(|id, _| ids.contains(id));
+        // Keep the complete validated setup graph in worker snapshots. Exclusion and
+        // disabled datums are run filters applied by the planner; pruning source ops
+        // here would leave pattern membership dangling.
+        let document = self.document().clone();
         let (min, max) = self.stock_box();
         JobInputs {
             document: Arc::new(document),
@@ -72,14 +58,15 @@ impl AppController {
         let mut inputs = self.job_inputs();
         if let Some(id) = operation {
             let document = Arc::make_mut(&mut inputs.document);
-            document.setup_mut().operations.retain(|op| op.id() == id);
-            document.geometry.bindings.retain(|op, _| *op == id);
+            let ids: Vec<u32> = document.setup().operations.iter().map(Operation::id).collect();
+            document.excluded_operations.extend(ids.into_iter().filter(|op| *op != id));
         }
         let ids: Vec<_> = inputs
             .document
             .setup()
             .operations
             .iter()
+            .filter(|op| inputs.document.operation_is_included(inputs.document.setup().id, op.id()))
             .map(Operation::id)
             .collect();
         if ids.is_empty() {
@@ -91,6 +78,21 @@ impl AppController {
         if recompute {
             self.operation_cache.invalidate_operations(&ids);
         }
+        Ok(self.submit_run(inputs))
+    }
+
+    /// Run exactly one pattern, retaining every included source at each instance.
+    pub fn start_pattern_toolpath_run(&mut self, pattern_id: u64, recompute: bool) -> Result<JobStamp, String> {
+        let mut inputs = self.job_inputs();
+        let members: BTreeSet<u32> = inputs.document.setup().patterns.iter().find(|p| p.id == pattern_id)
+            .ok_or_else(|| "Pattern no longer exists.".to_string())?.members.iter().copied().collect();
+        let document = Arc::make_mut(&mut inputs.document);
+        let ids_all: Vec<u32> = document.setup().operations.iter().map(Operation::id).collect();
+        document.excluded_operations.extend(ids_all.into_iter().filter(|id| !members.contains(id)));
+        let setup_id = document.setup().id;
+        let ids: Vec<_> = document.setup().operations.iter().filter(|op| document.operation_is_included(setup_id, op.id())).map(Operation::id).collect();
+        if ids.is_empty() { return Err("No included source operations in this pattern.".into()); }
+        if recompute { self.operation_cache.invalidate_operations(&ids); }
         Ok(self.submit_run(inputs))
     }
 
@@ -106,6 +108,8 @@ impl AppController {
             .collect();
         let bytes = serde_json::to_vec(&(
             inputs.document.setup(),
+            &inputs.document.excluded_operations,
+            &inputs.document.disabled_origins,
             &geometry.bindings,
             &inputs.document.cad_linked_operations,
             &geometry.instances,
@@ -294,6 +298,35 @@ mod tests {
             .all(|id| id == 0));
         app.set_origin_disabled(1, true);
         assert!(app.start_toolpath_run(None, false).is_err());
+    }
+
+    #[test]
+    fn pattern_job_scope_keeps_full_membership_and_skips_suppressed_bad_cad_sources() {
+        let mut app = app();
+        let setup_id = app.active_setup_id();
+        let ids: Vec<_> = app.document().setup().operations.iter().map(Operation::id).collect();
+        let kind = cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 10.0, dy: 0.0 };
+        let first = app.create_pattern(setup_id, &[ids[0]], "First".into(), kind, cam_model::PatternOrder::ByInstance).unwrap();
+        let second = app.create_pattern(setup_id, &[ids[1]], "Second".into(), kind, cam_model::PatternOrder::ByOperation).unwrap();
+        app.edit_document(|doc| {
+            doc.cad_linked_operations.insert(ids[1]);
+        });
+        app.set_pattern_suppressed(setup_id, second, true);
+        let full = app.job_inputs();
+        assert_eq!(full.document.setup().patterns.len(), 2, "worker snapshots retain both groups");
+        assert!(full.document.setup().patterns.iter().find(|p| p.id == second).unwrap().members.contains(&ids[1]));
+
+        app.start_pattern_toolpath_run(first, false).unwrap();
+        drain(&mut app);
+        let outcome = app.outcome().unwrap();
+        assert_eq!(outcome.completion, JobCompletion::Complete, "excluded stale CAD sources are not resolved: {:?}", outcome.diagnostics);
+        assert!(outcome.scene.strips.iter().filter_map(|strip| strip.op).all(|id| id == ids[0]));
+        assert!(app.document().setup().patterns.iter().any(|p| p.id == second && p.suppressed));
+
+        app.start_run();
+        drain(&mut app);
+        assert_eq!(app.outcome().unwrap().completion, JobCompletion::Complete);
+        assert!(app.outcome().unwrap().scene.strips.iter().filter_map(|strip| strip.op).all(|id| id == ids[0]));
     }
     #[test]
     fn long_worker_leaves_controller_responsive_and_edit_cancels_it() {

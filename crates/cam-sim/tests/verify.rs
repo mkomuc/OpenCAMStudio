@@ -79,6 +79,7 @@ fn setup(operations: Vec<Operation>) -> Document {
             ..Default::default()
         }],
         operations,
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
@@ -272,6 +273,7 @@ fn a_bad_setup_that_rapids_low_is_caught() {
             Operation::Profile(profile_square(0, square(5.0, 5.0, 15.0, 15.0))),
             Operation::Profile(profile_square(1, square(25.0, 25.0, 35.0, 35.0))),
         ],
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,

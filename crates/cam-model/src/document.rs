@@ -78,10 +78,88 @@ use crate::Tool;
 /// v20: profiles support open chains, multiple contours, and complete silhouettes.
 /// v21: named profile geometry entries with independent extraction settings.
 /// v22: managed stock material IDs, tool presets and operation preset snapshots.
-/// v23: modeled chamfer-face boundaries and axial finishing bands. Older readers
+/// v23: setup-scoped reusable operation patterns.
+/// v24: modeled chamfer-face boundaries and axial finishing bands. Older readers
 /// must refuse these operations rather than treating their projected face as an edge.
-/// v24: open chamfer chains; absent closed flags retain legacy closed rims.
-pub const SCHEMA_VERSION: u32 = 24;
+/// v25: open chamfer chains; absent closed flags retain legacy closed rims.
+pub const SCHEMA_VERSION: u32 = 25;
+
+/// How repeated instances are traversed when executing a pattern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternOrder { #[default] ByInstance, ByOperation }
+
+/// Direction used by circular patterns, viewed from setup +Z.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternDirection { #[default] Ccw, Cw }
+
+/// Distribution of circular pattern instances.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CircularDistribution { Full, Partial { sweep_degrees: f64 } }
+
+/// Geometry and placement parameters for setup XY operation repetition.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PatternKind {
+    Rectangular { nx: u32, ny: u32, dx: f64, dy: f64 },
+    Circular { center_xy: [f64; 2], count: u32, distribution: CircularDistribution, direction: PatternDirection },
+}
+
+/// A setup-level group that repeats its editable source operations.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OperationPattern {
+    pub id: u64,
+    pub name: String,
+    /// Ordered source operation IDs; they are a contiguous block in Setup.operations.
+    pub members: Vec<u32>,
+    pub kind: PatternKind,
+    #[serde(default)] pub order: PatternOrder,
+    #[serde(default)] pub suppressed: bool,
+}
+
+impl PatternKind {
+    pub fn instance_count(self) -> Option<usize> {
+        match self {
+            Self::Rectangular { nx, ny, .. } => (nx as usize).checked_mul(ny as usize),
+            Self::Circular { count, .. } => Some(count as usize),
+        }
+    }
+    /// Transform coordinates for an instance, with index zero always identity.
+    pub fn transform_xy(self, index: usize) -> Option<([f64; 2], f64)> {
+        match self {
+            Self::Rectangular { nx, ny, dx, dy } => {
+                if index >= (nx as usize).checked_mul(ny as usize)? { return None; }
+                let x = index % nx as usize; let y = index / nx as usize;
+                Some(([x as f64 * dx, y as f64 * dy], 0.0))
+            }
+            Self::Circular { count, distribution, direction, .. } => {
+                if index >= count as usize { return None; }
+                let sweep = match distribution { CircularDistribution::Full => 360.0, CircularDistribution::Partial { sweep_degrees } => sweep_degrees };
+                let divisor = if matches!(distribution, CircularDistribution::Full) { count as f64 } else { (count - 1) as f64 };
+                let sign = if direction == PatternDirection::Ccw { 1.0 } else { -1.0 };
+                Some(([0.0, 0.0], sign * sweep * index as f64 / divisor))
+            }
+        }
+    }
+    pub fn validate(self) -> Result<(), String> {
+        match self {
+            Self::Rectangular { nx, ny, dx, dy } => {
+                let n = (nx as usize).checked_mul(ny as usize).ok_or("pattern instance count overflows")?;
+                if nx == 0 || ny == 0 || !(2..=10_000).contains(&n) { return Err("rectangular pattern requires counts >= 1 and 2..=10,000 instances".into()); }
+                if !dx.is_finite() || !dy.is_finite() || (nx > 1 && dx == 0.0) || (ny > 1 && dy == 0.0) { return Err("active rectangular pitches must be finite and nonzero".into()); }
+            }
+            Self::Circular { center_xy, count, distribution, .. } => {
+                if !(2..=10_000).contains(&count) || !center_xy.iter().all(|v| v.is_finite()) { return Err("circular pattern requires 2..=10,000 instances and a finite center".into()); }
+                if let CircularDistribution::Partial { sweep_degrees } = distribution {
+                    if !sweep_degrees.is_finite() || sweep_degrees <= 0.0 || sweep_degrees >= 360.0 { return Err("partial sweep must be greater than 0 and less than 360 degrees".into()); }
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Operation safety planes (also used as legacy setup defaults), all
 /// **absolute Z in millimetres**. By
@@ -1515,6 +1593,9 @@ pub struct Setup {
     pub tools: Vec<Tool>,
     /// Operations, in execution order.
     pub operations: Vec<Operation>,
+    /// Reusable pattern groups. Group members remain canonical operations above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<OperationPattern>,
     /// Additional workpiece origins (index ≥ 2) beyond the base [`origin`](Self::origin)
     /// (index 1) — one per re-fixturing/reorientation of the part. Each operation runs
     /// under the origin named by its [`work_offset`](Operation::work_offset); a group of
@@ -1544,6 +1625,44 @@ pub struct Setup {
 }
 
 impl Setup {
+    /// Flattened execution view: a pattern appears at its first source, remaining
+    /// grouped sources are omitted, and ordinary operations appear once.
+    pub fn execution_items(&self) -> Vec<ExecutionItem<'_>> {
+        let mut items = Vec::new();
+        let mut emitted = std::collections::BTreeSet::new();
+        for op in &self.operations {
+            if let Some(pattern) = self.patterns.iter().find(|p| p.members.contains(&op.id())) {
+                if emitted.insert(pattern.id) { items.push(ExecutionItem::Pattern(pattern)); }
+            } else { items.push(ExecutionItem::Operation(op)); }
+        }
+        items
+    }
+
+    /// Validate pattern structure and shared datum/order invariants.
+    pub fn validate_patterns(&self) -> Result<(), String> {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut membership = std::collections::BTreeSet::new();
+        let positions: std::collections::HashMap<u32, usize> = self.operations.iter().enumerate().map(|(i,o)|(o.id(),i)).collect();
+        for p in &self.patterns {
+            if p.id == 0 || !ids.insert(p.id) { return Err(format!("pattern ID {} is zero or duplicated", p.id)); }
+            p.kind.validate()?;
+            if p.members.is_empty() { return Err(format!("pattern '{}' has no source operations", p.name)); }
+            let mut indices = Vec::new();
+            let mut datum = None;
+            for id in &p.members {
+                let i = *positions.get(id).ok_or_else(|| format!("pattern '{}' references missing operation {id}", p.name))?;
+                if !membership.insert(*id) { return Err(format!("operation {id} belongs to multiple patterns")); }
+                let op = &self.operations[i];
+                if datum.is_some_and(|d| d != op.work_offset()) { return Err(format!("pattern '{}' sources must share one work datum", p.name)); }
+                datum = Some(op.work_offset()); indices.push(i);
+            }
+            let min = *indices.iter().min().unwrap(); let max = *indices.iter().max().unwrap();
+            if max - min + 1 != indices.len() || indices.windows(2).any(|w| w[1] != w[0] + 1) {
+                return Err(format!("pattern '{}' sources must be a contiguous ordered block", p.name));
+            }
+        }
+        Ok(())
+    }
     /// Effective safety planes for one operation.
     pub fn heights_for(&self, operation: u32) -> Heights {
         self.operation_heights
@@ -1589,6 +1708,10 @@ impl Setup {
     }
 }
 
+/// One item in a setup's flattened execution view.
+#[derive(Clone, Copy, Debug)]
+pub enum ExecutionItem<'a> { Operation(&'a Operation), Pattern(&'a OperationPattern) }
+
 /// Default for a `#[serde(default)]` base-origin index: `1`.
 fn default_origin_index() -> u32 {
     1
@@ -1628,6 +1751,8 @@ pub struct Document {
     pub asset_id_floor: u64,
     #[serde(default)]
     pub instance_id_floor: u64,
+    #[serde(default)]
+    pub pattern_id_floor: u64,
 }
 
 // Active setup is session/view state: it is intentionally omitted from the wire
@@ -1644,10 +1769,21 @@ impl PartialEq for Document {
             && self.setup_id_floor == other.setup_id_floor
             && self.asset_id_floor == other.asset_id_floor
             && self.instance_id_floor == other.instance_id_floor
+            && self.pattern_id_floor == other.pattern_id_floor
     }
 }
 
 impl Document {
+    /// Whether one source operation participates in the selected setup's run,
+    /// accounting for operation suppression, disabled datum and group suppression.
+    pub fn operation_is_included(&self, setup_id: u64, operation_id: u32) -> bool {
+        if self.excluded_operations.contains(&operation_id) { return false; }
+        let Some(setup) = self.setups.iter().find(|s| s.id == setup_id) else { return false; };
+        let Some(operation) = setup.operations.iter().find(|op| op.id() == operation_id) else { return false; };
+        if self.disabled_origins.get(&setup_id).is_some_and(|set| set.contains(&operation.work_offset())) { return false; }
+        !setup.patterns.iter().any(|pattern| pattern.suppressed && pattern.members.contains(&operation_id))
+    }
+
     /// Wrap a setup in a document stamped with the current [`SCHEMA_VERSION`].
     pub fn new(setup: Setup) -> Self {
         let mut setup = setup;
@@ -1666,6 +1802,7 @@ impl Document {
             setup_id_floor: 0,
             asset_id_floor: 0,
             instance_id_floor: 0,
+            pattern_id_floor: 0,
         }
     }
     pub fn setup(&self) -> &Setup {
@@ -1710,6 +1847,9 @@ impl Document {
                 .max()
                 .unwrap_or(1),
         );
+        self.pattern_id_floor = self.pattern_id_floor.max(
+            self.setups.iter().flat_map(|s| &s.patterns).map(|p| p.id.saturating_add(1)).max().unwrap_or(1),
+        );
         self.operation_id_floor = self.operation_id_floor.max(
             self.setups
                 .iter()
@@ -1725,6 +1865,34 @@ impl Document {
                 .max()
                 .unwrap_or(1),
         );
+    }
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+
+    #[test]
+    fn circular_transform_keeps_identity_and_rotates_about_nonzero_center() {
+        let kind = PatternKind::Circular {
+            center_xy: [1.0, 1.0], count: 4, distribution: CircularDistribution::Full,
+            direction: PatternDirection::Ccw,
+        };
+        assert_eq!(kind.transform_xy(0), Some(([0.0, 0.0], 0.0)));
+        let (translation, angle) = kind.transform_xy(1).unwrap();
+        assert_eq!(translation, [0.0, 0.0]);
+        assert_eq!(angle, 90.0);
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let p = [3.0, 2.0];
+        let x = 1.0 + (p[0]-1.0)*cos - (p[1]-1.0)*sin + translation[0];
+        let y = 1.0 + (p[0]-1.0)*sin + (p[1]-1.0)*cos + translation[1];
+        assert!((x - 0.0).abs() < 1e-12 && (y - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn invalid_zero_partial_sweep_is_rejected() {
+        assert!(PatternKind::Circular { center_xy: [0.0, 0.0], count: 3,
+            distribution: CircularDistribution::Partial { sweep_degrees: 0.0 }, direction: PatternDirection::Ccw }.validate().is_err());
     }
 }
 

@@ -96,8 +96,7 @@ pub(super) fn extract(
                 let v: [f64; 3] = std::array::from_fn(|j| b[j] - a[j]);
                 let t = (0..3).map(|j| (point[j] - a[j]) * v[j]).sum::<f64>()
                     / v.iter().map(|x| x * x).sum::<f64>();
-                t >= -T
-                    && t <= 1. + T
+                (-T..=1. + T).contains(&t)
                     && distance(point, std::array::from_fn(|j| a[j] + t * v[j])) < T
             })
         };

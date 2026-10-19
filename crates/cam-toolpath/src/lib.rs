@@ -96,6 +96,8 @@ pub struct SourceRef {
     pub setup: Option<u64>,
     pub operation: Option<u32>,
     pub segment: Option<usize>,
+    pub pattern_id: Option<u64>,
+    pub instance_index: Option<u32>,
 }
 
 /// A typed message from a strategy, referencing what went wrong. (Geometry
@@ -145,6 +147,13 @@ impl Diagnostic {
     }
     pub fn for_setup(mut self, id: u64) -> Self {
         self.source.setup = Some(id);
+        self
+    }
+
+    /// Attach the derived pattern instance that owns this motion or diagnostic.
+    pub fn for_pattern(mut self, pattern_id: u64, instance_index: u32) -> Self {
+        self.source.pattern_id = Some(pattern_id);
+        self.source.instance_index = Some(instance_index);
         self
     }
 

@@ -73,6 +73,7 @@ fn doc(ops: Vec<Operation>) -> Document {
             ..Default::default()
         }],
         operations: ops,
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,

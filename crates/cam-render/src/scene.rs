@@ -99,6 +99,9 @@ pub struct LineStrip {
     /// CL-data `op_id`; part/stock outlines and pick highlights carry `None`.
     /// Drives selection focus (see [`Scene::focus_operation`]).
     pub op: Option<u32>,
+    /// Pattern instance that emitted this strip, when derived from a pattern.
+    pub pattern_id: Option<u64>,
+    pub instance_index: Option<u32>,
     /// Draw this strip broken into dashes rather than solid.
     ///
     /// Carried on the strip rather than derived from the colour so that dimming an
@@ -146,12 +149,27 @@ impl Scene {
         op: Option<u32>,
         dashed: bool,
     ) {
+        self.add_strip_with_owner(points, color, op, dashed, None, None);
+    }
+
+    /// Add a motion strip with source pattern ownership.
+    pub fn add_strip_with_owner(
+        &mut self,
+        points: Vec<[f32; 3]>,
+        color: Color,
+        op: Option<u32>,
+        dashed: bool,
+        pattern_id: Option<u64>,
+        instance_index: Option<u32>,
+    ) {
         if points.len() >= 2 {
             self.strips.push(LineStrip {
                 points,
                 color,
                 width: 1.0,
                 op,
+                pattern_id,
+                instance_index,
                 dashed,
             });
         }
@@ -217,7 +235,7 @@ impl Scene {
                         }
                     }
                     let first_strip = scene.strips.len();
-                    push_segment(&mut scene, cur, *to, tag.kind, tag.op_id);
+                    push_segment(&mut scene, cur, *to, *tag);
                     let cone_count = scene.path_cones.len();
                     scene.mark_path_motion(
                         tag.kind,
@@ -225,12 +243,11 @@ impl Scene {
                         first_strip,
                         &mut previous_cone_role,
                     );
-                    if tag.kind == MoveKind::Retract {
-                        if let Some(index) = pending_exit_cone.take() {
-                            scene.path_cones[index].at = point3_f32(*to);
-                        } else if scene.path_cones.len() > cone_count {
-                            scene.path_cones.last_mut().unwrap().at = point3_f32(*to);
-                        }
+                    if tag.kind == MoveKind::Retract
+                        && pending_exit_cone.take().is_none()
+                        && scene.path_cones.len() > cone_count
+                    {
+                        scene.path_cones.last_mut().unwrap().at = point3_f32(*to);
                     }
                     if scene.path_cones.len() > cone_count {
                         let index = scene.path_cones.len() - 1;
@@ -249,7 +266,7 @@ impl Scene {
                 }
                 Step::Linear { to, tag, .. } => {
                     let first_strip = scene.strips.len();
-                    push_segment(&mut scene, cur, *to, tag.kind, tag.op_id);
+                    push_segment(&mut scene, cur, *to, *tag);
                     let cone_count = scene.path_cones.len();
                     scene.mark_path_motion(
                         tag.kind,
@@ -281,7 +298,7 @@ impl Scene {
                 } => {
                     if let Some(start) = cur {
                         let first_strip = scene.strips.len();
-                        push_arc(&mut scene, start, *end, *center, *dir, tag.kind, tag.op_id);
+                        push_arc(&mut scene, start, *end, *center, *dir, *tag);
                         let cone_count = scene.path_cones.len();
                         scene.mark_path_motion(
                             tag.kind,
@@ -313,13 +330,16 @@ impl Scene {
                 Step::Drill(cycle) => {
                     // A drilled hole shows as a plunge marker at each point.
                     for &[x, y] in &cycle.points {
-                        scene.add_strip_op(
+                        scene.add_strip_with_owner(
                             vec![
                                 [x as f32, y as f32, cycle.z_top as f32],
                                 [x as f32, y as f32, cycle.depth as f32],
                             ],
                             color_for(cycle.tag.kind),
                             Some(cycle.tag.op_id),
+                            false,
+                            cycle.tag.pattern_id,
+                            cycle.tag.instance_index,
                         );
                         for (a, b, color) in [
                             (cycle.z_top, cycle.depth, PATH_IN),
@@ -647,17 +667,21 @@ impl Scene {
     }
 }
 
-fn push_segment(scene: &mut Scene, from: Option<Point3>, to: Point3, kind: MoveKind, op: u32) {
+fn push_segment(scene: &mut Scene, from: Option<Point3>, to: Point3, tag: cam_cldata::Tag) {
     if let Some(a) = from {
         scene.add_strip_styled(
             vec![
                 [a.x as f32, a.y as f32, a.z as f32],
                 [to.x as f32, to.y as f32, to.z as f32],
             ],
-            color_for(kind),
-            Some(op),
-            dashed_for(kind),
+            color_for(tag.kind),
+            Some(tag.op_id),
+            dashed_for(tag.kind),
         );
+        if let Some(strip) = scene.strips.last_mut() {
+            strip.pattern_id = tag.pattern_id;
+            strip.instance_index = tag.instance_index;
+        }
     }
 }
 
@@ -672,8 +696,7 @@ fn push_arc(
     end: Point3,
     center: Point3,
     dir: cam_cldata::ArcDir,
-    kind: MoveKind,
-    op: u32,
+    tag: cam_cldata::Tag,
 ) {
     let r = ((start.x - center.x).powi(2) + (start.y - center.y).powi(2)).sqrt();
     let a0 = (start.y - center.y).atan2(start.x - center.x);
@@ -690,7 +713,7 @@ fn push_arc(
             [p.x as f32, p.y as f32, z as f32]
         })
         .collect();
-    scene.add_strip_styled(pts, color_for(kind), Some(op), dashed_for(kind));
+    scene.add_strip_with_owner(pts, color_for(tag.kind), Some(tag.op_id), dashed_for(tag.kind), tag.pattern_id, tag.instance_index);
 }
 
 #[cfg(test)]

@@ -317,6 +317,7 @@ fn doc(ops: Vec<Operation>) -> Document {
         },
         tools: vec![tool(1, ToolKind::EndMill), tool(2, ToolKind::ChamferMill { included_angle_deg: 90.0, tip_diameter: 0.5 })],
         operations: ops,
+        patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],
         extra_origins: vec![],
         origin_index: 1,
