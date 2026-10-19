@@ -244,9 +244,9 @@ impl Scene {
                         &mut previous_cone_role,
                     );
                     if tag.kind == MoveKind::Retract {
-                        if let Some(index) = pending_exit_cone.take() {
-                            scene.path_cones[index].at = point3_f32(*to);
-                        } else if scene.path_cones.len() > cone_count {
+                        if pending_exit_cone.take().is_none()
+                            && scene.path_cones.len() > cone_count
+                        {
                             scene.path_cones.last_mut().unwrap().at = point3_f32(*to);
                         }
                     }
