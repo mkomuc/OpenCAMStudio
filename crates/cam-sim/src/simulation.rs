@@ -89,19 +89,24 @@ impl State {
                 }
                 self.cur = Some(*to);
             }
-            Step::Linear { to, .. } => {
+            Step::Linear { to, tag, .. } => {
                 if let Some(a) = self.cur {
                     self.field.cut_segment_profile_controlled(
                         [a.x, a.y, a.z],
                         [to.x, to.y, to.z],
                         &self.tool,
+                        Some(tag.op_id),
                         cancelled,
                     );
                 }
                 self.cur = Some(*to);
             }
             Step::Arc {
-                end, center, dir, ..
+                end,
+                center,
+                dir,
+                tag,
+                ..
             } => {
                 if let Some(a) = self.cur {
                     let pts = arc_points(a, *end, *center, *dir, self.field.resolution());
@@ -109,8 +114,13 @@ impl State {
                         if cancelled() {
                             return false;
                         }
-                        self.field
-                            .cut_segment_profile_controlled(w[0], w[1], &self.tool, cancelled);
+                        self.field.cut_segment_profile_controlled(
+                            w[0],
+                            w[1],
+                            &self.tool,
+                            Some(tag.op_id),
+                            cancelled,
+                        );
                     }
                 }
                 self.cur = Some(*end);
@@ -124,6 +134,7 @@ impl State {
                         [x, y, cycle.depth],
                         [x, y, cycle.depth],
                         &self.tool,
+                        Some(cycle.tag.op_id),
                         cancelled,
                     );
                 }

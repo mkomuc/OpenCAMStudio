@@ -158,12 +158,32 @@ impl App {
                         .any(|r| r.kind == EntityKind::Silhouette)
                     {
                         0.0
-                    } else if matches!(op, Operation::Drill(_) | Operation::Thread(_)) {
+                    } else if matches!(
+                        op,
+                        Operation::Drill(_)
+                            | Operation::Thread(_)
+                            | Operation::Chamfer(_)
+                            | Operation::Engrave(_)
+                            | Operation::Carve(_)
+                    ) {
                         resolved.heights.top
                     } else {
                         resolved.heights.bottom
                     };
-                    for region in resolved.regions {
+                    add_chamfer_faces(&mut scene, &resolved.chamfers, frame);
+                    if matches!(op, Operation::Chamfer(_) | Operation::Engrave(_)) {
+                        outlines.extend(
+                            resolved
+                                .profiles
+                                .iter()
+                                .map(|p| (p.chain.points().to_vec(), p.closed)),
+                        );
+                    }
+                    for region in resolved
+                        .regions
+                        .into_iter()
+                        .filter(|_| !matches!(op, Operation::Chamfer(_) | Operation::Engrave(_)))
+                    {
                         outlines.push((region.outer().points().to_vec(), true));
                         outlines.extend(
                             region
@@ -191,7 +211,10 @@ impl App {
                     outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
                 }
                 Operation::Face(p) => outlines.push((p.boundary.points().to_vec(), true)),
-                Operation::Chamfer(p) => outlines.push((p.chain.points().to_vec(), true)),
+                Operation::Chamfer(p) if !p.faces.is_empty() => {
+                    add_chamfer_faces(&mut scene, &p.faces, frame)
+                }
+                Operation::Chamfer(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
                 Operation::Engrave(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
                 Operation::Drill(p) => centers.extend(p.points.iter().copied()),
                 Operation::Thread(p) => centers.extend(p.points.iter().copied()),
@@ -527,5 +550,29 @@ mod tests {
             .iter()
             .any(|v| v.color == cam_render::CUT));
         assert_eq!(app.controller.outcome().unwrap().program, generated);
+    }
+}
+
+fn add_chamfer_faces(
+    scene: &mut Scene,
+    faces: &[cam_model::ChamferFace],
+    frame: &cam_model::SetupFrame,
+) {
+    for face in faces {
+        let upper = face.upper.map(|p| {
+            frame
+                .to_world_vector([p[0], p[1], face.top])
+                .map(|v| v as f32)
+        });
+        let lower = face.lower.map(|p| {
+            frame
+                .to_world_vector([p[0], p[1], face.bottom])
+                .map(|v| v as f32)
+        });
+        scene.add_highlight(upper.to_vec(), PICK_BOUNDARY);
+        scene.add_highlight(lower.to_vec(), PICK_BOUNDARY);
+        for end in 0..2 {
+            scene.add_highlight(vec![upper[end], lower[end]], PICK_BOUNDARY);
+        }
     }
 }

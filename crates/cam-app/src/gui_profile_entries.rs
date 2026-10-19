@@ -1,7 +1,10 @@
 //! Named geometry collections and their transactional configuration submenu.
+use super::geometry_selection::{
+    geometry_collection, selection_hint as hint, selection_icon as icon, GeometryRow,
+};
 use super::*;
 use cam_model::*;
-use iced::widget::{column, svg};
+use iced::widget::column;
 
 #[derive(Clone, Debug)]
 pub(super) enum EntryMessage {
@@ -38,42 +41,12 @@ fn kind_name(kind: ProfileGeometryKind) -> &'static str {
         ProfileGeometryKind::Silhouette => "Silhouette",
     }
 }
-fn icon(name: &str, size: f32) -> iced::widget::Svg<'static> {
-    let bytes: &'static [u8] = match name {
-        "face" => include_bytes!("../assets/icons/profile-selection/face.svg"),
-        "chain" => include_bytes!("../assets/icons/profile-selection/chain.svg"),
-        "silhouette" => include_bytes!("../assets/icons/profile-selection/silhouette.svg"),
-        "closed" => include_bytes!("../assets/icons/profile-selection/closed.svg"),
-        "open" => include_bytes!("../assets/icons/profile-selection/open.svg"),
-        "all" => include_bytes!("../assets/icons/profile-selection/all.svg"),
-        "outer" => include_bytes!("../assets/icons/profile-selection/outer.svg"),
-        "inner" => include_bytes!("../assets/icons/profile-selection/inner.svg"),
-        "remove" => include_bytes!("../assets/icons/delete_operation.svg"),
-        _ => include_bytes!("../assets/icons/profile-selection/settings.svg"),
-    };
-    svg(svg::Handle::from_memory(bytes))
-        .width(size)
-        .height(size)
-}
 fn kind_icon(kind: ProfileGeometryKind) -> &'static str {
     match kind {
         ProfileGeometryKind::FaceContours => "face",
         ProfileGeometryKind::Chain => "chain",
         ProfileGeometryKind::Silhouette => "silhouette",
     }
-}
-fn hint<'a>(
-    control: impl Into<Element<'a, Message>>,
-    label: impl Into<String>,
-) -> Element<'a, Message> {
-    delayed_tooltip(
-        control,
-        container(text(label.into()).size(12).width(260))
-            .padding(10)
-            .style(popup_surface),
-        tooltip::Position::Left,
-    )
-    .into()
 }
 
 impl App {
@@ -523,43 +496,29 @@ impl App {
             .geometry_row_selection
             .filter(|i| *i < entries.len())
             .or_else(|| (!entries.is_empty()).then_some(0));
-        let mut items = column![].spacing(2);
-        for (index, entry) in entries.iter().enumerate() {
-            let active = selected == Some(index);
-            let source_empty = match &entry.source {
-                ProfileGeometrySource::Cad(refs) => refs.is_empty(),
-                ProfileGeometrySource::Contours(c) => c.is_empty(),
-            };
-            let label = if source_empty {
-                format!("{} · Select geometry", entry.name)
-            } else {
-                entry.name.clone()
-            };
-            items = items.push(
-                button(
-                    row![
-                        icon(kind_icon(entry.kind), 25.),
-                        text(label).size(12).width(Length::Fill)
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .padding([7, 8])
-                .style(move |theme, status| inspector_tab(theme, status, active))
-                .on_press_maybe(
-                    self.profile_entry_editor
+        let rows = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let source_empty = match &entry.source {
+                    ProfileGeometrySource::Cad(refs) => refs.is_empty(),
+                    ProfileGeometrySource::Contours(c) => c.is_empty(),
+                };
+                GeometryRow {
+                    icon: kind_icon(entry.kind),
+                    label: if source_empty {
+                        format!("{} · Select geometry", entry.name)
+                    } else {
+                        entry.name.clone()
+                    },
+                    action: self
+                        .profile_entry_editor
                         .as_ref()
                         .is_none_or(|e| e.index == index)
                         .then_some(Message::GeometryRowSelected(index)),
-                ),
-            );
-        }
-        if entries.is_empty() {
-            items = items.push(
-                container(text("No geometry selected").size(12).color(INSPECTOR_MUTED)).padding(8),
-            );
-        }
+                }
+            })
+            .collect();
         let editing = self.profile_entry_editor.is_some();
         let mut toolbar = row![].spacing(4).align_y(Alignment::Center);
         for kind in [
@@ -603,35 +562,23 @@ impl App {
                 ),
             "Configure the selected geometry entry.",
         ));
-        let result = column![
-            row![
-                text("Contour selection").size(12).width(Length::Fill),
-                inspector_button("Select").on_press(Message::ProfileEntry(if selected.is_some() {
-                    EntryMessage::EditSelected
-                } else {
-                    EntryMessage::Add(ProfileGeometryKind::Chain)
-                }))
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-            container(scrollable(items).height(120).width(Length::Fill))
-                .padding(4)
-                .width(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(Color::from_rgb(0.12, 0.14, 0.17))),
-                    border: Border {
-                        color: Color::from_rgb(0.25, 0.28, 0.32),
-                        width: 1.,
-                        radius: 5.0.into()
-                    },
-                    ..Default::default()
-                }),
-            toolbar
-        ]
-        .spacing(6);
-        result.into()
+        geometry_collection(
+            "Contour selection",
+            rows,
+            selected,
+            Some(Message::ProfileEntry(if selected.is_some() {
+                EntryMessage::EditSelected
+            } else {
+                EntryMessage::Add(ProfileGeometryKind::Chain)
+            })),
+            toolbar,
+        )
     }
-    pub(super) fn profile_entry_settings<'a>(&'a self, editor: &'a EntryEditor) -> Element<'a, Message> {
+
+    pub(super) fn profile_entry_settings<'a>(
+        &'a self,
+        editor: &'a EntryEditor,
+    ) -> Element<'a, Message> {
         let entry = &editor.draft;
         let mut body = column![
             row![

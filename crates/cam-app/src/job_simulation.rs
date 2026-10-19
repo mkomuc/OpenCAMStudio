@@ -1,5 +1,14 @@
 //! Cancellable stock verification and mesh preparation.
 use super::*;
+
+#[derive(Default)]
+pub(super) struct StockSimulation {
+    pub vertices: Vec<MeshVertex>,
+    pub indices: Vec<u32>,
+    pub machined: Vec<bool>,
+    pub operations: Vec<Option<u32>>,
+    pub collisions: Vec<Collision>,
+}
 impl JobInputs {
     pub(crate) fn stock_resolution(&self, program: &Program) -> f64 {
         let span = (self.max[0] - self.min[0]).max(self.max[1] - self.min[1]);
@@ -17,10 +26,10 @@ impl JobInputs {
         cancel: &CancelToken,
         progress: &Progress,
         simulation: &mut SimulationCache,
-    ) -> (Vec<MeshVertex>, Vec<u32>, Vec<bool>, Vec<Collision>) {
+    ) -> StockSimulation {
         let (min, max) = (self.min, self.max);
         if min[0] >= max[0] || min[1] >= max[1] {
-            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            return StockSimulation::default();
         }
         let setup_tools = &self.document.setup().tools;
         let tool_diameter = setup_tools
@@ -51,7 +60,7 @@ impl JobInputs {
             &|| cancel.is_cancelled(),
             |done, total| progress.set(JobPhase::Verification, done, total, None),
         ) else {
-            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            return StockSimulation::default();
         };
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         // Render the stock as a watertight solid down to its floor, so the full
@@ -60,12 +69,12 @@ impl JobInputs {
             .field
             .to_solid_mesh_controlled(min[2], &|| cancel.is_cancelled())
         else {
-            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            return StockSimulation::default();
         };
         let mut vertices = mesh_vertices(&surface.positions, &surface.normals);
         for vertex in &mut vertices {
             if cancel.is_cancelled() {
-                return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                return StockSimulation::default();
             }
             vertex.position = self
                 .document
@@ -80,7 +89,13 @@ impl JobInputs {
                 .to_world_vector(vertex.normal.map(f64::from))
                 .map(|n| n as f32);
         }
-        (vertices, surface.indices, surface.machined, sim.collisions)
+        StockSimulation {
+            vertices,
+            indices: surface.indices,
+            machined: surface.machined,
+            operations: surface.operations,
+            collisions: sim.collisions,
+        }
     }
 }
 

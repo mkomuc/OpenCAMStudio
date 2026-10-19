@@ -10,6 +10,9 @@ impl App {
         if let Some(editor) = &self.profile_entry_editor {
             return self.profile_entry_settings(editor);
         }
+        if self.geometry_editor.is_some() {
+            return self.operation_geometry_settings();
+        }
         if self.drawing_editing_op.is_some() {
             return self.drawing_geometry_picker();
         }

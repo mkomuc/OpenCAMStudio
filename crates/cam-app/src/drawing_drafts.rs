@@ -62,7 +62,14 @@ impl AppController {
                 op.points = self.selected_centers(selected)?
             }
             (Operation::Face(op), Operation::Face(new)) => op.boundary = new.boundary,
-            (Operation::Chamfer(op), Operation::Chamfer(new)) => op.chain = new.chain,
+            (Operation::Chamfer(op), Operation::Chamfer(new)) => {
+                op.chain = new.chain;
+                op.closed = new.closed;
+                if !op.closed {
+                    op.start = None;
+                    op.lead_overlap = 0.;
+                }
+            }
             (Operation::Thread(op), Operation::Thread(new)) => {
                 op.points = self.selected_centers(selected)?;
                 op.major_dia = new.major_dia;

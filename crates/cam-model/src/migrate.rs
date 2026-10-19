@@ -238,7 +238,7 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         // Existing profiles retain their original source collections.
         20 => Ok(()),
         21 => Ok(()), // Additive cutting presets and managed material references.
-        22 => {
+        22 | 23 => {
             if let Some(setups) = doc.get_mut("setups").and_then(Value::as_array_mut) {
                 for setup in setups {
                     if let Some(object) = setup.as_object_mut() { object.entry("patterns").or_insert_with(|| Value::Array(Vec::new())); }
@@ -247,6 +247,7 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
             if let Some(object) = doc.as_object_mut() { object.entry("pattern_id_floor").or_insert(Value::from(1)); }
             Ok(())
         }
+        24 => Ok(()), // Open chamfer chains default to the legacy closed rim behavior.
         _ => Err(MigrationError::MissingStep { from }),
     }
 }

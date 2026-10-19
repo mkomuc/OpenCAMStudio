@@ -79,7 +79,10 @@ use crate::Tool;
 /// v21: named profile geometry entries with independent extraction settings.
 /// v22: managed stock material IDs, tool presets and operation preset snapshots.
 /// v23: setup-scoped reusable operation patterns.
-pub const SCHEMA_VERSION: u32 = 23;
+/// v24: modeled chamfer-face boundaries and axial finishing bands. Older readers
+/// must refuse these operations rather than treating their projected face as an edge.
+/// v25: open chamfer chains; absent closed flags retain legacy closed rims.
+pub const SCHEMA_VERSION: u32 = 25;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -997,18 +1000,101 @@ pub struct ThreadOp {
     pub plunge_feed: f64,
 }
 
-/// A chamfer/bevel along a closed edge: run a chamfer/V mill around the contour
-/// at a computed depth so its cone flank forms a bevel of `width`. A single pass
-/// (chamfers are shallow); the tool runs on the air side of the edge, offset by
-/// its tip radius.
+/// A planar modeled chamfer strip in setup coordinates. Endpoints at both
+/// elevations are paired along the face's tangent, including mitered corners.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChamferFace {
+    pub upper: [[f64; 2]; 2],
+    pub lower: [[f64; 2]; 2],
+    pub top: f64,
+    pub bottom: f64,
+    /// Unit XY direction from material toward air.
+    pub outward: [f64; 2],
+}
+impl ChamferFace {
+    pub fn width(&self) -> f64 {
+        (0..2)
+            .map(|i| (self.lower[0][i] - self.upper[0][i]) * self.outward[i])
+            .sum()
+    }
+    pub fn at_height(&self, z: f64) -> [[f64; 2]; 2] {
+        let t = (self.top - z) / (self.top - self.bottom);
+        std::array::from_fn(|end| {
+            std::array::from_fn(|i| {
+                self.upper[end][i] + t * (self.lower[end][i] - self.upper[end][i])
+            })
+        })
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !self
+            .upper
+            .iter()
+            .chain(&self.lower)
+            .flatten()
+            .chain(self.outward.iter())
+            .copied()
+            .chain([self.top, self.bottom])
+            .all(f64::is_finite)
+            || self.top <= self.bottom
+            || self.width() <= 1e-8
+            || (self.outward[0].hypot(self.outward[1]) - 1.).abs() > 1e-6
+        {
+            return Err("Modeled chamfer requires finite upper/lower boundaries, a positive width and height, and a unit outward direction".into());
+        }
+        for line in [&self.upper, &self.lower] {
+            let tangent = [line[1][0] - line[0][0], line[1][1] - line[0][1]];
+            if tangent[0].hypot(tangent[1]) < 1e-8
+                || (tangent[0] * self.outward[0] + tangent[1] * self.outward[1]).abs() > 1e-5
+            {
+                return Err(
+                    "Chamfer upper and lower boundaries must be parallel straight edges".into(),
+                );
+            }
+        }
+        let tangent = [
+            self.upper[1][0] - self.upper[0][0],
+            self.upper[1][1] - self.upper[0][1],
+        ];
+        let tangent_length = tangent[0].hypot(tangent[1]);
+        let along =
+            |point: [f64; 2]| (point[0] * tangent[0] + point[1] * tangent[1]) / tangent_length;
+        if along(self.lower[0]) > along(self.upper[0]) + 1e-5
+            || along(self.lower[1]) < along(self.upper[1]) - 1e-5
+        {
+            return Err("This chamfer narrows toward its lower boundary; its trimmed corners cannot be covered by planar bands without overcutting".into());
+        }
+        let other_width: f64 = (0..2)
+            .map(|i| (self.lower[1][i] - self.upper[1][i]) * self.outward[i])
+            .sum();
+        if (other_width - self.width()).abs() > 1e-5 {
+            return Err("Chamfer face width must be constant".into());
+        }
+        Ok(())
+    }
+}
+
+/// A chamfer/bevel along an open or closed edge chain, or modeled bevel faces.
+/// The angled cutter runs on the air side at the depth and offset needed to
+/// form the requested width; optional width increments divide the cut into passes.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChamferOp {
+    /// Close the path between its last and first vertices. Legacy files use closed rims.
+    #[serde(default = "default_true")]
+    pub closed: bool,
     /// Operation id.
     pub id: u32,
     /// Tool number (must select a chamfer/V mill — the strategy reads its angle).
     pub tool: u32,
-    /// The closed edge to chamfer, in the part/WCS frame.
+    /// The edge or connected chain to chamfer, in the part/WCS frame.
     pub chain: Contour,
+    /// Exact upper/lower boundaries of modeled planar chamfer faces. Empty uses
+    /// the edge strategy and its operator-defined width.
+    #[serde(default)]
+    pub faces: Vec<ChamferFace>,
+    /// Maximum vertical band per pass for modeled faces. Zero automatically uses
+    /// the cutter's usable flank; a smaller value adds overlapping finishing bands.
+    #[serde(default)]
+    pub stepdown: f64,
     /// Which side of the chain holds material; the tool runs on the other (air)
     /// side, offset by its tip radius.
     pub side: Side,

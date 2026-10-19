@@ -3,6 +3,8 @@
 //! allowance. Display meshes never enter machining derivation.
 mod profile_contours;
 mod profile_entries;
+mod surface_geometry;
+mod chamfer_faces;
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
 pub use profile_contours::coplanar_faces as coplanar_profile_faces;
@@ -20,6 +22,7 @@ pub struct ResolvedHole {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedInput {
+    pub chamfers: Vec<ChamferFace>,
     pub profiles: Vec<ProfileContour>,
     pub regions: Vec<Polygon>,
     pub holes: Vec<ResolvedHole>,
@@ -94,7 +97,7 @@ pub fn resolve_binding(
         bottom: binding.overrides.bottom.unwrap_or(base.bottom),
     };
     heights.validate()?;
-    if heights.bottom < base.bottom - T {
+    if !surface_geometry::is_surface_recipe(&binding.recipe) && heights.bottom < base.bottom - T {
         return Err("bottom override extends below the geometry-certified cutting interval".into());
     }
     if heights.top < base.top - T {
@@ -133,7 +136,17 @@ pub fn resolve_binding(
     } else {
         vec![format!("Exact curves approximated within {MACHINING_CHORD_TOLERANCE} mm; planar grid error ≤ {} mm",cam_geo::GRID_MM/2f64.sqrt())]
     };
-    let profiles = if binding.recipe == ExtractionRecipe::ProfileContours {
+    let profiles = if matches!(
+        binding.recipe,
+        ExtractionRecipe::ChamferLoop | ExtractionRecipe::EngravePath
+    ) {
+        surface_geometry::path(
+            state,
+            &binding.selected,
+            binding.recipe == ExtractionRecipe::ChamferLoop,
+        )?
+        .0
+    } else if binding.recipe == ExtractionRecipe::ProfileContours {
         profile_contours::extract(state, &binding.selected)?.0
     } else if binding.recipe == ExtractionRecipe::ProfileSilhouette {
         regions
@@ -155,6 +168,11 @@ pub fn resolve_binding(
         Vec::new()
     };
     Ok(ResolvedInput {
+        chamfers: if binding.recipe == ExtractionRecipe::ChamferFaces {
+            chamfer_faces::extract(state, &binding.selected)?.0
+        } else {
+            Vec::new()
+        },
         profiles,
         regions,
         holes,
@@ -873,7 +891,7 @@ impl<'a> View<'a> {
         let mut bore = refs[0].clone();
         bore.kind = EntityKind::Face;
         bore.id = cylinder;
-        let (_, holes, heights) = derive_holes(self, &[bore])?;
+        let (_, holes, heights) = derive_holes(self, &[bore], true)?;
         if holes.len() != 1 || (heights.bottom - floor_z).abs() > T {
             return Err("The selected floor does not terminate one constant-diameter bore".into());
         }
@@ -917,6 +935,25 @@ fn derive(
             .map(|p| Polygon::new(p.chain).map_err(|e| e.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok((regions, vec![], heights));
+    }
+    if binding.recipe == ExtractionRecipe::ChamferFaces {
+        let (faces, heights) = chamfer_faces::extract(state, &binding.selected)?;
+        let regions = faces
+            .iter()
+            .map(|face| {
+                Polygon::new(Contour::new(
+                    [face.lower[0], face.lower[1], face.upper[1], face.upper[0]]
+                        .into_iter()
+                        .map(|p| Point::new(p[0], p[1]))
+                        .collect(),
+                ))
+                .map_err(|e| e.to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        return Ok((regions, Vec::new(), heights));
+    }
+    if surface_geometry::is_surface_recipe(&binding.recipe) {
+        return surface_geometry::derive(state, binding);
     }
     if binding.recipe == ExtractionRecipe::ProfileContours {
         let (profiles, heights) = profile_contours::extract(state, &binding.selected)?;
@@ -1169,7 +1206,12 @@ fn derive(
             heights.validate()?;
             Ok((vec![region], vec![], heights))
         }
-        ExtractionRecipe::DrillHoles => derive_holes(&view, refs),
+        ExtractionRecipe::DrillHoles => derive_holes(&view, refs, true),
+        ExtractionRecipe::ThreadCylinders { internal } => derive_holes(&view, refs, internal),
+        ExtractionRecipe::ChamferFaces
+        | ExtractionRecipe::ChamferLoop
+        | ExtractionRecipe::EngravePath
+        | ExtractionRecipe::CarveRegion => unreachable!(),
         ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileEntries { .. } => {
             unreachable!()
         }
@@ -1179,6 +1221,7 @@ fn derive(
 fn derive_holes(
     view: &View<'_>,
     refs: &[EntityRef],
+    internal: bool,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
     let mut holes: Vec<ResolvedHole> = vec![];
     let mut heights: Option<CuttingHeights> = None;
@@ -1201,8 +1244,11 @@ fn derive_holes(
         };
         let center = view.point(origin);
         let a = view.vector(axis);
-        if !inward || a[0].abs() > T || a[1].abs() > T {
-            return Err("selected cylinder is a boss or its bore axis is not setup Z".into());
+        if inward != internal || a[0].abs() > T || a[1].abs() > T {
+            return Err(
+                "Select cylinders of the same internal/external type with axes parallel to setup Z"
+                    .into(),
+            );
         }
         let (lo, hi) = view.extent(f)?;
         // Merge split cylindrical seam faces into one analytic bore before validating
@@ -1218,8 +1264,8 @@ fn derive_holes(
                     origin: o,
                     axis: ax,
                     radius: rad,
-                    inward: true,
-                } => {
+                    inward: inside,
+                } if inside == internal => {
                     let c = view.point(o);
                     let ax = view.vector(ax);
                     (rad - radius).abs() < T
@@ -1286,7 +1332,7 @@ fn derive_holes(
                                 if (c[2] - hi).abs() < T {
                                     let open_rim = adjacent.loop_ids.iter().any(|id| {
                                         view.wire(*id).is_ok_and(|w| {
-                                            !w.is_outer
+                                            w.is_outer != internal
                                                 && w.edge_uses.iter().any(|u| u.edge_id == edge.id)
                                         })
                                     });

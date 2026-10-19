@@ -45,9 +45,10 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::LeadOutFeed
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
-        Field::MajorDia | Field::TabWidth | Field::TabHeight | Field::TabSpacing => {
-            OperationTab::Geometry
-        }
+        Field::MajorDia
+        | Field::TabWidth
+        | Field::TabHeight
+        | Field::TabSpacing => OperationTab::Geometry,
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -81,7 +82,7 @@ pub(super) fn operation_start(op: &Operation) -> Option<[f64; 2]> {
     match op {
         Operation::Profile(o) => o.start,
         Operation::Pocket(o) => o.start,
-        Operation::Chamfer(o) => o.start,
+        Operation::Chamfer(o) if o.closed => o.start,
         Operation::Engrave(o) if o.closed => o.start,
         Operation::Carve(o) => o.start,
         _ => None,
@@ -91,7 +92,7 @@ pub(super) fn set_operation_start(op: &mut Operation, enabled: bool) {
     let start = match op {
         Operation::Profile(o) => &mut o.start,
         Operation::Pocket(o) => &mut o.start,
-        Operation::Chamfer(o) => &mut o.start,
+        Operation::Chamfer(o) if o.closed => &mut o.start,
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
         _ => return,
@@ -109,7 +110,7 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
     let start = match op {
         Operation::Profile(o) => &mut o.start,
         Operation::Pocket(o) => &mut o.start,
-        Operation::Chamfer(o) => &mut o.start,
+        Operation::Chamfer(o) if o.closed => &mut o.start,
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
         _ => return,
@@ -373,7 +374,16 @@ impl App {
                     1 + p.additional_chains.len(),
                     if p.closed { "closed" } else { "open" }
                 ),
-                Operation::Chamfer(_) => "One closed chain".into(),
+                Operation::Chamfer(op) if !op.faces.is_empty() => format!(
+                    "{} modeled chamfer face(s) · upper and lower boundaries",
+                    op.faces.len()
+                ),
+                Operation::Chamfer(op) => if op.closed {
+                    "One closed chain"
+                } else {
+                    "One open chain"
+                }
+                .into(),
                 Operation::Engrave(o) => {
                     format!("One {} chain", if o.closed { "closed" } else { "open" })
                 }
@@ -407,11 +417,9 @@ impl App {
         if tab == OperationTab::Linking {
             let supports_start = matches!(
                 op,
-                Operation::Profile(_)
-                    | Operation::Pocket(_)
-                    | Operation::Chamfer(_)
-                    | Operation::Carve(_)
-            ) || matches!(op, Operation::Engrave(o) if o.closed);
+                Operation::Profile(_) | Operation::Pocket(_) | Operation::Carve(_)
+            ) || matches!(op, Operation::Engrave(o) if o.closed)
+                || matches!(op, Operation::Chamfer(o) if o.closed && o.faces.is_empty());
             if supports_start {
                 list = list.push(
                     row![
@@ -440,6 +448,23 @@ impl App {
                 Field::TabWidth | Field::TabHeight | Field::TabSpacing
             ) {
                 continue; // Grouped beneath the holding-tabs toggle.
+            }
+            if let Operation::Chamfer(chamfer) = op {
+                if field == Field::ChamferWidth
+                    || (chamfer.faces.is_empty() && field == Field::Stepdown)
+                    || (!chamfer.faces.is_empty()
+                        && matches!(
+                            field,
+                            Field::ChamferWidth
+                                | Field::ChamferDepth
+                                | Field::ChamferStep
+                                | Field::LeadInSize
+                                | Field::LeadOutSize
+                                | Field::LeadOverlap
+                        ))
+                {
+                    continue;
+                }
             }
             let preset_parameter = tab == OperationTab::Tool
                 && matches!(
@@ -634,6 +659,14 @@ impl App {
                     Message::FaceDirectionChanged,
                 ))
             }
+            Operation::Chamfer(c) if !c.faces.is_empty() => {
+                if tab == OperationTab::Passes {
+                    list = list.push(text("Stepdown limits the height of each face band. 0 uses the cutter's usable flank automatically; smaller cutters use more passes.").size(12));
+                }
+                if tab == OperationTab::Linking {
+                    list = list.push(text("Each face band approaches from the air side and retracts before repositioning.").size(12));
+                }
+            }
             Operation::Chamfer(c) => {
                 if tab == OperationTab::Geometry {
                     list = list.push(profile_picker(
@@ -646,6 +679,18 @@ impl App {
                     ));
                 }
                 if tab == OperationTab::Passes {
+                    let field = Field::ChamferWidth;
+                    let value = self.fields.get(&field).cloned().unwrap_or_default();
+                    list = list
+                        .push(inspector_section("Fase"))
+                        .push(field_row_labeled(
+                            field,
+                            self.field_label(field),
+                            self.field_help(field),
+                            &value,
+                            self.tooltips,
+                            self.field_invalid(field),
+                        ));
                     list = list.push(
                         row![
                             label_help("Gradual", help::CHAMFER_GRADUAL, self.tooltips),
@@ -1095,6 +1140,7 @@ mod tests {
         assert_eq!(field_tab(Field::ClearFeed), OperationTab::Tool);
         assert_eq!(field_tab(Field::ClearPlungeA), OperationTab::Linking);
         assert_eq!(field_tab(Field::MajorDia), OperationTab::Geometry);
+        assert_eq!(field_tab(Field::ChamferWidth), OperationTab::Passes);
     }
 
     #[test]
@@ -2003,6 +2049,126 @@ mod tests {
             app.controller.select(Selection::Setup);
             app.operation_draft = None;
             app.refresh_fields();
+        }
+    }
+
+    #[test]
+    fn cad_surface_geometry_creates_clears_and_switches_to_an_open_engraving() {
+        for kind in [OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
+            let (mut app, _) = linked_face_app();
+            let before = app.controller.document().clone();
+            let _ = app.update(Message::BeginOp(kind));
+            let mut reference = EntityRef {
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                kind: EntityKind::Loop,
+                id: 3,
+            };
+            if kind == OpKind::Carve {
+                reference.kind = EntityKind::Face;
+                reference.id = 2;
+            }
+            let _ = app.update(Message::CadSelect(reference.clone()));
+            assert!(
+                app.creation_ready(),
+                "{kind:?}: {:?}",
+                app.creation_operation()
+            );
+            assert_eq!(app.resolve_height_editor(0).unwrap().top, -1.);
+            let _ = app.update(Message::FieldChanged(Field::Feed, "321".into()));
+            if kind == OpKind::Engrave {
+                let _ = app.update(Message::HeightOffsetChanged(
+                    cam_model::HeightPlaneKind::Bottom,
+                    "-0.25".into(),
+                ));
+            }
+            let _ = app.update(Message::GeometryClear);
+            assert!(!app.creation_ready());
+            let _ = app.update(Message::GeometryPick);
+            let _ = app.update(Message::CadSelect(reference));
+            assert_eq!(app.fields[&Field::Feed], "321");
+            if kind == OpKind::Engrave {
+                let _ = app.update(Message::GeometryFilterChanged(CadFilter::Edge));
+                assert!(app.controller.cad_selection().is_empty());
+                let _ = app.update(Message::CadSelect(EntityRef {
+                    asset_id: 1,
+                    revision: 1,
+                    instance_id: 1,
+                    body_id: 1,
+                    kind: EntityKind::Edge,
+                    id: 20,
+                }));
+                assert!(
+                    matches!(app.creation_operation().unwrap().0, Operation::Engrave(op) if !op.closed)
+                );
+                assert_eq!(
+                    app.height_offsets[&cam_model::HeightPlaneKind::Bottom],
+                    "-0.25"
+                );
+                assert!(!app.operation_geometry_preview().line_vertices().is_empty());
+                assert_eq!(app.machining_viewport().cad_filter, EntityKind::Edge);
+            }
+            assert_eq!(app.controller.document(), &before);
+            let _ = app.update(Message::ConfirmOp);
+            assert!(!app.creating_operation(), "{kind:?}: {}", app.status);
+            assert!(app.controller.undo());
+            assert_eq!(app.controller.document(), &before);
+        }
+    }
+
+    #[test]
+    fn cad_icon_settings_cancel_and_confirm_keep_the_operation_transactional() {
+        for kind in [OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
+            let (mut app, _) = linked_face_app();
+            let _ = app.update(Message::BeginOp(kind));
+            let source = EntityRef {
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                kind: if kind == OpKind::Carve {
+                    EntityKind::Face
+                } else {
+                    EntityKind::Loop
+                },
+                id: if kind == OpKind::Carve { 2 } else { 3 },
+            };
+            let _ = app.update(Message::CadSelect(source.clone()));
+            let _ = app.update(Message::ConfirmOp);
+            assert!(!app.creating_operation(), "{kind:?}: {}", app.status);
+            let _ = app.update(Message::FieldChanged(Field::Feed, "322.5".into()));
+            let before = app.controller.document().clone();
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Edit));
+            assert!(app.geometry_editor.is_some());
+            let _ = app.inspector();
+            let _ = app.update(Message::GeometryClear);
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+            assert!(
+                app.geometry_editor.is_some(),
+                "Empty geometry cannot be confirmed"
+            );
+            let _ = app.update(Message::CadEscape);
+            assert!(app.geometry_editor.is_none());
+            assert_eq!(app.controller.cad_selection(), &[source.clone()]);
+            assert_eq!(app.fields[&Field::Feed], "322.5");
+            assert_eq!(app.controller.document(), &before);
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+                CadFilter::Loop,
+            )));
+            if kind == OpKind::Carve {
+                assert!(app.controller.cad_selection().is_empty());
+            }
+            let mut replacement = source;
+            replacement.kind = EntityKind::Loop;
+            replacement.id = 5;
+            app.controller.set_cad_selection(vec![replacement.clone()]);
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+            assert!(app.geometry_editor.is_none(), "{kind:?}: {}", app.status);
+            assert_eq!(app.operation_geometry, Some(vec![replacement]));
+            assert_eq!(app.fields[&Field::Feed], "322.5");
+            assert_eq!(app.controller.document(), &before);
         }
     }
 }

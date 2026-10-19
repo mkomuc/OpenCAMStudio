@@ -1,4 +1,4 @@
-//! The chamfering strategy: run a chamfer/V mill around a closed edge at a
+//! The chamfering strategy: run a chamfer/V mill along an edge or connected chain at a
 //! computed depth so its cone flank forms a bevel.
 //!
 //! ## Geometry
@@ -30,8 +30,10 @@ use cam_geo::{offset, Contour, JoinStyle, Polygon};
 use cam_model::{ChamferOp, Side, ToolKind};
 
 use crate::{CancelToken, Diagnostic, JobEnv, Strategy, StrategyResult};
+#[path = "chamfer_faces.rs"]
+mod faces;
 
-/// Chamfers a closed edge. Construct from a [`ChamferOp`].
+/// Chamfers an open or closed edge chain. Construct from a [`ChamferOp`].
 #[derive(Clone, Debug)]
 pub struct ChamferStrategy {
     op: ChamferOp,
@@ -116,14 +118,22 @@ impl Strategy for ChamferStrategy {
             }
         };
 
-        if !op.chain.is_valid() {
+        if !op.faces.is_empty() {
+            return faces::compute(op, env, tool, included_angle_deg, cancel);
+        }
+        if (op.closed && !op.chain.is_valid()) || (!op.closed && op.chain.len() < 2) {
             diagnostics.push(Diagnostic::error(format!(
-                "operation {}: chamfer edge must be a closed area (≥ 3 vertices)",
+                "operation {}: chamfer needs at least two points for an open chain or three for a closed rim",
                 op.id
             )));
             bail!();
         }
-        if op.width <= 0.0 {
+        if !op.width.is_finite()
+            || op.width <= 0.0
+            || !op.depth.is_finite()
+            || !op.top.is_finite()
+            || !op.step.is_finite()
+        {
             diagnostics.push(Diagnostic::error(format!(
                 "operation {}: chamfer width must be positive",
                 op.id
@@ -175,6 +185,18 @@ impl Strategy for ChamferStrategy {
             bail!();
         }
 
+        // Offset the tool axis to the air side by the deep-plunge shift plus the tip
+        // radius (0 for a sharp V at the tip keeps it on the edge). Sign follows the
+        // profile convention.
+        let off = delta * tan_a + tip_offset;
+        let signed = match op.side {
+            Side::Outside => off,
+            Side::Inside => -off,
+            Side::On => 0.0,
+        };
+        if !op.closed {
+            return open_chamfer(op, env, cancel, signed, tan_a, delta, diagnostics);
+        }
         let region = match Polygon::new(op.chain.clone()) {
             Ok(p) => p,
             Err(e) => {
@@ -186,15 +208,6 @@ impl Strategy for ChamferStrategy {
             }
         };
 
-        // Offset the tool axis to the air side by the deep-plunge shift plus the tip
-        // radius (0 for a sharp V at the tip keeps it on the edge). Sign follows the
-        // profile convention.
-        let off = delta * tan_a + tip_offset;
-        let signed = match op.side {
-            Side::Outside => off,
-            Side::Inside => -off,
-            Side::On => 0.0,
-        };
         // The cleared/air side the lead eases in from: outward for an external edge,
         // the bore interior for an internal one (flip the normal, or the lead swings
         // onto the material side and gouges).
@@ -353,7 +366,7 @@ impl Strategy for ChamferStrategy {
                     lead_out,
                     z,
                     op.entry_feeds.lead_out(op.feed),
-                    lead,
+                    Tag::new(op.id, MoveKind::LeadOut),
                 );
                 // Lift only when the next pass starts somewhere else; the final retract
                 // is unconditional (the operation must leave the tool clear).
@@ -372,6 +385,118 @@ impl Strategy for ChamferStrategy {
             diagnostics,
             cancelled: false,
         }
+    }
+}
+
+/// Open paths end at their last selected vertex and retract before each return.
+/// Side follows Profile: Outside offsets left, Inside offsets right.
+fn open_chamfer(
+    op: &ChamferOp,
+    env: &JobEnv,
+    cancel: &CancelToken,
+    offset: f64,
+    tan_a: f64,
+    delta: f64,
+    mut diagnostics: Vec<Diagnostic>,
+) -> StrategyResult {
+    let points = match crate::profile::offset_open_chain(op.chain.points(), offset) {
+        Ok(points) => points,
+        Err(error) => {
+            diagnostics.push(Diagnostic::error(format!("operation {}: {error}", op.id)));
+            return StrategyResult {
+                diagnostics,
+                ..Default::default()
+            };
+        }
+    };
+    if op.lead_overlap != 0. {
+        diagnostics.push(Diagnostic::error(
+            "Open chamfer chains cannot use closure overlap",
+        ));
+        return StrategyResult {
+            diagnostics,
+            ..Default::default()
+        };
+    }
+    let start = points[0];
+    let end = *points.last().unwrap();
+    let tangent = |a: cam_geo::Point, b: cam_geo::Point| {
+        let length = (b.x - a.x).hypot(b.y - a.y);
+        ((b.x - a.x) / length, (b.y - a.y) / length)
+    };
+    let tin = tangent(points[0], points[1]);
+    let tout = tangent(points[points.len() - 2], end);
+    let sign = if op.side == Side::Inside { -1. } else { 1. };
+    let normal = |t: (f64, f64)| (-t.1 * sign, t.0 * sign);
+    let nin = normal(tin);
+    let nout = normal(tout);
+    let entry = crate::leads::lead_start_point(start, tin, nin, op.lead_in);
+    let exit = crate::leads::lead_end_point(end, tout, nout, op.lead_out);
+    let mut program = Program::new();
+    for width in pass_widths(op.width, op.step, op.gradual) {
+        if cancel.is_cancelled() {
+            return StrategyResult {
+                program,
+                diagnostics,
+                cancelled: true,
+            };
+        }
+        let z = op.top - (width / tan_a + delta);
+        program.push(Step::Rapid {
+            to: Point3::new(entry.x, entry.y, env.heights.clearance),
+            tag: Tag::new(op.id, MoveKind::Link),
+        });
+        crate::emit::descend_to(
+            &mut program,
+            entry,
+            env.heights.retract.max(op.top),
+            &env.heights,
+            op.feed,
+            op.id,
+        );
+        program.push(Step::Linear {
+            to: Point3::new(entry.x, entry.y, z),
+            feed: op.plunge_feed,
+            tag: Tag::new(op.id, MoveKind::Plunge),
+        });
+        crate::leads::emit_lead(
+            &mut program,
+            entry,
+            start,
+            start,
+            nin,
+            op.lead_in,
+            z,
+            op.entry_feeds.lead_in(op.feed),
+            Tag::new(op.id, MoveKind::LeadIn),
+        );
+        crate::emit::cut_polyline(
+            &mut program,
+            &points,
+            op.feed,
+            Tag::new(op.id, MoveKind::Cutting),
+            z,
+        );
+        crate::leads::emit_lead(
+            &mut program,
+            end,
+            exit,
+            end,
+            nout,
+            op.lead_out,
+            z,
+            op.entry_feeds.lead_out(op.feed),
+            Tag::new(op.id, MoveKind::LeadIn),
+        );
+        program.push(Step::Rapid {
+            to: Point3::new(exit.x, exit.y, env.heights.clearance),
+            tag: Tag::new(op.id, MoveKind::Retract),
+        });
+    }
+    StrategyResult {
+        program,
+        diagnostics,
+        cancelled: false,
     }
 }
 
@@ -458,6 +583,9 @@ mod tests {
 
     fn op(width: f64) -> ChamferOp {
         ChamferOp {
+            closed: true,
+            faces: Vec::new(),
+            stepdown: 0.,
             spindle_rpm: 0.0,
             tool_preset: None,
             entry_feeds: Default::default(),
@@ -496,6 +624,56 @@ mod tests {
             Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(to.z),
             _ => None,
         })
+    }
+
+    #[test]
+    fn open_corner_offsets_both_sides_and_retracts_between_width_passes() {
+        for (side, expected) in [
+            (Side::Outside, [(0., 0.5), (9.5, 0.5), (9.5, 10.)]),
+            (Side::Inside, [(0., -0.5), (10.5, -0.5), (10.5, 10.)]),
+        ] {
+            let mut operation = op(1.);
+            operation.closed = false;
+            operation.chain = Contour::new(vec![
+                Point::new(0., 0.),
+                Point::new(10., 0.),
+                Point::new(10., 10.),
+            ]);
+            operation.side = side;
+            operation.step = 0.5;
+            let result = run(operation, chamfer_tool(90., 1.));
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let cut_points: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(cut_points.len(), 4, "no closing cut");
+            for (pass, points) in cut_points.chunks(2).enumerate() {
+                for (actual, expected) in points.iter().zip(&expected[1..]) {
+                    assert!(
+                        (actual.x - expected.0).abs() < 1e-9
+                            && (actual.y - expected.1).abs() < 1e-9
+                    );
+                    assert!((actual.z + 0.5 * (pass + 1) as f64).abs() < 1e-9);
+                }
+            }
+            assert_eq!(
+                result
+                    .program
+                    .steps()
+                    .iter()
+                    .filter(
+                        |s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract)
+                    )
+                    .count(),
+                2
+            );
+        }
     }
 
     /// A 90° mill (α=45°, tan=1) chamfers to a depth equal to the width.
@@ -603,7 +781,7 @@ mod tests {
         let lead_arcs: Vec<Point3> = steps
             .iter()
             .filter_map(|s| match s {
-                Step::Arc { end, tag, .. } if tag.kind == MoveKind::LeadIn => Some(*end),
+                Step::Arc { end, tag, .. } if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) => Some(*end),
                 _ => None,
             })
             .collect();
@@ -650,7 +828,7 @@ mod tests {
             .program
             .steps()
             .iter()
-            .filter(|s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadIn))
+            .filter(|s| matches!(s, Step::Arc { tag, .. } if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut)))
             .count();
         assert_eq!(leads, 2, "a lead-in and a lead-out on the bore edge");
     }
