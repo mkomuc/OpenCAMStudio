@@ -56,8 +56,8 @@ zero automatically uses the cutter's straight cutting flank, so a cutter smaller
 than the whole bevel finishes it in several descending bands. Each band's XY
 position follows the face slope, with a feed approach from the air side. Both
 boundaries appear at their actual Z heights in the geometry preview. Face width
-and total depth follow the model. For an edge or loop, set **Chamfer width** on
-**Geometry** and optional width increments on **Passes**. A single planar edge
+and total depth follow the model. For an edge or loop, set **Chamfer width** under **Fase** on
+**Passes** and optional width increments on **Passes**. A single planar edge
 or connected open chain retains its endpoints, with a retract before each return;
 no closing cut is added. Side is inferred from adjoining planar surfaces and can
 be changed explicitly. Schema v24 preserves open chains, while legacy chamfers

@@ -45,8 +45,7 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::LeadOutFeed
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
-        Field::ChamferWidth
-        | Field::MajorDia
+        Field::MajorDia
         | Field::TabWidth
         | Field::TabHeight
         | Field::TabSpacing => OperationTab::Geometry,
@@ -451,7 +450,8 @@ impl App {
                 continue; // Grouped beneath the holding-tabs toggle.
             }
             if let Operation::Chamfer(chamfer) = op {
-                if (chamfer.faces.is_empty() && field == Field::Stepdown)
+                if field == Field::ChamferWidth
+                    || (chamfer.faces.is_empty() && field == Field::Stepdown)
                     || (!chamfer.faces.is_empty()
                         && matches!(
                             field,
@@ -679,6 +679,18 @@ impl App {
                     ));
                 }
                 if tab == OperationTab::Passes {
+                    let field = Field::ChamferWidth;
+                    let value = self.fields.get(&field).cloned().unwrap_or_default();
+                    list = list
+                        .push(inspector_section("Fase"))
+                        .push(field_row_labeled(
+                            field,
+                            self.field_label(field),
+                            self.field_help(field),
+                            &value,
+                            self.tooltips,
+                            self.field_invalid(field),
+                        ));
                     list = list.push(
                         row![
                             label_help("Gradual", help::CHAMFER_GRADUAL, self.tooltips),
@@ -1128,7 +1140,7 @@ mod tests {
         assert_eq!(field_tab(Field::ClearFeed), OperationTab::Tool);
         assert_eq!(field_tab(Field::ClearPlungeA), OperationTab::Linking);
         assert_eq!(field_tab(Field::MajorDia), OperationTab::Geometry);
-        assert_eq!(field_tab(Field::ChamferWidth), OperationTab::Geometry);
+        assert_eq!(field_tab(Field::ChamferWidth), OperationTab::Passes);
     }
 
     #[test]
