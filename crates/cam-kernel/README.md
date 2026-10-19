@@ -4,7 +4,8 @@ Default builds do not load native CAD libraries. `--features cam-import/occt`
 (or `cam-kernel/occt`) enables the owned OCCT bridge when an SDK is present.
 Set `OCCT_ROOT` to a prefix containing `include/opencascade` and `lib`, or set
 `OCCT_INCLUDE_DIR` and `OCCT_LIB_DIR`. OCCT 7.9.3 is the tested SDK;
-no native distribution or whole-STEP-standard qualification is implied.
+The native release workflow builds this exact SDK and bundles its shared runtime;
+see [RELEASING.md](../../RELEASING.md). Whole-STEP-standard qualification is not implied.
 Requesting `occt` without an SDK fails the build. Without `occt`, solid imports
 return `BackendUnavailable`.
 

@@ -28,9 +28,9 @@ mod validate;
 
 pub use cam_cldata::Point3;
 pub use document::{
-    Axis, CarveClearing, CarveOp, ChamferOp, ClearParams, Clearing, Comp, Document, DrillOp,
-    EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp, ProfileContour,
-    ProfileOp, ProfileTabs, Setup, Side, Stock, ThreadOp, SCHEMA_VERSION,
+    Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
+    DrillOp, EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp,
+    ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, ThreadOp, SCHEMA_VERSION,
 };
 pub use geometry::*;
 pub use history::History;
@@ -305,7 +305,7 @@ impl std::fmt::Display for CutDir {
 /// The enriched dimensions use `0.0` as an **"unspecified" sentinel** resolved by the
 /// [`Tool::flute_len`], [`Tool::shank_dia`], [`Tool::neck_dia`] accessors, so an old
 /// tool (all sentinels) behaves exactly as before: fully fluted, no distinct shank.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tool {
     /// Tool number (emitted as `Tn`).
     pub number: u32,
@@ -349,6 +349,12 @@ pub struct Tool {
     /// Nominal plunge feed, mm/min. See [`nominal_rpm`](Self::nominal_rpm).
     #[serde(default)]
     pub nominal_plunge_feed: f64,
+    /// Named cutting data snapshots, independent of physical cutter identity.
+    #[serde(default)]
+    pub presets: Vec<ToolPreset>,
+    /// High-water mark: deleted preset IDs are never reused.
+    #[serde(default)]
+    pub preset_id_floor: u64,
     /// Tool geometry class.
     pub kind: ToolKind,
 }
@@ -370,6 +376,8 @@ impl Default for Tool {
             nominal_rpm: 0.0,
             nominal_feed: 0.0,
             nominal_plunge_feed: 0.0,
+            presets: Vec::new(),
+            preset_id_floor: 0,
             kind: ToolKind::EndMill,
         }
     }
@@ -684,6 +692,8 @@ mod tests {
             nominal_rpm: 8000.0,
             nominal_feed: 900.0,
             nominal_plunge_feed: 300.0,
+            presets: Vec::new(),
+            preset_id_floor: 0,
             kind: ToolKind::BullNose { corner_radius: 1.0 },
         };
         let back: Tool = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
@@ -748,3 +758,6 @@ mod tests {
         assert_eq!(t.shank_dia(), 6.0);
     }
 }
+
+mod tool_presets;
+pub use tool_presets::{EntryFeeds, Material, ToolPreset};

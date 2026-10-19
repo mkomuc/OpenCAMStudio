@@ -136,6 +136,8 @@ pub struct RunOutcome {
     pub stock_vertices: Vec<MeshVertex>,
     /// Per-vertex flag distinguishing cut surfaces from original stock faces.
     pub stock_machined: Vec<bool>,
+    /// Operation that exposed each stock vertex, used for selection highlighting.
+    pub stock_operations: Vec<Option<u32>>,
     /// Triangle indices into `stock_vertices`.
     pub stock_indices: Vec<u32>,
     /// Collisions the material-removal simulation found (e.g. a rapid plowing
@@ -304,9 +306,9 @@ impl LoopRef {
     }
 }
 
-/// Profile and Engrave can machine open paths without inventing a closing edge.
+/// Profile, Chamfer and Engrave can machine open paths without inventing a closing edge.
 pub fn op_accepts_open_paths(kind: OpKind) -> bool {
-    matches!(kind, OpKind::Engrave | OpKind::Profile)
+    matches!(kind, OpKind::Engrave | OpKind::Profile | OpKind::Chamfer)
 }
 
 /// Whether an operation kind takes **islands** — enclosed areas left standing. Only the
@@ -998,7 +1000,7 @@ impl AppController {
         tool: u32,
     ) -> Result<u32, String> {
         let id = self.next_op_id();
-        let (op, binding) = crate::cad_operations::create_operation(
+        let (mut op, binding) = crate::cad_operations::create_operation(
             self.document(),
             kind,
             entities,
@@ -1012,11 +1014,20 @@ impl AppController {
                 "Choose a tool from the tool library before creating the CAD operation".into(),
             );
         }
+        if let Some(preset) = self.setup().tools.iter().find(|t| t.number == tool)
+            .and_then(|t| t.preset_for_material(self.setup().material_id)) {
+            op.apply_tool_preset(preset)?;
+        }
         let mut preview = self.document().clone();
-        preview
-            .setup_mut()
-            .height_settings
-            .insert(id, cam_model::OperationHeightSettings::default());
+        let settings = if matches!(
+            kind,
+            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread
+        ) {
+            crate::cad_operations::selection_height_defaults(&preview, &op)
+        } else {
+            cam_model::OperationHeightSettings::default()
+        };
+        preview.setup_mut().height_settings.insert(id, settings);
         preview.setup_mut().operations.push(op);
         preview.geometry.bindings.insert(id, binding);
         preview.cad_linked_operations.insert(id);
@@ -1845,6 +1856,13 @@ impl AppController {
             .tools
             .iter()
             .find(|t| t.number == tool);
+        if let Some(preset) = td.and_then(|t| t.preset_for_material(self.setup().material_id)) {
+            return CuttingData {
+                rpm: preset.spindle_rpm,
+                feed: preset.feed,
+                plunge_feed: preset.plunge_feed,
+            };
+        }
         CuttingData {
             rpm: td.map_or(0.0, |t| t.nominal_rpm),
             feed: td
@@ -1925,7 +1943,7 @@ impl AppController {
             plunge_feed,
         } = cutting.unwrap_or_else(|| self.seeded_cutting_for(tool));
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
-        let op = match kind {
+        let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
                 selections: None,
                 closed,
@@ -1956,6 +1974,8 @@ impl AppController {
                 stepdown: p.stepdown,
                 stepover: 0.0,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
                 plunge_feed,
@@ -1977,6 +1997,8 @@ impl AppController {
                     islands: island_contours,
                     depth: p.depth,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     start,
                     clear: ClearParams {
@@ -2002,6 +2024,8 @@ impl AppController {
                 peck: None,
                 dwell: None,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: plunge_feed,
             }),
@@ -2029,12 +2053,17 @@ impl AppController {
                     overshoot: 5.0,
                     direction,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
                     plunge_feed,
                 })
             }
             OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+                closed,
+                faces: Vec::new(),
+                stepdown: 0.,
                 id: 0,
                 tool,
                 chain,
@@ -2046,6 +2075,8 @@ impl AppController {
                 step: 0.0,
                 gradual: false,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
                 plunge_feed,
@@ -2091,6 +2122,8 @@ impl AppController {
                     drill_clearance: 0.0,
                     blind_allowance: 0.0,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
                     plunge_feed,
@@ -2120,6 +2153,8 @@ impl AppController {
                     ring_step: 0.0,
                     scallop: 0.0,
                     spindle_rpm,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
                     plunge_feed,
@@ -2145,12 +2180,25 @@ impl AppController {
                 depth: 0.3,
                 stepdown: 0.0,
                 spindle_rpm,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
                 plunge_feed,
                 start,
             }),
         };
+        if cutting.is_none() {
+            if let Some(preset) = self
+                .setup()
+                .tools
+                .iter()
+                .find(|t| t.number == tool)
+                .and_then(|t| t.preset_for_material(self.setup().material_id))
+            {
+                op.apply_tool_preset(preset).ok()?;
+            }
+        }
         Some(op)
     }
 
@@ -2261,6 +2309,12 @@ impl AppController {
     /// Cancel the pending operation without creating anything.
     pub fn cancel_operation(&mut self) {
         self.pending_op = None;
+    }
+
+    /// Cancel a nested geometry edit without losing the outer wizard's selections.
+    #[cfg(feature = "gui")]
+    pub(crate) fn restore_pending_operation(&mut self, pending: Option<PendingOp>) {
+        self.pending_op = pending;
     }
 
     /// Finalise the pending operation — the **single commit point** for every kind.
@@ -2389,6 +2443,8 @@ impl AppController {
                     stepdown: p.stepdown,
                     stepover: 0.0,
                     spindle_rpm: 0.0,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed: p.feed,
                     plunge_feed: p.plunge_feed,
@@ -2426,6 +2482,8 @@ impl AppController {
                             peck: None,
                             dwell: None,
                             spindle_rpm: 0.0,
+                            tool_preset: None,
+                            entry_feeds: Default::default(),
                             work_offset: 1,
                             feed: p.plunge_feed,
                         }));
@@ -2437,6 +2495,8 @@ impl AppController {
                             islands: Vec::new(),
                             depth: p.depth,
                             spindle_rpm: 0.0,
+                            tool_preset: None,
+                            entry_feeds: Default::default(),
                             work_offset: 1,
                             start: None,
                             clear: ClearParams {
@@ -2462,6 +2522,7 @@ impl AppController {
             id: 1,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
             name: self.program_name(),
@@ -2897,6 +2958,7 @@ fn empty_document(p: &JobParams) -> Document {
         id: 1,
         frame: Default::default(),
         material: String::new(),
+        material_id: None,
         model_instances: Vec::new(),
         program_name: String::new(),
         name: "Untitled".to_string(),
@@ -3482,7 +3544,6 @@ mod tests {
             OpKind::Face,
             OpKind::Drill,
             OpKind::Thread,
-            OpKind::Chamfer,
         ] {
             assert!(
                 app.build_op(kind, LoopRef::open(0), &[], 1, None, None)
@@ -3512,6 +3573,12 @@ mod tests {
         };
         assert!(!profile.closed);
         assert_eq!(profile.chain.points(), app.open_paths()[0].points());
+
+        app.begin_operation(OpKind::Chamfer);
+        assert!(app.open_paths_pickable());
+        let Operation::Chamfer(chamfer) = app.build_op(OpKind::Chamfer, LoopRef::open(0), &[], 1, None, None).unwrap() else { unreachable!() };
+        assert!(!chamfer.closed);
+        assert_eq!(chamfer.chain.points(), app.open_paths()[0].points());
 
         app.begin_operation(OpKind::Engrave);
         assert!(app.open_paths_pickable());
@@ -4335,7 +4402,7 @@ mod tests {
             kind: ToolKind::EndMill,
             ..Default::default()
         };
-        let n1 = app.use_tool(bit);
+        let n1 = app.use_tool(bit.clone());
         assert_eq!(app.document().setup().tools.len(), base + 1);
         assert_ne!(
             n1, 99,

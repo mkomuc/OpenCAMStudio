@@ -278,9 +278,11 @@ impl OperationHeightSettings {
         };
         resolved.validate()?;
         if let Operation::Chamfer(op) = operation {
-            let minimum = document.chamfer_minimum_depth(op);
-            if resolved.top - resolved.bottom < minimum - 1e-9 {
-                return Err(format!("Bottom height must allow at least {minimum:.3} mm below top for this chamfer width and cutter angle"));
+            if op.faces.is_empty() {
+                let minimum = document.chamfer_minimum_depth(op);
+                if resolved.top - resolved.bottom < minimum - 1e-9 {
+                    return Err(format!("Bottom height must allow at least {minimum:.3} mm below top for this chamfer width and cutter angle"));
+                }
             }
         }
         Ok(resolved)
@@ -424,6 +426,16 @@ impl Document {
         // A selected edge chain has its own Z plane. The binding's interval
         // describes the adjoining wall that is safe to cut, and its bottom can
         // be well below that plane (or contain an older cached depth).
+        if matches!(
+            binding.recipe,
+            crate::ExtractionRecipe::ChamferLoop
+                | crate::ExtractionRecipe::ChamferFaces
+                | crate::ExtractionRecipe::EngravePath
+                | crate::ExtractionRecipe::CarveRegion
+                | crate::ExtractionRecipe::ThreadCylinders { .. }
+        ) {
+            return Ok(binding.heights.top);
+        }
         let references: Vec<_> = match &binding.recipe {
             crate::ExtractionRecipe::ProfileEntries { entries }
                 if entries.iter().all(|entry| {
@@ -476,7 +488,13 @@ impl Document {
     pub fn operation_base_cutting_heights(&self, op: &Operation) -> CuttingHeights {
         let mut cutting = legacy_cutting(op, &self.setup().heights_for(op.id()));
         if let Operation::Chamfer(chamfer) = op {
-            cutting.bottom = chamfer.top - chamfer.depth.max(self.chamfer_minimum_depth(chamfer));
+            if chamfer.faces.is_empty() {
+                cutting.bottom =
+                    chamfer.top - chamfer.depth.max(self.chamfer_minimum_depth(chamfer));
+            } else {
+                cutting.top = chamfer.faces[0].top;
+                cutting.bottom = chamfer.faces[0].bottom;
+            }
         }
         cutting
     }
@@ -688,6 +706,8 @@ mod tests {
             peck: None,
             dwell: None,
             spindle_rpm: 1000.,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             feed: 100.,
         }));

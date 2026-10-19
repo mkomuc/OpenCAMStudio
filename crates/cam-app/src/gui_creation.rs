@@ -12,17 +12,14 @@ impl App {
                 .tools
                 .iter()
                 .find(|tool| Some(tool.number) == self.cad_tool_pick)
-                .copied()
+                .cloned()
         } else {
             let number = self.controller.pending_op()?.tool?;
-            self.controller
-                .document()
-                .setup()
-                .tools
+            self.operation_tools
                 .iter()
-                .chain(self.operation_tools.iter())
+                .chain(self.controller.document().setup().tools.iter())
                 .find(|tool| tool.number == number)
-                .copied()
+                .cloned()
         }
     }
     pub(super) fn wizard_seeded_cutting(&self) -> Option<CuttingData> {
@@ -67,6 +64,8 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.geometry_editor = None;
+        self.creation_geometry_height_defaults = None;
         self.profile_contour_selection = 0;
         self.profile_side_overrides.clear();
         self.profile_entry_editor = None;
@@ -88,13 +87,74 @@ impl App {
         self.edit_operation_draft(|op| op.set_work_offset(work_offset));
         self.refresh_fields();
         self.seed_wizard_cutting();
+        self.auto_operation_preset();
+        self.sync_creation_geometry_heights();
+    }
+
+    /// Follow the selected surface while retaining every height definition the
+    /// operator has edited, including edits made before picking geometry.
+    pub(super) fn sync_creation_geometry_heights(&mut self) {
+        if !matches!(
+            self.cad_pending_kind,
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+        ) {
+            return;
+        }
+        let operation = self
+            .creation_operation()
+            .ok()
+            .map(|p| p.0)
+            .or_else(|| self.operation_draft.clone());
+        let Some(operation) = operation else {
+            return;
+        };
+        let mut document = self.controller.document().clone();
+        for tool in &self.operation_tools {
+            if let Some(existing) = document
+                .setup_mut()
+                .tools
+                .iter_mut()
+                .find(|existing| existing.number == tool.number)
+            {
+                *existing = tool.clone();
+            } else {
+                document.setup_mut().tools.push(tool.clone());
+            }
+        }
+        let defaults = crate::cad_operations::selection_height_defaults(&document, &operation);
+        let previous = self
+            .creation_geometry_height_defaults
+            .clone()
+            .unwrap_or_default();
+        if let Some(settings) = &mut self.height_draft {
+            for plane in cam_model::HeightPlaneKind::ALL {
+                let old = previous.definition(plane);
+                if settings.definition(plane) == old
+                    && self
+                        .height_offsets
+                        .get(&plane)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        == Some(old.offset)
+                {
+                    *settings.definition_mut(plane) = defaults.definition(plane).clone();
+                    self.height_offsets
+                        .insert(plane, fmt_num(defaults.definition(plane).offset));
+                }
+            }
+        }
+        self.creation_geometry_height_defaults = Some(defaults);
     }
 
     pub(super) fn sync_creation_tool(&mut self) {
         if let Some(tool) = self.wizard_tool() {
             let number = self.stage_operation_tool(tool);
-            self.edit_operation_draft(|op| op.set_tool(number));
+            self.edit_operation_draft(|op| {
+                op.set_tool(number);
+                op.clear_tool_preset();
+            });
+            self.auto_operation_preset();
         }
+        self.sync_creation_geometry_heights();
     }
 
     pub(super) fn creation_operation(
@@ -132,11 +192,14 @@ impl App {
         }
         if let Some(kind) = self.cad_pending_kind {
             let mut document = self.controller.document().clone();
-            document
-                .setup_mut()
-                .tools
-                .extend(self.operation_tools.iter().copied());
-            let (geometry, binding) = crate::cad_operations::create_operation(
+            for tool in &self.operation_tools {
+                if let Some(existing) = document.setup_mut().tools.iter_mut().find(|t| t.number == tool.number) {
+                    *existing = tool.clone();
+                } else {
+                    document.setup_mut().tools.push(tool.clone());
+                }
+            }
+            let (geometry, mut binding) = crate::cad_operations::create_operation(
                 &document,
                 kind,
                 self.controller.cad_selection().to_vec(),
@@ -160,7 +223,47 @@ impl App {
                 }
                 (Operation::Face(op), Operation::Face(new)) => op.boundary = new.boundary,
                 (Operation::Drill(op), Operation::Drill(new)) => op.points = new.points,
-                _ => return Err("Unsupported CAD operation".into()),
+                (Operation::Chamfer(op), Operation::Chamfer(new)) => {
+                    op.chain = new.chain;
+                    op.closed = new.closed;
+                    if !op.closed {
+                        op.start = None;
+                        op.lead_overlap = 0.;
+                    }
+                    op.side = new.side;
+                    op.top = new.top;
+                    op.faces = new.faces;
+                    if !op.faces.is_empty() {
+                        op.width = new.width;
+                        op.depth = new.depth;
+                    }
+                }
+                (Operation::Engrave(op), Operation::Engrave(new)) => {
+                    op.chain = new.chain;
+                    op.closed = new.closed;
+                    op.top = new.top;
+                    if !op.closed {
+                        op.start = None;
+                    }
+                }
+                (Operation::Carve(op), Operation::Carve(new)) => {
+                    op.boundary = new.boundary;
+                    op.islands = new.islands;
+                    op.top = new.top;
+                }
+                (Operation::Thread(op), Operation::Thread(new)) => {
+                    op.points = new.points;
+                    op.internal = new.internal;
+                    if !self.creation_edited_fields.contains(&Field::MajorDia) {
+                        op.major_dia = new.major_dia;
+                    }
+                    op.z_top = new.z_top;
+                    op.z_bottom = new.z_bottom;
+                }
+                _ => return Err("Geometry does not match operation".into()),
+            }
+            if crate::cad_operations::surface_recipe(&binding.recipe) {
+                binding.heights = document.operation_base_cutting_heights(&draft);
             }
             Ok((draft, Some(binding)))
         } else {
@@ -199,10 +302,13 @@ impl App {
         self.creation_operation()
             .and_then(|(op, binding)| {
                 let mut document = self.controller.document().clone();
-                document
-                    .setup_mut()
-                    .tools
-                    .extend(self.operation_tools.iter().copied());
+                for tool in &self.operation_tools {
+                    if let Some(existing) = document.setup_mut().tools.iter_mut().find(|t| t.number == tool.number) {
+                        *existing = tool.clone();
+                    } else {
+                        document.setup_mut().tools.push(tool.clone());
+                    }
+                }
                 if let Some(binding) = binding {
                     document.geometry.bindings.insert(0, binding);
                 }

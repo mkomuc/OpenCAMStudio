@@ -239,6 +239,7 @@ pub(super) fn resolve(
         .map(|p| Polygon::new(p.chain.clone()).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResolvedInput {
+        chamfers: Vec::new(),
         profiles,
         regions,
         holes: Vec::new(),

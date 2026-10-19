@@ -276,10 +276,7 @@ impl App {
             }
             SetupEditorTab::Stock => {
                 list = list.push(inspector_section("Material"));
-                list = list.push(
-                    inspector_input("Material", &draft.material)
-                        .on_input(Message::SetupMaterialChanged),
-                );
+                list = list.push(self.stock_material_picker(draft));
                 list = list.push(inspector_section("Stock definition"));
                 let kind = match draft.stock {
                     cam_model::Stock::FixedBox { .. } => StockEditorKind::FixedBox,

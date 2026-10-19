@@ -58,6 +58,9 @@ impl Strategy for ThreadStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if let Err(reason) = op.entry_feeds.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         let mut diagnostics = Vec::new();
 
         // Bail helper: return whatever diagnostics we have and no motions.
@@ -302,6 +305,7 @@ impl Strategy for ThreadStrategy {
             nseg,
             feed: op.feed,
             plunge_feed: op.plunge_feed,
+            entry_feeds: op.entry_feeds,
             clearance: env.heights.clearance,
             retract: env.heights.retract,
         };
@@ -370,6 +374,7 @@ struct HoleParams {
     nseg: usize,
     feed: f64,
     plunge_feed: f64,
+    entry_feeds: cam_model::EntryFeeds,
     clearance: f64,
     retract: f64,
 }
@@ -431,7 +436,7 @@ fn emit_pass(prog: &mut Program, p: &HoleParams, cx: f64, cy: f64, orbit_r: f64)
         end: Point3::new(p0.0, p0.1, p.z_start),
         center: Point3::new(lc_in.0, lc_in.1, p.z_start),
         dir: lead_dir,
-        feed: p.feed,
+        feed: p.entry_feeds.lead_in(p.feed),
         tag: lead,
     });
 
@@ -459,8 +464,8 @@ fn emit_pass(prog: &mut Program, p: &HoleParams, cx: f64, cy: f64, orbit_r: f64)
         end: Point3::new(a_end.0, a_end.1, p.z_end),
         center: Point3::new(lc_out.0, lc_out.1, p.z_end),
         dir: lead_dir,
-        feed: p.feed,
-        tag: lead,
+        feed: p.entry_feeds.lead_out(p.feed),
+        tag: Tag::new(p.op_id, MoveKind::LeadOut),
     });
     prog.push(Step::Rapid {
         to: Point3::new(a_end.0, a_end.1, p.clearance),
@@ -519,6 +524,8 @@ mod tests {
     fn op(internal: bool, hand: Hand, climb: bool) -> ThreadOp {
         ThreadOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -749,11 +756,10 @@ mod tests {
         let r = run(op(true, Hand::Right, true), tool(5.0));
         let s = &r.program.steps;
         assert!(matches!(s[0], Step::Comment(_)));
-        let leads = s
-            .iter()
-            .filter(|st| matches!(st, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadIn))
-            .count();
-        assert_eq!(leads, 2, "one lead-in + one lead-out");
+        for kind in [MoveKind::LeadIn, MoveKind::LeadOut] {
+            let leads = s.iter().filter(|st| matches!(st, Step::Arc { tag, .. } if tag.kind == kind)).count();
+            assert_eq!(leads, 1, "one arc for {kind:?}");
+        }
         let plunges = s
             .iter()
             .filter(|st| matches!(st, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge))

@@ -77,7 +77,11 @@ use crate::Tool;
 /// v19: setup model lists are explicit; an empty list selects no solid bodies.
 /// v20: profiles support open chains, multiple contours, and complete silhouettes.
 /// v21: named profile geometry entries with independent extraction settings.
-pub const SCHEMA_VERSION: u32 = 21;
+/// v22: managed stock material IDs, tool presets and operation preset snapshots.
+/// v23: modeled chamfer-face boundaries and axial finishing bands. Older readers
+/// must refuse these operations rather than treating their projected face as an edge.
+/// v24: open chamfer chains; absent closed flags retain legacy closed rims.
+pub const SCHEMA_VERSION: u32 = 24;
 
 /// Operation safety planes (also used as legacy setup defaults), all
 /// **absolute Z in millimetres**. By
@@ -387,6 +391,12 @@ pub struct ProfileOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -490,6 +500,12 @@ pub struct DrillOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -646,6 +662,12 @@ pub struct PocketOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -800,6 +822,12 @@ pub struct FaceOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -877,6 +905,12 @@ pub struct ThreadOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -888,18 +922,101 @@ pub struct ThreadOp {
     pub plunge_feed: f64,
 }
 
-/// A chamfer/bevel along a closed edge: run a chamfer/V mill around the contour
-/// at a computed depth so its cone flank forms a bevel of `width`. A single pass
-/// (chamfers are shallow); the tool runs on the air side of the edge, offset by
-/// its tip radius.
+/// A planar modeled chamfer strip in setup coordinates. Endpoints at both
+/// elevations are paired along the face's tangent, including mitered corners.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChamferFace {
+    pub upper: [[f64; 2]; 2],
+    pub lower: [[f64; 2]; 2],
+    pub top: f64,
+    pub bottom: f64,
+    /// Unit XY direction from material toward air.
+    pub outward: [f64; 2],
+}
+impl ChamferFace {
+    pub fn width(&self) -> f64 {
+        (0..2)
+            .map(|i| (self.lower[0][i] - self.upper[0][i]) * self.outward[i])
+            .sum()
+    }
+    pub fn at_height(&self, z: f64) -> [[f64; 2]; 2] {
+        let t = (self.top - z) / (self.top - self.bottom);
+        std::array::from_fn(|end| {
+            std::array::from_fn(|i| {
+                self.upper[end][i] + t * (self.lower[end][i] - self.upper[end][i])
+            })
+        })
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if !self
+            .upper
+            .iter()
+            .chain(&self.lower)
+            .flatten()
+            .chain(self.outward.iter())
+            .copied()
+            .chain([self.top, self.bottom])
+            .all(f64::is_finite)
+            || self.top <= self.bottom
+            || self.width() <= 1e-8
+            || (self.outward[0].hypot(self.outward[1]) - 1.).abs() > 1e-6
+        {
+            return Err("Modeled chamfer requires finite upper/lower boundaries, a positive width and height, and a unit outward direction".into());
+        }
+        for line in [&self.upper, &self.lower] {
+            let tangent = [line[1][0] - line[0][0], line[1][1] - line[0][1]];
+            if tangent[0].hypot(tangent[1]) < 1e-8
+                || (tangent[0] * self.outward[0] + tangent[1] * self.outward[1]).abs() > 1e-5
+            {
+                return Err(
+                    "Chamfer upper and lower boundaries must be parallel straight edges".into(),
+                );
+            }
+        }
+        let tangent = [
+            self.upper[1][0] - self.upper[0][0],
+            self.upper[1][1] - self.upper[0][1],
+        ];
+        let tangent_length = tangent[0].hypot(tangent[1]);
+        let along =
+            |point: [f64; 2]| (point[0] * tangent[0] + point[1] * tangent[1]) / tangent_length;
+        if along(self.lower[0]) > along(self.upper[0]) + 1e-5
+            || along(self.lower[1]) < along(self.upper[1]) - 1e-5
+        {
+            return Err("This chamfer narrows toward its lower boundary; its trimmed corners cannot be covered by planar bands without overcutting".into());
+        }
+        let other_width: f64 = (0..2)
+            .map(|i| (self.lower[1][i] - self.upper[1][i]) * self.outward[i])
+            .sum();
+        if (other_width - self.width()).abs() > 1e-5 {
+            return Err("Chamfer face width must be constant".into());
+        }
+        Ok(())
+    }
+}
+
+/// A chamfer/bevel along an open or closed edge chain, or modeled bevel faces.
+/// The angled cutter runs on the air side at the depth and offset needed to
+/// form the requested width; optional width increments divide the cut into passes.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChamferOp {
+    /// Close the path between its last and first vertices. Legacy files use closed rims.
+    #[serde(default = "default_true")]
+    pub closed: bool,
     /// Operation id.
     pub id: u32,
     /// Tool number (must select a chamfer/V mill — the strategy reads its angle).
     pub tool: u32,
-    /// The closed edge to chamfer, in the part/WCS frame.
+    /// The edge or connected chain to chamfer, in the part/WCS frame.
     pub chain: Contour,
+    /// Exact upper/lower boundaries of modeled planar chamfer faces. Empty uses
+    /// the edge strategy and its operator-defined width.
+    #[serde(default)]
+    pub faces: Vec<ChamferFace>,
+    /// Maximum vertical band per pass for modeled faces. Zero automatically uses
+    /// the cutter's usable flank; a smaller value adds overlapping finishing bands.
+    #[serde(default)]
+    pub stepdown: f64,
     /// Which side of the chain holds material; the tool runs on the other (air)
     /// side, offset by its tip radius.
     pub side: Side,
@@ -931,6 +1048,12 @@ pub struct ChamferOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1001,6 +1124,12 @@ pub struct EngraveOp {
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1082,6 +1211,12 @@ pub struct CarveOp {
     /// Applies to the whole carve, including any clearing pass.
     #[serde(default)]
     pub spindle_rpm: f64,
+    /// Selected cutting preset baseline; operation values may be manually overridden.
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    /// Independent ramp and lead-in/out feed overrides.
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
     /// Work-datum index for this operation (1-based; datum 1 is the default). The
     /// post lowers it to a dialect code — Okuma `G15 H<n>` — so ops on different
     /// fixtures/setups emit under different work coordinate systems.
@@ -1301,7 +1436,7 @@ impl Operation {
     }
 
     /// Whether two operations describe the **same work** — identical in every
-    /// field *except* their `id` (and so the same kind, tool, geometry, depths,
+    /// field *except* their `id` and preset provenance (same kind, tool, geometry, depths,
     /// feeds, leads…). Two such operations emit byte-identical toolpaths, so if
     /// both reach the post the machine cuts the same path twice. Used to flag
     /// exact duplicates before export.
@@ -1310,7 +1445,10 @@ impl Operation {
         // equality — which automatically covers any field added later.
         let mut probe = self.clone();
         probe.set_id(other.id());
-        &probe == other
+        probe.clear_tool_preset();
+        let mut other = other.clone();
+        other.clear_tool_preset();
+        probe == other
     }
 }
 
@@ -1343,6 +1481,9 @@ pub struct Setup {
     /// Material name for the blank.
     #[serde(default)]
     pub material: String,
+    /// Link to the managed material registry; name remains a portable display snapshot.
+    #[serde(default)]
+    pub material_id: Option<u64>,
     /// Model instance identities included in machining for this setup. Empty selects none.
     #[serde(default)]
     pub model_instances: Vec<u64>,
@@ -1587,6 +1728,26 @@ impl Document {
     }
 }
 
+// Internally tagged project files buffer JSON object keys as strings.
+fn deserialize_operation_map<'de, D, T>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<u32, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let encoded =
+        <std::collections::BTreeMap<String, T> as serde::Deserialize>::deserialize(deserializer)?;
+    let mut values = std::collections::BTreeMap::new();
+    for (key, value) in encoded {
+        let id = key.parse::<u32>().map_err(serde::de::Error::custom)?;
+        if values.insert(id, value).is_some() {
+            return Err(serde::de::Error::custom("duplicate operation height ID"));
+        }
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1600,6 +1761,8 @@ mod tests {
             additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             clearing: Clearing::default(),
             id,
@@ -1674,6 +1837,8 @@ mod tests {
     fn carve(clear_tool: Option<u32>) -> Operation {
         Operation::Carve(CarveOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 3,
             tool: 4,
@@ -1823,6 +1988,8 @@ mod tests {
         let prof = profile(0);
         let drill = Operation::Drill(DrillOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -1835,24 +2002,4 @@ mod tests {
         });
         assert!(!prof.same_work(&drill));
     }
-}
-
-// Internally tagged project files buffer JSON object keys as strings.
-fn deserialize_operation_map<'de, D, T>(
-    deserializer: D,
-) -> Result<std::collections::BTreeMap<u32, T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    let encoded =
-        <std::collections::BTreeMap<String, T> as serde::Deserialize>::deserialize(deserializer)?;
-    let mut values = std::collections::BTreeMap::new();
-    for (key, value) in encoded {
-        let id = key.parse::<u32>().map_err(serde::de::Error::custom)?;
-        if values.insert(id, value).is_some() {
-            return Err(serde::de::Error::custom("duplicate operation height ID"));
-        }
-    }
-    Ok(values)
 }

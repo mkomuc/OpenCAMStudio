@@ -82,12 +82,17 @@ impl AppController {
         operation.set_work_offset(self.active_origin);
         let mut document = self.document().clone();
         for tool in tools {
-            if !document
-                .setup()
+            if let Some(existing) = document
+                .setup_mut()
                 .tools
-                .iter()
-                .any(|t| t.number == tool.number)
+                .iter_mut()
+                .find(|t| t.number == tool.number)
             {
+                if existing.identity() != tool.identity() {
+                    return Err("A draft cutter conflicts with a setup tool number".into());
+                }
+                *existing = tool;
+            } else {
                 document.setup_mut().tools.push(tool);
             }
         }

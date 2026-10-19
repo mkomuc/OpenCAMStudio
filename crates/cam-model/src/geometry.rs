@@ -607,6 +607,18 @@ impl CuttingHeights {
 pub enum ExtractionRecipe {
     PocketFloor,
     DrillHoles,
+    /// One closed planar rim; the operation defines the bevel dimensions.
+    ChamferLoop,
+    /// Modeled inclined planar faces bounded by two horizontal edges.
+    ChamferFaces,
+    /// One planar loop or connected open/closed chain, at an operator-defined depth.
+    EngravePath,
+    /// A planar face (including islands) or closed loop to V-carve.
+    CarveRegion,
+    /// Constant-diameter cylindrical bores or bosses aligned with setup Z.
+    ThreadCylinders {
+        internal: bool,
+    },
     ProfileLoop {
         side: Side,
     },
@@ -1096,8 +1108,10 @@ mod tests {
                 .resolve_references(&state, refs)
                 .is_err());
         }
-        let mut refs = FrameReferences::default();
-        refs.stock_axes = [Some([1., 0., 0.]), Some([1., 0., 0.]), None];
+        let mut refs = FrameReferences {
+            stock_axes: [Some([1., 0., 0.]), Some([1., 0., 0.]), None],
+            ..Default::default()
+        };
         assert!(SetupFrame::default()
             .resolve_references(&state, refs.clone())
             .is_err());

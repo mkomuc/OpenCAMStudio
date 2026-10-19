@@ -33,6 +33,9 @@ impl Strategy for PocketStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if let Err(reason) = op.entry_feeds.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         let mut diagnostics = Vec::new();
 
         macro_rules! fail {
@@ -111,6 +114,7 @@ impl Strategy for PocketStrategy {
             plunge: op.clear.plunge,
             feed: op.clear.feed,
             plunge_feed: op.clear.plunge_feed,
+            entry_feeds: op.entry_feeds,
             lead_overlap: op.clear.lead_overlap,
             lead_in: op.clear.lead_in,
             lead_out: op.clear.lead_out,
@@ -206,6 +210,8 @@ mod tests {
         // retract *per level*, not per ring — and the rings are still all cut.
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -247,6 +253,8 @@ mod tests {
     fn helix_plunge_pocket_enters_on_helical_arcs() {
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -303,6 +311,8 @@ mod tests {
     fn tool_too_large_for_pocket_errors() {
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -356,6 +366,8 @@ mod tests {
         let run = |overlap: f64| {
             let mut op = PocketOp {
                 spindle_rpm: 0.0,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 id: 0,
                 tool: 1,
@@ -398,6 +410,8 @@ mod tests {
         let run = |offset: f64| {
             let op = PocketOp {
                 spindle_rpm: 0.0,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 id: 0,
                 tool: 1,
@@ -445,7 +459,7 @@ mod tests {
             match s {
                 Step::Rapid { to, .. } | Step::Linear { to, .. } => pos = Point::new(to.x, to.y),
                 Step::Arc { end, tag, .. } => {
-                    if tag.kind == MoveKind::LeadIn {
+                    if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) {
                         arcs.push((pos, Point::new(end.x, end.y)));
                     }
                     pos = Point::new(end.x, end.y);
@@ -459,6 +473,8 @@ mod tests {
     fn leaded_op(islands: Vec<Contour>) -> PocketOp {
         PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -578,6 +594,8 @@ mod tests {
         // `frontadvance::CERT_ENGAGEMENT_SLACK`.
         let op = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -710,6 +728,8 @@ mod tests {
         // multiple rings that put the wall ring on the leaded path in the first place.
         let small = PocketOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,

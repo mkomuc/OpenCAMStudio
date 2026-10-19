@@ -301,6 +301,8 @@ mod tests {
     fn op(depth: f64) -> EngraveOp {
         EngraveOp {
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
             tool: 1,
@@ -378,8 +380,8 @@ mod tests {
     fn depth_past_the_cone_flare_is_rejected() {
         // 90° V-bit, ⌀6 (r=3), sharp tip → the cone reaches full ⌀ at depth 3.0.
         let t = vbit(90.0, 0.0);
-        assert!(errors(&run(op(2.9), t)).is_empty());
-        let r = run(op(3.1), t);
+        assert!(errors(&run(op(2.9), t.clone())).is_empty());
+        let r = run(op(3.1), t.clone());
         let e = errors(&r);
         assert_eq!(e.len(), 1, "{e:?}");
         assert!(e[0].contains("shank rubs"), "{e:?}");

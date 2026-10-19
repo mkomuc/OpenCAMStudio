@@ -100,6 +100,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 Field::ChamferWidth,
                 Field::ChamferDepth,
                 Field::ChamferStep,
+                Field::Stepdown,
                 Field::SpindleRpm,
                 Field::Feed,
                 Field::PlungeFeed,
@@ -110,7 +111,9 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             if c.lead_out != Lead::None {
                 fields.push(Field::LeadOutSize);
             }
-            fields.push(Field::LeadOverlap);
+            if c.closed {
+                fields.push(Field::LeadOverlap);
+            }
             fields
         }
         Operation::Engrave(_) => {
@@ -200,6 +203,13 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             fields
         }
     };
+    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Carve(_)) {
+        fields.push(Field::RampFeed);
+    }
+    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Chamfer(_) | Operation::Thread(_))
+        || matches!(op, Operation::Carve(c) if c.clear.is_some()) {
+        fields.extend([Field::LeadInFeed, Field::LeadOutFeed]);
+    }
     if super::operation_tabs::operation_start(op).is_some() {
         fields.extend([Field::StartX, Field::StartY]);
     }

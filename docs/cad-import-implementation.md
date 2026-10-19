@@ -25,7 +25,8 @@ outer boundary, and Drill accepts cylindrical faces and their visible circular
 rims. STEP and DXF use the same creation controls and five-tab operation editor.
 Hover and selection highlight semantic geometry. Ctrl-click selects the visible
 body's silhouette projected onto the active setup XY reference plane (Z = 0),
-regardless of the geometry filter. Shift-click toggles multiple features;
+for Profile and Face. Surface and thread operations keep their operation-specific
+picking filters. Shift-click toggles multiple features;
 Command-click also toggles on macOS. Cylindrical and toroidal fillet faces retain
 their radius for inspection. Profile selection skips nonplanar wall/seam loops;
 a top boundary adjoining a rounded transition selects the whole-body silhouette.
@@ -34,12 +35,44 @@ Overlapping edge candidates remain available for WCS picking. Hide/isolate/show-
 straight boundary edge sets X. Placement also supports XYZ translation and Z
 rotation. Stock remains independently editable.
 
-Create Pocket, Drill, Profile or Face from the selection. Review extracted top,
+Create Pocket, Drill, Profile, Face, Chamfer, Engrave, Carve or Thread from the selection. Review extracted top,
 bottom, preserved islands, holes and approximation diagnostics, then select the
 tool from the library. Operation links survive save/reopen, duplicate, undo and
 redo. Absolute height overrides are explicit; blank height inputs follow geometry.
 **Edit / repair geometry** changes the source selection while preserving machining
 parameters and overrides. Unsupported selections give an incompatibility reason.
+
+On the Geometry tab, Chamfer, Engrave, Carve and Thread share Profile's
+icon-based collection list. The chain, face and thread icons add supported
+geometry; delete removes the selected item and the gear opens its settings.
+Hover over an icon for its selection description. Settings use OK/Cancel to
+stage or discard geometry without changing other operation tabs. Chamfer offers
+**Modeled faces**, **Boundary loop**, and **Individual edges**. Modeled upward
+inclined planar faces supply their actual upper and lower boundaries; select
+multiple adjacent bevel faces with the face icon. Straight trimmed strips that
+widen toward the lower edge are supported. The cutter's included angle must
+match the modeled bevel. On **Passes**, **Stepdown** limits each finishing band;
+zero automatically uses the cutter's straight cutting flank, so a cutter smaller
+than the whole bevel finishes it in several descending bands. Each band's XY
+position follows the face slope, with a feed approach from the air side. Both
+boundaries appear at their actual Z heights in the geometry preview. Face width
+and total depth follow the model. For an edge or loop, set **Chamfer width** under **Fase** on
+**Passes** and optional width increments on **Passes**. A single planar edge
+or connected open chain retains its endpoints, with a retract before each return;
+no closing cut is added. Side is inferred from adjoining planar surfaces and can
+be changed explicitly. Schema v24 preserves open chains, while legacy chamfers
+remain closed; modeled-face inputs were introduced in v23.
+
+Engrave offers boundary-loop and individual-edge modes and also accepts a
+connected open chain, preserving its endpoints. Carve offers a face with islands
+(all inner boundaries remain uncut) or a single closed boundary loop.
+Thread accepts cylindrical bore or boss faces, including picks on their circular
+rims; multiple centres must share diameter and cutting heights. The selected
+cylinder seeds internal/external type and diameter; nominal thread diameter and
+pitch remain editable. These operations follow the selected feature's setup Z
+plane. Surface-operation depth is specified by the operator; thread geometry
+provides the cylindrical cutting interval. Clear, remove and reselect work during
+creation and editing, with all changes waiting for the operation's OK/Cancel.
 
 Assets embed their original bytes, source fingerprint, units, backend version,
 import budgets, analytic topology, independent projection tessellation and semantic display mesh in schema-14

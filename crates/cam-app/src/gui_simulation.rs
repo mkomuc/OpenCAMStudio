@@ -54,12 +54,12 @@ impl Timeline {
                     return Err("Simulation playback exceeds 100000 drilling pecks.".into());
                 }
                 for &[x, y] in &c.points {
-                    let rapid = |z| Step::Rapid {
+                    let rapid = |z, kind| Step::Rapid {
                         to: Point3::new(x, y, z),
-                        tag: c.tag,
+                        tag: cam_cldata::Tag::new(c.tag.op_id, kind),
                     };
-                    expanded.push(rapid(c.retract));
-                    expanded.push(rapid(c.z_top));
+                    expanded.push(rapid(c.retract, cam_cldata::MoveKind::Link));
+                    expanded.push(rapid(c.z_top, cam_cldata::MoveKind::Link));
                     let mut top = c.z_top;
                     loop {
                         let target = c.peck.map_or(c.depth, |peck| (top - peck).max(c.depth));
@@ -67,19 +67,20 @@ impl Timeline {
                             return Err("Drilling peck cannot advance at this depth.".into());
                         }
                         if top < c.z_top {
-                            expanded.push(rapid((top + 0.5).min(c.z_top)));
+                            expanded
+                                .push(rapid((top + 0.5).min(c.z_top), cam_cldata::MoveKind::Link));
                         }
                         expanded.push(Step::Linear {
                             to: Point3::new(x, y, target),
                             feed: c.feed,
-                            tag: c.tag,
+                            tag: cam_cldata::Tag::new(c.tag.op_id, cam_cldata::MoveKind::Plunge),
                         });
                         if target <= c.depth {
                             if let Some(seconds) = c.dwell {
                                 expanded.push(Step::Dwell { seconds });
                             }
                         }
-                        expanded.push(rapid(c.retract));
+                        expanded.push(rapid(c.retract, cam_cldata::MoveKind::Retract));
                         top = target;
                         if target <= c.depth {
                             break;
@@ -464,6 +465,16 @@ mod tests {
         let full = timeline.prefix(timeline.duration);
         assert!(full.steps.contains(&Step::Dwell { seconds: 2. }));
         assert_eq!(last_position(&full).z, 1.);
+        let scene = Scene::from_program(&full);
+        assert!(scene
+            .path_cones
+            .iter()
+            .any(|cone| cone.color == cam_render::PATH_IN));
+        assert!(scene
+            .path_cones
+            .iter()
+            .any(|cone| cone.color == cam_render::PATH_OUT));
+        assert!(scene.path_cones.iter().all(|cone| cone.op == 7));
     }
     fn drain_player(player: &mut SimulationPlayer) {
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -491,6 +502,8 @@ mod tests {
             peck: None,
             dwell: None,
             spindle_rpm: 1000.,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             feed: 100.,
         }));
@@ -521,6 +534,7 @@ mod tests {
         drain_player(&mut player);
         let cut = player.preview.stock_vertices.clone();
         let cut_faces = player.preview.stock_machined.clone();
+        let cut_operations = player.preview.stock_operations.clone();
         assert!(!cut.is_empty());
         assert!(cut_faces.iter().any(|&cut| cut));
         player.seek(0.);
@@ -530,6 +544,7 @@ mod tests {
             "rewinding must restore uncut stock"
         );
         assert!(player.preview.stock_machined.iter().all(|&cut| !cut));
+        assert!(player.preview.stock_operations.iter().all(Option::is_none));
         assert!(player.current(&controller));
         assert_eq!(controller.export_nc().unwrap(), nc);
         player.seek(player.timeline.duration);
@@ -539,6 +554,7 @@ mod tests {
             "seeking forward must reproduce the same stock"
         );
         assert_eq!(cut_faces, player.preview.stock_machined);
+        assert_eq!(cut_operations, player.preview.stock_operations);
         player.toggle();
         assert!(player.playing);
         assert_eq!(player.position, 0.);

@@ -171,6 +171,26 @@ pub(crate) fn recipe(
     Ok(match kind {
         OpKind::Pocket => ExtractionRecipe::PocketFloor,
         OpKind::Drill => ExtractionRecipe::DrillHoles,
+        OpKind::Chamfer if selected.first().is_some_and(|r| r.kind == EntityKind::Face) => {
+            ExtractionRecipe::ChamferFaces
+        }
+        OpKind::Chamfer => ExtractionRecipe::ChamferLoop,
+        OpKind::Engrave => ExtractionRecipe::EngravePath,
+        OpKind::Carve => ExtractionRecipe::CarveRegion,
+        OpKind::Thread => {
+            let reference = selected
+                .first()
+                .ok_or("Select cylindrical bore or boss faces")?;
+            let face = geometry
+                .asset(reference.asset_id)
+                .and_then(|a| a.topology.faces.iter().find(|f| f.id == reference.id))
+                .filter(|_| reference.kind == EntityKind::Face)
+                .ok_or("Thread requires cylindrical bore or boss faces")?;
+            let CadSurface::Cylinder { inward, .. } = face.surface else {
+                return Err("Thread requires cylindrical bore or boss faces".into());
+            };
+            ExtractionRecipe::ThreadCylinders { internal: inward }
+        }
         OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette => {
             ExtractionRecipe::ProfileSilhouette
         }
@@ -181,7 +201,6 @@ pub(crate) fn recipe(
         }
         OpKind::Profile => ExtractionRecipe::ProfileContours,
         OpKind::Face => ExtractionRecipe::FaceRegion,
-        _ => return Err("CAD selections currently support Pocket, Drill, Profile and Face".into()),
     })
 }
 
@@ -392,7 +411,7 @@ pub(crate) fn create_operation(
 ) -> Result<(Operation, GeometryBinding), String> {
     let geometry = geometry_for_setup(document)?;
     validate_selection(&geometry, &selected)?;
-    let binding = cam_geometry3d::resolve_selection(
+    let mut binding = cam_geometry3d::resolve_selection(
         &geometry,
         &selected,
         recipe(kind, &geometry, &selected)?,
@@ -413,6 +432,8 @@ pub(crate) fn create_operation(
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             boundary: boundary()?,
             islands: resolved.regions[0].holes().to_vec(),
             depth,
@@ -432,13 +453,15 @@ pub(crate) fn create_operation(
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
             selections: None,
-            closed: resolved.profiles.first().map_or(true, |p| p.closed),
+            closed: resolved.profiles.first().is_none_or(|p| p.closed),
             additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
             tabs: Default::default(),
             id,
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             chain: resolved
                 .profiles
                 .first()
@@ -471,6 +494,8 @@ pub(crate) fn create_operation(
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             points: resolved
                 .holes
                 .iter()
@@ -487,6 +512,8 @@ pub(crate) fn create_operation(
             tool,
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             boundary: boundary()?,
             start_offset: resolved.heights.top,
             depth,
@@ -497,8 +524,109 @@ pub(crate) fn create_operation(
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
         }),
-        _ => unreachable!(),
+        OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+            closed: resolved.profiles.first().is_none_or(|p| p.closed),
+            faces: resolved.chamfers.clone(),
+            stepdown: 0.,
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
+            chain: if resolved.chamfers.is_empty() {
+                resolved.profiles[0].chain.clone()
+            } else {
+                boundary()?
+            },
+            side: resolved.profiles.first().map_or(Side::Outside, |p| p.side),
+            width: resolved.chamfers.first().map_or(1., ChamferFace::width),
+            top: resolved.heights.top,
+            depth: if resolved.chamfers.is_empty() {
+                0.
+            } else {
+                depth
+            },
+            step: 0.,
+            gradual: false,
+            feed: defaults.feed,
+            plunge_feed: defaults.plunge_feed,
+            start: None,
+            lead_in: Lead::None,
+            lead_out: Lead::None,
+            lead_overlap: 0.,
+        }),
+        OpKind::Engrave => Operation::Engrave(EngraveOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
+            chain: resolved.profiles[0].chain.clone(),
+            closed: resolved.profiles[0].closed,
+            top: resolved.heights.top,
+            depth: 0.3,
+            stepdown: 0.,
+            feed: defaults.feed,
+            plunge_feed: defaults.plunge_feed,
+            start: None,
+        }),
+        OpKind::Carve => Operation::Carve(CarveOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
+            boundary: boundary()?,
+            islands: resolved.regions[0].holes().to_vec(),
+            top: resolved.heights.top,
+            depth: 1.,
+            clear: None,
+            offset: 0.,
+            ring_step: 0.,
+            scallop: 0.,
+            feed: defaults.feed,
+            plunge_feed: defaults.plunge_feed,
+            start: None,
+            plunge: Plunge::Straight,
+            stay_down: true,
+        }),
+        OpKind::Thread => Operation::Thread(ThreadOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            entry_feeds: Default::default(),
+            points: resolved
+                .holes
+                .iter()
+                .map(|h| [h.center.x, h.center.y])
+                .collect(),
+            internal: matches!(
+                binding.recipe,
+                ExtractionRecipe::ThreadCylinders { internal: true }
+            ),
+            major_dia: resolved.holes[0].diameter,
+            pitch: 1.,
+            hand: Hand::Right,
+            z_top: resolved.heights.top,
+            z_bottom: resolved.heights.bottom,
+            climb: true,
+            passes: 1,
+            gradual: false,
+            spring_passes: 0,
+            drill_clearance: 0.,
+            blind_allowance: 0.,
+            feed: defaults.feed,
+            plunge_feed: defaults.plunge_feed,
+        }),
     };
+    if surface_recipe(&binding.recipe) {
+        binding.heights = document.operation_base_cutting_heights(&op);
+    }
     Ok((op, binding))
 }
 
@@ -565,6 +693,10 @@ pub(crate) fn resolve_document_checked(
                     .map_err(|e| format!("Operation {id}: {e}"))?;
             }
             let mut current_binding = binding.clone();
+            if surface_recipe(&binding.recipe) {
+                let cutting = document.operation_base_cutting_heights(operation);
+                current_binding.heights.bottom = current_binding.heights.top - cutting.depth();
+            }
             if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
                 current_binding.heights.top = stock_top(document);
             }
@@ -638,6 +770,55 @@ pub(crate) fn resolve_document_checked(
                     p.closed = true;
                     p.additional_chains.clear();
                     p.depth = depth;
+                }
+                (Operation::Chamfer(p), ExtractionRecipe::ChamferFaces) => {
+                    p.faces = input.chamfers.clone();
+                    p.chain = region()?.outer().clone();
+                    p.width = p.faces.first().ok_or("No modeled chamfer faces")?.width();
+                    p.top = input.heights.top;
+                    p.depth = depth;
+                }
+                (Operation::Chamfer(p), ExtractionRecipe::ChamferLoop) => {
+                    p.faces.clear();
+                    let path = input.profiles.first().ok_or("No chamfer rim")?;
+                    if p.chain != path.chain {
+                        p.side = path.side;
+                    }
+                    p.chain = path.chain.clone();
+                    p.closed = path.closed;
+                    if !p.closed {
+                        p.start = None;
+                        p.lead_overlap = 0.;
+                    }
+                    p.top = input.heights.top;
+                }
+                (Operation::Engrave(p), ExtractionRecipe::EngravePath) => {
+                    let path = input.profiles.first().ok_or("No engraving path")?;
+                    p.chain = path.chain.clone();
+                    p.closed = path.closed;
+                    p.top = input.heights.top;
+                    p.depth = depth;
+                    if !p.closed {
+                        p.start = None;
+                    }
+                }
+                (Operation::Carve(p), ExtractionRecipe::CarveRegion) => {
+                    p.boundary = region()?.outer().clone();
+                    p.islands = region()?.holes().to_vec();
+                    p.top = input.heights.top;
+                    p.depth = depth;
+                }
+                (Operation::Thread(p), ExtractionRecipe::ThreadCylinders { internal }) => {
+                    if p.internal != *internal {
+                        return Err("Thread type must match the selected bore or boss".into());
+                    }
+                    p.points = input
+                        .holes
+                        .iter()
+                        .map(|h| [h.center.x, h.center.y])
+                        .collect();
+                    p.z_top = input.heights.top;
+                    p.z_bottom = input.heights.bottom;
                 }
                 (Operation::Drill(p), ExtractionRecipe::DrillHoles) => {
                     let tool = document
@@ -715,6 +896,30 @@ pub(crate) fn mark_missing_bindings(state: &mut GeometryState) {
     }
 }
 
+pub(crate) fn selection_height_defaults(
+    document: &Document,
+    operation: &Operation,
+) -> OperationHeightSettings {
+    let cutting = document.operation_base_cutting_heights(operation);
+    let mut settings = OperationHeightSettings::default();
+    *settings.definition_mut(HeightPlaneKind::Top) =
+        HeightDefinition::new(HeightReference::SelectedContours, 0.);
+    *settings.definition_mut(HeightPlaneKind::Bottom) = HeightDefinition::new(
+        HeightReference::Plane(HeightPlaneKind::Top),
+        -cutting.depth(),
+    );
+    settings
+}
+
+pub(crate) fn surface_recipe(recipe: &ExtractionRecipe) -> bool {
+    matches!(
+        recipe,
+        ExtractionRecipe::ChamferLoop
+            | ExtractionRecipe::EngravePath
+            | ExtractionRecipe::CarveRegion
+    )
+}
+
 /// Inspector depth edits are explicit overrides while tool/feed/allowance edits
 /// preserve the geometry link. Depth values remain physical magnitudes.
 pub(crate) fn capture_height_override(
@@ -730,9 +935,7 @@ pub(crate) fn capture_height_override(
         return;
     };
     let operation = after;
-    let Some(after) = operation.legacy_cutting_heights(heights) else {
-        return;
-    };
+    let after = cam_model::legacy_cutting(operation, heights);
     let effective = binding.effective_heights();
     match after.top - before.top {
         delta if delta != 0.0 => {
@@ -746,7 +949,10 @@ pub(crate) fn capture_height_override(
         Operation::Profile(p) => (-before.bottom, p.depth),
         Operation::Drill(p) => (before.depth(), p.depth),
         Operation::Face(p) => (before.depth(), p.depth),
-        _ => return,
+        Operation::Engrave(p) => (before.depth(), p.depth),
+        Operation::Carve(p) => (before.depth(), p.depth),
+        Operation::Thread(p) => (before.depth(), p.z_top - p.z_bottom),
+        Operation::Chamfer(_) => return,
     };
     if after_depth != before_depth {
         binding.overrides.bottom = Some(binding.effective_heights().top - after_depth);
@@ -773,9 +979,13 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
         .iter_mut()
         .find(|op| op.id() == id)
         .ok_or("Missing operation")?;
-    *slot = operation;
+    *slot = operation.clone();
     let mut base = document.geometry.bindings[&id].clone();
     base.overrides = GeometryOverrides::default();
+    if surface_recipe(&base.recipe) {
+        let cutting = document.operation_base_cutting_heights(&operation);
+        base.heights.bottom = base.heights.top - cutting.depth();
+    }
     if matches!(base.recipe, ExtractionRecipe::FaceRegion) {
         base.heights.top = stock_top(document);
     }

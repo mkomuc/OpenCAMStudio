@@ -572,6 +572,15 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         .any(|s| matches!(s,cam_cldata::Step::Linear{to,..} if (to.z-37.).abs()<1e-8)));
     // Build independent explicit 2D geometry; do not call the CAD resolver.
     let mut planar = controller();
+    // Match the CAD stock top after translating this reference program by 40 mm.
+    planar.edit_stock(|s| {
+        *s = Stock::BoundingBox {
+            x_offset: 0.,
+            y_offset: 0.,
+            top: 0.,
+            thickness: 5.,
+        };
+    });
     let contour = |x0, x1, y0, y1| {
         Contour::new(vec![
             Point::new(x0, y0),
@@ -585,6 +594,8 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         tool: 1,
         work_offset: 1,
         spindle_rpm: 1000.,
+        tool_preset: None,
+        entry_feeds: Default::default(),
         boundary: contour(2., 18., 2., 18.),
         islands: vec![contour(8., 12., 8., 12.)],
         depth: 3.,
@@ -1167,16 +1178,13 @@ fn cad_multi_selection_is_homogeneous_and_rejections_preserve_every_reference() 
         .cad_operation_eligibility(OpKind::Pocket)
         .unwrap_err()
         .contains("stale"));
-    for kind in [
-        OpKind::Chamfer,
-        OpKind::Thread,
-        OpKind::Engrave,
-        OpKind::Carve,
-    ] {
+    assert!(app
+        .preview_cad_operation(OpKind::Carve, &app.cad_selection()[..1])
+        .is_ok());
+    for kind in [OpKind::Chamfer, OpKind::Thread, OpKind::Engrave] {
         assert!(app
             .preview_cad_operation(kind, &app.cad_selection()[..1])
-            .unwrap_err()
-            .contains("currently support"));
+            .is_err());
     }
 }
 
@@ -1268,13 +1276,14 @@ fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
         .unwrap();
     let before = app.document().clone();
     let revision = app.revision();
-    let mut staged_tool = *app
+    let mut staged_tool = app
         .document()
         .setup()
         .tools
         .iter()
         .find(|t| t.number == old_tool)
-        .unwrap();
+        .unwrap()
+        .clone();
     staged_tool.number = app
         .document()
         .setup()
@@ -1305,7 +1314,7 @@ fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
         .preview_operation_settings_with_geometry(
             draft.clone(),
             overrides.clone(),
-            vec![staged_tool],
+            vec![staged_tool.clone()],
             vec![new_bore.clone()],
         )
         .unwrap();
@@ -1330,7 +1339,7 @@ fn linked_drill_previews_staged_cutter_and_bore_then_commits_in_one_undo() {
     app.apply_operation_settings_with_geometry(
         draft,
         overrides,
-        vec![staged_tool],
+        vec![staged_tool.clone()],
         Some(vec![new_bore.clone()]),
     )
     .unwrap();
@@ -1480,4 +1489,301 @@ fn pocket_and_drill_ignore_unrelated_blends_but_reject_obstructed_approaches() {
             }
         }
     }
+}
+
+fn vbit(app: &mut AppController) -> u32 {
+    app.use_tool(Tool {
+        number: 20,
+        diameter: 6.,
+        length: 30.,
+        flute_length: 10.,
+        kind: ToolKind::VBit {
+            included_angle_deg: 90.,
+            tip_radius: 0.,
+        },
+        ..Default::default()
+    })
+}
+
+#[test]
+fn surface_operations_select_exact_geometry_at_the_placed_surface_and_reopen() {
+    for kind in [OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
+        let mut app = controller();
+        let floor = install_pocket(&mut app);
+        let wire = app.geometry_state().assets[0]
+            .topology
+            .faces
+            .iter()
+            .find(|f| f.id == floor.id)
+            .unwrap()
+            .loop_ids[0];
+        let geometry = if kind == OpKind::Carve {
+            floor
+        } else {
+            reference(wire, EntityKind::Loop)
+        };
+        app.place_cad_instance(
+            1,
+            RigidTransform {
+                translation: [5., 7., 10.],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let tool = vbit(&mut app);
+        let id = app
+            .create_cad_operation_with_tool(kind, vec![geometry.clone()], tool)
+            .unwrap();
+        match app.operation(id).unwrap() {
+            Operation::Chamfer(op) => {
+                assert_eq!(op.top, 7.);
+                assert_eq!(op.side, Side::Outside);
+            }
+            Operation::Engrave(op) => {
+                assert_eq!(op.top, 7.);
+                assert!(op.closed);
+                assert!((op.depth - 0.3).abs() < 1e-8);
+            }
+            Operation::Carve(op) => {
+                assert_eq!(op.top, 7.);
+                assert_eq!(op.islands.len(), 1);
+            }
+            _ => unreachable!(),
+        }
+        let heights = app.document().setup().height_settings[&id]
+            .resolve(app.document(), app.operation(id).unwrap())
+            .unwrap();
+        assert_eq!(heights.top, 7.);
+        assert!(heights.bottom < heights.top);
+        let outcome = app.run(&CancelToken::new());
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{kind:?}: {:?}",
+            outcome.diagnostics
+        );
+        assert!(!outcome.has_errors(), "{kind:?}: {:?}", outcome.diagnostics);
+        assert!(!outcome.program.is_empty());
+        let program = outcome.program.clone();
+        let path =
+            std::env::temp_dir().join(format!("surface-{kind:?}-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = controller();
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            reopened.geometry_state().bindings[&id].selected,
+            vec![geometry]
+        );
+        assert_eq!(reopened.run(&CancelToken::new()).program, program);
+    }
+}
+
+#[test]
+fn engraving_open_chain_replacement_preserves_parameters_and_chamfer_accepts_it() {
+    let mut app = controller();
+    let floor = install_pocket(&mut app);
+    let topology = &app.geometry_state().assets[0].topology;
+    let wire = topology
+        .faces
+        .iter()
+        .find(|f| f.id == floor.id)
+        .unwrap()
+        .loop_ids[0];
+    let edges: Vec<_> = topology
+        .loops
+        .iter()
+        .find(|w| w.id == wire)
+        .unwrap()
+        .edge_uses
+        .iter()
+        .take(2)
+        .map(|u| reference(u.edge_id, EntityKind::Edge))
+        .collect();
+    let tool = vbit(&mut app);
+    let id = app
+        .create_cad_operation_with_tool(
+            OpKind::Engrave,
+            vec![reference(wire, EntityKind::Loop)],
+            tool,
+        )
+        .unwrap();
+    let before = app.document().clone();
+    let mut operation = app.operation(id).unwrap().clone();
+    if let Operation::Engrave(op) = &mut operation {
+        op.feed = 245.;
+        op.depth = 0.6;
+    }
+    app.apply_operation_settings_with_geometry(operation, None, vec![], Some(edges.clone()))
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Engrave(op)) if !op.closed && op.chain.len() == 3 && op.feed == 245. && (op.depth - 0.6).abs() < 1e-8)
+    );
+    let chamfer = app.preview_cad_operation(OpKind::Chamfer, &edges).unwrap();
+    assert!(!chamfer.profiles[0].closed);
+    assert_eq!(chamfer.profiles[0].chain.len(), 3);
+    assert!(app.undo());
+    assert_eq!(app.document(), &before);
+}
+
+#[test]
+fn thread_selection_resolves_multiple_centres_and_keeps_the_nominal_diameter_editable() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let bottom = fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    let bores = vec![
+        reference(fixture.bore([5., 10.], 3., top, bottom), EntityKind::Face),
+        reference(fixture.bore([15., 10.], 3., top, bottom), EntityKind::Face),
+    ];
+    let state = fixture.state();
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let tool = app.use_tool(Tool {
+        number: 30,
+        diameter: 3.,
+        neck_diameter: 1.5,
+        flute_length: 12.,
+        length: 30.,
+        kind: ToolKind::ThreadMill { pitch: None },
+        ..Default::default()
+    });
+    let id = app
+        .create_cad_operation_with_tool(OpKind::Thread, bores.clone(), tool)
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Thread(op)) if op.points == vec![[5., 10.], [15., 10.]] && op.internal && op.z_top == 0. && op.z_bottom == -5. && op.major_dia == 6.)
+    );
+    let mut operation = app.operation(id).unwrap().clone();
+    if let Operation::Thread(op) = &mut operation {
+        op.major_dia = 6.8;
+        op.pitch = 0.8;
+    }
+    app.apply_operation_settings_with_geometry(
+        operation,
+        None,
+        vec![],
+        Some(vec![bores[1].clone()]),
+    )
+    .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Thread(op)) if op.points == vec![[15., 10.]] && op.major_dia == 6.8 && op.pitch == 0.8)
+    );
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    assert!(!result.has_errors(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn surface_selection_rejects_disconnected_nonplanar_and_stale_paths() {
+    let mut app = controller();
+    let floor = install_pocket(&mut app);
+    let topology = &app.geometry_state().assets[0].topology;
+    let wire = topology
+        .faces
+        .iter()
+        .find(|f| f.id == floor.id)
+        .unwrap()
+        .loop_ids[0];
+    let edges: Vec<_> = topology
+        .loops
+        .iter()
+        .find(|w| w.id == wire)
+        .unwrap()
+        .edge_uses
+        .iter()
+        .map(|u| reference(u.edge_id, EntityKind::Edge))
+        .collect();
+    assert!(app
+        .preview_cad_operation(OpKind::Engrave, &[edges[0].clone(), edges[2].clone()])
+        .unwrap_err()
+        .contains("connect"));
+    let vertical = topology
+        .edges
+        .iter()
+        .find(|e| matches!(e.curve, CadCurve::Line { start, end } if start[2] != end[2]))
+        .unwrap();
+    assert!(app
+        .preview_cad_operation(OpKind::Engrave, &[reference(vertical.id, EntityKind::Edge)])
+        .unwrap_err()
+        .contains("one plane"));
+    let mut stale = edges[0].clone();
+    stale.revision += 1;
+    assert!(app
+        .preview_cad_operation(OpKind::Engrave, &[stale])
+        .unwrap_err()
+        .contains("stale"));
+}
+
+#[test]
+fn external_thread_selects_a_boss_and_rejects_a_mismatched_operation_type() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let bottom = fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+    let cylinder = fixture.bore([10., 10.], 3., top, bottom);
+    for face in &mut fixture.t.faces {
+        if face.id == cylinder {
+            if let CadSurface::Cylinder { inward, .. } = &mut face.surface {
+                *inward = false;
+            }
+        } else {
+            // The circular rims bound the end caps of this solid cylinder.
+            face.loop_ids.remove(0);
+            for wire in &mut fixture.t.loops {
+                if face.loop_ids.contains(&wire.id) {
+                    wire.is_outer = true;
+                }
+            }
+        }
+    }
+    let state = fixture.state();
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let cylinder = reference(cylinder, EntityKind::Face);
+    let resolved = app
+        .preview_cad_operation(OpKind::Thread, std::slice::from_ref(&cylinder))
+        .unwrap();
+    assert_eq!(resolved.holes.len(), 1);
+    assert_eq!(resolved.holes[0].diameter, 6.);
+    let tool = app.use_tool(Tool {
+        number: 30,
+        diameter: 3.,
+        neck_diameter: 1.5,
+        flute_length: 12.,
+        length: 30.,
+        kind: ToolKind::ThreadMill { pitch: None },
+        ..Default::default()
+    });
+    let id = app
+        .create_cad_operation_with_tool(OpKind::Thread, vec![cylinder.clone()], tool)
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Thread(op)) if !op.internal && op.major_dia == 6.)
+    );
+    let before = app.document().clone();
+    let mut wrong_type = app.operation(id).unwrap().clone();
+    if let Operation::Thread(op) = &mut wrong_type {
+        op.internal = true;
+    }
+    assert!(app
+        .apply_operation_settings(wrong_type, None)
+        .unwrap_err()
+        .contains("must match"));
+    assert_eq!(app.document(), &before);
+    let outcome = app.run(&CancelToken::new());
+    assert_eq!(
+        outcome.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        outcome.diagnostics
+    );
 }

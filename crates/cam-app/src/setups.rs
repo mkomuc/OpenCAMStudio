@@ -501,6 +501,13 @@ impl AppController {
                             .into(),
                     );
                 }
+                let index = document
+                    .setup()
+                    .tools
+                    .iter()
+                    .position(|t| t.number == tool.number)
+                    .unwrap();
+                document.setup_mut().tools[index] = tool;
             } else {
                 document.setup_mut().tools.push(tool);
             }
@@ -512,7 +519,7 @@ impl AppController {
         {
             return Err("Operation refers to a missing tool".into());
         }
-        let before = old.legacy_cutting_heights(&document.setup().heights_for(id));
+        let before = Some(document.operation_base_cutting_heights(old));
         if let Some(heights) = safety_heights {
             heights.validate()?;
             document.setup_mut().height_settings.remove(&id);
@@ -581,7 +588,12 @@ impl AppController {
                 }
                 Some(recipe)
             } else {
-                None
+                let geometry = crate::cad_operations::geometry_for_setup(&document)?;
+                Some(crate::cad_operations::recipe(
+                    Self::operation_kind(&operation),
+                    &geometry,
+                    selected,
+                )?)
             };
             let binding = document
                 .geometry
@@ -643,6 +655,22 @@ impl AppController {
             .unwrap() = operation;
         if document.geometry.bindings.contains_key(&id) {
             crate::cad_operations::validate_binding_edit(&mut document, id)?;
+        }
+        if let Some(after @ Operation::Chamfer(_)) =
+            document.setup().operations.iter().find(|op| op.id() == id)
+        {
+            if matches!(old, Operation::Chamfer(_)) {
+                let previous =
+                    crate::cad_operations::selection_height_defaults(self.document(), old);
+                let defaults = crate::cad_operations::selection_height_defaults(&document, after);
+                if let Some(settings) = document.setup_mut().height_settings.get_mut(&id) {
+                    for plane in cam_model::HeightPlaneKind::ALL {
+                        if settings.definition(plane) == previous.definition(plane) {
+                            *settings.definition_mut(plane) = defaults.definition(plane).clone();
+                        }
+                    }
+                }
+            }
         }
         Ok(document)
     }
@@ -908,6 +936,8 @@ mod tests {
             peck: None,
             dwell: None,
             spindle_rpm: 1000.,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             feed: 100.,
         })

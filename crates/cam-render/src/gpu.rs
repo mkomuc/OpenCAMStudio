@@ -294,10 +294,12 @@ impl LineRenderer {
         let mut lines = Vec::new();
         let mut highlights = Vec::new();
         if vertices
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|segment| segment[0].width > 1.0)
         {
-            for segment in vertices.chunks_exact(2) {
+            for segment in vertices.as_chunks::<2>().0 {
                 if segment[0].width > 1.0 {
                     highlights.extend_from_slice(segment);
                 } else {
@@ -395,19 +397,33 @@ pub struct MeshRenderer {
 impl MeshRenderer {
     /// Create the renderer for a surface of the given `format`.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        Self::with_transparency(device, format, false)
+        Self::with_depth(device, format, false, mesh_depth())
+    }
+
+    /// Solid toolpath markers remain visible over the stock, like backplot lines.
+    pub fn new_overlay(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::with_depth(device, format, false, line_depth())
     }
 
     /// Blend a translucent mesh over opaque geometry without hiding that geometry
     /// in the depth buffer. Draw after opaque surfaces, with sorted triangles.
     pub fn new_transparent(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        Self::with_transparency(device, format, true)
+        Self::with_depth(
+            device,
+            format,
+            true,
+            wgpu::DepthStencilState {
+                depth_write_enabled: false,
+                ..mesh_depth()
+            },
+        )
     }
 
-    fn with_transparency(
+    fn with_depth(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         transparent: bool,
+        depth: wgpu::DepthStencilState,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cam-render mesh shader"),
@@ -466,14 +482,14 @@ impl MeshRenderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                // Open shells remain inspectable from either side, matching CPU picking.
-                cull_mode: None,
+                // Closed overlay cones have no depth writes; cull their rear faces
+                // so those faces cannot overpaint the visible side. CAD shells
+                // remain inspectable from either side, matching CPU picking.
+                cull_mode: (depth.depth_compare == wgpu::CompareFunction::Always)
+                    .then_some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                depth_write_enabled: !transparent,
-                ..mesh_depth()
-            }),
+            depth_stencil: Some(depth),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,

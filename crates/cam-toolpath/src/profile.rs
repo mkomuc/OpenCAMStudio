@@ -132,6 +132,9 @@ impl Strategy for ProfileStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if let Err(reason) = op.entry_feeds.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         if !op.additional_chains.is_empty() {
             if op.tabs.enabled || op.stepover > 0. {
                 return StrategyResult { diagnostics: vec![Diagnostic::error("Holding tabs and radial roughing require one closed profile chain; use separate operations")], ..Default::default() };
@@ -343,6 +346,7 @@ impl Strategy for ProfileStrategy {
                     plunge: op.plunge,
                     feed: op.feed,
                     plunge_feed: op.plunge_feed,
+                    entry_feeds: op.entry_feeds,
                     lead_overlap: op.lead_overlap,
                     lead_in: Lead::None,
                     lead_out: Lead::None,
@@ -518,6 +522,62 @@ impl Strategy for ProfileStrategy {
 }
 
 /// Open paths retain their endpoints and retract before returning to the start.
+/// Offset an open centreline to its left, preserving its endpoints and rejecting
+/// collapsed or self-intersecting paths. Shared by profiles and chamfers.
+pub(crate) fn offset_open_chain(source: &[Point], distance: f64) -> Result<Vec<Point>, String> {
+    if source.len() < 2
+        || source.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+        || !distance.is_finite()
+    {
+        return Err("an open path needs at least two finite points and a finite offset".into());
+    }
+    let mut tangents = Vec::new();
+    for pair in source.windows(2) {
+        let dx = pair[1].x - pair[0].x;
+        let dy = pair[1].y - pair[0].y;
+        let length = dx.hypot(dy);
+        if length < 1e-9 {
+            return Err("open chain contains a zero-length edge".into());
+        }
+        tangents.push([dx / length, dy / length]);
+    }
+    let mut points = Vec::new();
+    for (i, p) in source.iter().enumerate() {
+        let a = tangents[i.saturating_sub(1)];
+        let b = tangents[i.min(tangents.len() - 1)];
+        let denominator = 1. + a[0] * b[0] + a[1] * b[1];
+        if denominator < 1e-6 {
+            return Err("open chain doubles back; split it at the reversal".into());
+        }
+        let dx = -(a[1] + b[1]) * distance / denominator;
+        let dy = (a[0] + b[0]) * distance / denominator;
+        if dx.hypot(dy) > distance.abs().max(1e-9) * 10. {
+            return Err("open chain corner is too sharp for its tool offset".into());
+        }
+        points.push(Point::new(p.x + dx, p.y + dy));
+    }
+    // Offsets that cross themselves or reverse an edge cannot be machined as one chain.
+    for (i, pair) in points.windows(2).enumerate() {
+        let t = tangents[i];
+        if (pair[1].x - pair[0].x) * t[0] + (pair[1].y - pair[0].y) * t[1] <= 1e-9 {
+            return Err("tool offset collapses an open chain edge; use a smaller cutter".into());
+        }
+        for other in points.windows(2).skip(i + 2) {
+            let cross = |a: Point, b: Point, c: Point| {
+                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+            };
+            if cross(pair[0], pair[1], other[0]) * cross(pair[0], pair[1], other[1]) < 0.
+                && cross(other[0], other[1], pair[0]) * cross(other[0], other[1], pair[1]) < 0.
+            {
+                return Err(
+                    "tool offset intersects itself; split the chain or use a smaller cutter".into(),
+                );
+            }
+        }
+    }
+    Ok(points)
+}
+
 fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
     let fail = |message: &str| StrategyResult {
         diagnostics: vec![Diagnostic::error(format!("operation {}: {message}", op.id))],
@@ -558,51 +618,10 @@ fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken)
         Side::On => 0.,
     };
     let distance = sign * (radius + op.offset);
-    let source = op.chain.points();
-    let mut tangents = Vec::new();
-    for pair in source.windows(2) {
-        let dx = pair[1].x - pair[0].x;
-        let dy = pair[1].y - pair[0].y;
-        let length = dx.hypot(dy);
-        if length < 1e-9 {
-            return fail("open chain contains a zero-length edge");
-        }
-        tangents.push([dx / length, dy / length]);
-    }
-    let mut points = Vec::new();
-    for (i, p) in source.iter().enumerate() {
-        let a = tangents[i.saturating_sub(1)];
-        let b = tangents[i.min(tangents.len() - 1)];
-        let denominator = 1. + a[0] * b[0] + a[1] * b[1];
-        if denominator < 1e-6 {
-            return fail("open chain doubles back; split it at the reversal");
-        }
-        let dx = -(a[1] + b[1]) * distance / denominator;
-        let dy = (a[0] + b[0]) * distance / denominator;
-        if dx.hypot(dy) > distance.abs().max(1e-9) * 10. {
-            return fail("open chain corner is too sharp for its tool offset");
-        }
-        points.push(Point::new(p.x + dx, p.y + dy));
-    }
-    // Offsets that cross themselves or reverse an edge cannot be machined as one chain.
-    for (i, pair) in points.windows(2).enumerate() {
-        let t = tangents[i];
-        if (pair[1].x - pair[0].x) * t[0] + (pair[1].y - pair[0].y) * t[1] <= 1e-9 {
-            return fail("tool offset collapses an open chain edge; use a smaller cutter");
-        }
-        for other in points.windows(2).skip(i + 2) {
-            let cross = |a: Point, b: Point, c: Point| {
-                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-            };
-            if cross(pair[0], pair[1], other[0]) * cross(pair[0], pair[1], other[1]) < 0.
-                && cross(other[0], other[1], pair[0]) * cross(other[0], other[1], pair[1]) < 0.
-            {
-                return fail(
-                    "tool offset intersects itself; split the chain or use a smaller cutter",
-                );
-            }
-        }
-    }
+    let mut points = match offset_open_chain(op.chain.points(), distance) {
+        Ok(points) => points,
+        Err(error) => return fail(&error),
+    };
     let material_right = op.clearing.climb == (env.spindle == SpindleDir::Cw);
     let reverse = match op.side {
         Side::Outside | Side::On => !material_right,
@@ -698,6 +717,7 @@ fn roughing_region(op: &ProfileOp, stock: Option<([f64; 2], [f64; 2])>) -> Optio
 
 /// Emit approach, stepdown passes, and retract for one closed tool-path loop.
 /// When `comp` is set, the cut is bracketed by controller cutter compensation.
+#[allow(clippy::too_many_arguments)]
 fn emit_loop(
     prog: &mut Program,
     pts: &[cam_geo::Point],
@@ -776,6 +796,7 @@ fn emit_loop(
 /// to the entry footprint (off the contour when there is a lead-in), rapid down
 /// through the already-cut air to the previous level, enter Z per the plunge
 /// strategy, lead onto the contour, cut the loop, lead off, and retract.
+#[allow(clippy::too_many_arguments)]
 fn emit_loop_rich(
     prog: &mut Program,
     pts: &[Point],
@@ -915,9 +936,9 @@ fn emit_loop_rich(
             // lead and contour can merge their arcs and cut below the stock top
             // before the lead reaches the contour.
             emit_descending_path(
-                prog, &path[..=lead_end], *top, ramp_top, op.feed, plunge_tag,
+                prog, &path[..=lead_end], *top, ramp_top, op.entry_feeds.ramp(op.feed), plunge_tag,
             );
-            emit_descending_path(prog, &path[lead_end..], ramp_top, z, op.feed, plunge_tag);
+            emit_descending_path(prog, &path[lead_end..], ramp_top, z, op.entry_feeds.ramp(op.feed), plunge_tag);
         } else {
             emit_plunge(
                 prog,
@@ -928,12 +949,12 @@ fn emit_loop_rich(
                 z,
                 op.plunge,
                 op.plunge_feed,
-                op.feed,
+                op.entry_feeds.ramp(op.feed),
                 plunge_tag,
             );
 
             // Lead onto the contour at depth: entry → start.
-            crate::leads::emit_lead(prog, entry, start, start, out, lead_in, z, op.feed, lead);
+            crate::leads::emit_lead(prog, entry, start, start, out, lead_in, z, op.entry_feeds.lead_in(op.feed), lead);
         }
 
         if let Some(c) = comp {
@@ -950,7 +971,7 @@ fn emit_loop_rich(
 
         // Lead off the contour at depth — **flat**. Only the lead-in descends.
         crate::leads::emit_lead(
-            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.feed, lead,
+            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.entry_feeds.lead_out(op.feed), Tag::new(op.id, MoveKind::LeadOut),
         );
 
         // Lift only when the next pass has somewhere else to start from; the final
@@ -2035,6 +2056,8 @@ mod tests {
             additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             clearing: cam_model::Clearing::default(),
             id: 0,
@@ -2086,7 +2109,7 @@ mod tests {
             match s {
                 Step::Rapid { to, .. } | Step::Linear { to, .. } => pos = Point::new(to.x, to.y),
                 Step::Arc { end, tag, .. } => {
-                    if tag.kind == MoveKind::LeadIn {
+                    if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) {
                         arcs.push((pos, Point::new(end.x, end.y)));
                     }
                     pos = Point::new(end.x, end.y);
@@ -2163,6 +2186,8 @@ mod tests {
             additional_chains: Vec::new(),
             tabs: Default::default(),
             spindle_rpm: 0.0,
+            tool_preset: None,
+            entry_feeds: Default::default(),
             work_offset: 1,
             clearing: cam_model::Clearing {
                 engagement,
@@ -2883,7 +2908,7 @@ mod tests {
         let r = run_outside_rough(op);
         for st in r.program.steps() {
             if let Step::Arc { end, tag, .. } = st {
-                if tag.kind == MoveKind::LeadIn {
+                if tag.kind == MoveKind::LeadOut {
                     assert!(
                         (end.z + 1.0).abs() < 1e-9,
                         "a lead arc ended at {} — the lead-out must stay at depth",

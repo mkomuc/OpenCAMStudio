@@ -45,6 +45,8 @@ pub struct SurfaceMesh {
     /// Per-vertex material removal flag. Original stock faces remain false;
     /// newly exposed tops, slopes and internal cut walls are true.
     pub machined: Vec<bool>,
+    /// Operation that exposed each surface vertex; original faces have no owner.
+    pub operations: Vec<Option<u32>>,
     pub indices: Vec<u32>,
 }
 
@@ -62,6 +64,15 @@ fn tri_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     [n[0] / len, n[1] / len, n[2] / len]
 }
 
+/// A former surface, retained only when a different operation cuts it deeper.
+/// The linked layers let vertical walls keep the ownership of their upper bands.
+#[derive(Clone, Copy, Debug)]
+struct CutLayer {
+    height: f32,
+    operation: Option<u32>,
+    previous: u32,
+}
+
 /// A grid of remaining-stock heights.
 #[derive(Clone, Debug)]
 pub struct Heightfield {
@@ -72,9 +83,11 @@ pub struct Heightfield {
     ny: usize,
     top: f32,
     z: Vec<f32>,
-    // Winning analytic cutter at each sample, used only to recover sub-cell walls.
+    // Winning cutter at each sample supplies contour geometry and operation ownership.
     winners: Vec<u32>,
     cuts: Vec<Sweep>,
+    previous_layers: Vec<u32>,
+    layers: Vec<CutLayer>,
 }
 
 impl Heightfield {
@@ -93,6 +106,8 @@ impl Heightfield {
             z: vec![top as f32; nx * ny],
             winners: vec![u32::MAX; nx * ny],
             cuts: Vec::new(),
+            previous_layers: vec![u32::MAX; nx * ny],
+            layers: Vec::new(),
         }
     }
 
@@ -101,7 +116,9 @@ impl Heightfield {
     }
 
     pub(crate) fn storage_bytes(&self) -> usize {
-        self.z.len() * 8 + self.cuts.len() * std::mem::size_of::<Sweep>()
+        self.z.len() * 12
+            + self.cuts.len() * std::mem::size_of::<Sweep>()
+            + self.layers.len() * std::mem::size_of::<CutLayer>()
     }
 
     /// Grid dimensions (columns, rows).
@@ -137,7 +154,7 @@ impl Heightfield {
     /// `offset` at its radial distance from the axis (so a ball mill leaves a
     /// rounded floor, a V mill a groove, and a flat mill a flat floor).
     pub fn cut_segment_profile(&mut self, a: [f64; 3], b: [f64; 3], tool: &ToolProfile) {
-        self.cut_segment_profile_controlled(a, b, tool, &|| false);
+        self.cut_segment_profile_controlled(a, b, tool, None, &|| false);
     }
 
     pub(crate) fn cut_segment_profile_controlled(
@@ -145,6 +162,7 @@ impl Heightfield {
         a: [f64; 3],
         b: [f64; 3],
         tool: &ToolProfile,
+        operation: Option<u32>,
         cancelled: &dyn Fn() -> bool,
     ) {
         let radius = tool.radius;
@@ -156,7 +174,8 @@ impl Heightfield {
         {
             return;
         }
-        let sweep = Sweep::new(a, b, *tool);
+        let mut sweep = Sweep::new(a, b, *tool);
+        sweep.operation = operation;
         let id = self.cuts.len() as u32;
         self.cuts.push(sweep);
         let (iy0, iy1) = self.index_range(a[1].min(b[1]) - radius, a[1].max(b[1]) + radius, 1);
@@ -177,12 +196,27 @@ impl Heightfield {
                     let bottom = sweep.bottom(t, dist2) as f32;
                     let index = iy * self.nx + ix;
                     if bottom < self.z[index] {
+                        let previous_op = self.operation_at(ix, iy);
+                        if self.z[index] < self.top && previous_op != operation {
+                            let layer = self.layers.len() as u32;
+                            self.layers.push(CutLayer {
+                                height: self.z[index],
+                                operation: previous_op,
+                                previous: self.previous_layers[index],
+                            });
+                            self.previous_layers[index] = layer;
+                        }
                         self.z[index] = bottom;
                         self.winners[index] = id;
                     }
                 }
             }
         }
+    }
+
+    fn operation_at(&self, x: usize, y: usize) -> Option<u32> {
+        let winner = self.winners[y * self.nx + x];
+        self.cuts.get(winner as usize).and_then(|cut| cut.operation)
     }
 
     /// The greatest remaining-stock height within `radius` of the swept XY path
@@ -387,6 +421,9 @@ impl Heightfield {
             positions,
             normals,
             machined: self.z.iter().map(|&z| z < self.top).collect(),
+            operations: (0..self.ny)
+                .flat_map(|y| (0..self.nx).map(move |x| self.operation_at(x, y)))
+                .collect(),
             indices,
         }
     }

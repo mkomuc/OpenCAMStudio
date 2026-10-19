@@ -553,6 +553,12 @@ impl App {
             viewport.cad_silhouette |=
                 self.profile_selection_mode == ProfileSelectionMode::Silhouette;
         }
+        if matches!(
+            viewport.cad_operation_kind,
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+        ) {
+            viewport.cad_silhouette = false;
+        }
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
         }
@@ -767,6 +773,8 @@ mod tests {
                     peck: Some(1.),
                     dwell: Some(0.2),
                     spindle_rpm: 1000.,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
                     work_offset: 1,
                     feed: 100.,
                 }));
@@ -899,11 +907,17 @@ mod tests {
                 peck: None,
                 dwell: None,
                 spindle_rpm: 1000.,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: 100.,
             }));
         app.controller.run(&cam_toolpath::CancelToken::new());
         app.show_stock = true;
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!()
+        };
+        app.focus_ops.insert(id);
         let simulated = app.machining_viewport();
         let outcome = app.controller.outcome().unwrap();
         assert_eq!(
@@ -917,12 +931,12 @@ mod tests {
         assert!(!simulated.transparent_stock_indices.is_empty());
         assert!(outcome.stock_machined.iter().any(|&cut| cut));
         assert!(outcome.stock_machined.iter().any(|&cut| !cut));
-        for (vertex, &cut) in simulated
+        for (vertex, owner) in simulated
             .transparent_stock_vertices
             .iter()
-            .zip(&outcome.stock_machined)
+            .zip(&outcome.stock_operations)
         {
-            let expected = if cut {
+            let expected = if *owner == Some(id) {
                 [0.8, 0.3, 0.1, 0.25]
             } else {
                 [0.55, 0.58, 0.63, 0.25]
@@ -932,14 +946,92 @@ mod tests {
         app.settings.view.transparent_stock = false;
         app.settings.view.stock_color = [0.2, 0.65, 0.3];
         let opaque = app.machining_viewport();
-        for (vertex, &cut) in opaque.mesh_vertices.iter().zip(&outcome.stock_machined) {
-            let expected = if cut {
+        for (vertex, owner) in opaque.mesh_vertices.iter().zip(&outcome.stock_operations) {
+            let expected = if *owner == Some(id) {
                 [0.2, 0.65, 0.3, 1.0]
             } else {
                 [0.55, 0.58, 0.63, 1.0]
             };
             assert_eq!(vertex.color, expected);
         }
+    }
+
+    #[test]
+    fn stock_highlights_follow_selected_operations_and_hidden_paths() {
+        let mut app = picking_app();
+        app.end_setup_draft();
+        app.show_origin = false;
+        app.show_stock = true;
+        app.settings.view.transparent_stock = false;
+        app.settings.view.stock_color = [0.1, 0.9, 0.2];
+        let mut ids = Vec::new();
+        for x in [10., 25.] {
+            app.controller
+                .add_operation(Operation::Drill(cam_model::DrillOp {
+                    id: 0,
+                    tool: 1,
+                    points: vec![[x, 10.]],
+                    depth: 2.,
+                    start_offset: 0.,
+                    peck: None,
+                    dwell: None,
+                    spindle_rpm: 1000.,
+                    tool_preset: None,
+                    entry_feeds: Default::default(),
+                    work_offset: 1,
+                    feed: 100.,
+                }));
+            let Selection::Operation(id) = app.controller.selection() else {
+                panic!()
+            };
+            ids.push(id);
+        }
+        app.controller.run(&cam_toolpath::CancelToken::new());
+        let outcome = app.controller.outcome().unwrap().clone();
+        assert!(ids
+            .iter()
+            .all(|id| outcome.stock_operations.contains(&Some(*id))));
+        assert!(
+            outcome
+                .stock_operations
+                .iter()
+                .flatten()
+                .any(|op| !ids.contains(op)),
+            "the setup also contains an earlier, unselected operation"
+        );
+        for &selected in &ids {
+            app.clear_browser_selection();
+            let _ = app.update(Message::ClickOp(selected));
+            let viewport = app.machining_viewport();
+            assert_eq!(viewport.mesh_indices.as_slice(), outcome.stock_indices);
+            assert_eq!(viewport.path_cones.len(), 2);
+            assert!(viewport.path_cones.iter().all(|cone| cone.op == selected));
+            for (vertex, owner) in viewport.mesh_vertices.iter().zip(&outcome.stock_operations) {
+                let expected = if *owner == Some(selected) {
+                    [0.1, 0.9, 0.2, 1.]
+                } else {
+                    [0.55, 0.58, 0.63, 1.]
+                };
+                assert_eq!(vertex.color, expected);
+            }
+        }
+        app.modifiers = iced::keyboard::Modifiers::COMMAND;
+        let _ = app.update(Message::ClickOp(ids[0]));
+        let both = app.machining_viewport();
+        assert_eq!(both.path_cones.len(), 4);
+        for (vertex, owner) in both.mesh_vertices.iter().zip(&outcome.stock_operations) {
+            assert_eq!(
+                vertex.color == [0.1, 0.9, 0.2, 1.],
+                owner.is_some_and(|op| ids.contains(&op))
+            );
+        }
+        app.hidden_ops.extend(ids);
+        let hidden = app.machining_viewport();
+        assert!(hidden.path_cones.is_empty());
+        assert!(hidden
+            .mesh_vertices
+            .iter()
+            .all(|v| v.color == [0.55, 0.58, 0.63, 1.]));
     }
 
     #[test]
@@ -1225,16 +1317,16 @@ mod tests {
     fn dirty_tool_cannot_be_abandoned_by_workspace_or_library_navigation() {
         let (mut app, _) = App::new();
         app.switch_workspace(Workspace::Tools);
-        let original = app.library.tools[app.lib_sel];
+        let original = app.library.tools[app.lib_sel].clone();
         app.tool_edit.as_mut().unwrap().length += 1.;
         app.switch_workspace(Workspace::Machining);
         assert_eq!(app.workspace, Workspace::Tools);
         let _ = app.update(Message::SelectLibraryTool(
             (app.lib_sel + 1) % app.library.tools.len(),
         ));
-        assert_eq!(app.tool_edit.unwrap().length, original.length + 1.);
+        assert_eq!(app.tool_edit.clone().unwrap().length, original.length + 1.);
         let _ = app.update(Message::CancelToolDraft);
-        assert_eq!(app.tool_edit.unwrap(), original);
+        assert_eq!(app.tool_edit.clone().unwrap(), original);
         app.switch_workspace(Workspace::Machining);
         assert_eq!(app.workspace, Workspace::Machining);
     }

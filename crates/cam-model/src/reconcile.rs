@@ -257,17 +257,17 @@ mod tests {
         assert_eq!(a.identity(), b.identity(), "same tool, different number ⇒ same id");
 
         // Differing flutes, length, diameter, or kind ⇒ different identity.
-        let mut c = a;
+        let mut c = a.clone();
         c.flutes = 3;
         assert_ne!(a.identity(), c.identity(), "flutes count");
-        let mut d = a;
+        let mut d = a.clone();
         d.length = 45.0;
         assert_ne!(a.identity(), d.identity(), "overall length (reach)");
         assert_ne!(a.identity(), t(1, 10.0, ToolKind::EndMill).identity(), "diameter");
         assert_ne!(a.identity(), t(1, 12.0, ToolKind::BallMill).identity(), "kind");
 
         // Cutting direction is a physical property, so it distinguishes tools too.
-        let mut up = a;
+        let mut up = a.clone();
         up.cutting_direction = CutDir::Up;
         assert_ne!(a.identity(), up.identity(), "up-cut vs down-cut");
     }
@@ -366,6 +366,8 @@ mod tests {
         let mk_drill = |id: u32, tool: u32| {
             Operation::Drill(DrillOp {
                 spindle_rpm: 0.0,
+                tool_preset: None,
+                entry_feeds: Default::default(),
                 work_offset: 1,
                 id,
                 tool,
@@ -381,6 +383,7 @@ mod tests {
             id: 0,
             frame: Default::default(),
             material: String::new(),
+            material_id: None,
             model_instances: Vec::new(),
             program_name: String::new(),
             name: "s".into(),
@@ -404,11 +407,24 @@ mod tests {
         let rep = reconcile_tool_numbers(&mut setup, &shop);
 
         // Tool #7 (⌀12) became #4; the ⌀8 that was #4 moved off it.
-        let dia_of = |num: u32| setup.tools.iter().find(|t| t.number == num).map(|t| t.diameter);
+        let dia_of = |num: u32| {
+            setup
+                .tools
+                .iter()
+                .find(|t| t.number == num)
+                .map(|t| t.diameter)
+        };
         assert_eq!(dia_of(4), Some(12.0), "shop #4 is now the ⌀12 tool");
         assert!(setup.tools.iter().all(|t| t.number != 7), "old #7 is gone");
         // Op that cut with old #7 now references #4; op that cut with old #4 follows it.
-        let op_tool = |id: u32| setup.operations.iter().find(|o| o.id() == id).unwrap().tool();
+        let op_tool = |id: u32| {
+            setup
+                .operations
+                .iter()
+                .find(|o| o.id() == id)
+                .unwrap()
+                .tool()
+        };
         assert_eq!(op_tool(1), 4, "op on the ⌀12 tool points at shop #4");
         let moved = rep.local_renumbered[0].1;
         assert_eq!(op_tool(2), moved, "op on the ⌀8 follows it to its new number");
