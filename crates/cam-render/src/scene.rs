@@ -201,20 +201,75 @@ impl Scene {
         let mut scene = Scene::new();
         let mut cur: Option<Point3> = None;
         let mut previous_cone_role = None;
+        let mut approach_top: Option<[f32; 3]> = None;
+        let mut pending_exit_cone: Option<usize> = None;
         for step in program.steps() {
             if cancelled() {
                 return None;
             }
             match step {
-                Step::Rapid { to, tag } | Step::Linear { to, tag, .. } => {
+                Step::Rapid { to, tag } => {
+                    if tag.kind == MoveKind::Link {
+                        for point in cur.into_iter().map(point3_f32).chain([point3_f32(*to)]) {
+                            if approach_top.is_none_or(|top| point[2] >= top[2]) {
+                                approach_top = Some(point);
+                            }
+                        }
+                    }
                     let first_strip = scene.strips.len();
                     push_segment(&mut scene, cur, *to, tag.kind, tag.op_id);
+                    let cone_count = scene.path_cones.len();
                     scene.mark_path_motion(
                         tag.kind,
                         tag.op_id,
                         first_strip,
                         &mut previous_cone_role,
                     );
+                    if tag.kind == MoveKind::Retract {
+                        if let Some(index) = pending_exit_cone.take() {
+                            scene.path_cones[index].at = point3_f32(*to);
+                        } else if scene.path_cones.len() > cone_count {
+                            scene.path_cones.last_mut().unwrap().at = point3_f32(*to);
+                        }
+                    }
+                    if scene.path_cones.len() > cone_count {
+                        let index = scene.path_cones.len() - 1;
+                        match tag.kind {
+                            MoveKind::Plunge | MoveKind::LeadIn => {
+                                if let Some(top) = approach_top.take() {
+                                    scene.path_cones[index].at = top;
+                                }
+                                pending_exit_cone = None;
+                            }
+                            MoveKind::LeadOut => pending_exit_cone = Some(index),
+                            _ => {}
+                        }
+                    }
+                    cur = Some(*to);
+                }
+                Step::Linear { to, tag, .. } => {
+                    let first_strip = scene.strips.len();
+                    push_segment(&mut scene, cur, *to, tag.kind, tag.op_id);
+                    let cone_count = scene.path_cones.len();
+                    scene.mark_path_motion(
+                        tag.kind,
+                        tag.op_id,
+                        first_strip,
+                        &mut previous_cone_role,
+                    );
+                    if scene.path_cones.len() > cone_count {
+                        let index = scene.path_cones.len() - 1;
+                        match tag.kind {
+                            MoveKind::Plunge | MoveKind::LeadIn => {
+                                if let Some(top) = approach_top.take() {
+                                    scene.path_cones[index].at = top;
+                                }
+                                pending_exit_cone = None;
+                            }
+                            MoveKind::LeadOut => pending_exit_cone = Some(index),
+                            _ => {}
+                        }
+                    }
                     cur = Some(*to);
                 }
                 Step::Arc {
@@ -227,12 +282,31 @@ impl Scene {
                     if let Some(start) = cur {
                         let first_strip = scene.strips.len();
                         push_arc(&mut scene, start, *end, *center, *dir, tag.kind, tag.op_id);
+                        let cone_count = scene.path_cones.len();
                         scene.mark_path_motion(
                             tag.kind,
                             tag.op_id,
                             first_strip,
                             &mut previous_cone_role,
                         );
+                        if scene.path_cones.len() > cone_count {
+                            let index = scene.path_cones.len() - 1;
+                            match tag.kind {
+                                MoveKind::Plunge | MoveKind::LeadIn => {
+                                    if let Some(top) = approach_top.take() {
+                                        scene.path_cones[index].at = top;
+                                    }
+                                    pending_exit_cone = None;
+                                }
+                                MoveKind::LeadOut => pending_exit_cone = Some(index),
+                                _ => {}
+                            }
+                        }
+                        if tag.kind == MoveKind::Retract {
+                            if let Some(index) = pending_exit_cone {
+                                scene.path_cones[index].at = point3_f32(*end);
+                            }
+                        }
                     }
                     cur = Some(*end);
                 }
@@ -251,12 +325,15 @@ impl Scene {
                             (cycle.z_top, cycle.depth, PATH_IN),
                             (cycle.depth, cycle.retract, PATH_OUT),
                         ] {
-                            if let Some(cone) = PathCone::on_segment(
-                                [x as f32, y as f32, a as f32],
-                                [x as f32, y as f32, b as f32],
+                            let start = [x as f32, y as f32, a as f32];
+                            let end = [x as f32, y as f32, b as f32];
+                            if let Some(mut cone) = PathCone::on_segment(
+                                start,
+                                end,
                                 color,
                                 cycle.tag.op_id,
                             ) {
+                                cone.at = if color == PATH_IN { start } else { end };
                                 scene.path_cones.push(cone);
                             }
                         }
@@ -328,7 +405,15 @@ impl Scene {
                     } else {
                         PATH_IN
                     };
-                    if let Some(cone) = PathCone::on_segment(pair[0], pair[1], color, op) {
+                    if let Some(mut cone) = PathCone::on_segment(pair[0], pair[1], color, op) {
+                        // Entry markers sit at the start of the plunge/lead-in.
+                        // Exit markers sit where the lead-out ends or the retract
+                        // rapid begins, so they meet the path at its rapid boundary.
+                        cone.at = if matches!(kind, MoveKind::LeadOut | MoveKind::Retract) {
+                            pair[1]
+                        } else {
+                            pair[0]
+                        };
                         self.path_cones.push(cone);
                         *previous = role;
                     }
@@ -574,6 +659,10 @@ fn push_segment(scene: &mut Scene, from: Option<Point3>, to: Point3, kind: MoveK
             dashed_for(kind),
         );
     }
+}
+
+fn point3_f32(point: Point3) -> [f32; 3] {
+    [point.x as f32, point.y as f32, point.z as f32]
 }
 
 #[allow(clippy::too_many_arguments)]

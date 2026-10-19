@@ -45,6 +45,16 @@ pub fn path_cone_mesh(cones: &[PathCone], height: f32) -> (Vec<MeshVertex>, Vec<
     };
     for cone in cones {
         let d = cone.direction;
+        let at = if cone.color == PATH_OUT {
+            cones
+                .iter()
+                .find(|other| other.color == PATH_IN && other.at == cone.at)
+                .map_or(cone.at, |entry| {
+                    std::array::from_fn(|i| cone.at[i] + entry.direction[i] * height * 1.75)
+                })
+        } else {
+            cone.at
+        };
         let axis = if d[2].abs() < 0.9 {
             [0., 0., 1.]
         } else {
@@ -55,8 +65,8 @@ pub fn path_cone_mesh(cones: &[PathCone], height: f32) -> (Vec<MeshVertex>, Vec<
         let u = u.map(|v| v / len);
         let v = cross(d, u);
         let radius = height * 0.3;
-        let tip = std::array::from_fn(|i| cone.at[i] + d[i] * height * 0.5);
-        let base: [f32; 3] = std::array::from_fn(|i| cone.at[i] - d[i] * height * 0.5);
+        let tip = std::array::from_fn(|i| at[i] + d[i] * height * 0.5);
+        let base: [f32; 3] = std::array::from_fn(|i| at[i] - d[i] * height * 0.5);
         for sector in 0..SECTORS {
             let radial = [sector, sector + 1].map(|s| {
                 let (sin, cos) = (s as f32 * std::f32::consts::TAU / SECTORS as f32).sin_cos();
