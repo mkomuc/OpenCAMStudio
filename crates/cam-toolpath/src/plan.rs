@@ -1480,6 +1480,8 @@ mod tests {
                 cooling,
                 ends_with: Some(2),
                 datum: 1,
+                pattern_id: None,
+                instance_index: None,
             };
             let mut program = Program::new();
             emit_instance(
