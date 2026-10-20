@@ -17,6 +17,7 @@
 //!   `cdylib` plugin ABI later is cheap.
 
 mod carve;
+mod adaptive_strategy;
 mod chamfer;
 mod clearing;
 mod clearsim;
@@ -43,6 +44,7 @@ use cam_model::{Heights, Tool};
 
 pub use cache::{CacheStats, OperationCache};
 pub use carve::{carve_shape, CarveShape, CarveStrategy};
+pub use adaptive_strategy::AdaptiveStrategy;
 pub use chamfer::ChamferStrategy;
 pub use drill::DrillStrategy;
 pub use engrave::EngraveStrategy;

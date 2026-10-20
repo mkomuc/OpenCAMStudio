@@ -607,6 +607,13 @@ mod tests {
             .controller
             .create_cad_operation(OpKind::Profile, vec![reference])
             .unwrap();
+        // Exercise the legacy binding-backed profile path; named selections
+        // intentionally resolve their own entries instead of this binding.
+        app.controller.edit_operation(id, |operation| {
+            if let Operation::Profile(profile) = operation {
+                profile.selections = None;
+            }
+        });
         app.begin_operation_draft(id);
         let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
         let _ = app.update(Message::ProfileTabsEnabled(true));
@@ -710,6 +717,7 @@ mod tests {
         // Silhouettes are selected on setup XY, even when the body is elevated.
         binding.selected[0].kind = EntityKind::Silhouette;
         binding.selected[0].id = 1;
+        binding.recipe = cam_model::ExtractionRecipe::ProfileSilhouette;
         app.operation_binding_preview = Some(binding);
         let silhouette = app.profile_tab_overlay(camera, 0.).unwrap();
         assert_eq!(silhouette.z, 0.);

@@ -38,6 +38,9 @@ impl App {
     pub(super) fn clear_browser_selection(&mut self) {
         self.simulation = None;
         self.pending_simulation = None;
+        self.cad_filter_explicit = false;
+        self.geometry_additive = false;
+        self.geometry_auto_pick = false;
         self.end_setup_draft();
         self.operation_draft = None;
         self.operation_tools.clear();

@@ -12,6 +12,7 @@ repository.workspace = true
 cam-geo = { path = "../cam-geo" }
 cam-cldata = { path = "../cam-cldata" }
 cam-model = { path = "../cam-model" }
+cam-geometry3d = { path = "../cam-geometry3d" }
 
 [dev-dependencies]
 cam-post = { path = "../cam-post" }

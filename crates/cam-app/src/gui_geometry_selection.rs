@@ -33,9 +33,9 @@ pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
         .iter()
         .map(|entity| {
             if entity.kind == EntityKind::Silhouette {
-                format!("XY silhouette · Body {}", entity.body_id)
+                format!("XY silhouette · Instance {} · Body {}", entity.instance_id, entity.body_id)
             } else {
-                format!("{:?} {} · Body {}", entity.kind, entity.id, entity.body_id)
+                format!("{:?} {} · Instance {} · Body {}", entity.kind, entity.id, entity.instance_id, entity.body_id)
             }
         })
         .collect()
@@ -62,6 +62,7 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
         Operation::Thread(op) => (0..op.points.len())
             .map(|i| format!("Thread centre {}", i + 1))
             .collect(),
+        Operation::Adaptive(_) => vec!["Machining geometry".into()],
         Operation::Pocket(op) => std::iter::once("Boundary".into())
             .chain((0..op.islands.len()).map(|i| format!("Island {}", i + 1)))
             .collect(),
@@ -185,7 +186,7 @@ impl App {
         if self.profile_geometry_active() {
             return self.profile_geometry_collection();
         }
-        if let Some(kind @ (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)) =
+        if let Some(kind @ (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive)) =
             self.geometry_operation_kind()
         {
             return self.operation_geometry_collection(kind, labels);
@@ -407,7 +408,12 @@ impl App {
             } else {
                 selected.clear();
             }
-            if let Err(error) = self.controller.try_set_cad_selection(selected) {
+            let result = if self.geometry_operation_kind() == Some(OpKind::Adaptive) {
+                self.controller.try_set_adaptive_cad_selection(selected)
+            } else {
+                self.controller.try_set_cad_selection(selected)
+            };
+            if let Err(error) = result {
                 self.status = error;
             }
         } else if self.controller.pending_op().is_some() {

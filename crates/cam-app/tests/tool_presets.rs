@@ -92,6 +92,7 @@ fn all_operation_kinds_apply_presets_and_allow_independent_values() {
                 assert_eq!(o.stepdown, 0.75);
             }
             Operation::Carve(o) => assert_eq!(o.feed, 600.),
+            Operation::Adaptive(o) => assert_eq!(o.params.feed, 600.),
         }
         op.apply_tool_preset(&preset(2, Some(8), 250.)).unwrap();
         op.set_spindle_rpm(5000.); // A per-operation override does not mutate the baseline.

@@ -181,6 +181,15 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
+        Operation::Adaptive(_) => vec![
+            Field::AdaptiveTolerance,
+            Field::AdaptiveOptimalLoad,
+            Field::Stepdown,
+            Field::AdaptiveFineStepdown,
+            Field::SpindleRpm,
+            Field::Feed,
+            Field::PlungeFeed,
+        ],
         Operation::Thread(t) => {
             let mut fields = vec![
                 Field::MajorDia,
@@ -203,7 +212,9 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             fields
         }
     };
-    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Carve(_)) {
+    if matches!(op, Operation::Profile(p) if p.closed)
+        || matches!(op, Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_))
+    {
         fields.push(Field::RampFeed);
     }
     if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Chamfer(_) | Operation::Thread(_))

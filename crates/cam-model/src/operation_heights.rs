@@ -415,6 +415,18 @@ pub fn legacy_cutting(op: &Operation, h: &Heights) -> CuttingHeights {
             top: o.top,
             bottom: o.top - o.depth,
         },
+        Operation::Adaptive(o) => {
+            let top = h.top_of_stock;
+            let stepdown = if o.params.stepdown.is_finite() && o.params.stepdown > 0.0 {
+                o.params.stepdown
+            } else {
+                1.0
+            };
+            CuttingHeights {
+                top,
+                bottom: top - stepdown,
+            }
+        }
         _ => unreachable!(),
     })
 }
@@ -486,6 +498,11 @@ impl Document {
     /// A chamfer's zero depth means its natural cutter depth, rather than a zero
     /// cutting interval. All other strategies store their target interval directly.
     pub fn operation_base_cutting_heights(&self, op: &Operation) -> CuttingHeights {
+        if matches!(op, Operation::Adaptive(_)) {
+            if let Some(binding) = self.geometry.bindings.get(&op.id()) {
+                return binding.effective_heights();
+            }
+        }
         let mut cutting = legacy_cutting(op, &self.setup().heights_for(op.id()));
         if let Operation::Chamfer(chamfer) = op {
             if chamfer.faces.is_empty() {
@@ -713,6 +730,49 @@ mod tests {
             feed: 100.,
         }));
         doc
+    }
+    #[test]
+    fn adaptive_height_helpers_are_safe_before_and_after_binding() {
+        let mut doc = doc();
+        let mut op = AdaptiveOp {
+            id: 2,
+            tool: 1,
+            spindle_rpm: 1000.,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            params: Default::default(),
+        };
+        op.params.stepdown = 2.0;
+        let unbound = Operation::Adaptive(op);
+        let heights = doc.operation_base_cutting_heights(&unbound);
+        assert!(heights.validate().is_ok());
+        assert_eq!(heights.bottom, heights.top - 2.0);
+
+        doc.geometry.bindings.insert(
+            unbound.id(),
+            GeometryBinding {
+                selected: vec![EntityRef {
+                    asset_id: 1,
+                    revision: 1,
+                    instance_id: 1,
+                    body_id: 1,
+                    kind: EntityKind::Body,
+                    id: 1,
+                }],
+                recipe: ExtractionRecipe::AdaptiveClearing,
+                heights: CuttingHeights {
+                    top: 12.,
+                    bottom: 3.,
+                },
+                overrides: Default::default(),
+                status: ResolutionStatus::Resolved,
+                resolved_fingerprint: None,
+            },
+        );
+        assert_eq!(doc.operation_base_cutting_heights(&unbound).bottom, 3.);
+        assert_eq!(legacy_cutting(&unbound, &doc.setup().heights), heights);
     }
     #[test]
     fn screenshot_defaults_resolve_dependencies_and_follow_stock_changes() {

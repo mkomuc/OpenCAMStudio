@@ -49,6 +49,8 @@ showing what each operation does to it:
   running down to a cleared flat floor, with the bit standing off the boundary so its
   flank is on the wall. Deliberately distinct from `engrave.svg`, whose tool ploughs a
   single narrow groove with its tip and never leaves a floor)
+- `adaptive.svg` — Adaptive Clearing operation (a layered solid with a constant-engagement
+  path stepping through depth)
 
 The hole-making Operations use a **flat tool glyph** instead, so they read at a
 glance and stay visually distinct from each other:

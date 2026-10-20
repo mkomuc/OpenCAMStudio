@@ -2,7 +2,7 @@
 //! the planner assembles links, datums, spindle and shutdown on every run.
 use crate::{CancelToken, JobEnv, StrategyResult};
 use cam_cldata::SpindleDir;
-use cam_model::{Heights, Operation, Tool};
+use cam_model::{CuttingHeights, Heights, Operation, StockToLeave, Tool};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -13,6 +13,9 @@ struct Dependencies {
     tools: Vec<Tool>,
     stock: Option<([f64; 2], [f64; 2])>,
     spindle: SpindleDir,
+    stock_to_leave: StockToLeave,
+    geometry_fingerprint: Option<String>,
+    cutting_heights: Option<CuttingHeights>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CacheStats {
@@ -29,6 +32,15 @@ pub struct OperationCache {
     entries: VecDeque<Arc<Entry>>,
     pub stats: CacheStats,
 }
+
+/// Per-operation dependencies outside the serialized operation itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CacheExtras {
+    pub stock_to_leave: StockToLeave,
+    pub geometry_fingerprint: Option<String>,
+    pub cutting_heights: Option<CuttingHeights>,
+}
+
 impl OperationCache {
     /// Discard every retained version of the selected operations for an explicit
     /// recompute, while keeping unrelated operations available for reuse.
@@ -47,6 +59,18 @@ impl OperationCache {
         cancel: &CancelToken,
         compute: impl FnOnce() -> StrategyResult,
     ) -> StrategyResult {
+        self.compute_with_dependencies(op, env, cancel, CacheExtras::default(), compute)
+    }
+
+    /// Compute with setup-map allowances and resolved geometry/heights dependencies.
+    pub(crate) fn compute_with_dependencies(
+        &mut self,
+        op: &Operation,
+        env: &JobEnv,
+        cancel: &CancelToken,
+        extras: CacheExtras,
+        compute: impl FnOnce() -> StrategyResult,
+    ) -> StrategyResult {
         if cancel.is_cancelled() {
             return StrategyResult {
                 cancelled: true,
@@ -54,6 +78,12 @@ impl OperationCache {
             };
         }
         let required = op.tools();
+        let (radial, axial) = extras.stock_to_leave.effective();
+        let stock_to_leave = StockToLeave {
+            enabled: radial != 0.0 || axial != 0.0,
+            radial,
+            axial,
+        };
         let key = Dependencies {
             operation: op.clone(),
             heights: env.heights,
@@ -63,6 +93,9 @@ impl OperationCache {
                 .collect(),
             stock: env.stock,
             spindle: env.spindle,
+            stock_to_leave,
+            geometry_fingerprint: extras.geometry_fingerprint,
+            cutting_heights: extras.cutting_heights,
         };
         if let Some(at) = self.entries.iter().position(|entry| entry.key == key) {
             let entry = self.entries.remove(at).unwrap();
@@ -116,6 +149,48 @@ mod tests {
             work_offset: 1,
             feed: 100.,
         })
+    }
+
+    #[test]
+    fn changed_resolved_cutting_heights_do_not_reuse_adaptive_fragments() {
+        let adaptive = Operation::Adaptive(cam_model::AdaptiveOp {
+            id: 17,
+            tool: 1,
+            spindle_rpm: 1000.0,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            params: Default::default(),
+        });
+        let env = JobEnv {
+            heights: Heights::new(10.0, 5.0, 0.0),
+            tools: &[],
+            stock: None,
+            spindle: SpindleDir::Cw,
+        };
+        let mut cache = OperationCache::default();
+        let token = CancelToken::new();
+        let mut calls = 0;
+        for bottom in [-2.0, -2.5] {
+            cache.compute_with_dependencies(
+                &adaptive,
+                &env,
+                &token,
+                CacheExtras {
+                    stock_to_leave: StockToLeave::default(),
+                    geometry_fingerprint: Some("same binding".into()),
+                    cutting_heights: Some(CuttingHeights { top: 0.0, bottom }),
+                },
+                || {
+                    calls += 1;
+                    StrategyResult::default()
+                },
+            );
+        }
+        assert_eq!(calls, 2);
+        assert_eq!(cache.stats.computed, 2);
+        assert_eq!(cache.stats.reused, 0);
     }
     #[test]
     fn cache_bound_shared_snapshots_and_unsuccessful_results() {

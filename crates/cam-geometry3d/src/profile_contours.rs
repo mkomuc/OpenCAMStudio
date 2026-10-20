@@ -90,23 +90,25 @@ fn extract_impl(
             resolved_fingerprint: None,
             status: ResolutionStatus::Resolved,
         };
-        if let Ok((regions, _, interval)) = derive(state, &binding, 0.) {
+        let derived = derive(state, &binding, 0.);
+        if let Ok((regions, _, interval)) = &derived {
             accept(
                 ProfileContour {
                     chain: regions[0].outer().clone(),
                     closed: true,
                     side,
                 },
-                interval,
+                *interval,
             )?;
             continue;
         }
+        let derive_error = derived.unwrap_err();
         // Inner boundaries on an upward top face delimit an accessible void.
         // Its adjoining constant-section walls certify the complete depth.
         let face = view.face(wire.face_id)?;
         let (z, normal) = view.plane(face)?;
         if wire.is_outer || normal[2] <= 0. || z < view.bounds(view.body.bounds)[1][2] - T {
-            return Err("This face boundary cannot certify an accessible vertical profile".into());
+            return Err(derive_error);
         }
         let (chain, _) = view.contour(wire)?;
         let mut bottom: Option<f64> = None;
@@ -121,6 +123,8 @@ fn extract_impl(
             }
             bottom = Some(lo);
         }
+        let region = Polygon::new(chain.clone()).map_err(|error| error.to_string())?;
+        view.roofs_over(&region, z)?;
         accept(
             ProfileContour {
                 chain,

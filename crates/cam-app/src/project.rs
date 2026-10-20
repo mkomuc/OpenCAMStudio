@@ -586,6 +586,31 @@ mod tests {
     }
 
     #[test]
+    fn project_round_trip_preserves_operation_stock_to_leave() {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+            panic!("expected a project");
+        };
+        let operation_id = project.document.setups[0].operations[0].id();
+        let stock = cam_model::StockToLeave {
+            enabled: true,
+            radial: 0.35,
+            axial: 0.2,
+        };
+        project.document.setups[0]
+            .stock_to_leave
+            .insert(operation_id, stock);
+
+        let encoded = OcamFile::Project(project).to_json().unwrap();
+        let OcamFile::Project(reloaded) = OcamFile::from_json(&encoded).unwrap() else {
+            panic!("expected a project");
+        };
+        assert_eq!(
+            reloaded.document.setups[0].stock_to_leave_for(operation_id),
+            stock
+        );
+    }
+
+    #[test]
     fn the_v14_single_setup_migrates_to_setup_one_without_changing_its_operation() {
         let OcamFile::Project(project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
             panic!("expected project");

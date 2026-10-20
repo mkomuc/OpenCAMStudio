@@ -82,12 +82,49 @@ use crate::Tool;
 /// v24: modeled chamfer-face boundaries and axial finishing bands. Older readers
 /// must refuse these operations rather than treating their projected face as an edge.
 /// v25: open chamfer chains; absent closed flags retain legacy closed rims.
-pub const SCHEMA_VERSION: u32 = 25;
+/// v26: adds setup-scoped StockToLeave allowances keyed by operation ID and the
+/// Adaptive operation with its `AdaptiveClearing` geometry recipe. Older projects
+/// omit allowances and retain their existing offset and depth behavior.
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternOrder { #[default] ByInstance, ByOperation }
+
+/// Radial wall allowance and axial floor allowance for an operation, in mm.
+/// Disabled settings are ignored; zero allowances preserve the operation's
+/// existing offsets and generated toolpath exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StockToLeave {
+    /// Whether the allowances are active.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Material left on vertical walls and the XY perimeter.
+    #[serde(default)]
+    pub radial: f64,
+    /// Material left on horizontal floors, measured along setup Z.
+    #[serde(default)]
+    pub axial: f64,
+}
+
+impl StockToLeave {
+    /// Active allowances, or zero when disabled.
+    pub fn effective(self) -> (f64, f64) {
+        if self.enabled { (self.radial, self.axial) } else { (0.0, 0.0) }
+    }
+
+    /// Validate allowance magnitudes before they reach offset and depth math.
+    pub fn validate(self) -> Result<(), String> {
+        if !self.radial.is_finite() || self.radial < 0.0 {
+            return Err("stock to leave radial allowance must be finite and non-negative".into());
+        }
+        if !self.axial.is_finite() || self.axial < 0.0 {
+            return Err("stock to leave axial allowance must be finite and non-negative".into());
+        }
+        Ok(())
+    }
+}
 
 /// Direction used by circular patterns, viewed from setup +Z.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -784,6 +821,67 @@ pub struct PocketOp {
     pub clear: ClearParams,
 }
 
+/// A 3D adaptive roughing operation over a CAD solid. Its geometry is resolved
+/// from the operation's `AdaptiveClearing` geometry binding; no display mesh is
+/// stored or consulted by the toolpath generator.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AdaptiveOp {
+    pub id: u32,
+    pub tool: u32,
+    #[serde(default)]
+    pub spindle_rpm: f64,
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    #[serde(default)]
+    pub cooling: crate::Cooling,
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
+    #[serde(default = "default_work_offset")]
+    pub work_offset: u32,
+    #[serde(default)]
+    pub params: AdaptiveParams,
+}
+
+/// Controls for 3D adaptive roughing. The engagement controls are deliberately
+/// explicit; invalid or unsupported combinations stop generation with an error.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AdaptiveParams {
+    /// Maximum geometric deviation accepted when deriving layer boundaries, mm.
+    #[serde(default = "default_adaptive_tolerance")]
+    pub tolerance: f64,
+    /// Target radial engagement, mm.
+    #[serde(default = "default_adaptive_load")]
+    pub optimal_load: f64,
+    /// Maximum roughing stepdown, mm.
+    #[serde(default = "default_adaptive_stepdown")]
+    pub stepdown: f64,
+    /// Maximum axial spacing of fine-rest passes, mm.
+    #[serde(default = "default_adaptive_fine_stepdown")]
+    pub fine_stepdown: f64,
+    /// Cutting feed, mm/min.
+    #[serde(default)]
+    pub feed: f64,
+    /// Plunge feed, mm/min.
+    #[serde(default)]
+    pub plunge_feed: f64,
+    /// Climb milling when true.
+    #[serde(default = "default_true")]
+    pub climb: bool,
+}
+
+fn default_adaptive_tolerance() -> f64 { 0.1 }
+fn default_adaptive_load() -> f64 { 2.0 }
+fn default_adaptive_stepdown() -> f64 { 2.0 }
+fn default_adaptive_fine_stepdown() -> f64 { 0.5 }
+
+impl Default for AdaptiveParams {
+    fn default() -> Self {
+        Self { tolerance: default_adaptive_tolerance(), optimal_load: default_adaptive_load(),
+            stepdown: default_adaptive_stepdown(), fine_stepdown: default_adaptive_fine_stepdown(),
+            feed: 0.0, plunge_feed: 0.0, climb: true }
+    }
+}
+
 /// A principal axis in the XY plane — used to orient facing passes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Axis {
@@ -1373,6 +1471,8 @@ pub enum Operation {
     Drill(DrillOp),
     /// A pocket-clearing operation.
     Pocket(PocketOp),
+    /// 3D adaptive roughing over a CAD solid.
+    Adaptive(AdaptiveOp),
     /// A facing operation.
     Face(FaceOp),
     /// A chamfering operation.
@@ -1392,6 +1492,7 @@ impl Operation {
             Operation::Profile(op) => op.id,
             Operation::Drill(op) => op.id,
             Operation::Pocket(op) => op.id,
+            Operation::Adaptive(op) => op.id,
             Operation::Face(op) => op.id,
             Operation::Chamfer(op) => op.id,
             Operation::Thread(op) => op.id,
@@ -1407,6 +1508,7 @@ impl Operation {
             Operation::Profile(op) => op.tool,
             Operation::Drill(op) => op.tool,
             Operation::Pocket(op) => op.tool,
+            Operation::Adaptive(op) => op.tool,
             Operation::Face(op) => op.tool,
             Operation::Chamfer(op) => op.tool,
             Operation::Thread(op) => op.tool,
@@ -1440,6 +1542,7 @@ impl Operation {
             Operation::Profile(op) => op.spindle_rpm,
             Operation::Drill(op) => op.spindle_rpm,
             Operation::Pocket(op) => op.spindle_rpm,
+            Operation::Adaptive(op) => op.spindle_rpm,
             Operation::Face(op) => op.spindle_rpm,
             Operation::Chamfer(op) => op.spindle_rpm,
             Operation::Thread(op) => op.spindle_rpm,
@@ -1454,6 +1557,7 @@ impl Operation {
             Operation::Profile(op) => op.spindle_rpm = rpm,
             Operation::Drill(op) => op.spindle_rpm = rpm,
             Operation::Pocket(op) => op.spindle_rpm = rpm,
+            Operation::Adaptive(op) => op.spindle_rpm = rpm,
             Operation::Face(op) => op.spindle_rpm = rpm,
             Operation::Chamfer(op) => op.spindle_rpm = rpm,
             Operation::Thread(op) => op.spindle_rpm = rpm,
@@ -1470,6 +1574,7 @@ impl Operation {
             Operation::Profile(op) => op.work_offset,
             Operation::Drill(op) => op.work_offset,
             Operation::Pocket(op) => op.work_offset,
+            Operation::Adaptive(op) => op.work_offset,
             Operation::Face(op) => op.work_offset,
             Operation::Chamfer(op) => op.work_offset,
             Operation::Thread(op) => op.work_offset,
@@ -1484,6 +1589,7 @@ impl Operation {
             Operation::Profile(op) => op.work_offset = work_offset,
             Operation::Drill(op) => op.work_offset = work_offset,
             Operation::Pocket(op) => op.work_offset = work_offset,
+            Operation::Adaptive(op) => op.work_offset = work_offset,
             Operation::Face(op) => op.work_offset = work_offset,
             Operation::Chamfer(op) => op.work_offset = work_offset,
             Operation::Thread(op) => op.work_offset = work_offset,
@@ -1498,6 +1604,7 @@ impl Operation {
             Operation::Profile(op) => op.id = id,
             Operation::Drill(op) => op.id = id,
             Operation::Pocket(op) => op.id = id,
+            Operation::Adaptive(op) => op.id = id,
             Operation::Face(op) => op.id = id,
             Operation::Chamfer(op) => op.id = id,
             Operation::Thread(op) => op.id = id,
@@ -1514,6 +1621,7 @@ impl Operation {
             Operation::Profile(op) => op.tool = tool,
             Operation::Drill(op) => op.tool = tool,
             Operation::Pocket(op) => op.tool = tool,
+            Operation::Adaptive(op) => op.tool = tool,
             Operation::Face(op) => op.tool = tool,
             Operation::Chamfer(op) => op.tool = tool,
             Operation::Thread(op) => op.tool = tool,
@@ -1611,6 +1719,9 @@ pub struct Setup {
         deserialize_with = "deserialize_operation_map"
     )]
     pub height_settings: std::collections::BTreeMap<u32, crate::OperationHeightSettings>,
+    /// Radial and axial stock allowances keyed by stable operation ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "deserialize_operation_map")]
+    pub stock_to_leave: std::collections::BTreeMap<u32, StockToLeave>,
     /// The raw stock.
     pub stock: Stock,
     /// Tools available in this setup.
@@ -1649,6 +1760,36 @@ pub struct Setup {
 }
 
 impl Setup {
+    /// Stock allowances for an operation; absent entries preserve legacy toolpaths.
+    pub fn stock_to_leave_for(&self, operation_id: u32) -> StockToLeave {
+        self.stock_to_leave.get(&operation_id).copied().unwrap_or_default()
+    }
+
+    /// Validate map keys, allowance magnitudes, and operation-specific support.
+    pub fn validate_stock_to_leave(&self) -> Result<(), String> {
+        for (operation_id, allowances) in &self.stock_to_leave {
+            let operation = self.operations.iter().find(|op| op.id() == *operation_id)
+                .ok_or_else(|| format!("stock-to-leave settings reference missing operation {operation_id}"))?;
+            allowances.validate()?;
+            let (radial, axial) = allowances.effective();
+            let supported = match operation {
+                Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) => true,
+                Operation::Face(_) => {
+                    if radial > 0.0 {
+                        return Err(format!("operation {operation_id}: Face supports axial stock to leave only; radial allowance must be 0 mm"));
+                    }
+                    true
+                }
+                Operation::Drill(_) | Operation::Chamfer(_) | Operation::Thread(_)
+                | Operation::Engrave(_) | Operation::Carve(_) => false,
+            };
+            if !supported && (radial > 0.0 || axial > 0.0) {
+                return Err(format!("operation {operation_id}: stock to leave is supported for Profile, Pocket, Face, and Adaptive only"));
+            }
+        }
+        Ok(())
+    }
+
     /// Flattened execution view: a pattern appears at its first source, remaining
     /// grouped sources are omitted, and ordinary operations appear once.
     pub fn execution_items(&self) -> Vec<ExecutionItem<'_>> {
@@ -2025,6 +2166,40 @@ mod tests {
         let restored: ProfileOp =
             serde_json::from_str(&serde_json::to_string(&op).unwrap()).unwrap();
         assert_eq!(restored, op);
+    }
+
+    #[test]
+    fn setup_stock_allowances_roundtrip_with_numeric_operation_ids_and_default_legacy() {
+        let mut setup = Setup {
+            id: 1,
+            frame: Default::default(),
+            material: String::new(),
+            material_id: None,
+            model_instances: Vec::new(),
+            program_name: String::new(),
+            name: "stock allowance test".into(),
+            heights: Heights::new(10.0, 5.0, 0.0),
+            operation_heights: Default::default(),
+            height_settings: Default::default(),
+            stock_to_leave: Default::default(),
+            stock: Stock::BoundingBox { x_offset: 0.0, y_offset: 0.0, top: 0.0, thickness: 5.0 },
+            tools: Vec::new(),
+            operations: vec![profile(7)],
+            patterns: Vec::new(),
+            extra_origins: Vec::new(),
+            origin: [0.0; 3],
+            origin_index: 1,
+            tool_change_height: None,
+        };
+        setup.stock_to_leave.insert(7, StockToLeave { enabled: true, radial: 0.4, axial: 0.25 });
+        let mut encoded = serde_json::to_value(&setup).unwrap();
+        assert_eq!(encoded["stock_to_leave"]["7"]["radial"], 0.4);
+        let restored: Setup = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(restored.stock_to_leave_for(7), setup.stock_to_leave_for(7));
+
+        encoded.as_object_mut().unwrap().remove("stock_to_leave");
+        let legacy: Setup = serde_json::from_value(encoded).unwrap();
+        assert_eq!(legacy.stock_to_leave_for(7), StockToLeave::default());
     }
 
     fn carve(clear_tool: Option<u32>) -> Operation {

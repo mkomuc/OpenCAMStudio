@@ -132,11 +132,15 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::ChamferWidth
         | Field::Feed
         | Field::PlungeFeed
+        | Field::AdaptiveTolerance
+        | Field::AdaptiveOptimalLoad
+        | Field::AdaptiveFineStepdown
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
+        Field::StockLeaveRadial | Field::StockLeaveAxial => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
-        Field::Stepdown if matches!(op, Operation::Profile(_) | Operation::Face(_)) => value <= 0.0,
+        Field::Stepdown if matches!(op, Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_)) => value <= 0.0,
         Field::ThreadPasses => value < 1.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::ThreadSpringPasses => value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::Overlap | Field::ClearOverlap => !(0.0..=99.0).contains(&value),
@@ -198,6 +202,51 @@ fn profile_climb_control(climb: bool, show_help: bool) -> Element<'static, Messa
         tooltip::Position::Left,
     )
     .into()
+}
+
+fn stock_offset_row(
+    field: Field,
+    label: &'static str,
+    help: &'static str,
+    value: String,
+    enabled: bool,
+    show_help: bool,
+    invalid: bool,
+) -> Element<'static, Message> {
+    let mut input = inspector_input("", &value)
+        .align_x(iced::alignment::Horizontal::Right)
+        .on_input_maybe(enabled.then_some(move |value| Message::FieldChanged(field, value)))
+        .width(Length::Fixed(INSPECTOR_INPUT_W));
+    if invalid {
+        input = input.style(|theme, status| {
+            let mut style = inspector_input_style(theme, status);
+            style.border.color = palette::ERROR;
+            style.border.width = 1.5;
+            style.value = palette::ERROR;
+            style
+        });
+    }
+    row![label_help(label, help, show_help), input]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn stock_offset_fields(operation: &Operation) -> Vec<Field> {
+    let mut fields = Vec::with_capacity(2);
+    if matches!(
+        operation,
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_)
+    ) {
+        fields.push(Field::StockLeaveRadial);
+    }
+    if matches!(
+        operation,
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_)
+    ) {
+        fields.push(Field::StockLeaveAxial);
+    }
+    fields
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -402,6 +451,22 @@ impl App {
                 Operation::Face(_) => "Rectangular facing boundary".into(),
                 Operation::Drill(o) => format!("{} hole centres", o.points.len()),
                 Operation::Thread(o) => format!("{} thread centres", o.points.len()),
+                Operation::Adaptive(_) => linked.map_or_else(
+                    || "Selected geometry".into(),
+                    |binding| {
+                        let bodies = binding
+                            .selected
+                            .iter()
+                            .filter(|entity| entity.kind == EntityKind::Body)
+                            .count();
+                        let faces = binding
+                            .selected
+                            .iter()
+                            .filter(|entity| entity.kind == EntityKind::Face)
+                            .count();
+                        format!("{bodies} bodies · {faces} faces")
+                    },
+                ),
             };
             list = list.push(text(geometry).size(12));
             if let Some(binding) = linked {
@@ -435,11 +500,15 @@ impl App {
                 Operation::Drill(_) => list = list.push(text("Approach and retract follow the drilling cycle and operation safety heights.").size(12)),
                 Operation::Face(_) => list = list.push(text("Facing links and turnaround arcs are determined by the strategy. Overshoot is on Passes.").size(12)),
                 Operation::Thread(_) => list = list.push(text("Helical entry and exit are determined by the threading strategy.").size(12)),
+                Operation::Adaptive(_) => list = list.push(text("3D Adaptive Clearing uses generated helical entries and retracts between layers; set Ramp feed on Tool to override the entry rate.").size(12)),
                 Operation::Engrave(o) if !o.closed => list = list.push(text("Open strokes start at their first vertex. Entry and exit are determined by the engraving strategy.").size(12)),
                 _ => {}
             }
         }
-        for field in operation_fields(op) {
+        for field in self.geometry_operation_fields(op) {
+            if matches!(field, Field::StockLeaveRadial | Field::StockLeaveAxial) {
+                continue; // These belong to the dedicated Stock to Leave section below.
+            }
             if tab == OperationTab::Heights && field != Field::ThreadBlindAllowance {
                 continue;
             }
@@ -759,6 +828,24 @@ impl App {
                     );
                 }
             }
+            Operation::Adaptive(adaptive) if tab == OperationTab::Passes => {
+                list = list.push(
+                    row![
+                        label_help("Cut direction", help::CLIMB, self.tooltips),
+                        checkbox(adaptive.params.climb)
+                            .size(15)
+                            .on_toggle(Message::AdaptiveClimbToggled)
+                    ]
+                    .spacing(8),
+                );
+                list = list.push(
+                    text(
+                        "Fine stepdown adds intermediate terrace levels after each roughing slab.",
+                    )
+                    .size(11)
+                    .color(palette::GROUP_LABEL),
+                );
+            }
             Operation::Engrave(o) if tab == OperationTab::Geometry => {
                 if linked.is_none() {
                     list = list.push(
@@ -939,6 +1026,44 @@ impl App {
             }
             _ => {}
         }
+        if tab == OperationTab::Passes && App::stock_to_leave_supported(op) {
+            let stock = self.stock_to_leave_value();
+            let enabled = self.stock_to_leave_enabled();
+            list = list.push(inspector_section("Stock to Leave"));
+            list = list.push(
+                checkbox(enabled)
+                    .label("Enable stock to leave")
+                    .on_toggle(Message::StockToLeaveToggled),
+            );
+            for field in stock_offset_fields(op) {
+                let fallback = match field {
+                    Field::StockLeaveRadial => stock.radial,
+                    _ => stock.axial,
+                };
+                let value = if enabled {
+                    self.fields
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| fmt_num(fallback))
+                } else {
+                    fmt_num(fallback)
+                };
+                list = list.push(stock_offset_row(
+                    field,
+                    self.field_label(field),
+                    self.field_help(field),
+                    value,
+                    enabled,
+                    self.tooltips,
+                    enabled && self.field_invalid(field),
+                ));
+            }
+            list = list.push(text(if matches!(op, Operation::Face(_)) {
+                "Axial allowance leaves material on the faced surface."
+            } else {
+                "Radial allowance remains on walls; axial allowance remains on floors for finishing."
+            }).size(11).color(palette::GROUP_LABEL));
+        }
         let footer = inspector_footer(
             row![
                 inspector_button("Cancel").on_press(if creating {
@@ -1022,6 +1147,12 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut operation, &fields);
+        if matches!(operation, Operation::Adaptive(_)) {
+            cam_geometry3d::validate_adaptive_selection(
+                self.controller.geometry_state(),
+                &selected,
+            )?;
+        }
         let parse = |text: &str| -> Result<Option<f64>, String> {
             if text.trim().is_empty() {
                 Ok(None)
@@ -1085,6 +1216,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stock_allowances_are_grouped_radial_then_axial_and_face_uses_axial_only() {
+        let operations = operations();
+        let profile = operations
+            .iter()
+            .find(|operation| matches!(operation, Operation::Profile(_)))
+            .unwrap();
+        let face = operations
+            .iter()
+            .find(|operation| matches!(operation, Operation::Face(_)))
+            .unwrap();
+
+        assert_eq!(
+            stock_offset_fields(profile),
+            [Field::StockLeaveRadial, Field::StockLeaveAxial]
+        );
+        assert_eq!(stock_offset_fields(face), [Field::StockLeaveAxial]);
+    }
 
     fn operations() -> Vec<Operation> {
         let mut controller = AppController::new(crate::default_machine());
@@ -2151,7 +2301,10 @@ mod tests {
             );
             let _ = app.update(Message::CadEscape);
             assert!(app.geometry_editor.is_none());
-            assert_eq!(app.controller.cad_selection(), &[source.clone()]);
+            assert_eq!(
+                app.controller.cad_selection(),
+                std::slice::from_ref(&source)
+            );
             assert_eq!(app.fields[&Field::Feed], "322.5");
             assert_eq!(app.controller.document(), &before);
             let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(

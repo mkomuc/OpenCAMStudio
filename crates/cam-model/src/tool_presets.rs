@@ -141,6 +141,7 @@ impl Operation {
         match self {
             Self::Profile(o) => o.cooling,
             Self::Pocket(o) => o.cooling,
+            Self::Adaptive(o) => o.cooling,
             Self::Face(o) => o.cooling,
             Self::Drill(o) => o.cooling,
             Self::Chamfer(o) => o.cooling,
@@ -153,6 +154,7 @@ impl Operation {
         match self {
             Self::Profile(o) => o.cooling = cooling,
             Self::Pocket(o) => o.cooling = cooling,
+            Self::Adaptive(o) => o.cooling = cooling,
             Self::Face(o) => o.cooling = cooling,
             Self::Drill(o) => o.cooling = cooling,
             Self::Chamfer(o) => o.cooling = cooling,
@@ -165,6 +167,7 @@ impl Operation {
         match self {
             Self::Profile(o) => &o.entry_feeds,
             Self::Pocket(o) => &o.entry_feeds,
+            Self::Adaptive(o) => &o.entry_feeds,
             Self::Face(o) => &o.entry_feeds,
             Self::Drill(o) => &o.entry_feeds,
             Self::Chamfer(o) => &o.entry_feeds,
@@ -177,6 +180,7 @@ impl Operation {
         match self {
             Self::Profile(o) => &mut o.entry_feeds,
             Self::Pocket(o) => &mut o.entry_feeds,
+            Self::Adaptive(o) => &mut o.entry_feeds,
             Self::Face(o) => &mut o.entry_feeds,
             Self::Drill(o) => &mut o.entry_feeds,
             Self::Chamfer(o) => &mut o.entry_feeds,
@@ -190,6 +194,7 @@ impl Operation {
         match self {
             Self::Profile(o) => o.tool_preset.as_ref(),
             Self::Pocket(o) => o.tool_preset.as_ref(),
+            Self::Adaptive(o) => o.tool_preset.as_ref(),
             Self::Face(o) => o.tool_preset.as_ref(),
             Self::Drill(o) => o.tool_preset.as_ref(),
             Self::Chamfer(o) => o.tool_preset.as_ref(),
@@ -204,6 +209,7 @@ impl Operation {
         let slot = match self {
             Self::Profile(o) => &mut o.tool_preset,
             Self::Pocket(o) => &mut o.tool_preset,
+            Self::Adaptive(o) => &mut o.tool_preset,
             Self::Face(o) => &mut o.tool_preset,
             Self::Drill(o) => &mut o.tool_preset,
             Self::Chamfer(o) => &mut o.tool_preset,
@@ -241,6 +247,13 @@ impl Operation {
                 Some(&mut o.clear.plunge_feed),
                 Some(&mut o.clear.stepdown),
                 Some(&mut o.clear.overlap),
+                &mut o.tool_preset,
+            ),
+            Self::Adaptive(o) => (
+                &mut o.params.feed,
+                Some(&mut o.params.plunge_feed),
+                Some(&mut o.params.stepdown),
+                None,
                 &mut o.tool_preset,
             ),
             Self::Face(o) => (

@@ -86,6 +86,7 @@ fn setup(operations: Vec<Operation>) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }
@@ -282,6 +283,7 @@ fn a_bad_setup_that_rapids_low_is_caught() {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     });
     let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());

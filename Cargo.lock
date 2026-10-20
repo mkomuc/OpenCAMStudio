@@ -563,6 +563,7 @@ version = "0.1.0"
 dependencies = [
  "cam-cldata",
  "cam-geo",
+ "cam-geometry3d",
  "cam-model",
  "cam-post",
  "cam-sim",

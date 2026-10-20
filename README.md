@@ -3,8 +3,9 @@
 A CAM application for CNC toolpath generation, built in Rust.
 
 > **Status: the 2.5-D milling slice works end-to-end** — DXF/DWG in, toolpaths
-> and material simulation in a live viewport, real G-code out. Everything beyond
-> 2.5-D (3-axis surfacing, turning, plugins) is roadmap.
+> and material simulation in a live viewport, real G-code out. Initial 3D Adaptive
+> Clearing uses conservative CAD-derived Z levels. Freeform finishing, turning
+> and plugins remain roadmap work.
 
 ![The OpenCAMStudio desktop application](docs/screenshot_step.png)
 
@@ -17,6 +18,14 @@ to export.*
   **V-carve engraving** and **V-carving**; leads and ramp/helix plunges;
   engagement-capped area clearing (adaptive front-advance where it certifies,
   concentric otherwise).
+- **3D Adaptive Clearing** — roughing levels with upward fine-step refinement,
+  optimal load and tolerance controls, using the independent CAD machining
+  tessellation. Select the bodies or faces to machine while retaining other setup
+  bodies as protected obstacles. See the [design and geometry
+  limits](docs/3d-adaptive-clearing.md).
+- **Stock to Leave** — shared radial and axial finishing allowances for Profile,
+  Pocket and 3D Adaptive Clearing; axial allowance for Face. Disabled settings
+  preserve existing toolpaths.
 - **V-carving** — the boundary outlines an *area*, not a path: the tool never
   touches it, its flanks land on it, and the depth follows from the shape's own
   width. Built on **inward offset rings, not a medial axis** — the ring at inward

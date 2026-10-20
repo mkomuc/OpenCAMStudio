@@ -605,6 +605,9 @@ impl CuttingHeights {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ExtractionRecipe {
+    /// Conservative 3D adaptive roughing over selected bodies and faces, with
+    /// every included setup body retained as an obstacle.
+    AdaptiveClearing,
     PocketFloor,
     DrillHoles,
     /// One closed planar rim; the operation defines the bevel dimensions.
@@ -718,6 +721,33 @@ impl GeometryState {
     /// Deterministic dependency key for an immutable asset revision. Display
     /// tessellation does not participate; placement and machining overrides do.
     pub fn binding_fingerprint(&self, binding: &GeometryBinding) -> String {
+        if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+            let mut dependencies: Vec<_> = self
+                .instances
+                .iter()
+                .map(|instance| {
+                    let asset = self
+                        .asset(instance.asset_id)
+                        .map(|asset| (asset.id, asset.revision, &asset.backend));
+                    (
+                        instance.id,
+                        instance.asset_id,
+                        instance.body_id,
+                        instance.placement,
+                        asset,
+                    )
+                })
+                .collect();
+            dependencies.sort_by_key(|dependency| dependency.0);
+            return serde_json::to_string(&(
+                &binding.recipe,
+                &binding.selected,
+                binding.effective_heights(),
+                &binding.overrides,
+                dependencies,
+            ))
+            .expect("adaptive geometry dependency records serialize");
+        }
         let dependencies: Vec<_> = binding
             .selected
             .iter()

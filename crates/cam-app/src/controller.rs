@@ -16,7 +16,7 @@ use crate::project::{OcamFile, Project};
 use cam_model::{
     reconcile_tool_numbers, Axis, CarveOp, ChamferOp, ClearParams, Comp, Document, DrillOp,
     EngraveOp, FaceOp, Hand, Heights, History, Lead, Machine, Operation, Origin, Plunge, PocketOp,
-    ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
+    AdaptiveOp, AdaptiveParams, ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
 };
 use cam_post::{PostError, PostKind, PostOptions};
 use cam_render::{MeshVertex, Scene};
@@ -92,6 +92,7 @@ pub enum OpKind {
     Thread,
     Engrave,
     Carve,
+    Adaptive,
 }
 
 /// Whether an operation kind restricts geometry selection to **circular** loops.
@@ -747,6 +748,17 @@ impl AppController {
         self.cad_selection = entities;
         Ok(())
     }
+    /// Adaptive selections may combine faces and bodies across setup instances.
+    pub fn try_set_adaptive_cad_selection(
+        &mut self,
+        entities: Vec<cam_model::EntityRef>,
+    ) -> Result<(), String> {
+        if !entities.is_empty() {
+            cam_geometry3d::validate_adaptive_selection(self.geometry_state(), &entities)?;
+        }
+        self.cad_selection = entities;
+        Ok(())
+    }
     /// Apply a viewport/tree pick, with Ctrl/Command allowing homogeneous
     /// multi-selection. Rejected additions preserve the previous selection.
     pub fn toggle_cad_selection(
@@ -765,6 +777,19 @@ impl AppController {
             selected.push(entity);
         }
         self.try_set_cad_selection(selected)
+    }
+    pub fn toggle_adaptive_cad_selection(
+        &mut self,
+        entity: cam_model::EntityRef,
+        additive: bool,
+    ) -> Result<(), String> {
+        let mut selected = if additive { self.cad_selection.clone() } else { Vec::new() };
+        if let Some(index) = selected.iter().position(|reference| *reference == entity) {
+            selected.remove(index);
+        } else {
+            selected.push(entity);
+        }
+        self.try_set_adaptive_cad_selection(selected)
     }
     pub fn start_cad_import(&mut self, path: PathBuf) -> u64 {
         self.import_preview = None;
@@ -904,7 +929,11 @@ impl AppController {
         entities: &[cam_model::EntityRef],
     ) -> Result<cam_geometry3d::ResolvedInput, String> {
         let geometry = self.setup_geometry_state()?;
-        crate::cad_operations::validate_selection(&geometry, entities)?;
+        if kind == OpKind::Adaptive {
+            cam_geometry3d::validate_adaptive_selection(&geometry, entities)?;
+        } else {
+            crate::cad_operations::validate_selection(&geometry, entities)?;
+        }
         let binding = cam_geometry3d::resolve_selection(
             &geometry,
             entities,
@@ -1034,9 +1063,10 @@ impl AppController {
             op.apply_tool_preset(preset)?;
         }
         let mut preview = self.document().clone();
+        preview.geometry.bindings.insert(id, binding.clone());
         let settings = if matches!(
             kind,
-            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread
+            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive
         ) {
             crate::cad_operations::selection_height_defaults(&preview, &op)
         } else {
@@ -1044,7 +1074,6 @@ impl AppController {
         };
         preview.setup_mut().height_settings.insert(id, settings);
         preview.setup_mut().operations.push(op);
-        preview.geometry.bindings.insert(id, binding);
         preview.cad_linked_operations.insert(id);
         crate::cad_operations::validate_binding_edit(&mut preview, id)?;
         self.edit_document(move |doc| *doc = preview);
@@ -1057,8 +1086,12 @@ impl AppController {
         id: u32,
         entities: Vec<cam_model::EntityRef>,
     ) -> Result<(), String> {
-        crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
         let mut doc = self.document().clone();
+        if matches!(self.operation(id), Some(Operation::Adaptive(_))) {
+            cam_geometry3d::validate_adaptive_selection(self.geometry_state(), &entities)?;
+        } else {
+            crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
+        }
         let binding = doc
             .geometry
             .bindings
@@ -1833,6 +1866,10 @@ impl AppController {
             if doc.cad_linked_operations.contains(&sel) {
                 doc.cad_linked_operations.insert(new_id);
             }
+            let stock = doc.setup().stock_to_leave_for(sel);
+            if stock.enabled {
+                doc.setup_mut().stock_to_leave.insert(new_id, stock);
+            }
             doc.setup_mut().operations.insert(insert_after, copy);
         });
         self.selection = Selection::Operation(new_id);
@@ -2214,6 +2251,16 @@ impl AppController {
                 plunge_feed,
                 start,
             }),
+            OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+                id: 0,
+                tool,
+                spindle_rpm,
+                tool_preset: None,
+                cooling: Default::default(),
+                entry_feeds: Default::default(),
+                work_offset: 1,
+                params: AdaptiveParams::default(),
+            }),
         };
         if let Some(cooling) = self
             .setup()
@@ -2575,6 +2622,7 @@ impl AppController {
             origin_index: 1,
             operation_heights: Default::default(),
             height_settings: Default::default(),
+            stock_to_leave: Default::default(),
             tool_change_height: None,
         })
     }
@@ -2968,6 +3016,7 @@ fn op_kind_of(op: &Operation) -> OpKind {
         Operation::Thread(_) => OpKind::Thread,
         Operation::Engrave(_) => OpKind::Engrave,
         Operation::Carve(_) => OpKind::Carve,
+        Operation::Adaptive(_) => OpKind::Adaptive,
     }
 }
 
@@ -3022,6 +3071,7 @@ fn empty_document(p: &JobParams) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }
@@ -3171,6 +3221,7 @@ mod tests {
             Operation::Chamfer(o) => o.top,
             Operation::Engrave(o) => o.depth,
             Operation::Carve(o) => o.depth,
+            Operation::Adaptive(o) => o.params.stepdown,
         }
     }
 

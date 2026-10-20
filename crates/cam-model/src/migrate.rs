@@ -248,6 +248,8 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
             Ok(())
         }
         24 => Ok(()), // Open chamfer chains default to the legacy closed rim behavior.
+        // v25 adds setup-scoped stock-to-leave maps. Missing maps mean zero allowance.
+        25 => Ok(()),
         _ => Err(MigrationError::MissingStep { from }),
     }
 }

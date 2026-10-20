@@ -108,6 +108,7 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     });
 

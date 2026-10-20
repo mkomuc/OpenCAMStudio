@@ -1,10 +1,15 @@
 //! Fixed-axis feature extraction. Analytic operations use exact topology;
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
+mod adaptive;
+mod chamfer_faces;
 mod profile_contours;
 mod profile_entries;
 mod surface_geometry;
-mod chamfer_faces;
+pub use adaptive::{
+    adaptive_heights, resolve_adaptive, validate_adaptive_selection, AdaptiveGeometry,
+    AdaptiveLayer, AdaptiveResolveConfig,
+};
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
 pub use profile_contours::coplanar_faces as coplanar_profile_faces;
@@ -102,6 +107,17 @@ pub fn resolve_binding(
     }
     if heights.top < base.top - T {
         return Err("top override skips material above the geometry-certified entry plane".into());
+    }
+    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+        return Ok(ResolvedInput {
+            chamfers: Vec::new(),
+            profiles: Vec::new(),
+            regions,
+            holes,
+            heights,
+            fingerprint: state.binding_fingerprint(binding),
+            diagnostics: vec!["3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into()],
+        });
     }
     let view = View::new(state, &binding.selected)?;
     let mut exact = (*view.asset.topology).clone();
@@ -927,6 +943,13 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+        return Ok((
+            Vec::new(),
+            Vec::new(),
+            adaptive_heights(state, &binding.selected, stock_top)?,
+        ));
+    }
     if let ExtractionRecipe::ProfileEntries { entries } = &binding.recipe {
         let (profiles, heights) = profile_entries::extract(state, entries, stock_top)?;
         let regions = profiles
@@ -1216,6 +1239,7 @@ fn derive(
             unreachable!()
         }
         ExtractionRecipe::ProfileSilhouette => Err("Select one body for its silhouette".into()),
+        ExtractionRecipe::AdaptiveClearing => unreachable!(),
     }
 }
 fn derive_holes(
@@ -1696,6 +1720,48 @@ mod tests {
         assert_eq!(resolve_binding(&state, &b).unwrap(), input);
         state.assets[0].revision += 1;
         assert!(resolve_binding(&state, &b).is_err());
+    }
+
+    #[test]
+    fn selected_inner_loop_resolves_through_profile_contours_with_inside_side() {
+        let (state, face) = plate_with_hole();
+        let loop_id = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|wire| wire.face_id == face.id && !wire.is_outer)
+            .unwrap()
+            .id;
+        let selected = reference(loop_id, EntityKind::Loop);
+
+        let mut entry = ProfileGeometryEntry::new(
+            ProfileGeometryKind::Chain,
+            "Selected inner loop".into(),
+        );
+        entry.source = ProfileGeometrySource::Cad(vec![selected.clone()]);
+        let (entry_contours, heights) = profile_entry_contours(&state, &entry).unwrap();
+        assert_eq!(entry_contours.len(), 1);
+        assert_eq!(entry_contours[0].side, Side::Inside);
+        assert_eq!(entry_contours[0].chain.area(), 16.);
+        assert_eq!(
+            heights,
+            Some(CuttingHeights {
+                top: 0.,
+                bottom: -5.
+            })
+        );
+
+        let binding = resolve_selection(
+            &state,
+            &[selected],
+            ExtractionRecipe::ProfileContours,
+            0.,
+        )
+        .unwrap();
+        let direct = resolve_binding(&state, &binding).unwrap();
+        assert_eq!(direct.profiles.len(), 1);
+        assert_eq!(direct.profiles[0].side, Side::Inside);
+        assert_eq!(direct.profiles[0].chain.area(), 16.);
     }
 
     #[test]

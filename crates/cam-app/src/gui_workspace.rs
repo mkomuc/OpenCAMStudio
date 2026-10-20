@@ -510,6 +510,11 @@ impl App {
         } else {
             self.cad_filter.kind()
         };
+        viewport.cad_filter_explicit = self.cad_filter_explicit
+            || self.setup_model_pick
+            || self.height_reference_pick.is_some();
+        viewport.geometry_pick_active = (self.geometry_additive || self.geometry_auto_pick)
+            && self.operation_tab == OperationTab::Geometry;
         viewport.cad_select_through = self.cad_select_through;
         viewport.controls = self.view;
         viewport.show_gizmo = self.show_gizmo;
@@ -537,6 +542,10 @@ impl App {
                 self.current_operation(id)
                     .map(AppController::operation_kind)
             })
+        }).or_else(|| {
+            (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
+                .then(|| self.geometry_operation_kind())
+                .flatten()
         });
         if self
             .profile_entry_editor
@@ -555,8 +564,8 @@ impl App {
                 ProfileSelectionMode::Chain if self.profile_chain_edges => EntityKind::Edge,
                 _ => EntityKind::Loop,
             };
-            viewport.cad_silhouette |=
-                self.profile_selection_mode == ProfileSelectionMode::Silhouette;
+            viewport.cad_silhouette |= self.cad_filter_explicit
+                && self.profile_selection_mode == ProfileSelectionMode::Silhouette;
         }
         if matches!(
             viewport.cad_operation_kind,
@@ -1650,7 +1659,7 @@ mod tests {
         app.controller = controller;
         app.modifiers = iced::keyboard::Modifiers::CTRL;
         let _ = app.update(Message::CadPicked(candidates.clone()));
-        assert_eq!(app.controller.cad_selection(), &[selected.clone()]);
+        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&selected));
         assert!(
             app.machining_viewport()
                 .vertices

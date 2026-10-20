@@ -75,6 +75,7 @@ impl AppController {
         binding: Option<cam_model::GeometryBinding>,
         settings: cam_model::OperationHeightSettings,
         tools: Vec<Tool>,
+        stock_to_leave: cam_model::StockToLeave,
     ) -> Result<u32, String> {
         let replacing = self.pending_op.as_ref().and_then(|p| p.replacing);
         let id = replacing.unwrap_or_else(|| self.next_op_id());
@@ -114,8 +115,20 @@ impl AppController {
             document.setup_mut().operations.push(operation);
         }
         document.setup_mut().height_settings.insert(id, settings);
+        if stock_to_leave.enabled {
+            document.setup_mut().stock_to_leave.insert(id, stock_to_leave);
+        } else {
+            document.setup_mut().stock_to_leave.remove(&id);
+        }
         if document.geometry.bindings.contains_key(&id) {
             crate::cad_operations::validate_binding_edit(&mut document, id)?;
+        }
+        if stock_to_leave.enabled {
+            setups::validate_stock_to_leave(
+                &document,
+                document.setup().operations.iter().find(|op| op.id() == id).unwrap(),
+                stock_to_leave,
+            )?;
         }
         let operation = document
             .setup()

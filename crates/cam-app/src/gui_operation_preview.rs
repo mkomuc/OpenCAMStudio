@@ -218,7 +218,7 @@ impl App {
                 Operation::Engrave(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
                 Operation::Drill(p) => centers.extend(p.points.iter().copied()),
                 Operation::Thread(p) => centers.extend(p.points.iter().copied()),
-                Operation::Profile(_) => {}
+                Operation::Profile(_) | Operation::Adaptive(_) => {}
             }
         }
         for (points, closed) in outlines {
@@ -355,6 +355,30 @@ impl App {
             }
         }
         (vertices, indices)
+    }
+}
+
+fn add_chamfer_faces(
+    scene: &mut Scene,
+    faces: &[cam_model::ChamferFace],
+    frame: &cam_model::SetupFrame,
+) {
+    for face in faces {
+        let upper = face.upper.map(|p| {
+            frame
+                .to_world_vector([p[0], p[1], face.top])
+                .map(|v| v as f32)
+        });
+        let lower = face.lower.map(|p| {
+            frame
+                .to_world_vector([p[0], p[1], face.bottom])
+                .map(|v| v as f32)
+        });
+        scene.add_highlight(upper.to_vec(), PICK_BOUNDARY);
+        scene.add_highlight(lower.to_vec(), PICK_BOUNDARY);
+        for end in 0..2 {
+            scene.add_highlight(vec![upper[end], lower[end]], PICK_BOUNDARY);
+        }
     }
 }
 
@@ -550,29 +574,5 @@ mod tests {
             .iter()
             .any(|v| v.color == cam_render::CUT));
         assert_eq!(app.controller.outcome().unwrap().program, generated);
-    }
-}
-
-fn add_chamfer_faces(
-    scene: &mut Scene,
-    faces: &[cam_model::ChamferFace],
-    frame: &cam_model::SetupFrame,
-) {
-    for face in faces {
-        let upper = face.upper.map(|p| {
-            frame
-                .to_world_vector([p[0], p[1], face.top])
-                .map(|v| v as f32)
-        });
-        let lower = face.lower.map(|p| {
-            frame
-                .to_world_vector([p[0], p[1], face.bottom])
-                .map(|v| v as f32)
-        });
-        scene.add_highlight(upper.to_vec(), PICK_BOUNDARY);
-        scene.add_highlight(lower.to_vec(), PICK_BOUNDARY);
-        for end in 0..2 {
-            scene.add_highlight(vec![upper[end], lower[end]], PICK_BOUNDARY);
-        }
     }
 }

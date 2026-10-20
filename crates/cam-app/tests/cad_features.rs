@@ -371,6 +371,44 @@ fn face_profile_and_open_chain_replace_each_other_transactionally_and_survive_re
 }
 
 #[test]
+fn profile_can_be_created_from_a_certified_inner_loop() {
+    let mut fixture = Fixture::new();
+    let rings = |z| vec![square(0., 20., 0., 20., z), square(8., 12., 8., 12., z)];
+    let top = fixture.face(rings(0.), [0., 0., 1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    fixture.walls(8., 12., 8., 12., -5., 0.);
+    fixture.face(rings(-5.), [0., 0., -1.]);
+    let state = fixture.state();
+    let inner_loop = state.assets[0]
+        .topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == top && !wire.is_outer)
+        .unwrap()
+        .id;
+
+    let mut app = controller();
+    app.edit_tool(0, |tool| tool.flute_length = 10.);
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![reference(inner_loop, EntityKind::Loop)])
+        .unwrap();
+    assert!(matches!(
+        app.operation(id),
+        Some(Operation::Profile(profile)) if profile.closed && profile.side == Side::Inside
+    ));
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn cad_face_contours_preserve_independent_sides_through_resolution_save_and_undo() {
     let mut fixture = Fixture::new();
     let rings = |z| vec![square(0., 20., 0., 20., z), square(8., 12., 8., 12., z)];
@@ -447,6 +485,31 @@ fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
         .unwrap_err()
         .contains("certified"));
     assert_eq!(app.document(), &before);
+}
+
+#[test]
+fn inside_profile_accepts_a_certified_top_entry_rim() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let floor = fixture.face(vec![square(6., 14., 6., 14., -5.)], [0., 0., 1.]);
+    fixture.bore([10., 10.], 4., top, floor);
+    let state = fixture.state();
+    let entry_loop = state.assets[0]
+        .topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == top && !wire.is_outer)
+        .unwrap()
+        .id;
+
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![reference(entry_loop, EntityKind::Loop)])
+        .unwrap();
+    assert!(matches!(app.operation(id), Some(Operation::Profile(profile)) if profile.side == Side::Inside));
 }
 
 #[test]

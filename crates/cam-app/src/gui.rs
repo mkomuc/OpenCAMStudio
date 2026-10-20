@@ -177,6 +177,7 @@ enum Icon {
     Chamfer,
     Engrave,
     Carve,
+    Adaptive,
     Face,
     NewTool,
     Materials,
@@ -203,7 +204,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 36] = [
+    const ALL: [Icon; 37] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -222,6 +223,7 @@ impl Icon {
         Icon::Chamfer,
         Icon::Engrave,
         Icon::Carve,
+        Icon::Adaptive,
         Icon::Face,
         Icon::NewTool,
         Icon::Materials,
@@ -264,6 +266,7 @@ impl Icon {
             Icon::Chamfer => include_bytes!("../assets/icons/chamfer.svg"),
             Icon::Engrave => include_bytes!("../assets/icons/engrave.svg"),
             Icon::Carve => include_bytes!("../assets/icons/carve.svg"),
+            Icon::Adaptive => include_bytes!("../assets/icons/adaptive.svg"),
             Icon::Face => include_bytes!("../assets/icons/face.svg"),
             Icon::Materials => include_bytes!("../assets/icons/materials.svg"),
             Icon::NewTool => include_bytes!("../assets/icons/endmill.svg"),
@@ -319,6 +322,7 @@ impl Icon {
                             with a V-bit. Unlike engraving, the tool never touches the boundary: its \
                             flanks land on it, and the depth follows from the shape's own width."
             }
+            Icon::Adaptive => "Add a 3D Adaptive Clearing operation for selected CAD bodies or faces.",
             Icon::Face => "Add a Face operation — skim the top of the stock flat.",
             Icon::NewTool => "Add a new tool to the library.",
             Icon::Renumber => {
@@ -1088,6 +1092,11 @@ enum Field {
     /// Drill dwell at the hole bottom (seconds); 0 = no dwell.
     Dwell,
     Stepdown,
+    AdaptiveTolerance,
+    AdaptiveOptimalLoad,
+    AdaptiveFineStepdown,
+    StockLeaveRadial,
+    StockLeaveAxial,
     Stepover,
     /// Profile finishing allowance left on the wall (mm).
     ProfileOffset,
@@ -1224,6 +1233,11 @@ impl Field {
             Field::TabSpacing => "Tab spacing (mm)",
             Field::ProfileOffset => "Offset / leave (mm)",
             Field::Stepdown => "Stepdown (mm)",
+            Field::AdaptiveTolerance => "Tolerance (mm)",
+            Field::AdaptiveOptimalLoad => "Optimal load (mm)",
+            Field::AdaptiveFineStepdown => "Fine stepdown (mm)",
+            Field::StockLeaveRadial => "Radial stock to leave (mm)",
+            Field::StockLeaveAxial => "Axial stock to leave (mm)",
             Field::Stepover => "Stepover (mm)",
             Field::SpindleRpm => "Spindle (rpm)",
             Field::Feed => "Feed (mm/min)",
@@ -1275,6 +1289,11 @@ impl Field {
     fn help(self) -> &'static str {
         match self {
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
+            Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres.",
+            Field::AdaptiveOptimalLoad => "Target radial engagement for adaptive clearing, in millimetres.",
+            Field::AdaptiveFineStepdown => "Axial spacing for intermediate terrace refinement after each roughing slab, in millimetres. Smaller values add more shallow passes above each coarse cut.",
+            Field::StockLeaveRadial => "Material left on vertical walls for a later finishing operation, in millimetres.",
+            Field::StockLeaveAxial => "Material left on horizontal floors for a later finishing operation, in millimetres.",
             Field::StartX => "Preferred starting X in setup millimetres; the strategy chooses an eligible point near it.",
             Field::StartY => "Preferred starting Y in setup millimetres; the strategy chooses an eligible point near it.",
             Field::Clearance => {
@@ -1891,11 +1910,13 @@ struct App {
     setup_model_pick: bool,
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
+    stock_to_leave_draft: Option<cam_model::StockToLeave>,
     creation_edited_fields: BTreeSet<Field>,
     creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
     operation_geometry: Option<Vec<EntityRef>>,
     geometry_row_selection: Option<usize>,
     geometry_additive: bool,
+    geometry_auto_pick: bool,
     geometry_editor: Option<operation_geometry::GeometryEditor>,
     profile_tab_picking: bool,
     profile_tab_selection: Option<usize>,
@@ -2040,6 +2061,7 @@ struct App {
     profile_coplanar: bool,
     profile_chain_edges: bool,
     cad_filter: CadFilter,
+    cad_filter_explicit: bool,
     cad_hover: Option<EntityRef>,
     cad_candidates: Vec<PickCandidate>,
     cad_hidden: BTreeSet<InstanceId>,
@@ -2378,6 +2400,7 @@ enum Message {
     ProfileTabSelected(usize),
     ProfileTabsClear,
     EngraveClosedChanged(bool),
+    StockToLeaveToggled(bool),
     OperationStartEnabled(bool),
     OperationToolPicked(usize),
     EditDrawingGeometry(u32),
@@ -2665,6 +2688,7 @@ enum Message {
     /// Toggle climb (true) vs conventional (false) clearing on the selected
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
+    AdaptiveClimbToggled(bool),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
     ChamferGradualToggled(bool),
     /// Toggle the selected thread's gradual (equal-material) radial infeed.
@@ -2927,6 +2951,9 @@ impl App {
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
+        self.stock_to_leave_draft = Some(
+            self.controller.document().setup().stock_to_leave_for(id),
+        );
         if matches!(self.operation_draft, Some(Operation::Profile(_))) {
             let first = self
                 .controller
@@ -3194,11 +3221,13 @@ impl App {
             setup_model_pick: false,
             setup_values: BTreeMap::new(),
             operation_draft: None,
+            stock_to_leave_draft: None,
             creation_edited_fields: BTreeSet::new(),
             creation_geometry_height_defaults: None,
             operation_geometry: None,
             geometry_row_selection: None,
             geometry_additive: false,
+            geometry_auto_pick: false,
             geometry_editor: None,
             profile_tab_picking: false,
             profile_tab_selection: None,
@@ -3283,6 +3312,7 @@ impl App {
             profile_coplanar: false,
             profile_chain_edges: false,
             cad_filter: CadFilter::Face,
+            cad_filter_explicit: false,
             cad_hover: None,
             cad_candidates: vec![],
             cad_hidden: BTreeSet::new(),
@@ -3623,6 +3653,9 @@ impl App {
                 | Message::OpenSample
         ) {
             self.geometry_additive = false;
+            if matches!(message, Message::CadEscape | Message::CancelOperationDraft | Message::CancelOp) {
+                self.geometry_auto_pick = false;
+            }
             self.geometry_row_selection = None;
             if matches!(message, Message::CadEscape) && self.profile_tab_picking {
                 self.profile_tab_picking = false;
@@ -3677,6 +3710,17 @@ impl App {
                 self.profile_tab_picking = false;
                 self.height_reference_pick = None;
                 self.focused_height = None;
+                self.geometry_auto_pick = tab == OperationTab::Geometry
+                    && self.operation_uses_cad_geometry()
+                    && self.cad_pending_kind.is_none()
+                    && self.cad_editing_op.is_none();
+                if tab == OperationTab::Geometry && self.operation_uses_cad_geometry() {
+                    self.geometry_additive = self.cad_pending_kind.is_some()
+                        || self.cad_editing_op.is_some();
+                    self.cad_filter_explicit = false;
+                } else if tab != OperationTab::Geometry {
+                    self.geometry_additive = false;
+                }
             }
             Message::ProfileTabsEnabled(enabled) => {
                 self.profile_tab_picking = false;
@@ -3820,6 +3864,12 @@ impl App {
                         }
                     }
                 });
+                self.refresh_operation_fields();
+            }
+            Message::StockToLeaveToggled(enabled) => {
+                let mut stock = self.stock_to_leave_with_fields();
+                stock.enabled = enabled;
+                self.stock_to_leave_draft = Some(stock);
                 self.refresh_operation_fields();
             }
             Message::OperationStartEnabled(enabled) => {
@@ -4750,15 +4800,19 @@ impl App {
             }
             Message::GeometryFilterChanged(filter) => {
                 let _ = self.pick_operation_geometry();
-                if self.cad_filter != filter {
+                if self.cad_filter != filter
+                    && self.geometry_operation_kind() != Some(OpKind::Adaptive)
+                {
                     self.remove_operation_geometry(None);
                 }
                 self.cad_filter = filter;
+                self.cad_filter_explicit = true;
                 self.cad_hover = None;
                 self.cad_candidates.clear();
             }
             Message::CadFilterChanged(filter) => {
                 self.cad_filter = filter;
+                self.cad_filter_explicit = true;
                 self.cad_hover = None;
                 self.cad_candidates.clear();
             }
@@ -4817,6 +4871,7 @@ impl App {
                     let _ = self.pick_operation_geometry();
                     self.remove_operation_geometry(None);
                     self.profile_selection_mode = mode;
+                    self.cad_filter_explicit = true;
                     self.status = mode.hint().into();
                 }
             }
@@ -4826,6 +4881,7 @@ impl App {
                     let _ = self.pick_operation_geometry();
                     self.remove_operation_geometry(None);
                     self.profile_chain_edges = enabled;
+                    self.cad_filter_explicit = true;
                 }
             }
             Message::GeometryPick => return self.pick_operation_geometry(),
@@ -4895,6 +4951,9 @@ impl App {
                 self.cad_inspecting = false;
                 self.cad_editing_op = None;
                 self.cad_pending_kind = None;
+                self.cad_filter_explicit = false;
+                self.geometry_additive = false;
+                self.geometry_auto_pick = false;
                 self.cad_hover = None;
                 self.cad_candidates.clear();
                 self.controller.set_cad_selection(vec![]);
@@ -4993,6 +5052,7 @@ impl App {
             }
             Message::EditCadGeometry(id) => {
                 if let Some(binding) = self.controller.geometry_state().bindings.get(&id) {
+                    self.cad_filter_explicit = false;
                     let refs = binding.selected.clone();
                     if matches!(self.current_operation(id), Some(Operation::Profile(_))) {
                         self.profile_selection_mode = match refs.first().map(|r| r.kind) {
@@ -5015,6 +5075,10 @@ impl App {
                                 _ => CadFilter::Loop,
                             }
                         }
+                        cam_model::ExtractionRecipe::AdaptiveClearing => match refs.first().map(|r| r.kind) {
+                            Some(EntityKind::Face) => CadFilter::Face,
+                            _ => CadFilter::Body,
+                        },
                         _ => CadFilter::Face,
                     };
                     let refs = self.operation_geometry.clone().unwrap_or(refs);
@@ -5259,8 +5323,13 @@ impl App {
             }
             Message::BeginOp(kind) => {
                 self.end_setup_draft();
+                self.cad_filter_explicit = false;
                 self.operation_tools.clear();
                 self.operation_tab = OperationTab::Tool;
+                if kind == OpKind::Adaptive && self.controller.geometry_state().instances.is_empty() {
+                    self.status = "Import a solid CAD model before creating 3D Adaptive Clearing.".into();
+                    return iced::Task::none();
+                }
                 if !self.controller.geometry_state().instances.is_empty()
                     && (self.controller.regions().is_empty()
                         || !self.controller.cad_selection().is_empty())
@@ -5285,7 +5354,12 @@ impl App {
                     self.cad_inspecting = false;
                     self.cad_editing_op = None;
                     self.cad_filter =
-                        if matches!(kind, OpKind::Profile | OpKind::Chamfer | OpKind::Engrave) {
+                        if kind == OpKind::Adaptive {
+                            match self.controller.cad_selection().first().map(|r| r.kind) {
+                                Some(EntityKind::Face) => CadFilter::Face,
+                                _ => CadFilter::Body,
+                            }
+                        } else if matches!(kind, OpKind::Profile | OpKind::Chamfer | OpKind::Engrave) {
                             CadFilter::Loop
                         } else {
                             CadFilter::Face
@@ -5360,6 +5434,9 @@ impl App {
             Message::CancelOp => {
                 self.geometry_editor = None;
                 self.cad_pending_kind = None;
+                self.cad_filter_explicit = false;
+                self.geometry_additive = false;
+                self.geometry_auto_pick = false;
                 self.cad_tool_pick = None;
                 self.cad_inspecting = false;
                 self.controller.set_cad_selection(vec![]);
@@ -5380,11 +5457,15 @@ impl App {
                             binding,
                             settings,
                             self.operation_tools.clone(),
+                            self.stock_to_leave_with_fields(),
                         )
                     });
                     match result {
                         Ok(id) => {
                             self.cad_pending_kind = None;
+                            self.cad_filter_explicit = false;
+                            self.geometry_additive = false;
+                            self.geometry_auto_pick = false;
                             self.cad_tool_pick = None;
                             self.cad_inspecting = false;
                             self.controller.set_cad_selection(vec![]);
@@ -6089,6 +6170,14 @@ impl App {
                         }
                     }
                     _ => {}
+                });
+                self.refresh_operation_fields();
+            }
+            Message::AdaptiveClimbToggled(on) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Adaptive(adaptive) = op {
+                        adaptive.params.climb = on;
+                    }
                 });
                 self.refresh_operation_fields();
             }
@@ -7336,6 +7425,9 @@ impl App {
             return true;
         }
         if !self.library_mode() {
+            if self.stock_to_leave_dirty() {
+                return true;
+            }
             if self.operation_draft_dirty() {
                 return true;
             }
@@ -7374,6 +7466,28 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn stock_to_leave_dirty(&self) -> bool {
+        let draft = self.stock_to_leave_value();
+        if self.creating_operation() {
+            return draft != cam_model::StockToLeave::default();
+        }
+        match self.controller.selection() {
+            Selection::Operation(id) => draft != self.controller.document().setup().stock_to_leave_for(id),
+            _ => false,
+        }
+    }
+
+    fn stock_to_leave_with_fields(&self) -> cam_model::StockToLeave {
+        let mut stock = self.stock_to_leave_value();
+        if let Some(value) = self.fields.get(&Field::StockLeaveRadial).and_then(|s| s.trim().parse().ok()) {
+            stock.radial = value;
+        }
+        if let Some(value) = self.fields.get(&Field::StockLeaveAxial).and_then(|s| s.trim().parse().ok()) {
+            stock.axial = value;
+        }
+        stock
     }
 
     /// Which fields the inspector shows for the current selection.
@@ -7544,6 +7658,13 @@ impl App {
     }
     /// The model value backing a field for the current selection, if any.
     fn field_value(&self, field: Field) -> Option<f64> {
+        if matches!(field, Field::StockLeaveRadial | Field::StockLeaveAxial) {
+            let stock = self.stock_to_leave_value();
+            return Some(match field {
+                Field::StockLeaveRadial => stock.radial,
+                _ => stock.axial,
+            });
+        }
         if self.creating_operation() {
             return self
                 .operation_draft
@@ -7814,22 +7935,24 @@ impl App {
                     .contains_key(&id)
             {
                 match self.edited_height_settings() {
-                    Ok(settings) => self.controller.apply_operation_height_settings(
+                    Ok(settings) => self.controller.apply_operation_height_settings_and_stock(
                         operation,
                         overrides,
                         tools,
                         self.operation_geometry.clone(),
                         settings,
+                        self.stock_to_leave_with_fields(),
                     ),
                     Err(reason) => Err(reason),
                 }
             } else {
-                self.controller.apply_operation_settings_with_heights(
+                self.controller.apply_operation_settings_with_heights_and_stock(
                     operation,
                     overrides,
                     tools,
                     self.operation_geometry.clone(),
                     Some(heights),
+                    self.stock_to_leave_with_fields(),
                 )
             };
             match result {
@@ -8651,6 +8774,7 @@ impl App {
                     cmd(Icon::Chamfer, "Chamfer", begin(OpKind::Chamfer)),
                     cmd(Icon::Engrave, "Engrave", begin(OpKind::Engrave)),
                     cmd(Icon::Carve, "Carve", begin(OpKind::Carve)),
+                    cmd(Icon::Adaptive, "3D Adaptive Clearing", begin(OpKind::Adaptive)),
                 ],
             }],
             RibbonTab::Machinery => vec![GroupSpec {
@@ -8968,6 +9092,43 @@ impl App {
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
         if self.profile_entry_cad_pick(entity.clone()){return;}
+        let auto_edit_id = if self.geometry_auto_pick
+            && self.operation_tab == OperationTab::Geometry
+            && self.cad_editing_op.is_none()
+            && self.cad_pending_kind.is_none()
+        {
+            match self.controller.selection() {
+                Selection::Operation(id)
+                    if self.controller.geometry_state().bindings.contains_key(&id) => Some(id),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(id) = auto_edit_id {
+            if self.setup_draft_dirty() {
+                self.status = "OK or Cancel setup changes before selecting new geometry.".into();
+                return;
+            }
+            if matches!(&self.operation_draft, Some(Operation::Profile(profile)) if profile.selections.is_some()) {
+                let entry_kind = match entity.kind {
+                    EntityKind::Face => Some(cam_model::ProfileGeometryKind::FaceContours),
+                    EntityKind::Edge | EntityKind::Loop => {
+                        Some(cam_model::ProfileGeometryKind::Chain)
+                    }
+                    EntityKind::Silhouette => Some(cam_model::ProfileGeometryKind::Silhouette),
+                    _ => None,
+                };
+                if let Some(kind) = entry_kind {
+                    self.profile_entry_message(profile_entries_view::EntryMessage::Add(kind));
+                    self.profile_entry_cad_pick(entity);
+                    return;
+                }
+            }
+            let _ = self.update(Message::EditCadGeometry(id));
+            self.geometry_additive = true;
+            self.geometry_auto_pick = false;
+        }
         if self.cad_editing_op.is_none()
             && self.cad_pending_kind.is_none()
             && (self.setup_draft_dirty()
@@ -8977,6 +9138,7 @@ impl App {
             self.status = "OK or Cancel inspector changes before selecting new geometry.".into();
             return;
         }
+        self.adopt_automatic_geometry_pick(&entity);
         self.cad_inspecting = self.cad_editing_op.is_some();
         let profile = self.profile_geometry_active();
         if profile
@@ -9003,6 +9165,8 @@ impl App {
             return;
         }
         let multiple = (profile && entity.kind != EntityKind::Silhouette)
+            || self.cad_pending_kind == Some(OpKind::Adaptive)
+            || self.cad_editing_op.and_then(|id| self.current_operation(id)).is_some_and(|op| matches!(op, Operation::Adaptive(_)))
             || matches!(
                 self.cad_pending_kind,
                 Some(OpKind::Drill | OpKind::Thread | OpKind::Engrave | OpKind::Chamfer)
@@ -9024,10 +9188,16 @@ impl App {
                 || (self.modifiers.command() && !self.modifiers.control())
                 || self.modifiers.shift();
         self.geometry_row_selection = None;
-        match self
-            .controller
-            .toggle_cad_selection(entity.clone(), additive)
-        {
+        let adaptive = self.cad_pending_kind == Some(OpKind::Adaptive)
+            || self.cad_editing_op
+                .and_then(|id| self.current_operation(id))
+                .is_some_and(|operation| matches!(operation, Operation::Adaptive(_)));
+        let selection_result = if adaptive {
+            self.controller.toggle_adaptive_cad_selection(entity.clone(), additive)
+        } else {
+            self.controller.toggle_cad_selection(entity.clone(), additive)
+        };
+        match selection_result {
             Ok(()) => {
                 if !self.creating_operation() && self.cad_editing_op.is_none() {
                     let selected = self.controller.cad_selection().to_vec();
@@ -9060,6 +9230,68 @@ impl App {
                 )
             )),
         }
+    }
+
+    fn adopt_automatic_geometry_pick(&mut self, entity: &EntityRef) {
+        if self.cad_filter_explicit
+            || !(self.geometry_additive || self.geometry_auto_pick)
+            || self.operation_tab != OperationTab::Geometry
+            || self.setup_model_pick
+            || self.setup_axis_pick.is_some()
+        {
+            return;
+        }
+        let kind = self.cad_pending_kind.or_else(|| {
+            self.cad_editing_op
+                .and_then(|id| self.current_operation(id))
+                .map(AppController::operation_kind)
+        }).or_else(|| {
+            (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
+                .then(|| self.geometry_operation_kind())
+                .flatten()
+        });
+        let Some(kind) = kind else {
+            return;
+        };
+        if kind == OpKind::Profile {
+            match entity.kind {
+                EntityKind::Face => {
+                    self.profile_selection_mode = ProfileSelectionMode::FaceContours;
+                    self.profile_chain_edges = false;
+                    self.cad_filter = CadFilter::Face;
+                }
+                EntityKind::Edge => {
+                    self.profile_selection_mode = ProfileSelectionMode::Chain;
+                    self.profile_chain_edges = true;
+                    self.cad_filter = CadFilter::Edge;
+                }
+                EntityKind::Loop => {
+                    self.profile_selection_mode = ProfileSelectionMode::Chain;
+                    self.profile_chain_edges = false;
+                    self.cad_filter = CadFilter::Loop;
+                }
+                EntityKind::Silhouette => {
+                    self.profile_selection_mode = ProfileSelectionMode::Silhouette;
+                    self.cad_filter = CadFilter::Body;
+                }
+                _ => {}
+            }
+            return;
+        }
+        self.cad_filter = match (kind, entity.kind) {
+            (OpKind::Chamfer, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Chamfer, EntityKind::Edge) => CadFilter::Edge,
+            (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve, EntityKind::Loop) => {
+                CadFilter::Loop
+            }
+            (OpKind::Engrave, EntityKind::Edge) => CadFilter::Edge,
+            (OpKind::Carve, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Thread | OpKind::Drill, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Adaptive, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Adaptive, EntityKind::Body) => CadFilter::Body,
+            (OpKind::Face, EntityKind::Silhouette) => CadFilter::Silhouette,
+            _ => self.cad_filter,
+        };
     }
 
     /// The object-snap toggle row shown during a pick. Enabled snaps read as
@@ -9951,6 +10183,7 @@ fn op_kind(op: &Operation) -> &'static str {
         Operation::Thread(_) => "Thread",
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
+        Operation::Adaptive(_) => "3D Adaptive Clearing",
     }
 }
 
@@ -10048,6 +10281,12 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Thread(o), Field::ThreadBlindAllowance) => Some(o.blind_allowance),
         (Operation::Thread(o), Field::Feed) => Some(o.feed),
         (Operation::Thread(o), Field::PlungeFeed) => Some(o.plunge_feed),
+        (Operation::Adaptive(o), Field::AdaptiveTolerance) => Some(o.params.tolerance),
+        (Operation::Adaptive(o), Field::AdaptiveOptimalLoad) => Some(o.params.optimal_load),
+        (Operation::Adaptive(o), Field::Stepdown) => Some(o.params.stepdown),
+        (Operation::Adaptive(o), Field::AdaptiveFineStepdown) => Some(o.params.fine_stepdown),
+        (Operation::Adaptive(o), Field::Feed) => Some(o.params.feed),
+        (Operation::Adaptive(o), Field::PlungeFeed) => Some(o.params.plunge_feed),
         _ => None,
     }
 }
@@ -10266,6 +10505,14 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             if let Some(v) = get(Field::PlungeFeed) {
                 o.plunge_feed = v;
             }
+        }
+        Operation::Adaptive(o) => {
+            if let Some(v) = get(Field::AdaptiveTolerance) { o.params.tolerance = v; }
+            if let Some(v) = get(Field::AdaptiveOptimalLoad) { o.params.optimal_load = v; }
+            if let Some(v) = get(Field::Stepdown) { o.params.stepdown = v; }
+            if let Some(v) = get(Field::AdaptiveFineStepdown) { o.params.fine_stepdown = v; }
+            if let Some(v) = get(Field::Feed) { o.params.feed = v; }
+            if let Some(v) = get(Field::PlungeFeed) { o.params.plunge_feed = v; }
         }
         Operation::Engrave(o) => {
             if let Some(v) = get(Field::Depth) {
@@ -10738,6 +10985,8 @@ struct Viewport {
     cad_edges: Arc<Vec<Vertex>>,
     cad_scene: Arc<CadScene>,
     cad_filter: EntityKind,
+    cad_filter_explicit: bool,
+    geometry_pick_active: bool,
     cad_operation_kind: Option<OpKind>,
     cad_silhouette: bool,
     cad_select_through: bool,
@@ -11112,6 +11361,8 @@ impl Viewport {
             cad_edges,
             cad_scene,
             cad_filter,
+            cad_filter_explicit: false,
+            geometry_pick_active: false,
             cad_operation_kind: None,
             cad_silhouette: false,
             cad_select_through,
@@ -11176,6 +11427,32 @@ impl Viewport {
                 self.cad_select_through,
             );
         }
+        let operation_kind = if self.setup_axis {
+            None
+        } else {
+            self.cad_operation_kind
+        };
+        if !self.setup_axis {
+            if let Some(kind) = operation_kind {
+                if self.geometry_pick_active && !self.cad_filter_explicit {
+                    return self.operation_candidates(kind, ray, aperture as f64);
+                }
+            }
+            if self.cad_operation_kind.is_none() && !self.cad_filter_explicit {
+                return self.cad_scene.pick_any_candidates(
+                    ray,
+                    &[
+                        EntityKind::Face,
+                        EntityKind::Edge,
+                        EntityKind::Loop,
+                        EntityKind::Vertex,
+                        EntityKind::Body,
+                    ],
+                    aperture as f64,
+                    self.cad_select_through,
+                );
+            }
+        }
         match if self.setup_axis {
             None
         } else {
@@ -11220,6 +11497,133 @@ impl Viewport {
                 self.cad_select_through,
             ),
         }
+    }
+
+    fn operation_candidates(
+        &self,
+        kind: OpKind,
+        ray: cam_render::Ray,
+        aperture: f64,
+    ) -> Vec<PickCandidate> {
+        let through = self.cad_select_through;
+        let mut candidates = match kind {
+            OpKind::Profile => {
+                let mut candidates = self
+                    .cad_scene
+                    .pick_profile_candidates(ray, aperture, through);
+                candidates.extend(self.cad_scene.pick_any_candidates(
+                    ray,
+                    &[
+                        EntityKind::Face,
+                        EntityKind::Edge,
+                        EntityKind::Silhouette,
+                    ],
+                    aperture,
+                    through,
+                ));
+                candidates
+            }
+            OpKind::Chamfer => {
+                let mut candidates = self.cad_scene.pick_any_candidates(
+                    ray,
+                    &[EntityKind::Face, EntityKind::Edge],
+                    aperture,
+                    through,
+                );
+                candidates.extend(
+                    self.cad_scene
+                        .pick_surface_loop_candidates(ray, aperture, through),
+                );
+                candidates
+            }
+            OpKind::Engrave => self.cad_scene.pick_any_candidates(
+                ray,
+                &[EntityKind::Edge, EntityKind::Loop],
+                aperture,
+                through,
+            ),
+            OpKind::Carve => {
+                let mut candidates = self.cad_scene.pick_any_candidates(
+                    ray,
+                    &[EntityKind::Face],
+                    aperture,
+                    through,
+                );
+                candidates.extend(
+                    self.cad_scene
+                        .pick_surface_loop_candidates(ray, aperture, through),
+                );
+                candidates
+            }
+            OpKind::Drill | OpKind::Thread => self
+                .cad_scene
+                .pick_drill_candidates(ray, aperture, through),
+            OpKind::Adaptive => self.cad_scene.pick_any_candidates(
+                ray,
+                &[EntityKind::Face, EntityKind::Body],
+                aperture,
+                through,
+            ),
+            OpKind::Pocket => self.cad_scene.pick_any_candidates(
+                ray,
+                &[EntityKind::Face],
+                aperture,
+                through,
+            ),
+            OpKind::Face => self.cad_scene.pick_any_candidates(
+                ray,
+                &[EntityKind::Face, EntityKind::Silhouette],
+                aperture,
+                through,
+            ),
+        };
+        candidates.sort_by(|a, b| {
+            a.depth
+                .total_cmp(&b.depth)
+                .then_with(|| {
+                    let rank = |entity: &EntityRef| match kind {
+                        OpKind::Profile => match entity.kind {
+                            EntityKind::Loop => 0,
+                            EntityKind::Edge => 1,
+                            EntityKind::Face => 2,
+                            EntityKind::Silhouette => 3,
+                            _ => 4,
+                        },
+                        OpKind::Chamfer => match entity.kind {
+                            EntityKind::Loop => 0,
+                            EntityKind::Face => 1,
+                            EntityKind::Edge => 2,
+                            _ => 3,
+                        },
+                        OpKind::Engrave => match entity.kind {
+                            EntityKind::Loop => 0,
+                            EntityKind::Edge => 1,
+                            _ => 2,
+                        },
+                        OpKind::Carve => match entity.kind {
+                            EntityKind::Face => 0,
+                            EntityKind::Loop => 1,
+                            _ => 2,
+                        },
+                        OpKind::Adaptive | OpKind::Pocket => match entity.kind {
+                            EntityKind::Face => 0,
+                            EntityKind::Body => 1,
+                            _ => 2,
+                        },
+                        OpKind::Face => match entity.kind {
+                            EntityKind::Face => 0,
+                            EntityKind::Silhouette => 1,
+                            _ => 2,
+                        },
+                        OpKind::Drill | OpKind::Thread => 0,
+                    };
+                    rank(&a.entity).cmp(&rank(&b.entity))
+                })
+                .then_with(|| a.entity.cmp(&b.entity))
+        });
+        let mut seen = BTreeSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.entity.clone()));
+        candidates
     }
 
     /// The orbit camera framed on the stable stock box, with the current controls.
@@ -12534,6 +12938,66 @@ mod multi_setup_draft_tests {
         (app, id)
     }
 
+    fn stock_profile_app() -> (App, u32) {
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Profile, 1);
+        app.controller.add_operation(operation);
+        let id = app.controller.document().setup().operations[0].id();
+        app.begin_operation_draft(id);
+        (app, id)
+    }
+
+    #[test]
+    fn stock_to_leave_edit_is_staged_until_apply_and_cancel_discards_it() {
+        let (mut app, id) = stock_profile_app();
+        let before = app.controller.document().setup().clone();
+        send(&mut app, Message::StockToLeaveToggled(true));
+        send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()));
+        send(&mut app, Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()));
+        assert_eq!(app.controller.document().setup(), &before);
+        assert!(app.inspector_dirty());
+
+        send(&mut app, Message::CancelOperationDraft);
+        assert_eq!(app.controller.document().setup(), &before);
+        assert_eq!(app.controller.document().setup().stock_to_leave_for(id), Default::default());
+
+        send(&mut app, Message::StockToLeaveToggled(true));
+        send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()));
+        send(&mut app, Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()));
+        send(&mut app, Message::Apply);
+        assert_eq!(
+            app.controller.document().setup().stock_to_leave_for(id),
+            cam_model::StockToLeave { enabled: true, radial: 0.3, axial: 0.2 }
+        );
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document().setup().stock_to_leave_for(id), Default::default());
+    }
+
+    #[test]
+    fn operation_stock_allowance_follows_duplicates_and_is_removed_on_delete() {
+        let (mut app, id) = stock_profile_app();
+        let allowance = cam_model::StockToLeave {
+            enabled: true,
+            radial: 0.3,
+            axial: 0.2,
+        };
+        app.controller
+            .edit_setup(|setup| { setup.stock_to_leave.insert(id, allowance); });
+        app.controller.duplicate_selected_operation();
+        let Selection::Operation(copy_id) = app.controller.selection() else {
+            panic!("duplicate should be selected");
+        };
+        assert_eq!(app.controller.document().setup().stock_to_leave_for(copy_id), allowance);
+        app.controller.delete_selected_operation();
+        assert_eq!(app.controller.document().setup().stock_to_leave_for(copy_id), Default::default());
+        assert_eq!(app.controller.document().setup().stock_to_leave_for(id), allowance);
+
+        let setup_copy = app.controller.duplicate_setup(app.controller.active_setup_id()).unwrap();
+        let duplicate_setup = app.controller.setups().iter().find(|s| s.id == setup_copy).unwrap();
+        let copied_id = duplicate_setup.operations[0].id();
+        assert_eq!(duplicate_setup.stock_to_leave_for(copied_id), allowance);
+    }
+
     fn model_list_app() -> App {
         use cam_model::*;
         let mut app = blank_app();
@@ -13411,6 +13875,7 @@ mod ribbon_tests {
             families_for(OpKind::Pocket),
             &[F::EndMill, F::BallMill, F::BullNose]
         );
+        assert_eq!(families_for(OpKind::Adaptive), &[F::EndMill]);
         assert_eq!(
             families_for(OpKind::Face),
             &[F::EndMill, F::BullNose, F::FaceMill]

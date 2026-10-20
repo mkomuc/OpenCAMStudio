@@ -9,7 +9,7 @@ use cam_cldata::{Coolant, MoveKind, Point3, Program, SpindleDir, Step, Tag};
 use cam_model::{Document, Operation};
 
 use crate::{
-    CancelToken, CarveStrategy, ChamferStrategy, Diagnostic, DrillStrategy, EngraveStrategy,
+    AdaptiveStrategy, CancelToken, CarveStrategy, ChamferStrategy, Diagnostic, DrillStrategy, EngraveStrategy,
     FaceStrategy, JobEnv, PocketStrategy, ProfileStrategy, Strategy, StrategyResult,
     ThreadStrategy,
 };
@@ -67,7 +67,9 @@ pub fn build_job(
         stock,
         tool_change_height,
         cancel,
-        compute,
+        |op, env, token, stock_to_leave, geometry, heights| {
+            compute_with_stock(op, env, token, stock_to_leave, geometry, heights)
+        },
     )
 }
 
@@ -95,9 +97,17 @@ pub fn build_job_cached(
         request.stock,
         request.tool_change_height,
         cancel,
-        |op, env, token| {
+        |op, env, token, stock_to_leave, geometry, heights| {
             progress(op.id());
-            cache.compute(op, env, token, || compute(op, env, token))
+            let geometry_fingerprint = geometry.bindings.get(&op.id())
+                .map(|binding| geometry.binding_fingerprint(binding));
+            cache.compute_with_dependencies(op, env, token, crate::cache::CacheExtras {
+                stock_to_leave,
+                geometry_fingerprint,
+                cutting_heights: heights,
+            }, || {
+                compute_with_stock(op, env, token, stock_to_leave, geometry, heights)
+            })
         },
     )
 }
@@ -109,7 +119,7 @@ fn build_job_with_compute(
     stock: Option<([f64; 2], [f64; 2])>,
     tool_change_height: f64,
     cancel: &CancelToken,
-    mut compute: impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
+    mut compute: impl FnMut(&Operation, &JobEnv, &CancelToken, cam_model::StockToLeave, &cam_model::GeometryState, Option<cam_model::CuttingHeights>) -> StrategyResult,
 ) -> JobResult {
     let setup = doc.setup();
     let mut env = JobEnv {
@@ -128,6 +138,31 @@ fn build_job_with_compute(
         return JobResult {
             program,
             diagnostics: vec![Diagnostic::error(format!("invalid operation pattern: {reason}")).for_setup(setup.id)],
+            completion: JobCompletion::Failed,
+        };
+    }
+    let adaptive_operation_ids: std::collections::HashSet<_> = setup.operations.iter()
+        .filter(|operation| doc.operation_is_included(setup.id, operation.id()))
+        .filter(|operation| matches!(operation, Operation::Adaptive(_)))
+        .map(Operation::id)
+        .collect();
+    if let Some(pattern) = setup.patterns.iter().find(|pattern| {
+        !pattern.suppressed
+            && pattern.kind.instance_count().is_some_and(|count| count > 1)
+            && pattern.members.iter().any(|member| adaptive_operation_ids.contains(member))
+    }) {
+        return JobResult {
+            program,
+            diagnostics: vec![Diagnostic::error(
+                "3D Adaptive cannot be repeated in an operation pattern because its path is resolved against the setup's actual model instances; create separate adaptive operations for each machining location",
+            ).for_setup(setup.id).for_pattern(pattern.id, 1)],
+            completion: JobCompletion::Failed,
+        };
+    }
+    if let Err(reason) = setup.validate_stock_to_leave() {
+        return JobResult {
+            program,
+            diagnostics: vec![Diagnostic::error(format!("invalid stock-to-leave settings: {reason}")).for_setup(setup.id)],
             completion: JobCompletion::Failed,
         };
     }
@@ -178,6 +213,7 @@ fn build_job_with_compute(
             break;
         }
         env.heights = setup.heights_for(operation.id());
+        let stock_to_leave = setup.stock_to_leave_for(operation.id());
         let configured = setup
             .height_settings
             .get(&operation.id())
@@ -236,7 +272,11 @@ fn build_job_with_compute(
                                 .and_then(|r| r.as_ref().ok())
                                 .map_or(binding.effective_heights(), |h| h.cutting()),
                             cancel,
-                            &mut compute,
+                            ComputeContext {
+                                stock_to_leave,
+                                compute: &mut compute,
+                                geometry: &doc.geometry,
+                            },
                             true,
                         )
                     }
@@ -248,11 +288,15 @@ fn build_job_with_compute(
                 &env,
                 heights.cutting(),
                 cancel,
-                &mut compute,
+                ComputeContext {
+                    stock_to_leave,
+                    compute: &mut compute,
+                    geometry: &doc.geometry,
+                },
                 false,
             )
         } else {
-            compute(operation, &env, cancel)
+            compute(operation, &env, cancel, stock_to_leave, &doc.geometry, None)
         };
         if let Some(Ok(heights)) = configured {
             if let Some(feed_z) = heights.feed {
@@ -451,12 +495,27 @@ fn build_job_with_compute(
 /// and profile compute in a local Z frame so reach checks measure the physical
 /// interval, even when the imported floor lies above world zero. Posting still
 /// applies the work datum exactly once.
+type StrategyCompute<'a> = dyn FnMut(
+    &Operation,
+    &JobEnv,
+    &CancelToken,
+    cam_model::StockToLeave,
+    &cam_model::GeometryState,
+    Option<cam_model::CuttingHeights>,
+) -> StrategyResult + 'a;
+
+struct ComputeContext<'a> {
+    stock_to_leave: cam_model::StockToLeave,
+    compute: &'a mut StrategyCompute<'a>,
+    geometry: &'a cam_model::GeometryState,
+}
+
 fn compute_at_heights(
     operation: &Operation,
     env: &JobEnv,
     heights: cam_model::CuttingHeights,
     cancel: &CancelToken,
-    compute: &mut impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
+    context: ComputeContext<'_>,
     linked: bool,
 ) -> StrategyResult {
     if let Err(reason) = heights.validate() {
@@ -507,6 +566,7 @@ fn compute_at_heights(
             p.depth = depth;
             0.0
         }
+        Operation::Adaptive(_) => 0.0,
         Operation::Carve(p) => {
             p.top = heights.top;
             p.depth = depth;
@@ -540,7 +600,9 @@ fn compute_at_heights(
         },
         spindle: env.spindle,
     };
-    let mut result = compute(&op, &local, cancel);
+    let mut result = (context.compute)(
+        &op, &local, cancel, context.stock_to_leave, context.geometry, Some(heights),
+    );
     if shift != 0.0 {
         result.program = result.program.translated([0.0, 0.0, shift]);
     }
@@ -559,6 +621,7 @@ fn apply_feed_height(
         Operation::Profile(o) => o.plunge_feed,
         Operation::Pocket(o) => o.clear.plunge_feed,
         Operation::Face(o) => o.plunge_feed,
+        Operation::Adaptive(o) => o.params.plunge_feed,
         Operation::Drill(o) => o.feed,
         Operation::Thread(o) => o.plunge_feed,
         Operation::Chamfer(o) => o.plunge_feed,
@@ -914,16 +977,85 @@ fn first_position(program: &Program) -> Option<Point3> {
 }
 
 /// Dispatch an operation to its strategy and compute it.
-fn compute(operation: &Operation, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+fn compute_with_stock(
+    operation: &Operation,
+    env: &JobEnv,
+    cancel: &CancelToken,
+    stock_to_leave: cam_model::StockToLeave,
+    geometry_state: &cam_model::GeometryState,
+    cutting_heights: Option<cam_model::CuttingHeights>,
+) -> StrategyResult {
+    let (radial, axial) = stock_to_leave.effective();
     match operation {
-        Operation::Profile(op) => ProfileStrategy::new(op.clone()).compute(env, cancel),
+        Operation::Adaptive(op) => {
+            let Some(binding) = geometry_state.bindings.get(&op.id) else {
+                return StrategyResult { diagnostics: vec![Diagnostic::error(format!("operation {}: adaptive geometry binding is missing", op.id))], ..Default::default() };
+            };
+            let heights = cutting_heights.unwrap_or_else(|| binding.effective_heights());
+            let resolved = match cam_geometry3d::resolve_adaptive(
+                geometry_state,
+                binding,
+                cam_geometry3d::AdaptiveResolveConfig {
+                    heights,
+                    stock_to_leave,
+                    stepdown: op.params.stepdown,
+                    fine_stepdown: op.params.fine_stepdown,
+                    tolerance: op.params.tolerance,
+                },
+                || cancel.is_cancelled(),
+            ) {
+                Ok(geometry) => geometry,
+                Err(_) if cancel.is_cancelled() => return StrategyResult { cancelled: true, ..Default::default() },
+                Err(reason) => return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() },
+            };
+            AdaptiveStrategy::new(op.clone(), stock_to_leave, resolved).compute(env, cancel)
+        }
+        Operation::Profile(op) => {
+            if axial > 0.0 && axial >= op.depth {
+                return stock_allowance_error(op.id, axial, op.depth);
+            }
+            let mut op = op.clone();
+            op.offset += radial;
+            op.depth -= axial;
+            ProfileStrategy::new(op).compute(env, cancel)
+        }
         Operation::Drill(op) => DrillStrategy::new(op.clone()).compute(env, cancel),
-        Operation::Pocket(op) => PocketStrategy::new(op.clone()).compute(env, cancel),
-        Operation::Face(op) => FaceStrategy::new(op.clone()).compute(env, cancel),
+        Operation::Pocket(op) => {
+            if axial > 0.0 && axial >= op.depth {
+                return stock_allowance_error(op.id, axial, op.depth);
+            }
+            let mut op = op.clone();
+            op.clear.offset += radial;
+            op.depth -= axial;
+            PocketStrategy::new(op).compute(env, cancel)
+        }
+        Operation::Face(op) => {
+            if radial > 0.0 {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error("radial stock to leave is not supported for Face; set radial allowance to 0 mm")],
+                    ..Default::default()
+                };
+            }
+            if axial > 0.0 && axial >= op.depth {
+                return stock_allowance_error(op.id, axial, op.depth);
+            }
+            let mut op = op.clone();
+            op.depth -= axial;
+            FaceStrategy::new(op).compute(env, cancel)
+        }
         Operation::Chamfer(op) => ChamferStrategy::new(op.clone()).compute(env, cancel),
         Operation::Thread(op) => ThreadStrategy::new(op.clone()).compute(env, cancel),
         Operation::Engrave(op) => EngraveStrategy::new(op.clone()).compute(env, cancel),
         Operation::Carve(op) => CarveStrategy::new(op.clone()).compute(env, cancel),
+    }
+}
+
+fn stock_allowance_error(operation_id: u32, axial: f64, depth: f64) -> StrategyResult {
+    StrategyResult {
+        diagnostics: vec![Diagnostic::error(format!(
+            "operation {operation_id}: axial stock to leave ({axial:.3} mm) must be less than the cutting depth ({depth:.3} mm)"
+        ))],
+        ..Default::default()
     }
 }
 
@@ -940,6 +1072,51 @@ fn last_tool_change(fragment: &Program) -> Option<u32> {
 mod tests {
     use super::*;
     use cam_model::{DrillOp, Heights, Setup, Stock, Tool, ToolKind};
+    use cam_geo::{Contour, Point};
+
+    fn profile_operation() -> Operation {
+        Operation::Profile(cam_model::ProfileOp {
+            selections: None,
+            closed: true,
+            additional_chains: Vec::new(),
+            tabs: Default::default(),
+            id: 0,
+            tool: 1,
+            chain: Contour::new(vec![
+                Point::new(0.0, 0.0), Point::new(30.0, 0.0),
+                Point::new(30.0, 30.0), Point::new(0.0, 30.0),
+            ]),
+            side: cam_model::Side::Inside,
+            comp: cam_model::Comp::Computed,
+            offset: 0.25,
+            depth: 2.0,
+            stepdown: 2.0,
+            stepover: 0.0,
+            spindle_rpm: 1000.0,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            feed: 300.0,
+            plunge_feed: 100.0,
+            start: None,
+            lead_in: cam_model::Lead::None,
+            lead_out: cam_model::Lead::None,
+            lead_overlap: 0.0,
+            plunge: cam_model::Plunge::Straight,
+            clearing: Default::default(),
+        })
+    }
+
+    fn plan_request(document: &Document) -> crate::PlanRequest<'_> {
+        crate::PlanRequest {
+            document,
+            spindle_rpm: 1000.0,
+            dir: SpindleDir::Cw,
+            stock: None,
+            tool_change_height: 50.0,
+        }
+    }
 
     fn document(operations: u32) -> Document {
         Document::new(Setup {
@@ -991,8 +1168,139 @@ mod tests {
             origin_index: 1,
             operation_heights: Default::default(),
             height_settings: Default::default(),
+            stock_to_leave: Default::default(),
             tool_change_height: None,
         })
+    }
+
+    #[test]
+    fn setup_stock_allowance_changes_profile_path_and_invalidates_cached_fragment() {
+        let mut doc = document(0);
+        doc.setup_mut().tools = vec![Tool {
+            number: 1,
+            diameter: 6.0,
+            length: 30.0,
+            flute_length: 20.0,
+            kind: ToolKind::EndMill,
+            ..Default::default()
+        }];
+        doc.setup_mut().operations.push(profile_operation());
+        let mut cache = crate::OperationCache::default();
+        let original = crate::build_job_cached(plan_request(&doc), &CancelToken::new(), &mut cache, |_| {});
+        assert_eq!(original.completion, JobCompletion::Complete, "{:?}", original.diagnostics);
+        assert_eq!(cache.stats.computed, 1);
+
+        doc.setup_mut().stock_to_leave.insert(0, cam_model::StockToLeave {
+            enabled: false, radial: 0.75, axial: 0.5,
+        });
+        let disabled = crate::build_job_cached(plan_request(&doc), &CancelToken::new(), &mut cache, |_| {});
+        assert_eq!(disabled.completion, JobCompletion::Complete, "{:?}", disabled.diagnostics);
+        assert_eq!(disabled.program, original.program, "disabled allowances must preserve the exact legacy path");
+        assert_eq!(cache.stats.reused, 1, "disabled values must not change toolpath dependencies");
+
+        doc.setup_mut().stock_to_leave.insert(0, cam_model::StockToLeave {
+            enabled: true, radial: 0.5, axial: 0.5,
+        });
+        let allowed = crate::build_job_cached(plan_request(&doc), &CancelToken::new(), &mut cache, |_| {});
+        assert_eq!(allowed.completion, JobCompletion::Complete, "{:?}", allowed.diagnostics);
+        assert_eq!(cache.stats.computed, 1, "changed allowances must not reuse the old path");
+        assert_ne!(allowed.program, original.program);
+        let first_cut_xy = |program: &Program| program.steps().iter().find_map(|step| match step {
+            Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some([to.x, to.y]),
+            Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => Some([end.x, end.y]),
+            _ => None,
+        }).unwrap();
+        let a = first_cut_xy(&original.program);
+        let b = first_cut_xy(&allowed.program);
+        assert!((a[0] - b[0]).hypot(a[1] - b[1]) > 0.1, "radial allowance must offset the wall path: {a:?} -> {b:?}");
+        let deepest_cut = allowed.program.steps().iter().filter_map(|step| match step {
+            Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(to.z),
+            Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => Some(end.z),
+            _ => None,
+        }).fold(f64::INFINITY, f64::min);
+        assert!((deepest_cut - -1.5).abs() < 1e-9, "axial allowance must raise the floor: {deepest_cut}");
+    }
+
+    #[test]
+    fn stock_allowances_apply_to_pocket_walls_and_face_floor() {
+        let tools = [Tool {
+            number: 1,
+            diameter: 6.0,
+            length: 30.0,
+            flute_length: 20.0,
+            kind: ToolKind::EndMill,
+            ..Default::default()
+        }];
+        let env = JobEnv {
+            heights: Heights::new(10.0, 5.0, 0.0),
+            tools: &tools,
+            stock: None,
+            spindle: SpindleDir::Cw,
+        };
+        let cancel = CancelToken::new();
+        let geometry = cam_model::GeometryState::default();
+        let allowance = cam_model::StockToLeave { enabled: true, radial: 0.5, axial: 0.5 };
+        let square = || Contour::new(vec![
+            Point::new(0.0, 0.0), Point::new(30.0, 0.0),
+            Point::new(30.0, 30.0), Point::new(0.0, 30.0),
+        ]);
+        let pocket = Operation::Pocket(cam_model::PocketOp {
+            id: 2, tool: 1, boundary: square(), islands: Vec::new(), depth: 2.0,
+            spindle_rpm: 1000.0, tool_preset: None, cooling: Default::default(),
+            entry_feeds: Default::default(), work_offset: 1, start: None,
+            clear: cam_model::ClearParams {
+                stepdown: 2.0, overlap: 0.5, offset: 0.2, feed: 300.0,
+                plunge_feed: 100.0, plunge: cam_model::Plunge::Straight,
+                lead_in: cam_model::Lead::None, lead_out: cam_model::Lead::None,
+                lead_overlap: 0.0, clearing: Default::default(),
+            },
+        });
+        let pocket_base = compute_with_stock(&pocket, &env, &cancel, Default::default(), &geometry, None);
+        let pocket_allowed = compute_with_stock(&pocket, &env, &cancel, allowance, &geometry, None);
+        assert!(!pocket_base.has_errors(), "{:?}", pocket_base.diagnostics);
+        assert!(!pocket_allowed.has_errors(), "{:?}", pocket_allowed.diagnostics);
+        assert_ne!(pocket_allowed.program, pocket_base.program, "radial allowance adds to the saved pocket wall offset");
+        let min_cut_z = |program: &Program| program.steps().iter().filter_map(|step| match step {
+            Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(to.z),
+            Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => Some(end.z),
+            _ => None,
+        }).fold(f64::INFINITY, f64::min);
+        assert!((min_cut_z(&pocket_allowed.program) - -1.5).abs() < 1e-9);
+
+        let face = Operation::Face(cam_model::FaceOp {
+            id: 3, tool: 1, boundary: square(), start_offset: 0.0, depth: 2.0,
+            stepdown: 2.0, overlap: 0.25, overshoot: 0.0, direction: cam_model::Axis::X,
+            spindle_rpm: 1000.0, tool_preset: None, cooling: Default::default(),
+            entry_feeds: Default::default(), work_offset: 1, feed: 300.0, plunge_feed: 100.0,
+        });
+        let face_base = compute_with_stock(&face, &env, &cancel, Default::default(), &geometry, None);
+        let face_allowed = compute_with_stock(
+            &face, &env, &cancel,
+            cam_model::StockToLeave { enabled: true, radial: 0.0, axial: 0.5 },
+            &geometry, None,
+        );
+        assert!(!face_base.has_errors(), "{:?}", face_base.diagnostics);
+        assert!(!face_allowed.has_errors(), "{:?}", face_allowed.diagnostics);
+        assert!((min_cut_z(&face_base.program) - -2.0).abs() < 1e-9);
+        assert!((min_cut_z(&face_allowed.program) - -1.5).abs() < 1e-9);
+        let radial_face = compute_with_stock(
+            &face, &env, &cancel,
+            cam_model::StockToLeave { enabled: true, radial: 0.1, axial: 0.0 },
+            &geometry, None,
+        );
+        assert!(radial_face.has_errors());
+        assert!(radial_face.diagnostics[0].message.contains("radial stock to leave is not supported for Face"));
+    }
+
+    #[test]
+    fn unsupported_stock_allowances_fail_setup_validation() {
+        let mut doc = document(1);
+        doc.setup_mut().stock_to_leave.insert(0, cam_model::StockToLeave {
+            enabled: true, radial: 0.5, axial: 0.25,
+        });
+        let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result.diagnostics.iter().any(|d| d.message.contains("supported for Profile, Pocket, Face, and Adaptive only")));
     }
 
     #[test]
@@ -1016,6 +1324,32 @@ mod tests {
             assert_eq!(tag.pattern_id, Some(77));
             assert!(tag.instance_index.is_some());
         }
+    }
+
+    #[test]
+    fn adaptive_patterns_fail_before_reusing_a_path_against_unchecked_models() {
+        let mut doc = document(0);
+        doc.setup_mut().operations.push(Operation::Adaptive(cam_model::AdaptiveOp {
+            id: 4,
+            tool: 1,
+            spindle_rpm: 1000.0,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            params: Default::default(),
+        }));
+        doc.setup_mut().patterns.push(cam_model::OperationPattern {
+            id: 79,
+            name: "Repeated adaptive part".into(),
+            members: vec![4],
+            kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 20.0, dy: 0.0 },
+            order: cam_model::PatternOrder::ByInstance,
+            suppressed: false,
+        });
+        let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result.diagnostics.iter().any(|diagnostic| diagnostic.message.contains("cannot be repeated in an operation pattern")));
     }
 
     #[test]
@@ -1185,7 +1519,7 @@ mod tests {
             None,
             10.,
             &CancelToken::new(),
-            |op, env, _| {
+            |op, env, _, _, _, _| {
                 seen.push((op.id(), env.heights));
                 let mut program = Program::new();
                 program.push(Step::Rapid {
@@ -1236,7 +1570,7 @@ mod tests {
             None,
             50.,
             &CancelToken::new(),
-            |_, _, _| panic!("invalid planes must not reach a strategy"),
+            |_, _, _, _, _, _| panic!("invalid planes must not reach a strategy"),
         );
         assert_eq!(result.completion, JobCompletion::Failed);
         assert!(result.diagnostics.iter().any(|d| d.op == Some(0)));
@@ -1306,7 +1640,7 @@ mod tests {
             None,
             50.0,
             &CancelToken::new(),
-            |op, _, _| fragment(op),
+            |op, _, _, _, _, _| fragment(op),
         );
         assert_eq!(job.completion, JobCompletion::Failed);
         assert!(!contains_cut(&job, 0));
@@ -1325,7 +1659,7 @@ mod tests {
             None,
             50.0,
             &CancelToken::new(),
-            |op, _, _| {
+            |op, _, _, _, _, _| {
                 let mut result = fragment(op);
                 if let Step::Linear { feed, .. } = &mut result.program.steps[1] {
                     *feed = f64::NAN;
@@ -1350,7 +1684,7 @@ mod tests {
             None,
             50.0,
             &token,
-            |_, _, _| panic!("cancelled work must not begin"),
+            |_, _, _, _, _, _| panic!("cancelled work must not begin"),
         );
         assert_eq!(job.completion, JobCompletion::Cancelled);
         assert!(!contains_cut(&job, 0));
@@ -1367,7 +1701,7 @@ mod tests {
             None,
             50.0,
             &token,
-            |op, _, _| {
+            |op, _, _, _, _, _| {
                 called.push(op.id());
                 StrategyResult {
                     cancelled: true,
@@ -1395,7 +1729,7 @@ mod tests {
             None,
             50.0,
             &token,
-            |op, _, token| {
+            |op, _, token, _, _, _| {
                 if op.id() == 1 {
                     token.cancel();
                 }
@@ -1418,7 +1752,7 @@ mod tests {
             None,
             50.0,
             &CancelToken::new(),
-            |op, _, _| {
+            |op, _, _, _, _, _| {
                 called.push(op.id());
                 let mut result = fragment(op);
                 if op.id() == 0 {
@@ -1445,7 +1779,7 @@ mod tests {
             None,
             50.0,
             &CancelToken::new(),
-            |_, _, _| StrategyResult {
+            |_, _, _, _, _, _| StrategyResult {
                 diagnostics: vec![Diagnostic::warning("nothing to cut")],
                 ..Default::default()
             },

@@ -22,6 +22,7 @@ pub(crate) struct Ring {
 }
 
 /// Why ring generation stopped without producing rings.
+#[derive(Debug)]
 pub(crate) enum RingsError {
     /// The job was cancelled mid-generation.
     Cancelled,
