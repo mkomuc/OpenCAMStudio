@@ -32,6 +32,7 @@ fn profile_square(id: u32, chain: Contour) -> ProfileOp {
         tabs: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         clearing: cam_model::Clearing::default(),
@@ -114,6 +115,7 @@ fn a_pocket_clears_its_floor_without_collisions() {
     let op = PocketOp {
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,
@@ -185,6 +187,7 @@ fn pocket_op() -> PocketOp {
     PocketOp {
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,

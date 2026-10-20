@@ -212,6 +212,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
         tabs: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         clearing: Clearing::default(),
@@ -238,6 +239,7 @@ fn pocket() -> Operation {
     Operation::Pocket(PocketOp {
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         id: 1,
@@ -268,6 +270,7 @@ fn chamfer() -> Operation {
         stepdown: 0.,
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         id: 2,

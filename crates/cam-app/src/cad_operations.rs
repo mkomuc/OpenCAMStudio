@@ -433,6 +433,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             boundary: boundary()?,
             islands: resolved.regions[0].holes().to_vec(),
@@ -461,6 +462,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             chain: resolved
                 .profiles
@@ -495,6 +497,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             points: resolved
                 .holes
@@ -513,6 +516,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             boundary: boundary()?,
             start_offset: resolved.heights.top,
@@ -533,6 +537,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             chain: if resolved.chamfers.is_empty() {
                 resolved.profiles[0].chain.clone()
@@ -562,6 +567,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             chain: resolved.profiles[0].chain.clone(),
             closed: resolved.profiles[0].closed,
@@ -578,6 +584,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             boundary: boundary()?,
             islands: resolved.regions[0].holes().to_vec(),
@@ -599,6 +606,7 @@ pub(crate) fn create_operation(
             work_offset,
             spindle_rpm: defaults.spindle_rpm,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             points: resolved
                 .holes

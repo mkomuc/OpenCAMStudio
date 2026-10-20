@@ -181,6 +181,7 @@ fn pocket_doc() -> Document {
     let op = PocketOp {
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,
@@ -214,6 +215,7 @@ fn roughing_doc() -> Document {
         tabs: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         clearing: Clearing::default(),
@@ -244,6 +246,7 @@ fn face_doc(overshoot: f64) -> Document {
     let op = FaceOp {
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,
@@ -278,6 +281,7 @@ fn carve_doc() -> Document {
     let op = CarveOp {
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         id: 0,

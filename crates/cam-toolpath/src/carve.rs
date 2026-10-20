@@ -1392,6 +1392,7 @@ mod tests {
         CarveOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,

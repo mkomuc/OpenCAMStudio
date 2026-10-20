@@ -308,6 +308,15 @@ impl std::fmt::Display for CutDir {
 /// tool (all sentinels) behaves exactly as before: fully fluted, no distinct shank.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tool {
+    /// Optional catalog details; empty for tools saved before these fields existed.
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub manufacturer: String,
+    #[serde(default)]
+    pub product_id: String,
+    #[serde(default)]
+    pub product_link: String,
     /// Tool number (emitted as `Tn`).
     pub number: u32,
     /// Cutting diameter, mm.
@@ -350,6 +359,8 @@ pub struct Tool {
     /// Nominal plunge feed, mm/min. See [`nominal_rpm`](Self::nominal_rpm).
     #[serde(default)]
     pub nominal_plunge_feed: f64,
+    #[serde(default)]
+    pub cooling: Cooling,
     /// Named cutting data snapshots, independent of physical cutter identity.
     #[serde(default)]
     pub presets: Vec<ToolPreset>,
@@ -365,6 +376,10 @@ impl Default for Tool {
     /// Not a usable tool on its own; callers set at least number/diameter/kind.
     fn default() -> Self {
         Self {
+            description: String::new(),
+            manufacturer: String::new(),
+            product_id: String::new(),
+            product_link: String::new(),
             number: 0,
             diameter: 0.0,
             length: 0.0,
@@ -377,6 +392,7 @@ impl Default for Tool {
             nominal_rpm: 0.0,
             nominal_feed: 0.0,
             nominal_plunge_feed: 0.0,
+            cooling: Cooling::None,
             presets: Vec::new(),
             preset_id_floor: 0,
             kind: ToolKind::EndMill,
@@ -696,6 +712,8 @@ mod tests {
             presets: Vec::new(),
             preset_id_floor: 0,
             kind: ToolKind::BullNose { corner_radius: 1.0 },
+            cooling: Cooling::Mms,
+            ..Default::default()
         };
         let back: Tool = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(t, back);
@@ -761,4 +779,4 @@ mod tests {
 }
 
 mod tool_presets;
-pub use tool_presets::{EntryFeeds, Material, ToolPreset};
+pub use tool_presets::{Cooling, EntryFeeds, Material, ToolPreset};

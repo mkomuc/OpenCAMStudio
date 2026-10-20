@@ -1,17 +1,26 @@
 # Tool presets and stock materials
 
-The **Tools** inspector contains **Cutting presets** for the selected cutter and a
-shared **Materials** list. Materials currently contain only a stable ID and a name.
+The **Tools** page shows the cutter library above a **Cutting parameters** table
+for the selected cutter. Preset rows show the linked material name and stable ID.
+The inspector edits cutter geometry, description, manufacturer, product ID, and
+product link. The **Materials** button in the Tools ribbon opens the shared material
+manager in a modal. Materials currently contain only a stable ID and a name.
 Rename a material without changing its ID; presets and stock use the ID to match.
 Materials are saved with the cross-project tool library and included in library
 imports and exports.
 
-1. Add materials under **Tools → Materials**.
-2. Select a cutter and use **Add / duplicate** under **Cutting presets**. With a
+1. Open **Tools → Materials** to add, rename, or delete materials, then click **Done**.
+2. Select a cutter and use **Add preset** below the cutter table. With a
    preset selected this copies its values. Give the new preset a name and select
-   its material, or leave it at **Any material**.
-3. Enter spindle RPM, cutting feed, and plunge feed. Optionally enter ramp,
-   lead-in, and lead-out feeds, as well as stepdown and overlap. Click **Apply changes** to save the cutter and presets together.
+   its material, or leave it at **Any material**. The material picker stores the ID
+   and displays its name. Select a preset row and use **Edit** or **Remove** to manage it.
+3. Enter spindle RPM, cutting feed, and plunge feed. Choose **Cooling → MMS** to
+   run minimum-quantity lubrication, or **None** to cut without cooling. Optionally enter ramp,
+   lead-in, and lead-out feeds, as well as stepdown and overlap. Click **Done** to
+   return to the table, then **Apply changes** in the inspector to save the cutter
+   and presets together. **Cancel** discards pending cutter and preset changes.
+   Switching cutters keeps each cutter's pending edits; an asterisk marks edited
+   cutters. Return to each marked cutter to **Apply changes** or **Cancel**.
 4. In **Setup → Stock**, choose the stock material from the managed list.
 5. Create an operation and choose a cutter. Its first preset matching the stock
    material is applied automatically. If none matches, its first **Any material**
@@ -43,6 +52,20 @@ presets or managed material IDs retain their existing cutting data and material 
 A material used by a library preset or stock in the current project must be
 unlinked before it can be deleted. Saved projects remain self-contained when a
 material is unavailable in the local library.
+
+## Cooling
+
+Tool defaults and cutting presets include **None** and **MMS**. Choosing a cutter
+or applying a preset copies its cooling choice into the operation. The operation's
+**Tool** tab can override it independently; Apply, Cancel, and undo include cooling.
+Older tools, presets, and operations without this field default to **None**.
+
+MMS switches on before an operation's cutting fragment and off after the fragment,
+before tool changes, and at program end. This applies to clearing and carving
+within a compound V-carve operation too. None never activates a coolant output.
+For Estlcam, the machine's **Coolant / MMS outputs** settings select which output
+is driven: output 1 uses M8/M9, output 2 uses M10/M11. Other posts emit their mist
+commands (M7/M9). See [Estlcam export](estlcam.md).
 
 ## Independent entry and exit feeds
 

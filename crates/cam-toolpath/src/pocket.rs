@@ -211,6 +211,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
@@ -254,6 +255,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
@@ -312,6 +314,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
@@ -367,6 +370,7 @@ mod tests {
             let mut op = PocketOp {
                 spindle_rpm: 0.0,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 id: 0,
@@ -411,6 +415,7 @@ mod tests {
             let op = PocketOp {
                 spindle_rpm: 0.0,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 id: 0,
@@ -474,6 +479,7 @@ mod tests {
         PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
@@ -595,6 +601,7 @@ mod tests {
         let op = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,
@@ -729,6 +736,7 @@ mod tests {
         let small = PocketOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,

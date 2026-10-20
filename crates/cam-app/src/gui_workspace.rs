@@ -183,6 +183,7 @@ impl App {
             return;
         }
         if self.setup_draft_dirty()
+            || !self.tool_drafts.is_empty()
             || self.inspector_dirty()
             || self.any_field_invalid()
             || !self.operation_height_overrides_valid()
@@ -663,20 +664,21 @@ impl App {
         };
         let mut list = column![
             row![
-                text("Tool library").size(18),
+                text("Tool library").size(14),
                 mode(LibraryView::Ordered, "By number"),
                 mode(LibraryView::Grouped, "By family")
             ]
             .spacing(12),
             container(
                 row![
-                    text("Tool").width(54),
-                    text("Cutter").width(Length::Fill),
-                    text("Ø mm").width(62),
-                    text("Length mm").width(80),
-                    text("Flute length mm").width(112),
-                    text("RPM").width(65),
-                    text("Feed mm/min").width(100)
+                    text("Tool").size(12).width(54),
+                    text("Description").size(12).width(220),
+                    text("Cutter").size(12).width(140),
+                    text("Manufacturer").size(12).width(140),
+                    text("Product ID").size(12).width(120),
+                    text("Ø mm").size(12).width(62),
+                    text("Length mm").size(12).width(80),
+                    text("Flute length mm").size(12).width(112)
                 ]
                 .spacing(4)
             )
@@ -693,16 +695,30 @@ impl App {
                     .then(a.diameter.total_cmp(&b.diameter))
             }),
         }
-        for (index, tool) in tools {
+        for (index, committed) in tools {
             let selected = index == self.lib_sel;
+            let draft = self.tool_drafts.get(&index);
+            let tool = if selected {
+                self.tool_edit.as_ref().unwrap_or(committed)
+            } else {
+                draft.map(|draft| &draft.tool).unwrap_or(committed)
+            };
+            let pending = draft.is_some() || (selected && self.inspector_dirty());
             let cells = row![
-                text(format!("T{}", tool.number)).width(54),
-                text(tool.kind.to_string()).width(Length::Fill),
-                text(fmt_num(tool.diameter)).width(62),
-                text(fmt_num(tool.length)).width(80),
-                text(fmt_num(tool.flute_len())).width(112),
-                text(fmt_num(tool.nominal_rpm)).width(65),
-                text(fmt_num(tool.nominal_feed)).width(100)
+                text(format!(
+                    "T{}{}",
+                    tool.number,
+                    if pending { " *" } else { "" }
+                ))
+                .size(12)
+                .width(54),
+                text(tool.description.clone()).size(12).width(220),
+                text(tool.kind.to_string()).size(12).width(140),
+                text(tool.manufacturer.clone()).size(12).width(140),
+                text(tool.product_id.clone()).size(12).width(120),
+                text(fmt_num(tool.diameter)).size(12).width(62),
+                text(fmt_num(tool.length)).size(12).width(80),
+                text(fmt_num(tool.flute_len())).size(12).width(112)
             ]
             .spacing(4);
             let item = container(cells)
@@ -718,7 +734,15 @@ impl App {
                     .on_right_press(Message::LibToolMenu(index)),
             );
         }
-        scrollable(list)
+        let cutters = scrollable(list.width(1120))
+            .direction(scrollable::Direction::Both {
+                vertical: scrollable::Scrollbar::default(),
+                horizontal: scrollable::Scrollbar::default(),
+            })
+            .height(Length::FillPortion(3))
+            .width(Length::Fill);
+        column![cutters, self.cutting_presets_table()]
+            .spacing(8)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -733,6 +757,16 @@ impl App {
             );
         }
         body = body.push(self.library_editor());
+        if !self.tool_drafts.is_empty() {
+            body = body.push(
+                text(format!(
+                "Unsaved changes in {} other tool(s). Select each marked tool to Apply or Cancel.",
+                self.tool_drafts.len()
+            ))
+                .size(11)
+                .color(INSPECTOR_MUTED),
+            );
+        }
         column![
             body.height(Length::Fill),
             inspector_footer(
@@ -778,6 +812,7 @@ mod tests {
                     dwell: Some(0.2),
                     spindle_rpm: 1000.,
                     tool_preset: None,
+                    cooling: Default::default(),
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     feed: 100.,
@@ -912,6 +947,7 @@ mod tests {
                 dwell: None,
                 spindle_rpm: 1000.,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: 100.,
@@ -981,6 +1017,7 @@ mod tests {
                     dwell: None,
                     spindle_rpm: 1000.,
                     tool_preset: None,
+                    cooling: Default::default(),
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     feed: 100.,
@@ -1318,16 +1355,28 @@ mod tests {
         assert_eq!(app.view.pan, before.pan);
     }
     #[test]
-    fn dirty_tool_cannot_be_abandoned_by_workspace_or_library_navigation() {
+    fn dirty_tool_is_preserved_while_browsing_and_blocks_workspace_navigation() {
         let (mut app, _) = App::new();
+        app.library = ToolLibrary {
+            tools: vec![
+                crate::tool_library::default_tool(1, ToolKind::EndMill),
+                crate::tool_library::default_tool(2, ToolKind::BallMill),
+            ],
+            ..Default::default()
+        };
         app.switch_workspace(Workspace::Tools);
-        let original = app.library.tools[app.lib_sel].clone();
+        let original_index = app.lib_sel;
+        let original = app.library.tools[original_index].clone();
         app.tool_edit.as_mut().unwrap().length += 1.;
         app.switch_workspace(Workspace::Machining);
         assert_eq!(app.workspace, Workspace::Tools);
-        let _ = app.update(Message::SelectLibraryTool(
-            (app.lib_sel + 1) % app.library.tools.len(),
-        ));
+        let other = (original_index + 1) % app.library.tools.len();
+        let _ = app.update(Message::SelectLibraryTool(other));
+        assert_eq!(app.lib_sel, other);
+        assert!(app.tool_drafts.contains_key(&original_index));
+        app.switch_workspace(Workspace::Machining);
+        assert_eq!(app.workspace, Workspace::Tools);
+        let _ = app.update(Message::SelectLibraryTool(original_index));
         assert_eq!(app.tool_edit.clone().unwrap().length, original.length + 1.);
         let _ = app.update(Message::CancelToolDraft);
         assert_eq!(app.tool_edit.clone().unwrap(), original);

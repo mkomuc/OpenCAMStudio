@@ -8,6 +8,11 @@ outputs**, enable the output wired to the lubrication system, then click **Apply
 | Output 1 (enabled by default) | M8 | M9 |
 | Output 2 | M10 | M11 |
 
+Select **Cooling → MMS** in the cutter defaults or cutting preset, or in the
+operation's **Tool** tab. **None** keeps cooling disabled. MMS activates the
+configured outputs for each cut and turns them off when the operation finishes
+and before a tool change. Files without a cooling choice default to None.
+
 Both outputs can be enabled independently. Selected outputs follow the program's
 coolant state: flood or mist turns them on; coolant-off turns them off. They are
 also switched off at program start and end. Disabled outputs emit no commands.

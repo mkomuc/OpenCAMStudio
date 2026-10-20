@@ -2057,6 +2057,7 @@ mod tests {
             tabs: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             clearing: cam_model::Clearing::default(),
@@ -2187,6 +2188,7 @@ mod tests {
             tabs: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             clearing: cam_model::Clearing {

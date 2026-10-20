@@ -4,9 +4,9 @@ G54
 (clearing)
 T2 M6
 M3 S1000
-M8
 G0 X19.041 Y20.959 Z50.000
 Z5.000
+M9
 (Carve clearing: 1 flat area at 1.000 mm deep with tool 2 dia 6.000, 3.000 mm stepover, 1 pass)
 Z2.000
 G1 Z-1.000 F100

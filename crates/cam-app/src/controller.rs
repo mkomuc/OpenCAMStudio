@@ -1020,6 +1020,15 @@ impl AppController {
                 "Choose a tool from the tool library before creating the CAD operation".into(),
             );
         }
+        if let Some(cooling) = self
+            .setup()
+            .tools
+            .iter()
+            .find(|t| t.number == tool)
+            .map(|t| t.cooling)
+        {
+            op.set_cooling(cooling);
+        }
         if let Some(preset) = self.setup().tools.iter().find(|t| t.number == tool)
             .and_then(|t| t.preset_for_material(self.setup().material_id)) {
             op.apply_tool_preset(preset)?;
@@ -1985,6 +1994,7 @@ impl AppController {
                 stepover: 0.0,
                 spindle_rpm,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
@@ -2008,6 +2018,7 @@ impl AppController {
                     depth: p.depth,
                     spindle_rpm,
                     tool_preset: None,
+                    cooling: Default::default(),
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     start,
@@ -2035,6 +2046,7 @@ impl AppController {
                 dwell: None,
                 spindle_rpm,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: plunge_feed,
@@ -2064,6 +2076,7 @@ impl AppController {
                     direction,
                     spindle_rpm,
                     tool_preset: None,
+                    cooling: Default::default(),
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
@@ -2086,6 +2099,7 @@ impl AppController {
                 gradual: false,
                 spindle_rpm,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
@@ -2133,6 +2147,7 @@ impl AppController {
                     blind_allowance: 0.0,
                     spindle_rpm,
                     tool_preset: None,
+                    cooling: Default::default(),
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
@@ -2164,6 +2179,7 @@ impl AppController {
                     scallop: 0.0,
                     spindle_rpm,
                     tool_preset: None,
+                    cooling: Default::default(),
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     feed,
@@ -2191,6 +2207,7 @@ impl AppController {
                 stepdown: 0.0,
                 spindle_rpm,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 feed,
@@ -2198,6 +2215,15 @@ impl AppController {
                 start,
             }),
         };
+        if let Some(cooling) = self
+            .setup()
+            .tools
+            .iter()
+            .find(|t| t.number == tool)
+            .map(|t| t.cooling)
+        {
+            op.set_cooling(cooling);
+        }
         if cutting.is_none() {
             if let Some(preset) = self
                 .setup()
@@ -2454,6 +2480,7 @@ impl AppController {
                     stepover: 0.0,
                     spindle_rpm: 0.0,
                     tool_preset: None,
+                    cooling: Default::default(),
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     feed: p.feed,
@@ -2493,6 +2520,7 @@ impl AppController {
                             dwell: None,
                             spindle_rpm: 0.0,
                             tool_preset: None,
+                            cooling: Default::default(),
                             entry_feeds: Default::default(),
                             work_offset: 1,
                             feed: p.plunge_feed,
@@ -2506,6 +2534,7 @@ impl AppController {
                             depth: p.depth,
                             spindle_rpm: 0.0,
                             tool_preset: None,
+                            cooling: Default::default(),
                             entry_feeds: Default::default(),
                             work_offset: 1,
                             start: None,
@@ -3181,6 +3210,10 @@ mod tests {
     fn estlcam_output_changes_repost_the_same_toolpath() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        let ids: Vec<_> = app.setup().operations.iter().map(Operation::id).collect();
+        for id in ids {
+            app.edit_operation(id, |op| op.set_cooling(cam_model::Cooling::Mms));
+        }
         app.set_post_kind(PostKind::Estlcam);
         app.run(&CancelToken::new());
         let first = app.export_nc().unwrap().to_string();

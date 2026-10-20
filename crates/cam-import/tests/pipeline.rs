@@ -50,6 +50,7 @@ fn profile_op(id: u32, chain: cam_geo::Contour, side: Side, climb: bool) -> Oper
         stepover: 0.0,
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset: 1,
         feed: 300.0,

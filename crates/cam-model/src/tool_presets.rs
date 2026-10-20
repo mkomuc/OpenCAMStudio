@@ -2,6 +2,25 @@
 //! never consults mutable shop data, so saving/reopening cannot change a cut.
 use crate::{Operation, Tool};
 
+/// Cutting lubrication requested independently of the machine's output wiring.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Cooling {
+    #[default]
+    None,
+    Mms,
+}
+impl Cooling {
+    pub const ALL: [Self; 2] = [Self::None, Self::Mms];
+}
+impl std::fmt::Display for Cooling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "None",
+            Self::Mms => "MMS",
+        })
+    }
+}
+
 /// A shared stock material. Physical properties can be added without changing IDs.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Material {
@@ -42,6 +61,8 @@ impl EntryFeeds {
 /// Named cutting parameters for one cutter. IDs are local to the cutter.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolPreset {
+    #[serde(default)]
+    pub cooling: Cooling,
     pub id: u64,
     pub name: String,
     #[serde(default)]
@@ -116,6 +137,30 @@ impl Tool {
 }
 
 impl Operation {
+    pub fn cooling(&self) -> Cooling {
+        match self {
+            Self::Profile(o) => o.cooling,
+            Self::Pocket(o) => o.cooling,
+            Self::Face(o) => o.cooling,
+            Self::Drill(o) => o.cooling,
+            Self::Chamfer(o) => o.cooling,
+            Self::Thread(o) => o.cooling,
+            Self::Engrave(o) => o.cooling,
+            Self::Carve(o) => o.cooling,
+        }
+    }
+    pub fn set_cooling(&mut self, cooling: Cooling) {
+        match self {
+            Self::Profile(o) => o.cooling = cooling,
+            Self::Pocket(o) => o.cooling = cooling,
+            Self::Face(o) => o.cooling = cooling,
+            Self::Drill(o) => o.cooling = cooling,
+            Self::Chamfer(o) => o.cooling = cooling,
+            Self::Thread(o) => o.cooling = cooling,
+            Self::Engrave(o) => o.cooling = cooling,
+            Self::Carve(o) => o.cooling = cooling,
+        }
+    }
     pub fn entry_feeds(&self) -> &EntryFeeds {
         match self {
             Self::Profile(o) => &o.entry_feeds,
@@ -171,6 +216,7 @@ impl Operation {
 
     pub fn apply_tool_preset(&mut self, preset: &ToolPreset) -> Result<(), String> {
         preset.validate()?;
+        self.set_cooling(preset.cooling);
         self.set_spindle_rpm(preset.spindle_rpm);
         let feeds = self.entry_feeds_mut();
         if let Some(v) = preset.entry_feeds.ramp {

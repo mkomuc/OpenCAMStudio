@@ -43,8 +43,8 @@ pub struct JobResult {
 /// Assemble a whole-job [`Program`] from a [`Document`].
 ///
 /// Each operation is turned into its strategy, computed against the setup's
-/// heights and tools, and its motions are spliced between a job preamble (tool
-/// change, spindle on, coolant on) and postamble (coolant off, spindle off). A
+/// heights and tools, and its motions are spliced between machine transitions.
+/// Each operation's cooling request surrounds its fragment; shutdown stops the spindle. A
 /// tool change is inserted whenever the tool number changes between operations.
 ///
 /// Diagnostics from every operation are collected; if any operation errors, its
@@ -300,6 +300,7 @@ fn build_job_with_compute(
             clearance: env.heights.clearance,
             tool: operation.tools()[0],
             rpm,
+            cooling: operation.cooling(),
             // A multi-tool operation (Carve) emits its own tool change mid-fragment;
             // whatever it leaves in the spindle is what the next instance compares
             // against, so read it back rather than assume.
@@ -682,6 +683,7 @@ struct Planned {
     fragment: Program,
     tool: u32,
     rpm: f64,
+    cooling: cam_model::Cooling,
     /// The tool a multi-tool fragment (Carve) leaves in the spindle, if any.
     ends_with: Option<u32>,
     /// The operation's origin index (its `work_offset`) — the group it belongs to.
@@ -778,11 +780,13 @@ fn emit_instance(
         program.push(Step::Spindle { rpm: pl.rpm, dir });
         st.current_rpm = Some(pl.rpm);
     }
-    // Coolant on once, after the spindle first starts.
-    if !st.spindle_started {
-        program.push(Step::Coolant(Coolant::Flood));
-        st.spindle_started = true;
-    }
+    st.spindle_started = true;
+    // Resolve the requested state for this operation's cutting fragment. Cooling belongs
+    // to the cut, so it is switched off again at the end of each fragment.
+    let coolant = match pl.cooling {
+        cam_model::Cooling::None => Coolant::Off,
+        cam_model::Cooling::Mms => Coolant::Mist,
+    };
     // Open every new context from the tool-change height: cross to this operation's start
     // XY at that height, then descend to clearance and hand off (the operation owns
     // clearance and below). Tagged `Traverse` so the backplot draws it apart. For the
@@ -823,7 +827,21 @@ fn emit_instance(
             });
         }
     }
-    program.extend(pl.fragment.clone());
+    program.push(Step::Coolant(coolant));
+    for step in pl.fragment.steps() {
+        // Compound Carve operations switch cutters inside their strategy fragment.
+        // Keep lubrication off while the tool is being changed.
+        if matches!(step, Step::ToolChange { .. }) && coolant != Coolant::Off {
+            program.push(Step::Coolant(Coolant::Off));
+            program.push(step.clone());
+            program.push(Step::Coolant(coolant));
+        } else {
+            program.push(step.clone());
+        }
+    }
+    if coolant != Coolant::Off {
+        program.push(Step::Coolant(Coolant::Off));
+    }
     st.last_clearance = Some(clearance);
     if let Some(t) = pl.ends_with {
         st.current_tool = Some(t);
@@ -960,6 +978,7 @@ mod tests {
                         dwell: None,
                         spindle_rpm: 1000.0,
                         tool_preset: None,
+                        cooling: Default::default(),
                         entry_feeds: Default::default(),
                         work_offset: 1,
                         feed: 100.0,
@@ -1434,6 +1453,58 @@ mod tests {
         assert_eq!(job.completion, JobCompletion::Complete);
         assert!(!contains_cut(&job, 0));
         assert_eq!(job.diagnostics[0].op, Some(0));
+    }
+
+    #[test]
+    fn compound_tool_changes_disable_and_restore_mms() {
+        for cooling in [cam_model::Cooling::Mms, cam_model::Cooling::None] {
+            let mut fragment = Program::new();
+            let tag = Tag::new(1, MoveKind::Cutting);
+            fragment.push(Step::Linear {
+                to: Point3::new(10., 10., -1.),
+                feed: 100.,
+                tag,
+            });
+            fragment.push(Step::ToolChange { tool: 2 });
+            fragment.push(Step::Linear {
+                to: Point3::new(12., 10., -1.),
+                feed: 100.,
+                tag,
+            });
+            let planned = Planned {
+                op_id: 1,
+                clearance: 5.,
+                fragment,
+                tool: 1,
+                rpm: 1000.,
+                cooling,
+                ends_with: Some(2),
+                datum: 1,
+            };
+            let mut program = Program::new();
+            emit_instance(
+                &mut program,
+                &planned,
+                SpindleDir::Cw,
+                &mut EmitState::new(),
+                50.,
+                5.,
+            );
+            let steps = program.steps();
+            let change = steps
+                .iter()
+                .position(|s| matches!(s, Step::ToolChange { tool: 2 }))
+                .unwrap();
+            if cooling == cam_model::Cooling::Mms {
+                assert_eq!(steps[change - 1], Step::Coolant(Coolant::Off));
+                assert_eq!(steps[change + 1], Step::Coolant(Coolant::Mist));
+                assert_eq!(steps.last(), Some(&Step::Coolant(Coolant::Off)));
+            } else {
+                assert!(!steps
+                    .iter()
+                    .any(|s| matches!(s, Step::Coolant(Coolant::Flood | Coolant::Mist))));
+            }
+        }
     }
 
     #[test]

@@ -179,6 +179,7 @@ enum Icon {
     Carve,
     Face,
     NewTool,
+    Materials,
     Renumber,
     ImportLibrary,
     ExportLibrary,
@@ -202,7 +203,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 35] = [
+    const ALL: [Icon; 36] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -223,6 +224,7 @@ impl Icon {
         Icon::Carve,
         Icon::Face,
         Icon::NewTool,
+        Icon::Materials,
         Icon::Renumber,
         Icon::ImportLibrary,
         Icon::ExportLibrary,
@@ -263,6 +265,7 @@ impl Icon {
             Icon::Engrave => include_bytes!("../assets/icons/engrave.svg"),
             Icon::Carve => include_bytes!("../assets/icons/carve.svg"),
             Icon::Face => include_bytes!("../assets/icons/face.svg"),
+            Icon::Materials => include_bytes!("../assets/icons/materials.svg"),
             Icon::NewTool => include_bytes!("../assets/icons/endmill.svg"),
             Icon::Renumber => include_bytes!("../assets/icons/renumber.svg"),
             Icon::ImportLibrary => include_bytes!("../assets/icons/import_library.svg"),
@@ -287,6 +290,7 @@ impl Icon {
     /// entirely at Compact density — the tooltip is where the icon explains itself).
     fn help(self) -> &'static str {
         match self {
+            Icon::Materials => "Manage the shared materials used by stock and cutting presets.",
             Icon::New => "Start a new, empty project.",
             Icon::Open => "Open a saved .ocam project from disk.",
             Icon::Save => "Save the current project to disk.",
@@ -1997,9 +2001,12 @@ struct App {
     /// an Apply); the committed library entry is only overwritten on Apply. `None` outside
     /// Tools mode. Dirty ⇔ this differs from the committed entry.
     tool_edit: Option<cam_model::Tool>,
+    tool_drafts: BTreeMap<usize, tool_presets::LibraryToolDraft>,
     library_preset: Option<u64>,
     preset_values: BTreeMap<PresetField, String>,
     new_material_name: String,
+    show_materials: bool,
+    show_preset_editor: bool,
     /// Which internal tab the Tool Library pane shows (Serial / Family).
     library_view: LibraryView,
     /// The operation whose right-click context menu is open, and where to anchor it
@@ -2666,8 +2673,17 @@ enum Message {
     NewTool,
     LibraryPresetSelected(u64),
     AddPreset,
+    EditPreset,
+    ClosePresetEditor,
+    OpenMaterials,
+    Noop,
+    CloseMaterials,
+    ToolDetailChanged(tool_presets::ToolDetail, String),
     DeletePreset,
     PresetNameChanged(String),
+    ToolCoolingChanged(cam_model::Cooling),
+    PresetCoolingChanged(cam_model::Cooling),
+    OperationCoolingChanged(cam_model::Cooling),
     PresetMaterialChanged(MaterialChoice),
     PresetValueChanged(PresetField, String),
     OperationPresetPicked(PresetChoice),
@@ -3244,9 +3260,12 @@ impl App {
             machine_estlcam_edit: None,
             lib_sel: 0,
             tool_edit: None,
+            tool_drafts: BTreeMap::new(),
             library_preset: None,
             preset_values: BTreeMap::new(),
             new_material_name: String::new(),
+            show_materials: false,
+            show_preset_editor: false,
             library_view: LibraryView::Ordered,
             open_op_menu: None,
             pending_toolpath_export: None,
@@ -3398,6 +3417,24 @@ impl App {
     }
 
     fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        if (self.show_materials || self.show_preset_editor)
+            && matches!(message, Message::CadEscape | Message::Apply)
+        {
+            let close = if self.show_materials {
+                Message::CloseMaterials
+            } else {
+                Message::ClosePresetEditor
+            };
+            return self.update_message(close);
+        }
+        if (self.show_materials || self.show_preset_editor)
+            && matches!(
+                message,
+                Message::ToggleStock | Message::CheckHeightFocus | Message::Tree(_)
+            )
+        {
+            return iced::Task::none();
+        }
         match &message {
             Message::OutputAction(action) => {
                 self.output_action(action.clone());
@@ -3440,7 +3477,7 @@ impl App {
             }
         }
         if self.library_mode()
-            && self.inspector_dirty()
+            && (self.inspector_dirty() || !self.tool_drafts.is_empty())
             && matches!(
                 &message,
                 Message::NewTool
@@ -5928,7 +5965,13 @@ impl App {
                         if end_mill_family(t.kind) && end_mill_family(kind) {
                             fix_dir(t);
                         } else {
-                            *t = crate::tool_library::default_tool(t.number, kind);
+                            *t = cam_model::Tool {
+                                description: t.description.clone(),
+                                manufacturer: t.manufacturer.clone(),
+                                product_id: t.product_id.clone(),
+                                product_link: t.product_link.clone(),
+                                ..crate::tool_library::default_tool(t.number, kind)
+                            };
                         }
                     }
                     // The kind-specific fields depend on the kind — repopulate them from
@@ -6202,8 +6245,43 @@ impl App {
                     self.status = "Correct the current preset before selecting another.".into();
                 }
             }
-            Message::AddPreset => self.add_library_preset(),
+            Message::AddPreset => {
+                self.add_library_preset();
+                self.show_preset_editor = self.library_preset.is_some();
+            }
+            Message::EditPreset => self.show_preset_editor = self.library_preset.is_some(),
+            Message::ClosePresetEditor => {
+                if !self.preset_edit_invalid() {
+                    self.show_preset_editor = false;
+                }
+            }
+            Message::Noop => {}
+            Message::OpenMaterials => self.show_materials = true,
+            Message::CloseMaterials => self.show_materials = false,
+            Message::ToolDetailChanged(field, value) => {
+                if let Some(tool) = &mut self.tool_edit {
+                    match field {
+                        tool_presets::ToolDetail::Description => tool.description = value,
+                        tool_presets::ToolDetail::Manufacturer => tool.manufacturer = value,
+                        tool_presets::ToolDetail::ProductId => tool.product_id = value,
+                        tool_presets::ToolDetail::ProductLink => tool.product_link = value,
+                    }
+                }
+            }
             Message::DeletePreset => self.delete_library_preset(),
+            Message::ToolCoolingChanged(cooling) => {
+                if let Some(tool) = &mut self.tool_edit {
+                    tool.cooling = cooling;
+                }
+            }
+            Message::PresetCoolingChanged(cooling) => {
+                if let Some(preset) = self.library_preset_mut() {
+                    preset.cooling = cooling;
+                }
+            }
+            Message::OperationCoolingChanged(cooling) => {
+                self.edit_operation_draft(|op| op.set_cooling(cooling));
+            }
             Message::PresetNameChanged(name) => {
                 if let Some(preset) = self.library_preset_mut() {
                     preset.name = name;
@@ -6289,29 +6367,10 @@ impl App {
                     };
                 }
             }
-            Message::SelectLibraryTool(i) => {
-                if i == self.lib_sel {
-                    return iced::Task::none();
-                }
-                if self.library_mode() && i != self.lib_sel && self.inspector_dirty() {
-                    self.status =
-                        "Apply or Cancel tool changes before selecting another tool.".into();
-                    return iced::Task::none();
-                }
-                self.lib_sel = i;
-                self.reload_tool_edit();
-            }
+            Message::SelectLibraryTool(i) => self.select_library_tool(i),
             Message::SetLibraryView(view) => self.library_view = view,
             Message::LibToolMenu(i) => {
-                if self.library_mode() && i != self.lib_sel && self.inspector_dirty() {
-                    self.status =
-                        "Apply or Cancel tool changes before selecting another tool.".into();
-                    return iced::Task::none();
-                }
-                if i != self.lib_sel {
-                    self.lib_sel = i;
-                    self.reload_tool_edit();
-                }
+                self.select_library_tool(i);
                 self.lib_menu = Some(LibMenu {
                     index: i,
                     input: None,
@@ -6798,6 +6857,7 @@ impl App {
     /// field buffers from it. Called at every "load" point (tool selection, New, Delete,
     /// tab switch, post-Apply), but *not* on an in-place field/picker edit.
     fn reload_tool_edit(&mut self) {
+        self.show_preset_editor = false;
         self.tool_edit = if self.library_mode() {
             self.library.tools.get(self.lib_sel).cloned()
         } else {
@@ -7947,6 +8007,9 @@ impl App {
                 .on_press(Message::CloseLicense);
             layers = layers.push(catcher).push(card);
         }
+        if let Some(dialog) = self.tool_management_overlay() {
+            layers = layers.push(dialog);
+        }
         if let Some(dialog) = self.notice_overlay() {
             layers = layers.push(dialog);
         }
@@ -8619,6 +8682,7 @@ impl App {
                     title: "Library",
                     commands: vec![
                         cmd(Icon::NewTool, "New", Some(Message::NewTool)),
+                        cmd(Icon::Materials, "Materials", Some(Message::OpenMaterials)),
                         cmd(
                             Icon::Delete,
                             "Delete",
@@ -9123,6 +9187,64 @@ impl App {
             .unwrap_or_else(|| "Tool Library".to_string());
         let mut list = column![inspector_heading(name)].spacing(10).padding(14);
 
+        if let Some(t) = self.preview_tool() {
+            // Keep the label flexible so long tool types fit a narrow inspector.
+            list = list.push(
+                row![
+                    help_wrap(
+                        text("Type").width(Length::Fill).size(12),
+                        help::TOOL_TYPE,
+                        self.tooltips,
+                    ),
+                    pick_list(
+                        &ToolKindPick::ALL[..],
+                        Some(ToolKindPick::of(t.kind)),
+                        |p| { Message::ToolKindChanged(p.to_kind()) }
+                    )
+                    .text_size(12)
+                    .padding([7, 9])
+                    .style(inspector_picker)
+                    .width(Length::Fixed(177.0)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+
+        if let Some(tool) = &self.tool_edit {
+            for (label, field, value) in [
+                (
+                    "Description",
+                    tool_presets::ToolDetail::Description,
+                    &tool.description,
+                ),
+                (
+                    "Manufacturer",
+                    tool_presets::ToolDetail::Manufacturer,
+                    &tool.manufacturer,
+                ),
+                (
+                    "Product ID",
+                    tool_presets::ToolDetail::ProductId,
+                    &tool.product_id,
+                ),
+                (
+                    "Product link",
+                    tool_presets::ToolDetail::ProductLink,
+                    &tool.product_link,
+                ),
+            ] {
+                list = list.push(
+                    column![
+                        text(label).size(12),
+                        inspector_input(label, value)
+                            .on_input(move |value| Message::ToolDetailChanged(field, value))
+                    ]
+                    .spacing(4),
+                );
+            }
+        }
+
         for field in self.inspector_fields() {
             let value = self.fields.get(&field).cloned().unwrap_or_default();
             list = list.push(field_row_labeled(
@@ -9133,6 +9255,23 @@ impl App {
                 self.tooltips,
                 self.field_invalid(field),
             ));
+        }
+        if let Some(tool) = &self.tool_edit {
+            list = list.push(
+                column![
+                    text("Cooling").size(12),
+                    pick_list(
+                        &cam_model::Cooling::ALL[..],
+                        Some(tool.cooling),
+                        Message::ToolCoolingChanged
+                    )
+                    .text_size(12)
+                    .padding([7, 9])
+                    .style(inspector_picker)
+                    .width(Length::Fill)
+                ]
+                .spacing(4),
+            );
         }
         if let Some(t) = self.preview_tool() {
             // Read from the working copy so the pickers (cutting direction, Type, thread
@@ -9198,31 +9337,8 @@ impl App {
                     .align_y(Alignment::Center),
                 );
             }
-            // Keep the label flexible so long tool types fit a narrow inspector.
-            list = list.push(
-                row![
-                    help_wrap(
-                        text("Type").width(Length::Fill).size(12),
-                        help::TOOL_TYPE,
-                        self.tooltips,
-                    ),
-                    pick_list(
-                        &ToolKindPick::ALL[..],
-                        Some(ToolKindPick::of(t.kind)),
-                        |p| { Message::ToolKindChanged(p.to_kind()) }
-                    )
-                    .text_size(12)
-                    .padding([7, 9])
-                    .style(inspector_picker)
-                    .width(Length::Fixed(177.0)),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
         }
 
-        list = list.push(self.library_preset_editor());
-        list = list.push(self.managed_material_editor());
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -10234,7 +10350,7 @@ fn fmt_num(v: f64) -> String {
 /// A selectable project-tree / list row: plain text that highlights when active
 /// (a muted fill, not a button). Left-click sends `on_press`.
 fn select_row<'a>(label: String, active: bool, on_press: Message) -> Element<'a, Message> {
-    let content = container(text(label).size(13).color(palette::LABEL_COLOR))
+    let content = container(text(label).size(10).color(palette::LABEL_COLOR))
         .width(Length::Fill)
         .padding(Padding::from([3.0, 6.0]))
         .style(move |_theme| container::Style {
@@ -12404,6 +12520,7 @@ mod multi_setup_draft_tests {
                 scallop: 0.0,
                 spindle_rpm: 0.0,
                 tool_preset: None,
+                cooling: Default::default(),
                 entry_feeds: Default::default(),
                 work_offset: 1,
                 feed: 300.0,
@@ -12926,6 +13043,7 @@ mod inspector_field_tests {
         Operation::Drill(DrillOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 1,
@@ -12969,6 +13087,7 @@ mod inspector_field_tests {
             gradual: false,
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             feed: 200.0,

@@ -313,6 +313,7 @@ fn profile(id: u32, chain: Contour, side: Side, tool: u32, work_offset: u32) -> 
         tabs: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
+        cooling: Default::default(),
         entry_feeds: Default::default(),
         work_offset,
         clearing: cam_model::Clearing::default(),
@@ -453,10 +454,13 @@ fn a_reorientation_emits_an_operator_stop_before_the_new_datum() {
 #[test]
 fn a_reorientation_stops_spindle_and_coolant_before_the_halt_and_restarts_after() {
     use cam_cldata::{Coolant, MoveKind};
-    let d = doc(vec![
+    let mut d = doc(vec![
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 1, 2),
     ]);
+    for op in &mut d.setups[0].operations {
+        op.set_cooling(cam_model::Cooling::Mms);
+    }
     let s = steps(&d);
     let stop_at = s.iter().position(|x| matches!(x, Step::Stop)).expect("an M00");
     // Nothing live during the flip: M05 then M09, then a lift clear to tool-change
@@ -477,7 +481,7 @@ fn a_reorientation_stops_spindle_and_coolant_before_the_halt_and_restarts_after(
         "spindle restarts for the new group"
     );
     assert!(
-        s[datum_at..].iter().any(|x| matches!(x, Step::Coolant(Coolant::Flood))),
+        s[datum_at..].iter().any(|x| matches!(x, Step::Coolant(Coolant::Mist))),
         "coolant restarts for the new group"
     );
 }

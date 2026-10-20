@@ -472,6 +472,9 @@ pub struct ProfileOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -581,6 +584,9 @@ pub struct DrillOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -743,6 +749,9 @@ pub struct PocketOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -903,6 +912,9 @@ pub struct FaceOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -986,6 +998,9 @@ pub struct ThreadOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -1129,6 +1144,9 @@ pub struct ChamferOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -1205,6 +1223,9 @@ pub struct EngraveOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -1292,6 +1313,9 @@ pub struct CarveOp {
     /// Selected cutting preset baseline; operation values may be manually overridden.
     #[serde(default)]
     pub tool_preset: Option<crate::ToolPreset>,
+    /// Concrete cutting cooling; changing library presets never rewrites saved operations.
+    #[serde(default)]
+    pub cooling: crate::Cooling,
     /// Independent ramp and lead-in/out feed overrides.
     #[serde(default)]
     pub entry_feeds: crate::EntryFeeds,
@@ -1930,6 +1954,7 @@ mod tests {
             tabs: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             clearing: Clearing::default(),
@@ -2006,6 +2031,7 @@ mod tests {
         Operation::Carve(CarveOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 3,
@@ -2157,6 +2183,7 @@ mod tests {
         let drill = Operation::Drill(DrillOp {
             spindle_rpm: 0.0,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             id: 0,

@@ -74,7 +74,51 @@ impl PresetField {
         })
     }
 }
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ToolDetail {
+    Description,
+    Manufacturer,
+    ProductId,
+    ProductLink,
+}
+
+/// Preserve each cutter's pending edits while browsing another cutter.
+#[derive(Clone, Debug)]
+pub(super) struct LibraryToolDraft {
+    pub tool: cam_model::Tool,
+    fields: BTreeMap<Field, String>,
+    preset: Option<u64>,
+    preset_values: BTreeMap<PresetField, String>,
+}
+
 impl App {
+    pub(super) fn select_library_tool(&mut self, index: usize) {
+        if index == self.lib_sel || index >= self.library.tools.len() {
+            return;
+        }
+        if self.library_mode() && (self.inspector_dirty() || self.any_field_invalid()) {
+            if let Some(tool) = &self.tool_edit {
+                self.tool_drafts.insert(
+                    self.lib_sel,
+                    LibraryToolDraft {
+                        tool: tool.clone(),
+                        fields: self.fields.clone(),
+                        preset: self.library_preset,
+                        preset_values: self.preset_values.clone(),
+                    },
+                );
+            }
+        }
+        self.lib_sel = index;
+        self.reload_tool_edit();
+        if let Some(draft) = self.tool_drafts.remove(&index) {
+            self.tool_edit = Some(draft.tool);
+            self.fields = draft.fields;
+            self.library_preset = draft.preset;
+            self.preset_values = draft.preset_values;
+        }
+    }
+
     fn material_choices(&self, unlinked: &str) -> Vec<MaterialChoice> {
         std::iter::once(MaterialChoice {
             id: None,
@@ -196,6 +240,7 @@ impl App {
                 },
                 stepdown: None,
                 overlap: None,
+                cooling: tool.cooling,
                 entry_feeds: Default::default(),
             })
         };
@@ -292,11 +337,36 @@ impl App {
                 inspector_input("Preset name", &preset.name).on_input(Message::PresetNameChanged),
             );
             list = list.push(
+                text(format!(
+                    "Material ID: {}",
+                    preset
+                        .material_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "Any material".into())
+                ))
+                .size(12),
+            );
+            list = list.push(
                 pick_list(materials, selected, Message::PresetMaterialChanged)
                     .text_size(12)
                     .padding([7, 9])
                     .style(inspector_picker)
                     .width(Length::Fill),
+            );
+            list = list.push(
+                column![
+                    text("Cooling").size(12),
+                    pick_list(
+                        &cam_model::Cooling::ALL[..],
+                        Some(preset.cooling),
+                        Message::PresetCoolingChanged
+                    )
+                    .text_size(12)
+                    .padding([7, 9])
+                    .style(inspector_picker)
+                    .width(Length::Fill)
+                ]
+                .spacing(4),
             );
             for field in PresetField::ALL {
                 let value = self
@@ -323,6 +393,206 @@ impl App {
         }
         list.into()
     }
+    /// Material IDs are persisted on presets; names are resolved from the shop library.
+    pub(super) fn cutting_presets_table(&self) -> Element<'_, Message> {
+        let Some(tool) = &self.tool_edit else {
+            return column![].into();
+        };
+        let selected = self.library_preset;
+        let toolbar = row![
+            text("Cutting parameters").size(14),
+            Space::new().width(Length::Fill),
+            inspector_button("Add preset").on_press(Message::AddPreset),
+            inspector_button("Edit").on_press_maybe(selected.map(|_| Message::EditPreset)),
+            inspector_button("Remove").on_press_maybe(selected.map(|_| Message::DeletePreset)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let widths = [
+            150., 150., 80., 75., 85., 115., 115., 105., 105., 105., 95., 90.,
+        ];
+        let cells = |values: Vec<String>| {
+            let mut cells = row![].spacing(4);
+            for (value, width) in values.into_iter().zip(widths) {
+                cells = cells.push(text(value).size(12).width(Length::Fixed(width)));
+            }
+            cells
+        };
+        let mut rows = column![container(cells(
+            [
+                "Preset",
+                "Material",
+                "Material ID",
+                "Cooling",
+                "RPM",
+                "Feed mm/min",
+                "Plunge mm/min",
+                "Ramp mm/min",
+                "Lead-in mm/min",
+                "Lead-out mm/min",
+                "Stepdown mm",
+                "Overlap %",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        ))
+        .padding(7)]
+        .spacing(2);
+        // Show the cutter's fallback cutting data even before a named preset is added.
+        let nominal = |value| {
+            if value > 0. {
+                fmt_num(value)
+            } else {
+                "Job default".into()
+            }
+        };
+        rows = rows.push(
+            container(cells(vec![
+                "Tool defaults".into(),
+                "Any material".into(),
+                "—".into(),
+                tool.cooling.to_string(),
+                nominal(tool.nominal_rpm),
+                nominal(tool.nominal_feed),
+                nominal(tool.nominal_plunge_feed),
+                "—".into(),
+                "—".into(),
+                "—".into(),
+                "—".into(),
+                "—".into(),
+            ]))
+            .padding(7),
+        );
+        let optional = |v: Option<f64>| v.map(fmt_num).unwrap_or_else(|| "—".into());
+        for preset in &tool.presets {
+            let material = preset
+                .material_id
+                .map(|id| {
+                    self.library
+                        .materials
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| format!("Unavailable #{id}"))
+                })
+                .unwrap_or_else(|| "Any material".into());
+            let active = selected == Some(preset.id);
+            let item = container(cells(vec![
+                preset.name.clone(),
+                material,
+                preset
+                    .material_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                preset.cooling.to_string(),
+                fmt_num(preset.spindle_rpm),
+                fmt_num(preset.feed),
+                fmt_num(preset.plunge_feed),
+                optional(preset.entry_feeds.ramp),
+                optional(preset.entry_feeds.lead_in),
+                optional(preset.entry_feeds.lead_out),
+                optional(preset.stepdown),
+                optional(preset.overlap.map(|v| v * 100.)),
+            ]))
+            .padding(7)
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: active.then_some(Background::Color(palette::SELECT_BG)),
+                ..Default::default()
+            });
+            rows = rows.push(mouse_area(item).on_press(Message::LibraryPresetSelected(preset.id)));
+        }
+        if tool.presets.is_empty() {
+            rows = rows.push(text("No cutting presets for this cutter. Add a preset to define material-specific parameters.").size(12));
+        }
+        container(
+            column![
+                toolbar,
+                scrollable(rows.width(1445))
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::default(),
+                        horizontal: scrollable::Scrollbar::default(),
+                    })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                text("Edit tool defaults in the inspector. Apply changes saves cutter details and presets.")
+                    .size(11)
+                    .color(INSPECTOR_MUTED),
+            ]
+            .spacing(8),
+        )
+        .padding(16)
+        .height(Length::FillPortion(2))
+        .width(Length::Fill)
+        .into()
+    }
+
+    pub(super) fn tool_management_overlay(&self) -> Option<Element<'_, Message>> {
+        let (title, content, close) = if self.show_materials {
+            (
+                "Materials",
+                self.managed_material_editor(),
+                Message::CloseMaterials,
+            )
+        } else if self.show_preset_editor {
+            (
+                "Edit cutting preset",
+                self.library_preset_editor(),
+                Message::ClosePresetEditor,
+            )
+        } else {
+            return None;
+        };
+        let can_close = self.show_materials || !self.preset_edit_invalid();
+        let card = container(
+            column![
+                text(title).size(18),
+                scrollable(content).height(Length::Shrink),
+                text(self.status.clone()).size(11).color(INSPECTOR_MUTED),
+                row![
+                    Space::new().width(Length::Fill),
+                    inspector_button("Done").on_press_maybe(can_close.then_some(close))
+                ],
+            ]
+            .spacing(12),
+        )
+        .width(600)
+        .max_height((self.window.height - 60.).max(200.))
+        .padding(16)
+        .style(|theme: &iced::Theme| container::Style {
+            background: Some(Background::Color(
+                theme.extended_palette().background.weak.color,
+            )),
+            border: Border {
+                color: palette::SEPARATOR,
+                width: 1.,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        });
+        let backdrop = mouse_area(
+            container(Space::new().width(Length::Fill).height(Length::Fill)).style(|_| {
+                container::Style {
+                    background: Some(Background::Color(Color::from_rgba(0., 0., 0., 0.45))),
+                    ..Default::default()
+                }
+            }),
+        )
+        .on_press(Message::Noop);
+        Some(
+            iced::widget::stack![
+                backdrop,
+                container(iced::widget::opaque(card))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center)
+            ]
+            .into(),
+        )
+    }
+
     pub(super) fn managed_material_editor(&self) -> Element<'_, Message> {
         let mut list = column![
             inspector_section("Materials"),
@@ -440,6 +710,9 @@ impl App {
             .find(|t| t.number == op.tool())
     }
     pub(super) fn auto_operation_preset(&mut self) {
+        if let Some(cooling) = self.operation_preset_tool().map(|t| t.cooling) {
+            self.edit_operation_draft(|op| op.set_cooling(cooling));
+        }
         let preset = self
             .operation_preset_tool()
             .and_then(|t| t.preset_for_material(self.controller.document().setup().material_id))
@@ -533,6 +806,16 @@ impl App {
                 .padding([7, 9])
                 .style(inspector_picker)
                 .width(Length::Fill),
+            text("Cooling").size(12),
+            pick_list(
+                &cam_model::Cooling::ALL[..],
+                Some(op.cooling()),
+                Message::OperationCoolingChanged
+            )
+            .text_size(12)
+            .padding([7, 9])
+            .style(inspector_picker)
+            .width(Length::Fill),
         ]
         .spacing(6);
         if let Some(preset) = op.tool_preset() {
@@ -562,6 +845,7 @@ mod tests {
             plunge_feed: 100.,
             stepdown: Some(0.5),
             overlap: Some(0.25),
+            cooling: Default::default(),
             entry_feeds: Default::default(),
         }
     }
@@ -710,6 +994,187 @@ mod tests {
         send(&mut app, Message::CancelToolDraft);
         assert_eq!(app.tool_edit.as_ref().unwrap(), &saved);
     }
+    #[test]
+    fn cooling_preset_edits_and_operation_overrides_are_transactional() {
+        use cam_model::Cooling;
+        let mut app = app();
+        app.library.tools[0].cooling = Cooling::Mms;
+        app.library.tools[0].presets[0].cooling = Cooling::Mms;
+        let before = app.controller.document().clone();
+        send(&mut app, Message::BeginOp(OpKind::Pocket));
+        assert_eq!(
+            app.operation_draft.as_ref().unwrap().cooling(),
+            Cooling::Mms
+        );
+        send(&mut app, Message::OperationCoolingChanged(Cooling::None));
+        let op = app.operation_draft.as_ref().unwrap();
+        assert_eq!(op.cooling(), Cooling::None);
+        assert_eq!(op.tool_preset().unwrap().cooling, Cooling::Mms);
+        send(
+            &mut app,
+            Message::OperationPresetPicked(PresetChoice {
+                id: Some(1),
+                name: "Preset 1".into(),
+            }),
+        );
+        assert_eq!(
+            app.operation_draft.as_ref().unwrap().cooling(),
+            Cooling::Mms
+        );
+        send(&mut app, Message::CancelOp);
+        assert_eq!(app.controller.document(), &before);
+        app.switch_workspace(Workspace::Tools);
+        let saved = app.library.tools[0].clone();
+        send(&mut app, Message::PresetCoolingChanged(Cooling::None));
+        assert_eq!(
+            app.tool_edit.as_ref().unwrap().presets[0].cooling,
+            Cooling::None
+        );
+        assert_eq!(app.library.tools[0], saved);
+        send(&mut app, Message::CancelToolDraft);
+        assert_eq!(app.tool_edit.as_ref().unwrap(), &saved);
+        send(&mut app, Message::ToolCoolingChanged(Cooling::None));
+        assert!(app.inspector_dirty());
+        send(&mut app, Message::CancelToolDraft);
+        assert_eq!(app.tool_edit.as_ref().unwrap().cooling, Cooling::Mms);
+    }
+
+    #[test]
+    fn selecting_a_preset_does_not_block_selecting_another_cutter() {
+        let mut app = app();
+        let mut other = crate::tool_library::default_tool(2, ToolKind::BallMill);
+        other.presets = vec![preset(3, 7, 900.)];
+        app.library.tools.push(other.clone());
+        app.switch_workspace(Workspace::Tools);
+        send(&mut app, Message::LibraryPresetSelected(2));
+        assert!(!app.inspector_dirty());
+        send(&mut app, Message::SelectLibraryTool(1));
+        assert_eq!(app.lib_sel, 1);
+        assert_eq!(app.tool_edit.as_ref(), Some(&other));
+        assert_eq!(app.library_preset, Some(3));
+        assert!(app.tool_drafts.is_empty());
+    }
+
+    #[test]
+    fn browsing_cutters_retains_pending_preset_values_and_invalid_buffers() {
+        let mut app = app();
+        app.library
+            .tools
+            .push(crate::tool_library::default_tool(2, ToolKind::BallMill));
+        app.switch_workspace(Workspace::Tools);
+        let saved = app.library.tools.clone();
+        send(&mut app, Message::LibraryPresetSelected(2));
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "750".into()),
+        );
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Rpm, "invalid".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ToolDiameter, "unfinished".into()),
+        );
+        send(&mut app, Message::SelectLibraryTool(1));
+        assert_eq!(app.lib_sel, 1);
+        assert!(!app.inspector_dirty());
+        assert!(!app.any_field_invalid());
+        send(
+            &mut app,
+            Message::ToolDetailChanged(ToolDetail::Description, "Other cutter".into()),
+        );
+        send(&mut app, Message::LibToolMenu(0));
+        assert_eq!(app.lib_sel, 0);
+        assert_eq!(app.library_preset, Some(2));
+        assert_eq!(app.preset_values[&PresetField::Rpm], "invalid");
+        assert_eq!(app.fields[&Field::ToolDiameter], "unfinished");
+        assert_eq!(app.tool_edit.as_ref().unwrap().presets[1].feed, 750.);
+        assert!(app.any_field_invalid());
+        assert_eq!(app.library.tools, saved);
+        send(&mut app, Message::CancelToolDraft);
+        assert_eq!(app.tool_edit.as_ref(), Some(&saved[0]));
+        send(&mut app, Message::SelectLibraryTool(1));
+        assert_eq!(app.tool_edit.as_ref().unwrap().description, "Other cutter");
+        assert!(app.tool_drafts.is_empty());
+        send(&mut app, Message::CancelToolDraft);
+        assert_eq!(app.tool_edit.as_ref(), Some(&saved[1]));
+    }
+
+    #[test]
+    fn catalog_edits_are_transactional_and_survive_kind_changes() {
+        let mut app = app();
+        app.switch_workspace(Workspace::Tools);
+        app.lib_sel = 0;
+        app.reload_tool_edit();
+        let saved = app.library.tools[0].clone();
+        for (field, value) in [
+            (ToolDetail::Description, "Finishing cutter"),
+            (ToolDetail::Manufacturer, "Example Tools"),
+            (ToolDetail::ProductId, "EM-6"),
+            (ToolDetail::ProductLink, "https://example.com/EM-6"),
+        ] {
+            send(&mut app, Message::ToolDetailChanged(field, value.into()));
+        }
+        assert!(app.inspector_dirty());
+        assert_eq!(app.library.tools[0], saved);
+        let edited = app.tool_edit.clone().unwrap();
+        send(
+            &mut app,
+            Message::ToolKindChanged(ToolKind::Drill {
+                point_angle_deg: 118.,
+            }),
+        );
+        assert_eq!(
+            app.tool_edit.as_ref().unwrap().description,
+            edited.description
+        );
+        assert_eq!(
+            app.tool_edit.as_ref().unwrap().manufacturer,
+            edited.manufacturer
+        );
+        assert_eq!(
+            app.tool_edit.as_ref().unwrap().product_id,
+            edited.product_id
+        );
+        assert_eq!(
+            app.tool_edit.as_ref().unwrap().product_link,
+            edited.product_link
+        );
+        send(&mut app, Message::CancelToolDraft);
+        assert_eq!(app.tool_edit.as_ref().unwrap(), &saved);
+    }
+
+    #[test]
+    fn preset_modal_keeps_invalid_edits_open_and_escape_preserves_tool_draft() {
+        let mut app = app();
+        app.switch_workspace(Workspace::Tools);
+        app.lib_sel = 0;
+        app.reload_tool_edit();
+        let saved = app.library.tools[0].clone();
+        send(&mut app, Message::EditPreset);
+        assert!(app.show_preset_editor);
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "invalid".into()),
+        );
+        send(&mut app, Message::ClosePresetEditor);
+        assert!(app.show_preset_editor);
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "750".into()),
+        );
+        send(&mut app, Message::CadEscape);
+        assert!(!app.show_preset_editor);
+        assert_eq!(app.tool_edit.as_ref().unwrap().presets[0].feed, 750.);
+        assert_eq!(app.library.tools[0], saved);
+        send(&mut app, Message::OpenMaterials);
+        assert!(app.show_materials);
+        send(&mut app, Message::CadEscape);
+        assert!(!app.show_materials);
+        assert!(app.inspector_dirty());
+    }
+
     #[test]
     fn cad_creation_uses_the_same_material_match() {
         let mut app = app();

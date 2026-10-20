@@ -503,6 +503,7 @@ mod tests {
             dwell: None,
             spindle_rpm: 1000.,
             tool_preset: None,
+            cooling: Default::default(),
             entry_feeds: Default::default(),
             work_offset: 1,
             feed: 100.,

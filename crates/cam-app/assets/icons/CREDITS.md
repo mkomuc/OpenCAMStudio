@@ -78,3 +78,6 @@ contributors, GPL-3.0.
 - `edit.svg`, `suppress.svg`, `delete_operation.svg` — original project-menu
   actions: pencil, suppressed toolpath, and trash can. © OpenCAMStudio
   contributors, GPL-3.0.
+
+`materials.svg` is an original stacked-material-sheets icon for OpenCAMStudio,
+licensed under GPL-3.0 with the application.
