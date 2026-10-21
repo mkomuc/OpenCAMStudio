@@ -85,7 +85,9 @@ use crate::Tool;
 /// v26: adds setup-scoped StockToLeave allowances keyed by operation ID and the
 /// Adaptive operation with its `AdaptiveClearing` geometry recipe. Older projects
 /// omit allowances and retain their existing offset and depth behavior.
-pub const SCHEMA_VERSION: u32 = 26;
+/// v27: adaptive operations persist a simplification tolerance; older projects
+/// default to the existing 0.02 mm frontier simplification.
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -849,6 +851,9 @@ pub struct AdaptiveParams {
     /// Maximum geometric deviation accepted when deriving layer boundaries, mm.
     #[serde(default = "default_adaptive_tolerance")]
     pub tolerance: f64,
+    /// Frontier simplification and corner-detection tolerance, mm; 0 disables it.
+    #[serde(default = "default_adaptive_simplification_tolerance")]
+    pub simplification_tolerance: f64,
     /// Target radial engagement, mm.
     #[serde(default = "default_adaptive_load")]
     pub optimal_load: f64,
@@ -867,18 +872,85 @@ pub struct AdaptiveParams {
     /// Climb milling when true.
     #[serde(default = "default_true")]
     pub climb: bool,
+    /// Relation between the cutter and the selected boundary.
+    #[serde(default)]
+    pub containment: AdaptiveContainment,
+    /// Signed shift applied to the selected XY boundary, in mm.
+    #[serde(default)]
+    pub additional_offset: f64,
 }
 
-fn default_adaptive_tolerance() -> f64 { 0.1 }
-fn default_adaptive_load() -> f64 { 2.0 }
-fn default_adaptive_stepdown() -> f64 { 2.0 }
-fn default_adaptive_fine_stepdown() -> f64 { 0.5 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptiveContainment {
+    #[default]
+    Inside,
+    Center,
+    Outside,
+}
+
+impl std::fmt::Display for AdaptiveContainment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Inside => "Tool inside boundary",
+            Self::Center => "Tool center on boundary",
+            Self::Outside => "Tool outside boundary",
+        })
+    }
+}
+
+fn default_adaptive_tolerance() -> f64 {
+    0.1
+}
+fn default_adaptive_simplification_tolerance() -> f64 {
+    0.02
+}
+fn default_adaptive_load() -> f64 {
+    2.0
+}
+fn default_adaptive_stepdown() -> f64 {
+    2.0
+}
+fn default_adaptive_fine_stepdown() -> f64 {
+    0.5
+}
 
 impl Default for AdaptiveParams {
     fn default() -> Self {
-        Self { tolerance: default_adaptive_tolerance(), optimal_load: default_adaptive_load(),
-            stepdown: default_adaptive_stepdown(), fine_stepdown: default_adaptive_fine_stepdown(),
-            feed: 0.0, plunge_feed: 0.0, climb: true }
+        Self {
+            tolerance: default_adaptive_tolerance(),
+            simplification_tolerance: default_adaptive_simplification_tolerance(),
+            optimal_load: default_adaptive_load(),
+            stepdown: default_adaptive_stepdown(),
+            fine_stepdown: default_adaptive_fine_stepdown(),
+            feed: 0.0,
+            plunge_feed: 0.0,
+            climb: true,
+            containment: AdaptiveContainment::Inside,
+            additional_offset: 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod adaptive_params_tests {
+    use super::{AdaptiveContainment, AdaptiveParams};
+
+    #[test]
+    fn containment_and_offset_round_trip_and_legacy_projects_keep_inside_defaults() {
+        let legacy: AdaptiveParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(legacy.containment, AdaptiveContainment::Inside);
+        assert_eq!(legacy.additional_offset, 0.0);
+        assert_eq!(legacy.simplification_tolerance, 0.02);
+
+        let configured = AdaptiveParams {
+            containment: AdaptiveContainment::Outside,
+            additional_offset: -0.75,
+            simplification_tolerance: 0.005,
+            ..legacy
+        };
+        let restored: AdaptiveParams = serde_json::from_value(serde_json::to_value(configured).unwrap()).unwrap();
+        assert_eq!(restored, configured);
     }
 }
 

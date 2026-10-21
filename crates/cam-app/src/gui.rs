@@ -1093,8 +1093,10 @@ enum Field {
     Dwell,
     Stepdown,
     AdaptiveTolerance,
+    AdaptiveSimplificationTolerance,
     AdaptiveOptimalLoad,
     AdaptiveFineStepdown,
+    AdaptiveOffset,
     StockLeaveRadial,
     StockLeaveAxial,
     Stepover,
@@ -1234,8 +1236,10 @@ impl Field {
             Field::ProfileOffset => "Offset / leave (mm)",
             Field::Stepdown => "Stepdown (mm)",
             Field::AdaptiveTolerance => "Tolerance (mm)",
+            Field::AdaptiveSimplificationTolerance => "Simplification tolerance (mm, 0=off)",
             Field::AdaptiveOptimalLoad => "Optimal load (mm)",
             Field::AdaptiveFineStepdown => "Fine stepdown (mm)",
+            Field::AdaptiveOffset => "Additional offset (mm)",
             Field::StockLeaveRadial => "Radial stock to leave (mm)",
             Field::StockLeaveAxial => "Axial stock to leave (mm)",
             Field::Stepover => "Stepover (mm)",
@@ -1290,8 +1294,10 @@ impl Field {
         match self {
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
             Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres.",
+            Field::AdaptiveSimplificationTolerance => "Simplifies adaptive frontiers and ignores tiny projection zigzags during corner detection. Larger values reduce short segments and unnecessary corner loops. Must not exceed Tolerance; 0 disables simplification.",
             Field::AdaptiveOptimalLoad => "Target radial engagement for adaptive clearing, in millimetres.",
             Field::AdaptiveFineStepdown => "Axial spacing for intermediate terrace refinement after each roughing slab, in millimetres. Smaller values add more shallow passes above each coarse cut.",
+            Field::AdaptiveOffset => "Signed shift of the selected adaptive boundary. Positive values move it outward, except Inside containment moves it inward.",
             Field::StockLeaveRadial => "Material left on vertical walls for a later finishing operation, in millimetres.",
             Field::StockLeaveAxial => "Material left on horizontal floors for a later finishing operation, in millimetres.",
             Field::StartX => "Preferred starting X in setup millimetres; the strategy chooses an eligible point near it.",
@@ -2101,6 +2107,7 @@ struct App {
     output_content: iced::widget::text_editor::Content,
     output_snapshot: String,
     output_last_geometry_error: Option<String>,
+    output_cleared: bool,
 }
 
 // The pickbox aperture, the object-snap catch distance derived from it, and the snap
@@ -2387,6 +2394,7 @@ fn face_view(normal: [f32; 3]) -> (f32, f32) {
 enum Message {
     OutputAction(iced::widget::text_editor::Action),
     OutputCopy,
+    OutputClear,
     OpenSample,
     CancelToolDraft,
     RunJob,
@@ -2689,6 +2697,7 @@ enum Message {
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
     AdaptiveClimbToggled(bool),
+    AdaptiveContainmentChanged(cam_model::AdaptiveContainment),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
     ChamferGradualToggled(bool),
     /// Toggle the selected thread's gradual (equal-material) radial infeed.
@@ -3053,6 +3062,16 @@ impl App {
     }
 
     fn edit_operation_draft(&mut self, edit: impl FnOnce(&mut Operation)) {
+        // Tree selection and Apply can leave an operation selected without a
+        // draft. Start one on the first edit without resetting numeric buffers
+        // or the cutter that the picker has just staged.
+        if !self.creating_operation() {
+            if let Selection::Operation(id) = self.controller.selection() {
+                if self.operation_draft.as_ref().map(Operation::id) != Some(id) {
+                    self.operation_draft = self.controller.operation(id).cloned();
+                }
+            }
+        }
         if let Some(operation) = &mut self.operation_draft {
             edit(operation);
         }
@@ -3338,6 +3357,7 @@ impl App {
             output_content: iced::widget::text_editor::Content::new(),
             output_snapshot: String::new(),
             output_last_geometry_error: None,
+            output_cleared: false,
             // Last: every field above reads from it.
             settings,
         };
@@ -3476,6 +3496,13 @@ impl App {
                         .selection()
                         .unwrap_or_else(|| self.output_content.text()),
                 )
+            }
+            Message::OutputClear => {
+                self.output_history.clear();
+                self.output_cleared = true;
+                self.output_snapshot.clear();
+                self.output_content = iced::widget::text_editor::Content::new();
+                return iced::Task::none();
             }
             _ => {}
         }
@@ -6181,6 +6208,14 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::AdaptiveContainmentChanged(value) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Adaptive(adaptive) = op {
+                        adaptive.params.containment = value;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::SideChanged(side) => {
                 if self.profile_geometry_active() {
                     self.set_profile_contour_side(self.profile_contour_selection, side);
@@ -6574,7 +6609,7 @@ impl App {
             }
             // The preamble already cleared it; the arm keeps the match exhaustive.
             Message::CloseRibbonPopup => {}
-            Message::OutputAction(_) | Message::OutputCopy => unreachable!(),
+            Message::OutputAction(_) | Message::OutputCopy | Message::OutputClear => unreachable!(),
             Message::SetPaneVisible(Pane::Inspector, show) => self.inspector_enabled = show,
             Message::SetPaneVisible(pane, show) => self.set_pane_visible(pane, show),
         }
@@ -8093,7 +8128,11 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let mut layers = iced::widget::stack![column![self.ribbon(), grid]];
+        let mut content = column![self.ribbon(), grid];
+        if let Some(progress) = self.calculation_progress() {
+            content = content.push(progress);
+        }
+        let mut layers = iced::widget::stack![content];
         if let Some(popup) = self.ribbon_popup() {
             // A full-window catcher under the popup so a click off it dismisses.
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
@@ -10282,9 +10321,11 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Thread(o), Field::Feed) => Some(o.feed),
         (Operation::Thread(o), Field::PlungeFeed) => Some(o.plunge_feed),
         (Operation::Adaptive(o), Field::AdaptiveTolerance) => Some(o.params.tolerance),
+        (Operation::Adaptive(o), Field::AdaptiveSimplificationTolerance) => Some(o.params.simplification_tolerance),
         (Operation::Adaptive(o), Field::AdaptiveOptimalLoad) => Some(o.params.optimal_load),
         (Operation::Adaptive(o), Field::Stepdown) => Some(o.params.stepdown),
         (Operation::Adaptive(o), Field::AdaptiveFineStepdown) => Some(o.params.fine_stepdown),
+        (Operation::Adaptive(o), Field::AdaptiveOffset) => Some(o.params.additional_offset),
         (Operation::Adaptive(o), Field::Feed) => Some(o.params.feed),
         (Operation::Adaptive(o), Field::PlungeFeed) => Some(o.params.plunge_feed),
         _ => None,
@@ -10508,9 +10549,11 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
         }
         Operation::Adaptive(o) => {
             if let Some(v) = get(Field::AdaptiveTolerance) { o.params.tolerance = v; }
+            if let Some(v) = get(Field::AdaptiveSimplificationTolerance) { o.params.simplification_tolerance = v; }
             if let Some(v) = get(Field::AdaptiveOptimalLoad) { o.params.optimal_load = v; }
             if let Some(v) = get(Field::Stepdown) { o.params.stepdown = v; }
             if let Some(v) = get(Field::AdaptiveFineStepdown) { o.params.fine_stepdown = v; }
+            if let Some(v) = get(Field::AdaptiveOffset) { o.params.additional_offset = v; }
             if let Some(v) = get(Field::Feed) { o.params.feed = v; }
             if let Some(v) = get(Field::PlungeFeed) { o.params.plunge_feed = v; }
         }
@@ -12945,6 +12988,37 @@ mod multi_setup_draft_tests {
         let id = app.controller.document().setup().operations[0].id();
         app.begin_operation_draft(id);
         (app, id)
+    }
+
+    #[test]
+    fn adaptive_simplification_is_editable_in_passes_and_supports_apply_cancel_and_undo() {
+        let mut app = blank_app();
+        let mut operation = app.controller.operation_template(OpKind::Adaptive, 1);
+        if let Operation::Adaptive(op) = &mut operation {
+            op.params.feed = 300.;
+            op.params.plunge_feed = 100.;
+        }
+        let id = operation.id();
+        let field = Field::AdaptiveSimplificationTolerance;
+        assert!(operation_fields(&operation).contains(&field));
+        assert_eq!(operation_tabs::field_tab(field), OperationTab::Passes);
+        assert_eq!(op_field(&operation, field), Some(0.02));
+        assert!(!operation_tabs::operation_field_invalid(&operation, field, 0.0));
+        assert!(operation_tabs::operation_field_invalid(&operation, field, -0.001));
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        send(&mut app, Message::FieldChanged(field, "0.005".into()));
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.02));
+        send(&mut app, Message::CancelOperationDraft);
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.02));
+        app.begin_operation_draft(id);
+        send(&mut app, Message::FieldChanged(field, "0.005".into()));
+        send(&mut app, Message::Apply);
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.005), "{}", app.status);
+        assert!(app.controller.undo());
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.02));
+        assert!(app.controller.redo());
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.005));
     }
 
     #[test]

@@ -85,6 +85,29 @@ fn offset_past_medial_axis_vanishes() {
     assert!(gone.is_empty(), "over-shrunk region should vanish");
 }
 
+#[test]
+fn dense_curved_offsets_disappear_without_affecting_larger_regions() {
+    // CAD projection sections have hundreds of short edges. Once an offset
+    // passes their bounds, intersecting the inverted edges is wasted work.
+    let circle = Polygon::new(Contour::new(
+        (0..800)
+            .map(|i| {
+                let angle = 2.0 * PI * i as f64 / 800.0;
+                Point::new(17.0 * angle.cos(), 17.0 * angle.sin())
+            })
+            .collect(),
+    ))
+    .unwrap();
+    assert!(
+        offset(std::slice::from_ref(&circle), -18.0, JoinStyle::Round)
+            .unwrap()
+            .is_empty()
+    );
+    let remaining = offset(&[circle, square(100.0, 0.0, 60.0)], -18.0, JoinStyle::Round).unwrap();
+    assert_eq!(remaining.len(), 1);
+    approx(total_area(&remaining), 24.0 * 24.0, 1e-9);
+}
+
 // ---------------------------------------------------------------------------
 // Square + hole
 // ---------------------------------------------------------------------------

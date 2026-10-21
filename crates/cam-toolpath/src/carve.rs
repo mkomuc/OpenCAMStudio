@@ -431,6 +431,7 @@ impl Strategy for CarveStrategy {
                                 .unwrap_or_default();
                         let job = crate::clearing::ClearJob {
                             id: op.id,
+                            simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
                             radius: r,
                             finish,
                             first,

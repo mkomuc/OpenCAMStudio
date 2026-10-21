@@ -48,7 +48,8 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         Field::MajorDia
         | Field::TabWidth
         | Field::TabHeight
-        | Field::TabSpacing => OperationTab::Geometry,
+        | Field::TabSpacing
+        | Field::AdaptiveOffset => OperationTab::Geometry,
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -137,10 +138,17 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::AdaptiveFineStepdown
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
-        Field::StockLeaveRadial | Field::StockLeaveAxial => value < 0.0,
+        Field::StockLeaveRadial | Field::StockLeaveAxial | Field::AdaptiveSimplificationTolerance => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
-        Field::Stepdown if matches!(op, Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_)) => value <= 0.0,
+        Field::Stepdown
+            if matches!(
+                op,
+                Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_)
+            ) =>
+        {
+            value <= 0.0
+        }
         Field::ThreadPasses => value < 1.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::ThreadSpringPasses => value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::Overlap | Field::ClearOverlap => !(0.0..=99.0).contains(&value),
@@ -265,7 +273,10 @@ impl Compensation {
         }
     }
     fn available(post: PostKind) -> &'static [Self] {
-        if matches!(post, PostKind::Grbl | PostKind::FluidNc | PostKind::GrblHal | PostKind::Estlcam) {
+        if matches!(
+            post,
+            PostKind::Grbl | PostKind::FluidNc | PostKind::GrblHal | PostKind::Estlcam
+        ) {
             &Self::ALL[..1]
         } else {
             &Self::ALL
@@ -417,6 +428,25 @@ impl App {
             list = list.push(self.creation_geometry_controls());
         }
         if tab == OperationTab::Geometry && !creating {
+            if let Operation::Adaptive(adaptive) = op {
+                list = list.push(text("Tool containment").size(12));
+                list = list.push(
+                    pick_list(
+                        [
+                            cam_model::AdaptiveContainment::Inside,
+                            cam_model::AdaptiveContainment::Center,
+                            cam_model::AdaptiveContainment::Outside,
+                        ],
+                        Some(adaptive.params.containment),
+                        Message::AdaptiveContainmentChanged,
+                    )
+                    .placeholder("Choose containment")
+                    .text_size(12)
+                    .padding([7, 9])
+                    .style(inspector_picker)
+                    .width(Length::Fill),
+                );
+            }
             let geometry = match op {
                 Operation::Profile(p) => format!(
                     "{} profile contour(s) · {}",
@@ -750,9 +780,7 @@ impl App {
                 if tab == OperationTab::Passes {
                     let field = Field::ChamferWidth;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list
-                        .push(inspector_section("Fase"))
-                        .push(field_row_labeled(
+                    list = list.push(inspector_section("Fase")).push(field_row_labeled(
                             field,
                             self.field_label(field),
                             self.field_help(field),
@@ -1218,6 +1246,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_adaptive_operation_accepts_replacement_cutter() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testfiles/mill_change.ocam"
+            ))
+            .unwrap();
+        app.setup_draft = None;
+        app.focus_ops.clear();
+        let _ = app.update(Message::ClickOp(0));
+        let before = app.controller.document().setup().clone();
+        let binding = app.controller.geometry_state().bindings[&0].clone();
+        let mut tool = before.tools[0].clone();
+        tool.flute_length = 25.0;
+        tool.length = 55.0;
+        app.library.tools = vec![tool];
+        let _ = app.update(Message::OperationToolPicked(0));
+        assert!(app.inspector_dirty(), "replacement cutter must enable Apply");
+        assert!(!app.any_field_invalid(), "{:?}", app.resolve_height_editor(0));
+        assert!(app.operation_height_overrides_valid());
+        let number = app.current_operation(0).unwrap().tool();
+        assert_ne!(
+            number,
+            before.operations[0].tool(),
+            "picker must stage the chosen cutter"
+        );
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller.operation(0).unwrap().tool(),
+            number,
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            app.controller
+                .document()
+                .setup()
+                .tools
+                .iter()
+                .find(|t| t.number == number)
+                .unwrap()
+                .flute_length,
+            25.0
+        );
+        let applied = &app.controller.geometry_state().bindings[&0];
+        assert_eq!(applied.heights, binding.heights);
+        assert_eq!(applied.overrides, binding.overrides);
+        assert!(!app.inspector_dirty());
+        let mut next_tool = app.library.tools[0].clone();
+        next_tool.diameter = 5.0;
+        app.library.tools.push(next_tool);
+        let _ = app.update(Message::OperationToolPicked(1));
+        assert_ne!(app.current_operation(0).unwrap().tool(), number);
+        assert!(app.inspector_dirty());
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.current_operation(0).unwrap().tool(), number);
+        assert!(!app.inspector_dirty());
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document().setup(), &before);
+    }
+
+    #[test]
     fn stock_allowances_are_grouped_radial_then_axial_and_face_uses_axial_only() {
         let operations = operations();
         let profile = operations
@@ -1532,11 +1624,12 @@ mod tests {
                 "{}: edited feed must reach the motion program",
                 op_kind(&operation)
             );
-            assert!(job
-                .program
+            assert!(
+                job.program
                 .steps()
                 .iter()
-                .any(|step| matches!(step, Step::Spindle { rpm, .. } if *rpm == 9000.0)));
+                    .any(|step| matches!(step, Step::Spindle { rpm, .. } if *rpm == 9000.0))
+            );
         }
     }
 
@@ -1575,7 +1668,12 @@ mod tests {
 
     #[test]
     fn compensation_availability_and_radial_passes_follow_post_and_strategy() {
-        for post in [PostKind::Grbl, PostKind::FluidNc, PostKind::GrblHal, PostKind::Estlcam] {
+        for post in [
+            PostKind::Grbl,
+            PostKind::FluidNc,
+            PostKind::GrblHal,
+            PostKind::Estlcam,
+        ] {
             assert_eq!(Compensation::available(post), &[Compensation::Computed]);
         }
         for post in [

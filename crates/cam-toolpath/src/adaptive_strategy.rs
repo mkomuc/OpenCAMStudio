@@ -1,6 +1,6 @@
 //! 3D adaptive roughing over conservative CAD-derived layer shadows.
 use cam_cldata::Program;
-use cam_geo::{difference, offset, Contour, JoinStyle, Point, Polygon};
+use cam_geo::{Contour, JoinStyle, Point, Polygon, difference, offset};
 use cam_geometry3d::AdaptiveGeometry;
 use cam_model::{AdaptiveOp, Clearing, Lead, Plunge, StockToLeave};
 
@@ -38,6 +38,15 @@ impl Strategy for AdaptiveStrategy {
         if !op.params.tolerance.is_finite() || op.params.tolerance <= 0.0 {
             fail!("operation {}: tolerance must be finite and positive", op.id);
         }
+        if !op.params.simplification_tolerance.is_finite()
+            || op.params.simplification_tolerance < 0.0
+            || op.params.simplification_tolerance > op.params.tolerance
+        {
+            fail!(
+                "operation {}: simplification tolerance must be finite, nonnegative and no greater than tolerance",
+                op.id
+            );
+        }
         if !op.params.optimal_load.is_finite() || op.params.optimal_load <= 0.0 {
             fail!(
                 "operation {}: optimal load must be finite and positive",
@@ -61,6 +70,12 @@ impl Strategy for AdaptiveStrategy {
         {
             fail!(
                 "operation {}: cutting and plunge feeds must be finite and positive",
+                op.id
+            );
+        }
+        if !op.params.additional_offset.is_finite() {
+            fail!(
+                "operation {}: adaptive additional offset must be finite",
                 op.id
             );
         }
@@ -191,29 +206,77 @@ impl Strategy for AdaptiveStrategy {
                 }
             };
             let domains = if layer.body_domains.is_empty() && layer.face_domains.is_empty() {
-                vec![stock_region.clone()]
+                let radius_adjustment = match op.params.containment {
+                    cam_model::AdaptiveContainment::Inside => 0.0,
+                    cam_model::AdaptiveContainment::Center => tool.radius(),
+                    cam_model::AdaptiveContainment::Outside => tool.diameter,
+                };
+                let user_adjustment = match op.params.containment {
+                    cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
+                    cam_model::AdaptiveContainment::Center
+                    | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
+                };
+                match offset(
+                    std::slice::from_ref(&stock_region),
+                    radius_adjustment + user_adjustment,
+                    JoinStyle::Round,
+                ) {
+                    Ok(regions) => regions,
+                    Err(e) => fail!(
+                        "operation {}: could not offset the stock machining domain: {e}",
+                        op.id
+                    ),
+                }
             } else {
                 let mut selected_domains = Vec::new();
                 if !layer.body_domains.is_empty() {
+                    let domain_expansion = match op.params.containment {
+                        cam_model::AdaptiveContainment::Inside => 0.0,
+                        cam_model::AdaptiveContainment::Center => tool.radius(),
+                        cam_model::AdaptiveContainment::Outside => tool.diameter,
+                    };
+                    let user_expansion = match op.params.containment {
+                        cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
+                        cam_model::AdaptiveContainment::Center
+                        | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
+                    };
                     match offset(
                         &layer.body_domains,
-                        2.0 * tool.diameter
+                        domain_expansion + user_expansion
                             - self.geometry.error_bound
                             - 2.0 * cam_geo::GRID_MM,
                         JoinStyle::Round,
                     ) {
                         Ok(regions) => selected_domains.extend(regions),
-                        Err(e) => fail!("operation {}: could not expand the selected body machining domain: {e}", op.id),
+                        Err(e) => fail!(
+                            "operation {}: could not expand the selected body machining domain: {e}",
+                            op.id
+                        ),
                     }
                 }
                 if !layer.face_domains.is_empty() {
+                    let containment_distance = match op.params.containment {
+                        cam_model::AdaptiveContainment::Inside => 0.0,
+                        cam_model::AdaptiveContainment::Center => tool.radius(),
+                        cam_model::AdaptiveContainment::Outside => tool.diameter,
+                    };
+                    let user_offset = match op.params.containment {
+                        cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
+                        cam_model::AdaptiveContainment::Center
+                        | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
+                    };
                     match offset(
                         &layer.face_domains,
-                        -self.geometry.error_bound - 2.0 * cam_geo::GRID_MM,
+                        containment_distance + user_offset
+                            - self.geometry.error_bound
+                            - 2.0 * cam_geo::GRID_MM,
                         JoinStyle::Round,
                     ) {
                         Ok(regions) => selected_domains.extend(regions),
-                        Err(e) => fail!("operation {}: could not erode the selected face machining domain by the certified path error: {e}", op.id),
+                        Err(e) => fail!(
+                            "operation {}: could not erode the selected face machining domain by the certified path error: {e}",
+                            op.id
+                        ),
                     }
                 }
                 match cam_geo::intersection(&selected_domains, std::slice::from_ref(&stock_region))
@@ -247,6 +310,7 @@ impl Strategy for AdaptiveStrategy {
                 let fine_pitch = op.params.fine_stepdown.min(op.params.stepdown);
                 let job = crate::clearing::ClearJob {
                     id: op.id,
+                    simplification_tolerance: op.params.simplification_tolerance,
                     radius,
                     finish: 0.0,
                     first: radius,
@@ -287,7 +351,7 @@ impl Strategy for AdaptiveStrategy {
                             program,
                             diagnostics,
                             cancelled: true,
-                        }
+                        };
                     }
                     Err(e) => fail!(
                         "operation {}: adaptive layer clearing failed at Z{:.3}: {e:?}",
@@ -381,6 +445,24 @@ mod tests {
             ),
             tool,
         )
+    }
+
+    #[test]
+    fn invalid_simplification_tolerances_fail_before_any_motion() {
+        let (mut strategy, tool) = fixture();
+        let env = JobEnv {
+            heights: Heights::new(15., 12., 10.),
+            tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 30.])),
+            spindle: SpindleDir::Cw,
+        };
+        for value in [-0.001, f64::NAN, f64::INFINITY, strategy.op.params.tolerance + 0.001] {
+            strategy.op.params.simplification_tolerance = value;
+            let result = strategy.compute(&env, &CancelToken::new());
+            assert!(result.has_errors(), "must reject simplification {value}");
+            assert!(result.program.steps().is_empty());
+            assert!(result.diagnostics.iter().any(|d| d.message.contains("simplification tolerance")));
+        }
     }
 
     #[test]
@@ -522,6 +604,59 @@ mod tests {
     }
 
     #[test]
+    fn containment_and_signed_offset_shift_emitted_cutter_centers_as_documented() {
+        let run = |containment, additional_offset| {
+            let (mut strategy, tool) = fixture();
+            let face = Polygon::new(Contour::new(vec![
+                Point::new(10., 10.), Point::new(30., 10.),
+                Point::new(30., 30.), Point::new(10., 30.),
+            ])).unwrap();
+            let protected = Polygon::new(Contour::new(vec![
+                Point::new(18., 18.), Point::new(22., 18.),
+                Point::new(22., 22.), Point::new(18., 22.),
+            ])).unwrap();
+            strategy.geometry.layers.truncate(1);
+            for layer in &mut strategy.geometry.layers {
+                layer.face_domains = vec![face.clone()];
+                layer.body_domains.clear();
+                layer.protected = vec![protected.clone()];
+            }
+            strategy.op.params.containment = containment;
+            strategy.op.params.additional_offset = additional_offset;
+            let env = JobEnv {
+                heights: Heights::new(15., 12., 10.),
+                tools: std::slice::from_ref(&tool),
+                stock: Some(([0., 0.], [40., 40.])),
+                spindle: SpindleDir::Cw,
+            };
+            let result = strategy.compute(&env, &CancelToken::new());
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let x_values: Vec<_> = result.program.steps().iter().filter_map(|step| match step {
+                Step::Linear { to, .. } => Some(to.x),
+                Step::Arc { end, .. } => Some(end.x),
+                _ => None,
+            }).collect();
+            assert!(!x_values.is_empty());
+            (*x_values.iter().min_by(|a, b| a.total_cmp(b)).unwrap(), *x_values.iter().max_by(|a, b| a.total_cmp(b)).unwrap())
+        };
+        use cam_model::AdaptiveContainment::{Center, Inside, Outside};
+        let inside = run(Inside, 0.0);
+        let inside_offset = run(Inside, 1.0);
+        let inside_negative = run(Inside, -1.0);
+        let center = run(Center, 0.0);
+        let center_offset = run(Center, 1.0);
+        let center_negative = run(Center, -1.0);
+        let outside = run(Outside, 0.0);
+        let outside_offset = run(Outside, 1.0);
+        assert!(inside_offset.0 > inside.0 + 0.8, "inside positive offset should shrink the region: {inside:?} -> {inside_offset:?}");
+        assert!(inside_negative.0 < inside.0 - 0.8, "inside negative offset should expand the region: {inside:?} -> {inside_negative:?}");
+        assert!(center_offset.0 < center.0 - 0.8, "center positive offset should expand the region: {center:?} -> {center_offset:?}");
+        assert!(center_negative.0 > center.0 + 0.8, "center negative offset should shrink the region: {center:?} -> {center_negative:?}");
+        assert!(outside_offset.0 < outside.0 - 0.8, "outside positive offset should expand the region: {outside:?} -> {outside_offset:?}");
+        assert!(inside.0 > center.0 && center.0 > outside.0, "tool center should move outward by containment mode: {inside:?}, {center:?}, {outside:?}");
+    }
+
+    #[test]
     fn selected_body_subset_clips_output_to_its_local_runout_domain() {
         let (mut strategy, tool) = fixture();
         let body = Polygon::new(Contour::new(vec![
@@ -633,15 +768,19 @@ mod tests {
         };
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(result.has_errors());
-        assert!(result
+        assert!(
+            result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("no accessible stock")));
-        assert!(!result
+                .any(|diagnostic| diagnostic.message.contains("no accessible stock"))
+        );
+        assert!(
+            !result
             .program
             .steps()
             .iter()
-            .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. })));
+                .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. }))
+        );
 
         strategy
             .geometry
@@ -650,15 +789,19 @@ mod tests {
             .for_each(|layer| layer.z += 10.);
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(result.has_errors());
-        assert!(result
+        assert!(
+            result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("no accessible stock")));
-        assert!(!result
+                .any(|diagnostic| diagnostic.message.contains("no accessible stock"))
+        );
+        assert!(
+            !result
             .program
             .steps()
             .iter()
-            .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. })));
+                .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. }))
+        );
     }
 
     #[test]
@@ -674,9 +817,11 @@ mod tests {
         token.cancel();
         assert!(strategy.compute(&env, &token).cancelled);
         let no_stock = JobEnv { stock: None, ..env };
-        assert!(strategy
+        assert!(
+            strategy
             .compute(&no_stock, &CancelToken::new())
-            .has_errors());
+                .has_errors()
+        );
     }
 
     #[test]
@@ -693,10 +838,12 @@ mod tests {
         };
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(result.has_errors());
-        assert!(result
+        assert!(
+            result
             .diagnostics
             .iter()
-            .any(|d| d.message.contains("drill bit")));
+                .any(|d| d.message.contains("drill bit"))
+        );
 
         let short_flute = Tool {
             flute_length: 2.,
@@ -709,9 +856,11 @@ mod tests {
         };
         let result = strategy.compute(&short_flute_env, &CancelToken::new());
         assert!(result.has_errors());
-        assert!(result
+        assert!(
+            result
             .diagnostics
             .iter()
-            .any(|d| d.message.contains("length of cut")));
+                .any(|d| d.message.contains("length of cut"))
+        );
     }
 }

@@ -26,6 +26,8 @@ use crate::CancelToken;
 pub(crate) struct ClearJob<'a> {
     /// Operation id, stamped onto emitted tags.
     pub id: u32,
+    /// Frontier and corner-detection simplification tolerance, mm; 0 disables it.
+    pub simplification_tolerance: f64,
     /// Tool radius.
     pub radius: f64,
     /// Finishing allowance left on the walls.
@@ -208,6 +210,7 @@ pub(crate) fn clear(
             job.finish,
             job.clearing.engagement,
             job.start,
+            job.simplification_tolerance,
         ) {
             emit_adaptive_moves(prog, &moves, &[], job, heights, levels);
             // One continuous certified path (not a ring count); `Ok(_)` ⇒ emitted.
@@ -461,6 +464,7 @@ mod tests {
     fn frame_clearjob(clearing: Clearing) -> ClearJob<'static> {
         ClearJob {
             id: 7,
+            simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: 3.0,
             finish: 0.0,
             first: 3.0,

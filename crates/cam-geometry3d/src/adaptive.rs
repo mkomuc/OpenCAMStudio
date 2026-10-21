@@ -1,6 +1,7 @@
 //! Conservative 3D adaptive roughing shadows from the independent, bounded-
 //! deflection CAD projection mesh. The viewport mesh is never used.
 use super::*;
+use std::collections::BTreeMap;
 
 /// Validate the adaptive-only multi-reference selection contract.
 pub fn validate_adaptive_selection(
@@ -353,9 +354,24 @@ pub fn resolve_adaptive(
             let projection = checked_projection(&asset.topology)?;
             let triangles =
                 triangles_for_faces(&projection.mesh, &[reference.id], instance.placement)?;
-            let polygons = project_triangles(&triangles)?;
+            let mut polygons = project_triangles(&triangles)?;
+            // A vertical face has zero area when each tessellation triangle
+            // is flattened independently. Accept the useful full cylindrical
+            // case only when its analytic circle and closed topology wire,
+            // including any canceled axial seam, can be certified. Obstacle
+            // shadows still constrain every path against the complete solid.
             if polygons.is_empty() {
-                return Err(format!("Selected face {} has no positive-area XY projection in the setup; select a face with an XY footprint", reference.id));
+                if let Some(domain) =
+                    closed_vertical_cylinder_domain(face, &asset.topology, instance.placement)?
+                {
+                    polygons.push(domain);
+                }
+            }
+            if polygons.is_empty() {
+                return Err(format!(
+                    "Selected face {} has no positive-area XY projection in the setup; select a face with an XY footprint",
+                    reference.id
+                ));
             }
             face_domains.extend(polygons);
         }
@@ -365,7 +381,10 @@ pub fn resolve_adaptive(
     let mut obstacle_error_bound: f64 = 0.0;
     for instance in &state.instances {
         if !instance.placement.is_rigid() {
-            return Err(format!("Setup instance {} has an invalid placement and cannot be certified as a 3D Adaptive obstacle", instance.name));
+            return Err(format!(
+                "Setup instance {} has an invalid placement and cannot be certified as a 3D Adaptive obstacle",
+                instance.name
+            ));
         }
         let asset = state
             .asset(instance.asset_id)
@@ -378,7 +397,10 @@ pub fn resolve_adaptive(
             .find(|b| b.id == instance.body_id)
             .ok_or("setup model body missing")?;
         if !body.valid_solid {
-            return Err(format!("Setup body {} is not a valid solid and cannot be certified as a 3D Adaptive obstacle", body.name));
+            return Err(format!(
+                "Setup body {} is not a valid solid and cannot be certified as a 3D Adaptive obstacle",
+                body.name
+            ));
         }
         let projection = checked_projection(&asset.topology)?;
         let face_ids: Vec<_> = asset
@@ -400,7 +422,10 @@ pub fn resolve_adaptive(
             || covered != expected
             || projection.mesh.triangles.len() != projection.mesh.triangle_faces.len()
         {
-            return Err(format!("Incomplete CAD machining projection for setup body {}; reimport it before Adaptive clearing", body.name));
+            return Err(format!(
+                "Incomplete CAD machining projection for setup body {}; reimport it before Adaptive clearing",
+                body.name
+            ));
         }
         triangles.extend(triangles_for_faces(
             &projection.mesh,
@@ -419,7 +444,9 @@ pub fn resolve_adaptive(
     // that displacement to the protected envelope before constructing toolpaths.
     let error_bound = obstacle_error_bound + 0.01 + 2.0 * cam_geo::GRID_MM;
     if tolerance + T < error_bound {
-        return Err(format!("Adaptive tolerance {tolerance:.4} mm is below the certified machining error {error_bound:.4} mm"));
+        return Err(format!(
+            "Adaptive tolerance {tolerance:.4} mm is below the certified machining error {error_bound:.4} mm"
+        ));
     }
     let mut tips = vec![heights.top];
     let fine = fine_stepdown.min(stepdown);
@@ -511,6 +538,118 @@ pub fn resolve_adaptive(
     })
 }
 
+fn closed_vertical_cylinder_domain(
+    face: &CadFace,
+    topology: &TopologySnapshot,
+    placement: RigidTransform,
+) -> Result<Option<Polygon>, String> {
+    let CadSurface::Cylinder {
+        origin,
+        axis,
+        radius,
+        ..
+    } = &face.surface
+    else {
+        return Ok(None);
+    };
+    let world_axis = transform_vector(placement, *axis);
+    if world_axis[0].abs() > T
+        || world_axis[1].abs() > T
+        || world_axis[2].abs() < 1.0 - T
+        || !radius.is_finite()
+        || *radius <= 0.0
+    {
+        return Ok(None);
+    }
+    let loops: Vec<_> = face
+        .loop_ids
+        .iter()
+        .filter_map(|id| topology.loops.iter().find(|wire| wire.id == *id))
+        .collect();
+    if loops.is_empty() {
+        return Ok(None);
+    }
+    // Accept only complete circular boundary wires. Partial arcs and open or
+    // ambiguous trims stay rejected because they do not certify an XY area.
+    for wire in loops {
+        let mut angle = 0.0;
+        let mut closed = !wire.edge_uses.is_empty();
+        let mut first_vertex = None;
+        let mut previous_vertex = None;
+        let mut seam_uses: BTreeMap<EntityId, Vec<bool>> = BTreeMap::new();
+        for use_ in &wire.edge_uses {
+            let Some(edge) = topology.edges.iter().find(|edge| edge.id == use_.edge_id) else {
+                closed = false;
+                break;
+            };
+            let start = edge.vertices[usize::from(use_.reversed)];
+            let end = edge.vertices[usize::from(!use_.reversed)];
+            if previous_vertex.is_some_and(|previous| previous != start) {
+                closed = false;
+                break;
+            }
+            first_vertex.get_or_insert(start);
+            previous_vertex = Some(end);
+            match &edge.curve {
+                CadCurve::CircleArc {
+                    center: arc_center,
+                    normal,
+                    radius: edge_radius,
+                    start_angle,
+                    end_angle,
+                    ..
+                } => {
+                    let world_normal = transform_vector(placement, *normal);
+                    let axis_dot = world_normal.iter().zip(world_axis).map(|(a, b)| a * b).sum::<f64>().abs();
+                    let world_center = transform_point(placement, *arc_center);
+                    let axis_center = transform_point(placement, *origin);
+                    if (edge_radius - radius).abs() > T || axis_dot < 1.0 - T
+                        || (world_center[0] - axis_center[0]).abs() > T
+                        || (world_center[1] - axis_center[1]).abs() > T
+                    {
+                        closed = false;
+                        break;
+                    }
+                    angle += (end_angle - start_angle).abs();
+                }
+                CadCurve::Line { start, end } => {
+                    let a = transform_point(placement, *start);
+                    let b = transform_point(placement, *end);
+                    if (a[0] - b[0]).abs() > T || (a[1] - b[1]).abs() > T || (a[2] - b[2]).abs() <= T {
+                        closed = false;
+                        break;
+                    }
+                    seam_uses.entry(edge.id).or_default().push(use_.reversed);
+                }
+                _ => { closed = false; break; }
+            }
+        }
+        let seams_cancel = seam_uses.values().all(|uses| uses.len() == 2 && uses[0] != uses[1]);
+        if !closed || first_vertex != previous_vertex || !seams_cancel || angle < TAU - 1e-3 {
+            return Ok(None);
+        }
+    }
+    let center = transform_point(placement, *origin);
+    let contour = Contour::new(
+        (0..128)
+            .map(|i| {
+                let angle = TAU * i as f64 / 128.0;
+                Point::new(
+                    center[0] + radius * angle.cos(),
+                    center[1] + radius * angle.sin(),
+                )
+            })
+            .collect(),
+    );
+    Polygon::new(contour)
+        .map(Some)
+        .map_err(|e| format!("could not construct closed cylindrical footprint: {e}"))
+}
+
+fn transform_vector(transform: RigidTransform, vector: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|i| (0..3).map(|j| transform.rotation[i][j] * vector[j]).sum())
+}
+
 /// Clip one triangle by the half-space z >= plane. The resulting XY polygon is
 /// a conservative part shadow: material inside a closed solid is projected by
 /// its upper boundary; vertical faces add only boundary traces.
@@ -536,6 +675,100 @@ fn clip_above(triangle: [[f64; 3]; 3], plane: f64) -> Vec<[f64; 3]> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn projected_cylindrical_face_requires_complete_boundary_wires() {
+        let make = |sweep: f64| {
+            let face = CadFace {
+                id: 1,
+                body_id: 1,
+                surface: CadSurface::Cylinder {
+                    origin: [0., 0., 0.],
+                    axis: [0., 0., 1.],
+                    radius: 5.,
+                    inward: false,
+                },
+                loop_ids: vec![1],
+                bounds: [[-5., -5., 0.], [5., 5., 10.]],
+            };
+            let edge_count = (sweep / (TAU / 4.)).round().max(1.) as usize;
+            let edges = (0..edge_count)
+                .map(|i| CadEdge {
+                    id: i as u64 + 1,
+                    body_id: 1,
+                    vertices: [i as u64, (i as u64 + 1) % edge_count as u64],
+                    face_ids: vec![1],
+                    curve: CadCurve::CircleArc {
+                        center: [0., 0., 0.],
+                        normal: [0., 0., 1.],
+                        x_axis: [1., 0., 0.],
+                        radius: 5.,
+                        start_angle: i as f64 * sweep / edge_count as f64,
+                        end_angle: (i + 1) as f64 * sweep / edge_count as f64,
+                    },
+                })
+                .collect();
+            let uses = (0..edge_count)
+                .map(|i| EdgeUse {
+                    edge_id: i as u64 + 1,
+                    reversed: false,
+                })
+                .collect();
+            let topology = TopologySnapshot {
+                version: 1,
+                bodies: vec![],
+                faces: vec![face.clone()],
+                edges,
+                loops: vec![CadLoop {
+                    id: 1,
+                    body_id: 1,
+                    face_id: 1,
+                    edge_uses: uses,
+                    is_outer: true,
+                }],
+                vertices: vec![],
+                mesh: CadMesh::default(),
+                projection: None,
+            };
+            (face, topology)
+        };
+        let (face, topology) = make(TAU);
+        let domain = closed_vertical_cylinder_domain(&face, &topology, RigidTransform::default())
+            .unwrap()
+            .unwrap();
+        assert!((domain.area() - std::f64::consts::PI * 25.).abs() < 0.1);
+        let (face, topology) = make(std::f64::consts::FRAC_PI_2);
+        assert!(
+            closed_vertical_cylinder_domain(&face, &topology, RigidTransform::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn projected_cylindrical_face_accepts_canceled_axial_seam() {
+        let face = CadFace {
+            id: 3, body_id: 1,
+            surface: CadSurface::Cylinder { origin: [-30., 10., 20.], axis: [0., 0., -1.], radius: 15., inward: true },
+            loop_ids: vec![70], bounds: [[-45., -5., 0.], [-15., 25., 16.]],
+        };
+        let circle = |id, z, normal| CadEdge {
+            id, body_id: 1, vertices: [if z == 16. { 49 } else { 50 }; 2], face_ids: vec![3],
+            curve: CadCurve::CircleArc { center: [-30., 10., z], normal, x_axis: [-1., 0., 0.], radius: 15., start_angle: std::f64::consts::PI, end_angle: 3. * std::f64::consts::PI },
+        };
+        let seam = CadEdge { id: 19, body_id: 1, vertices: [49, 50], face_ids: vec![3, 3], curve: CadCurve::Line { start: [-15., 10., 16.], end: [-15., 10., 0.] } };
+        let topology = TopologySnapshot {
+            version: 1, bodies: vec![], faces: vec![face.clone()],
+            edges: vec![circle(18, 16., [0., 0., -1.]), seam.clone(), circle(20, 0., [0., 0., 1.])],
+            loops: vec![CadLoop { id: 70, body_id: 1, face_id: 3, edge_uses: vec![
+                EdgeUse { edge_id: 19, reversed: true }, EdgeUse { edge_id: 18, reversed: true },
+                EdgeUse { edge_id: 19, reversed: false }, EdgeUse { edge_id: 20, reversed: true },
+            ], is_outer: true }],
+            vertices: vec![], mesh: CadMesh::default(), projection: None,
+        };
+        let domain = closed_vertical_cylinder_domain(&face, &topology, RigidTransform::default()).unwrap().unwrap();
+        assert!((domain.area() - std::f64::consts::PI * 225.).abs() < 1.0);
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn resolve_adaptive(
@@ -721,7 +954,8 @@ mod tests {
             .as_mut()
             .unwrap()
             .chord_tolerance = 0.01;
-        assert!(resolve_adaptive(
+        assert!(
+            resolve_adaptive(
             &state,
             &binding,
             CuttingHeights {
@@ -738,7 +972,8 @@ mod tests {
             0.02,
             || false
         )
-        .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -1026,10 +1261,12 @@ mod tests {
             || false,
         )
         .unwrap();
-        assert!(near_existing
+        assert!(
+            near_existing
             .layers
             .iter()
-            .any(|layer| (layer.z - near_floor_tip).abs() < 1e-9));
+                .any(|layer| (layer.z - near_floor_tip).abs() < 1e-9)
+        );
         assert!(
             near_existing
                 .layers
@@ -1081,22 +1318,28 @@ mod tests {
         assert!(error.contains("no positive-area XY projection"), "{error}");
 
         binding.selected[0].id = 2;
-        assert!(adaptive_heights(&state, &binding.selected, 10.)
+        assert!(
+            adaptive_heights(&state, &binding.selected, 10.)
             .unwrap_err()
-            .contains("no cutting depth"));
+                .contains("no cutting depth")
+        );
     }
 
     #[test]
     fn adaptive_selection_rejects_duplicate_and_stale_references() {
         let (state, binding) = state(false);
         let duplicate = [binding.selected[0].clone(), binding.selected[0].clone()];
-        assert!(validate_adaptive_selection(&state, &duplicate)
+        assert!(
+            validate_adaptive_selection(&state, &duplicate)
             .unwrap_err()
-            .contains("duplicate"));
+                .contains("duplicate")
+        );
         let mut stale = binding.selected[0].clone();
         stale.revision += 1;
-        assert!(validate_adaptive_selection(&state, &[stale])
+        assert!(
+            validate_adaptive_selection(&state, &[stale])
             .unwrap_err()
-            .contains("stale"));
+                .contains("stale")
+        );
     }
 }

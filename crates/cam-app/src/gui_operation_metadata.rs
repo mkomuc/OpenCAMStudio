@@ -13,7 +13,11 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             let mut fields = vec![Field::Depth, Field::Stepdown];
             // Radial roughing (stepover) is outside-only; an inner profile is
             // a single-pass wall finish (rough the pocket first).
-            if p.closed && p.additional_chains.is_empty() && p.side == Side::Outside && p.comp == cam_model::Comp::Computed {
+            if p.closed
+                && p.additional_chains.is_empty()
+                && p.side == Side::Outside
+                && p.comp == cam_model::Comp::Computed
+            {
                 fields.push(Field::Stepover);
                 fields.push(Field::Engagement);
             }
@@ -183,9 +187,11 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
         }
         Operation::Adaptive(_) => vec![
             Field::AdaptiveTolerance,
+            Field::AdaptiveSimplificationTolerance,
             Field::AdaptiveOptimalLoad,
             Field::Stepdown,
             Field::AdaptiveFineStepdown,
+            Field::AdaptiveOffset,
             Field::SpindleRpm,
             Field::Feed,
             Field::PlungeFeed,
@@ -213,12 +219,20 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
         }
     };
     if matches!(op, Operation::Profile(p) if p.closed)
-        || matches!(op, Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_))
+        || matches!(
+            op,
+            Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_)
+        )
     {
         fields.push(Field::RampFeed);
     }
-    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Chamfer(_) | Operation::Thread(_))
-        || matches!(op, Operation::Carve(c) if c.clear.is_some()) {
+    if matches!(op, Operation::Profile(p) if p.closed)
+        || matches!(
+            op,
+            Operation::Pocket(_) | Operation::Chamfer(_) | Operation::Thread(_)
+        )
+        || matches!(op, Operation::Carve(c) if c.clear.is_some())
+    {
         fields.extend([Field::LeadInFeed, Field::LeadOutFeed]);
     }
     if super::operation_tabs::operation_start(op).is_some() {

@@ -966,6 +966,12 @@ pub(crate) fn capture_height_override(
     after: &Operation,
     heights: &Heights,
 ) {
+    // Adaptive operations have no legacy cutting-height fields. Their interval
+    // belongs to the binding and reference-height settings, so comparing it with
+    // legacy_cutting would turn an unrelated edit into a spurious height shift.
+    if matches!(after, Operation::Adaptive(_)) {
+        return;
+    }
     let Some(binding) = binding else {
         return;
     };

@@ -11,6 +11,7 @@ The operation is named **3D Adaptive Clearing**. Its initial pass controls are:
 | Control | Meaning |
 | --- | --- |
 | Tolerance | Maximum permitted geometry approximation error, in mm |
+| Simplification tolerance | Frontier approximation and corner-detection tolerance, in mm; default 0.02, 0 disables it |
 | Optimal Load | Requested radial engagement, in mm |
 | Stepdown | Maximum separation of primary roughing levels |
 | Fine Stepdown | Intermediate levels for reducing the roughing staircase |
@@ -36,19 +37,32 @@ the radial and axial fields (Face uses axial only). Those fields remain visible
 and are disabled while the checkbox is off. Apply the edit before
 generating.
 
+**Simplification tolerance** is saved per operation in Passes, directly below
+Tolerance. Smaller values retain more short segments and more detail; larger
+values suppress small projection zigzags and unnecessary corner reliefs. It must
+be finite, nonnegative and no greater than Tolerance. Setting it to 0 retains
+the unsimplified frontier and corner outline. Existing projects load with
+0.02 mm. Edits participate in Apply, Cancel, undo/redo and toolpath cache
+invalidation.
+
 ## Selected machining areas
 
-Selected faces limit machining to their projected XY footprints. The boundary
-includes the CAD/path error margin and cutter radius, so the swept cutter remains
-inside the selected area. Faces with no positive-area XY footprint, such as a
-vertical planar wall, require a different selection and report an actionable
-error.
+Selected faces limit machining to their projected XY footprints. Choose whether
+the cutter stays Inside the boundary, its center follows the boundary, or it
+travels Outside the boundary. A signed additional offset shifts the boundary;
+positive values move it inward for Inside and outward for Center or Outside.
+Complete vertical cylindrical faces use the analytic circle only when their
+CAD topology has a full circular boundary and any axial seam cancels in the
+closed wire. Partial arcs, unsupported vertical planes, and ambiguous/open
+trims remain rejected. Full-solid obstacle shadows continue to protect all
+setup bodies. Height overrides below the geometry-certified cutting interval
+remain invalid because they cannot be certified against the selected geometry.
 
 Selected bodies define local machining areas from their bounds in setup XY,
-expanded by twice the tool diameter and clipped to stock. This provides runout
-around the selected bodies without clearing unrelated stock across the setup.
+then apply the selected containment and signed offset before clipping to stock.
 For compatibility, selecting the only body in a one-body setup retains the
-original full-stock clearing area.
+original full-stock clearing area; containment and offset still apply to that
+stock boundary.
 
 Every included setup body remains a protected obstacle, including bodies that
 are not selected for machining. Moving, replacing or changing the setup's model
@@ -127,6 +141,21 @@ Tolerance must cover the native machining deflection, existing 0.01 mm arc
 refitting, and planar-grid allowance. Settings below this budget are rejected.
 
 ## Verification
+
+Rejected planar frontier segments are linked directly to the next cutting
+segment's start. Intermediate rejected points and trailing repositions do not
+produce plunge/retract cycles. The supplied `3d_toolpath_calculation.ocam`
+regression checks that every retract follows actual cutting; this removes
+3,272 empty cycles from that project while preserving every cutting segment
+and the existing engagement, coverage and gouge certification gates.
+
+Corner relief detection uses the operation's Simplification tolerance (default
+0.02 mm) to ignore small projection zigzags. The original cutter-centre boundary still
+guards motion and the resulting path still passes engagement, coverage and
+gouge certification. This prevents microscopic facets on rounded hole entrances
+from producing spurious corner relief loops. The supplied project regression
+requires one retract per cutting level inside its round pocket; its total
+retract count drops from 219 to 58.
 
 Regression coverage includes changing model heights, overhang protection,
 intermediate shelf allowances, deep-then-upward fine-level ordering, display-mesh

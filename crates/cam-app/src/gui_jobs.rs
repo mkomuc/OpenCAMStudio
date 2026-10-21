@@ -10,6 +10,78 @@ pub(super) enum ToolpathAction {
 }
 
 impl App {
+    /// Keep calculation feedback visible independently of the docked Output pane.
+    pub(super) fn calculation_progress(&self) -> Option<Element<'_, Message>> {
+        use crate::JobPhase;
+        use iced::widget::progress_bar;
+
+        let progress = self.controller.run_progress()?;
+        let label = match progress.phase {
+            JobPhase::Queued => "Waiting to calculate…".into(),
+            JobPhase::GeometryResolution => "Resolving machining geometry…".into(),
+            JobPhase::Generation => {
+                let operation = progress
+                    .operation
+                    .map_or(String::new(), |id| format!(" · operation #{id}"));
+                format!(
+                    "Calculating toolpaths{operation} · {} / {} operations complete",
+                    progress.completed, progress.total
+                )
+            }
+            JobPhase::Verification if progress.total > 0 => format!(
+                "Verifying toolpaths · {:.0}%",
+                (progress.completed as f64 / progress.total as f64).clamp(0.0, 1.0) * 100.0
+            ),
+            JobPhase::Verification => "Verifying toolpaths…".into(),
+            JobPhase::RenderPreparation => "Preparing preview…".into(),
+        };
+        let bar: Element<'_, Message> =
+            if progress.phase == JobPhase::Verification && progress.total > 0 {
+                progress_bar(
+                    0.0..=1.0,
+                    (progress.completed as f32 / progress.total as f32).clamp(0.0, 1.0),
+                )
+                .girth(6)
+                .into()
+            } else {
+                // Generation reports operation boundaries, not progress within a long
+                // operation. Animate a moving segment instead of inventing a percentage.
+                // The existing 50 ms worker polling subscription also redraws this bar.
+                let tick = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    % 2_000;
+                let position = if tick < 1_000 { tick } else { 2_000 - tick };
+                let left = 1 + (position / 10) as u16;
+                row![
+                    Space::new().width(Length::FillPortion(left)),
+                    progress_bar(0.0..=1.0, 1.0)
+                        .length(Length::FillPortion(30))
+                        .girth(6),
+                    Space::new().width(Length::FillPortion(102 - left)),
+                ]
+                .into()
+            };
+        Some(
+            container(
+                column![
+                    row![
+                        text(label).size(12).width(Length::Fill),
+                        inspector_button("Cancel").on_press(Message::CancelRun),
+                    ]
+                    .align_y(Alignment::Center)
+                    .spacing(12),
+                    bar,
+                ]
+                .spacing(6),
+            )
+            .padding([8, 12])
+            .width(Length::Fill)
+            .into(),
+        )
+    }
+
     /// Submit a snapshot; the event loop never runs machining services inline.
     pub(super) fn rerun(&mut self) {
         self.pending_toolpath_export = None;
@@ -45,7 +117,12 @@ impl App {
         let (setup, operation, pattern) = match node {
             TreeNode::Setup(id) => (id, None, None),
             TreeNode::Pattern(id) => {
-                let Some(setup) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == id)) else {
+                let Some(setup) = self
+                    .controller
+                    .setups()
+                    .iter()
+                    .find(|s| s.patterns.iter().any(|p| p.id == id))
+                else {
                     self.status = "Pattern no longer exists.".into();
                     return iced::Task::none();
                 };
@@ -79,7 +156,14 @@ impl App {
         self.focus_ops.clear();
         self.focus_ops.extend(operation);
         if let Some(pattern_id) = pattern {
-            if let Some(pattern) = self.controller.setups().iter().find_map(|s| s.patterns.iter().find(|p| p.id == pattern_id)) { self.focus_ops.extend(pattern.members.iter().copied()); }
+            if let Some(pattern) = self
+                .controller
+                .setups()
+                .iter()
+                .find_map(|s| s.patterns.iter().find(|p| p.id == pattern_id))
+            {
+                self.focus_ops.extend(pattern.members.iter().copied());
+            }
         }
         self.end_setup_draft();
         self.operation_draft = None;
@@ -88,9 +172,11 @@ impl App {
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
         let run = if let Some(pattern_id) = pattern {
-            self.controller.start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)
+            self.controller
+                .start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)
         } else {
-            self.controller.start_toolpath_run(operation, action == ToolpathAction::Recompute)
+            self.controller
+                .start_toolpath_run(operation, action == ToolpathAction::Recompute)
         };
         match run {
             Ok(stamp) => {
@@ -141,7 +227,8 @@ impl App {
             } else {
                 "Copy output"
             })
-            .on_press(Message::OutputCopy)
+            .on_press(Message::OutputCopy),
+            inspector_button("Clear").on_press(Message::OutputClear)
         ]
         .spacing(8);
         if self.output_content.selection().is_some() {

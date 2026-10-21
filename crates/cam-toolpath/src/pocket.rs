@@ -106,6 +106,7 @@ impl Strategy for PocketStrategy {
         // stay-down inside-out rings, with the finishing wall leads.
         let job = crate::clearing::ClearJob {
             id: op.id,
+            simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: r,
             finish: op.clear.offset,
             first,

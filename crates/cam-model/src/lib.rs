@@ -28,7 +28,7 @@ mod validate;
 
 pub use cam_cldata::Point3;
 pub use document::{
-    AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
+    AdaptiveContainment, AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
     DrillOp, EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp,
     ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, StockToLeave, ThreadOp, SCHEMA_VERSION,
     CircularDistribution, ExecutionItem, OperationPattern, PatternDirection, PatternKind, PatternOrder,
