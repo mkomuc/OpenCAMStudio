@@ -42,7 +42,7 @@ pub use validate::{
 };
 
 /// A point in 3-D space, millimetres, in the part/WCS frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Point3 {
     pub x: f64,
     pub y: f64,
@@ -60,7 +60,7 @@ impl Point3 {
 /// What a motion is *for* — its role in the toolpath. Drives backplot colouring
 /// and safety checks (e.g. a [`MoveKind::Link`] rapid must not pass through
 /// stock).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveKind {
     /// Approach into the cut (ramp/lead-in).
     LeadIn,
@@ -81,7 +81,7 @@ pub enum MoveKind {
 }
 
 /// A motion's provenance tag: which operation emitted it, and its role.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tag {
     /// Index of the emitting operation within the job (0-based).
     pub op_id: u32,
@@ -102,7 +102,7 @@ impl Tag {
 }
 
 /// Spindle rotation sense, looking down the tool axis (`+Z` toward the viewer).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpindleDir {
     /// Clockwise — the usual sense for right-hand cutting tools (`M3`).
     Cw,
@@ -111,7 +111,7 @@ pub enum SpindleDir {
 }
 
 /// Coolant state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coolant {
     /// Flood coolant (`M8`).
     Flood,
@@ -122,7 +122,7 @@ pub enum Coolant {
 }
 
 /// Arc direction in the XY plane, viewed from `+Z`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArcDir {
     /// Clockwise (`G2`).
     Cw,
@@ -132,7 +132,7 @@ pub enum ArcDir {
 
 /// Cutter-radius compensation state, applied by the *controller* (not computed
 /// into the geometry). A post that lacks the capability must reject it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CutterComp {
     /// Cancel compensation (`G40`).
     Off,
@@ -151,7 +151,7 @@ pub enum CutterComp {
 /// optionally in [`peck`](DrillCycle::peck) increments with an optional
 /// [`dwell`](DrillCycle::dwell) at the bottom, then withdraws. All Z values are
 /// absolute millimetres; `retract ≥ z_top > depth`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct DrillCycle {
     /// XY positions of the holes, in order.
     pub points: Vec<[f64; 2]>,
@@ -173,7 +173,7 @@ pub struct DrillCycle {
 
 /// One step of a CL-data program: a primitive move, a machine-control action, or
 /// a Tier-2 cycle intent.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum Step {
     /// Rapid traverse to a point (`G0`) — non-cutting, at the machine's rapid
     /// rate.
@@ -222,7 +222,7 @@ pub enum Step {
 
 /// An ordered CL-data program: the complete, controller-neutral description of a
 /// job, ready to be handed to any post.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Program {
     /// The steps, in execution order.
     pub steps: Vec<Step>,

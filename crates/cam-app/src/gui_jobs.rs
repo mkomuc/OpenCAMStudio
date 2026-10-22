@@ -84,6 +84,14 @@ impl App {
 
     /// Submit a snapshot; the event loop never runs machining services inline.
     pub(super) fn rerun(&mut self) {
+        self.rerun_with_review(false);
+    }
+
+    pub(super) fn rerun_all(&mut self) {
+        self.rerun_with_review(true);
+    }
+
+    fn rerun_with_review(&mut self, review_all: bool) {
         self.pending_toolpath_export = None;
         self.pending_simulation = None;
         self.simulation = None;
@@ -92,7 +100,11 @@ impl App {
             self.status = "No operations to run.".into();
             return;
         }
-        self.controller.start_run();
+        if review_all {
+            self.controller.start_run();
+        } else {
+            self.controller.start_automatic_run();
+        }
         self.status = "Generating toolpaths…".into();
     }
 
@@ -254,5 +266,55 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn opening_saved_paths_reuses_them_and_legacy_projects_wait_for_a_user_run() {
+        let mut source = AppController::new(crate::default_machine());
+        source.open_dxf(SAMPLE_DXF, "saved-paths.dxf").unwrap();
+        assert_eq!(
+            source.run(&cam_toolpath::CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
+        let path =
+            std::env::temp_dir().join(format!("gui-saved-paths-{}.ocam", std::process::id()));
+        source.save_project(&path).unwrap();
+        let (mut app, _) = App::new();
+        app.library.tools.clear();
+        app.open_project(&path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.controller.run_needs_poll() {
+            app.controller.poll_run();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(app.controller.cache_stats().computed, 0);
+        assert_eq!(
+            app.controller.cache_stats().reused,
+            source.document().setup().operations.len()
+        );
+        assert!(app.controller.outcome().is_some());
+
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("toolpaths");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        app.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            !app.controller.run_needs_poll(),
+            "opening cannot calculate missing paths"
+        );
+        assert!(app
+            .controller
+            .toolpath_statuses()
+            .values()
+            .all(|ready| !ready));
     }
 }

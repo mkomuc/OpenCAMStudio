@@ -2,19 +2,22 @@
 use super::*;
 use cam_model::Comp;
 use iced::widget::column;
+use iced::widget::svg;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum OperationTab {
     #[default]
     Tool,
+    MultiAxis,
     Geometry,
     Heights,
     Passes,
     Linking,
 }
 impl OperationTab {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::Tool,
+        Self::MultiAxis,
         Self::Geometry,
         Self::Heights,
         Self::Passes,
@@ -25,11 +28,36 @@ impl std::fmt::Display for OperationTab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Tool => "Tool",
+            Self::MultiAxis => "Multi-axis",
             Self::Geometry => "Geometry",
             Self::Heights => "Heights",
             Self::Passes => "Passes",
-            Self::Linking => "Linking",
+            Self::Linking => "Lead-in and lead-out moves",
         })
+    }
+}
+
+impl OperationTab {
+    fn hover_label(self) -> &'static str {
+        match self {
+            Self::Tool => "Tool",
+            Self::MultiAxis => "Multi-axis",
+            Self::Geometry => "Geometry",
+            Self::Heights => "Heights",
+            Self::Passes => "Passes",
+            Self::Linking => "Lead-in and lead-out moves",
+        }
+    }
+
+    fn icon(self) -> &'static [u8] {
+        match self {
+            Self::Tool => include_bytes!("../assets/icons/operation-tabs/tool.svg"),
+            Self::MultiAxis => include_bytes!("../assets/icons/operation-tabs/multi_axis.svg"),
+            Self::Geometry => include_bytes!("../assets/icons/operation-tabs/geometry.svg"),
+            Self::Heights => include_bytes!("../assets/icons/operation-tabs/heights.svg"),
+            Self::Passes => include_bytes!("../assets/icons/operation-tabs/passes.svg"),
+            Self::Linking => include_bytes!("../assets/icons/operation-tabs/linking.svg"),
+        }
     }
 }
 
@@ -138,7 +166,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::AdaptiveFineStepdown
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
-        Field::StockLeaveRadial | Field::StockLeaveAxial | Field::AdaptiveSimplificationTolerance => value < 0.0,
+        Field::StockLeaveRadial | Field::StockLeaveAxial => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
         Field::Stepdown
@@ -327,28 +355,32 @@ impl App {
             format!("Operation {id} · {}", op_kind(op))
         };
         let mut list = column![inspector_heading(heading)].spacing(10).padding(14);
-        // Two rows keep every tab reachable in a narrow inspector. Navigation
-        // never reloads the shared numeric buffers or operation draft.
-        let tab_button = |value: OperationTab| {
-            inspector_button(value.to_string())
-                .padding([7, 4])
-                .width(Length::Fill)
-                .style(move |theme, status| inspector_tab(theme, status, tab == value))
-                .on_press(Message::OperationTabChanged(value))
+        // Compact buttons keep all six tabs in one row. Navigation never
+        // reloads the shared numeric buffers or operation draft.
+        let tab_button = |value: OperationTab| -> Element<'_, Message> {
+            let button = button(
+                svg(svg::Handle::from_memory(value.icon()))
+                    .width(20)
+                    .height(20),
+            )
+            .padding(3)
+            .width(Length::Fill)
+            .style(move |theme, status| inspector_tab(theme, status, tab == value))
+            .on_press(Message::OperationTabChanged(value));
+            delayed_tooltip(
+                button,
+                container(text(value.hover_label()).size(12))
+                    .padding(8)
+                    .style(popup_surface),
+                tooltip::Position::Top,
+            )
+            .into()
         };
         list = list.push(
-            column![
-                row(OperationTab::ALL[..3]
-                    .iter()
-                    .copied()
-                    .map(|value| tab_button(value).into()))
-                .spacing(3),
-                row(OperationTab::ALL[3..]
-                    .iter()
-                    .copied()
-                    .map(|value| tab_button(value).into()))
-                .spacing(3),
-            ]
+            row(OperationTab::ALL
+                .iter()
+                .copied()
+                .map(|value| tab_button(value).into()))
             .spacing(3),
         );
         let header = list;
@@ -360,6 +392,13 @@ impl App {
                 bottom: 16.0,
                 left: 14.0,
             });
+        if tab == OperationTab::MultiAxis {
+            list = list.push(
+                text("Multi-axis machining controls are not available yet.")
+                    .size(12)
+                    .color(INSPECTOR_MUTED),
+            );
+        }
         if tab == OperationTab::Tool {
             let tool = self
                 .operation_tools

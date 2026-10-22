@@ -1093,7 +1093,6 @@ enum Field {
     Dwell,
     Stepdown,
     AdaptiveTolerance,
-    AdaptiveSimplificationTolerance,
     AdaptiveOptimalLoad,
     AdaptiveFineStepdown,
     AdaptiveOffset,
@@ -1236,7 +1235,6 @@ impl Field {
             Field::ProfileOffset => "Offset / leave (mm)",
             Field::Stepdown => "Stepdown (mm)",
             Field::AdaptiveTolerance => "Tolerance (mm)",
-            Field::AdaptiveSimplificationTolerance => "Simplification tolerance (mm, 0=off)",
             Field::AdaptiveOptimalLoad => "Optimal load (mm)",
             Field::AdaptiveFineStepdown => "Fine stepdown (mm)",
             Field::AdaptiveOffset => "Additional offset (mm)",
@@ -1293,10 +1291,9 @@ impl Field {
     fn help(self) -> &'static str {
         match self {
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
-            Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres.",
-            Field::AdaptiveSimplificationTolerance => "Simplifies adaptive frontiers and ignores tiny projection zigzags during corner detection. Larger values reduce short segments and unnecessary corner loops. Must not exceed Tolerance; 0 disables simplification.",
+            Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres. Path simplification is calculated automatically from this tolerance.",
             Field::AdaptiveOptimalLoad => "Target radial engagement for adaptive clearing, in millimetres.",
-            Field::AdaptiveFineStepdown => "Axial spacing for intermediate terrace refinement after each roughing slab, in millimetres. Smaller values add more shallow passes above each coarse cut.",
+            Field::AdaptiveFineStepdown => "Axial spacing for intermediate terrace refinement, in millimetres. Fine passes are added only where shelves or slopes expose additional material; unchanged vertical walls use the primary stepdown.",
             Field::AdaptiveOffset => "Signed shift of the selected adaptive boundary. Positive values move it outward, except Inside containment moves it inward.",
             Field::StockLeaveRadial => "Material left on vertical walls for a later finishing operation, in millimetres.",
             Field::StockLeaveAxial => "Material left on horizontal floors for a later finishing operation, in millimetres.",
@@ -3725,7 +3722,7 @@ impl App {
                         "OK or Cancel inspector changes and operation selection before running."
                             .into();
                 } else {
-                    self.rerun();
+                    self.rerun_all();
                 }
             }
             Message::CancelToolDraft => {
@@ -8091,7 +8088,16 @@ impl App {
         self.controller.select(Selection::Setup);
         self.end_setup_draft();
         self.refresh_fields();
-        self.rerun();
+        // Rebuild the preview from saved cutting fragments only when current.
+        // Opening a stale/legacy project must not initiate a recalculation.
+        let statuses = self.controller.toolpath_statuses();
+        let document = self.controller.document();
+        if document.setup().operations.iter()
+            .filter(|op| document.operation_is_included(document.setup().id, op.id()))
+            .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
+        {
+            self.rerun();
+        }
         self.status = match report.summary() {
             Some(summary) => format!("Opened {}. Tools: {summary}.", path.display()),
             None => format!("Opened {}.", path.display()),
@@ -10321,7 +10327,6 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Thread(o), Field::Feed) => Some(o.feed),
         (Operation::Thread(o), Field::PlungeFeed) => Some(o.plunge_feed),
         (Operation::Adaptive(o), Field::AdaptiveTolerance) => Some(o.params.tolerance),
-        (Operation::Adaptive(o), Field::AdaptiveSimplificationTolerance) => Some(o.params.simplification_tolerance),
         (Operation::Adaptive(o), Field::AdaptiveOptimalLoad) => Some(o.params.optimal_load),
         (Operation::Adaptive(o), Field::Stepdown) => Some(o.params.stepdown),
         (Operation::Adaptive(o), Field::AdaptiveFineStepdown) => Some(o.params.fine_stepdown),
@@ -10549,7 +10554,6 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
         }
         Operation::Adaptive(o) => {
             if let Some(v) = get(Field::AdaptiveTolerance) { o.params.tolerance = v; }
-            if let Some(v) = get(Field::AdaptiveSimplificationTolerance) { o.params.simplification_tolerance = v; }
             if let Some(v) = get(Field::AdaptiveOptimalLoad) { o.params.optimal_load = v; }
             if let Some(v) = get(Field::Stepdown) { o.params.stepdown = v; }
             if let Some(v) = get(Field::AdaptiveFineStepdown) { o.params.fine_stepdown = v; }
@@ -12991,7 +12995,7 @@ mod multi_setup_draft_tests {
     }
 
     #[test]
-    fn adaptive_simplification_is_editable_in_passes_and_supports_apply_cancel_and_undo() {
+    fn adaptive_tolerance_is_editable_in_passes_and_supports_apply_cancel_and_undo() {
         let mut app = blank_app();
         let mut operation = app.controller.operation_template(OpKind::Adaptive, 1);
         if let Operation::Adaptive(op) = &mut operation {
@@ -12999,26 +13003,26 @@ mod multi_setup_draft_tests {
             op.params.plunge_feed = 100.;
         }
         let id = operation.id();
-        let field = Field::AdaptiveSimplificationTolerance;
+        let field = Field::AdaptiveTolerance;
         assert!(operation_fields(&operation).contains(&field));
         assert_eq!(operation_tabs::field_tab(field), OperationTab::Passes);
-        assert_eq!(op_field(&operation, field), Some(0.02));
-        assert!(!operation_tabs::operation_field_invalid(&operation, field, 0.0));
+        assert_eq!(op_field(&operation, field), Some(0.1));
+        assert!(operation_tabs::operation_field_invalid(&operation, field, 0.0));
         assert!(operation_tabs::operation_field_invalid(&operation, field, -0.001));
         app.controller.add_operation(operation);
         app.begin_operation_draft(id);
-        send(&mut app, Message::FieldChanged(field, "0.005".into()));
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.02));
+        send(&mut app, Message::FieldChanged(field, "0.025".into()));
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.1));
         send(&mut app, Message::CancelOperationDraft);
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.02));
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.1));
         app.begin_operation_draft(id);
-        send(&mut app, Message::FieldChanged(field, "0.005".into()));
+        send(&mut app, Message::FieldChanged(field, "0.025".into()));
         send(&mut app, Message::Apply);
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.005), "{}", app.status);
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.025), "{}", app.status);
         assert!(app.controller.undo());
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.02));
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.1));
         assert!(app.controller.redo());
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.005));
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.025));
     }
 
     #[test]

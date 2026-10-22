@@ -473,6 +473,7 @@ impl App {
             mouse_area(tree_header("Setups"))
                 .on_right_press(Message::Tree(TreeMessage::Open(TreeNode::Setups))),
         );
+        let toolpath_statuses = self.controller.toolpath_statuses();
         for setup in self.controller.setups() {
             let active = setup.id == self.controller.active_setup_id();
             let expanded = self.expanded_setups.contains(&setup.id);
@@ -548,22 +549,13 @@ impl App {
                     if !self.expanded_patterns.contains(&pattern.id) { continue; }
                 }
                 let excluded = self.controller.is_operation_excluded(id);
-                let generated = active
-                    && self.controller.outcome().is_some_and(|outcome| {
-                        outcome
-                            .scene
-                            .strips
-                            .iter()
-                            .any(|strip| strip.op == Some(id))
-                    });
+                let generated = toolpath_statuses.get(&id).copied().unwrap_or(false);
                 let state = if excluded {
                     "suppressed"
-                } else if !active {
-                    "inactive"
                 } else if generated {
                     "ready"
                 } else {
-                    "pending"
+                    "out of date"
                 };
                 let expanded = self.expanded_operations.contains(&id);
                 let controls = row![
@@ -575,6 +567,11 @@ impl App {
                     checkbox(!self.hidden_ops.contains(&id))
                         .size(12)
                         .on_toggle(move |visible| Message::SetOperationVisible(id, visible)),
+                    text("●").size(10).color(if generated {
+                        Color::from_rgb8(70, 175, 85)
+                    } else {
+                        Color::from_rgb8(230, 185, 40)
+                    }),
                     text(format!("{} · {}", op_kind(op), state))
                         .size(11)
                         .width(Length::Fill)

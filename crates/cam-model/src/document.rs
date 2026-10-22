@@ -85,8 +85,8 @@ use crate::Tool;
 /// v26: adds setup-scoped StockToLeave allowances keyed by operation ID and the
 /// Adaptive operation with its `AdaptiveClearing` geometry recipe. Older projects
 /// omit allowances and retain their existing offset and depth behavior.
-/// v27: adaptive operations persist a simplification tolerance; older projects
-/// default to the existing 0.02 mm frontier simplification.
+/// v27: introduced an optional adaptive simplification tolerance. That legacy
+/// member is now ignored; simplification is derived from the operation tolerance.
 pub const SCHEMA_VERSION: u32 = 27;
 
 /// How repeated instances are traversed when executing a pattern.
@@ -851,9 +851,6 @@ pub struct AdaptiveParams {
     /// Maximum geometric deviation accepted when deriving layer boundaries, mm.
     #[serde(default = "default_adaptive_tolerance")]
     pub tolerance: f64,
-    /// Frontier simplification and corner-detection tolerance, mm; 0 disables it.
-    #[serde(default = "default_adaptive_simplification_tolerance")]
-    pub simplification_tolerance: f64,
     /// Target radial engagement, mm.
     #[serde(default = "default_adaptive_load")]
     pub optimal_load: f64,
@@ -902,9 +899,6 @@ impl std::fmt::Display for AdaptiveContainment {
 fn default_adaptive_tolerance() -> f64 {
     0.1
 }
-fn default_adaptive_simplification_tolerance() -> f64 {
-    0.02
-}
 fn default_adaptive_load() -> f64 {
     2.0
 }
@@ -915,11 +909,19 @@ fn default_adaptive_fine_stepdown() -> f64 {
     0.5
 }
 
+impl AdaptiveParams {
+    /// Spend one quarter of the operation tolerance on frontier simplification and
+    /// corner detection. This gives 0.025 mm at the default 0.1 mm tolerance.
+    /// Motion remains guarded by the original boundary and path certification.
+    pub fn simplification_tolerance(&self) -> f64 {
+        self.tolerance / 4.0
+    }
+}
+
 impl Default for AdaptiveParams {
     fn default() -> Self {
         Self {
             tolerance: default_adaptive_tolerance(),
-            simplification_tolerance: default_adaptive_simplification_tolerance(),
             optimal_load: default_adaptive_load(),
             stepdown: default_adaptive_stepdown(),
             fine_stepdown: default_adaptive_fine_stepdown(),
@@ -937,16 +939,32 @@ mod adaptive_params_tests {
     use super::{AdaptiveContainment, AdaptiveParams};
 
     #[test]
+    fn simplification_follows_tolerance_and_ignores_legacy_override() {
+        for tolerance in [0.025, 0.1, 0.5] {
+            let params: AdaptiveParams = serde_json::from_value(serde_json::json!({
+                "tolerance": tolerance,
+                "simplification_tolerance": 0.9
+            }))
+            .unwrap();
+            assert_eq!(params.simplification_tolerance(), tolerance / 4.0);
+            let saved = serde_json::to_value(params).unwrap();
+            assert!(saved.get("simplification_tolerance").is_none());
+            let restored: AdaptiveParams = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.simplification_tolerance(), tolerance / 4.0);
+        }
+    }
+
+    #[test]
     fn containment_and_offset_round_trip_and_legacy_projects_keep_inside_defaults() {
         let legacy: AdaptiveParams = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(legacy.containment, AdaptiveContainment::Inside);
         assert_eq!(legacy.additional_offset, 0.0);
-        assert_eq!(legacy.simplification_tolerance, 0.02);
+        assert_eq!(legacy.simplification_tolerance(), 0.025);
 
         let configured = AdaptiveParams {
             containment: AdaptiveContainment::Outside,
             additional_offset: -0.75,
-            simplification_tolerance: 0.005,
+            tolerance: 0.025,
             ..legacy
         };
         let restored: AdaptiveParams = serde_json::from_value(serde_json::to_value(configured).unwrap()).unwrap();

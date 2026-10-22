@@ -448,7 +448,9 @@ pub fn resolve_adaptive(
             "Adaptive tolerance {tolerance:.4} mm is below the certified machining error {error_bound:.4} mm"
         ));
     }
-    let mut tips = vec![heights.top];
+    // Fine levels are candidates for terrace refinement, not a second uniform
+    // roughing grid. Primary levels must remain even when their shadows match.
+    let mut tips = vec![(heights.top, false)];
     let fine = fine_stepdown.min(stepdown);
     let mut coarse_top = heights.top;
     while coarse_top - bottom > 1e-9 {
@@ -458,10 +460,10 @@ pub fn resolve_adaptive(
         }
         // Rough to the base of this axial slice first, then clear finer levels
         // upward through the slice as a finishing refinement.
-        tips.push(base);
+        tips.push((base, false));
         let mut z = base + fine;
         while z < coarse_top - 1e-9 {
-            tips.push(z);
+            tips.push((z, true));
             z += fine;
             if tips.len() > 100_000 {
                 return Err("Adaptive level count exceeds its resource limit".into());
@@ -483,16 +485,16 @@ pub fn resolve_adaptive(
         let reachable = floor + axial + error_bound + cam_geo::GRID_MM;
         if reachable < heights.top - T
             && reachable >= bottom - T
-            && !tips.iter().any(|tip| (tip - reachable).abs() <= 1e-9)
+            && !tips.iter().any(|(tip, _)| (tip - reachable).abs() <= 1e-9)
         {
-            tips.push(reachable);
+            tips.push((reachable, false));
             if tips.len() > 100_000 {
                 return Err("Adaptive level count exceeds its resource limit".into());
             }
         }
     }
-    let mut layers = Vec::with_capacity(tips.len());
-    for tip in tips {
+    let mut layers: Vec<AdaptiveLayer> = Vec::with_capacity(tips.len());
+    for (tip, refinement) in tips {
         if cancelled() {
             return Err("Adaptive geometry resolution cancelled".into());
         }
@@ -524,6 +526,23 @@ pub fn resolve_adaptive(
             cam_geo::union(&projected, &[])
                 .map_err(|e| format!("could not union CAD machining projection: {e}"))?
         };
+        if refinement {
+            // A lower pass already clears the same XY domain above itself.
+            // Only a shrinking model shadow can expose a terrace on the way
+            // back up. Ignore changes within the remaining tolerance budget,
+            // including tessellation/grid jitter along nominally vertical walls.
+            let previous = layers.last().expect("fine level follows a primary level");
+            let comparison_shadow = cam_geo::offset(
+                &protected,
+                (tolerance - error_bound).max(0.0),
+                cam_geo::JoinStyle::Round,
+            ).map_err(|e| format!("could not offset Adaptive refinement shadow: {e}"))?;
+            let newly_exposed = cam_geo::difference(&previous.protected, &comparison_shadow)
+                .map_err(|e| format!("could not compare Adaptive refinement shadows: {e}"))?;
+            if newly_exposed.is_empty() {
+                continue;
+            }
+        }
         layers.push(AdaptiveLayer {
             z: tip,
             protected,
@@ -932,9 +951,9 @@ mod tests {
         )
         .unwrap();
         let levels: Vec<_> = result.layers.iter().map(|layer| layer.z).collect();
-        assert_eq!(levels, vec![10., 6., 7., 8., 9., 2., 3., 4., 5., 0., 1.]);
+        assert_eq!(levels, vec![10., 6., 2., 0.]);
         let high = bounds(&result.layers[1].protected[0]);
-        let low = bounds(&result.layers[5].protected[0]);
+        let low = bounds(&result.layers[2].protected[0]);
         assert!(
             (high.0[0] - 2.).abs() < 0.01 && (high.1[0] - 8.).abs() < 0.01,
             "upper step shadow: {high:?}"
@@ -944,6 +963,49 @@ mod tests {
             "lower ledge shadow: {low:?}"
         );
         assert!(result.error_bound > 0.01);
+    }
+
+    #[test]
+    fn vertical_walls_keep_primary_stepdown_without_redundant_fine_levels() {
+        let (state, binding) = state(true);
+        for fine in [1.0, 0.25] {
+            let result = resolve_adaptive(
+                &state, &binding, binding.heights, StockToLeave::default(),
+                4.0, fine, 0.02, || false,
+            ).unwrap();
+            let levels: Vec<_> = result.layers.iter().map(|layer| layer.z).collect();
+            assert_eq!(levels, vec![10., 6., 2., 0.]);
+        }
+    }
+
+    #[test]
+    fn fine_levels_refine_exposed_shelves_after_the_deep_roughing_pass() {
+        let (state, binding) = state(false);
+        let result = resolve_adaptive(
+            &state, &binding, binding.heights, StockToLeave::default(),
+            6.0, 1.0, 0.02, || false,
+        ).unwrap();
+        let levels: Vec<_> = result.layers.iter().map(|layer| layer.z).collect();
+        assert_eq!(levels, vec![10., 4., 6., 0.]);
+        assert!(result.layers[1].protected[0].area() > result.layers[2].protected[0].area());
+    }
+
+    #[test]
+    fn sloped_walls_still_receive_fine_refinement_levels() {
+        let (mut state, binding) = state(false);
+        let topology = Arc::make_mut(&mut state.assets[0].topology);
+        let mesh = &mut topology.projection.as_mut().unwrap().mesh;
+        // Tilt the upper cap so successive shadows expose strips of material.
+        for vertex in &mut mesh.vertices[4..] {
+            vertex[2] = vertex[0] + 2.0;
+        }
+        let result = resolve_adaptive(
+            &state, &binding, binding.heights, StockToLeave::default(),
+            4.0, 1.0, 0.02, || false,
+        ).unwrap();
+        let levels: Vec<_> = result.layers.iter().map(|layer| layer.z).collect();
+        assert!(levels.starts_with(&[10., 6., 7., 8., 9.]), "{levels:?}");
+        assert!(levels.ends_with(&[2., 0.]), "{levels:?}");
     }
 
     #[test]

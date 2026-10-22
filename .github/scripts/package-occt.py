@@ -94,6 +94,8 @@ def verify(destination, smoke, system):
         executable_dir /= 'usr/bin'
     elif system == 'Darwin':
         executable_dir /= 'Contents/MacOS'
+    app_executable = executable_dir / ('opencamstudio.exe' if system == 'Windows'
+                                       else 'opencamstudio')
     probe = executable_dir / smoke.name
     shutil.copy2(smoke, probe)
     if system == 'Darwin':
@@ -118,6 +120,11 @@ def verify(destination, smoke, system):
             hidden.append((path, renamed))
         subprocess.run([str(probe), str(fixtures / 'box-mm.step'),
                         str(fixtures / 'box-mm.iges')], env=env, cwd=destination, check=True)
+        # Also start the packaged desktop executable without the SDK or loader-path
+        # environment. --help exits before opening a window, but loads the GUI binary
+        # and proves its complete OCCT runtime dependency chain is relocatable.
+        subprocess.run([str(app_executable), '--help'], env=env,
+                       cwd=destination, check=True)
     finally:
         for original, renamed in reversed(hidden):
             renamed.rename(original)

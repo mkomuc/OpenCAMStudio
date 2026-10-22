@@ -6,7 +6,7 @@
 //! and export G-code. The iced shell is a thin view over this — so the app's
 //! logic is unit-tested exactly like the rest of the pipeline.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cam_geo::{Contour, Point, Polygon, Polyline};
@@ -248,6 +248,8 @@ pub struct AppController {
     import_replacement: Option<u64>,
     jobs: crate::jobs::JobService,
     operation_cache: cam_toolpath::OperationCache,
+    toolpath_fingerprints: BTreeMap<u32, String>,
+    automatic_toolpath_run: bool,
     simulation_accuracy: f32,
     operation_id_floor: u32,
     setup_id_floor: u64,
@@ -546,6 +548,8 @@ impl AppController {
             import_replacement: None,
             jobs: Default::default(),
             operation_cache: Default::default(),
+            toolpath_fingerprints: Default::default(),
+            automatic_toolpath_run: false,
             simulation_accuracy: 1.0,
             operation_id_floor: 0,
             setup_id_floor: 1,
@@ -1252,6 +1256,8 @@ impl AppController {
         let mut document = self.generate_document(seed_ops);
         document.geometry.drawing_regions = self.regions.clone();
         document.geometry.drawing_paths = self.open_paths.clone();
+        self.operation_cache = Default::default();
+        self.toolpath_fingerprints.clear();
         self.document = History::new(document);
         self.active_setup_id = self.document.current().setup().id;
         self.cad_selection.clear();
@@ -1276,6 +1282,8 @@ impl AppController {
         self.provenance = Provenance::default();
         self.regions.clear();
         self.open_paths.clear();
+        self.operation_cache = Default::default();
+        self.toolpath_fingerprints.clear();
         self.document = History::new(empty_document(&self.defaults));
         self.active_setup_id = self.document.current().setup().id;
         self.active_origin = self.document.current().setup().origin_index;
@@ -1318,6 +1326,10 @@ impl AppController {
             doc.pattern_id_floor = doc.pattern_id_floor.max(pattern_floor);
         });
         let project = Project {
+            toolpaths: crate::project::StoredToolpaths {
+                cache: self.operation_cache.clone(),
+                fingerprints: self.toolpath_fingerprints.clone(),
+            },
             schema_version: cam_model::SCHEMA_VERSION,
             document: self.document.current().clone(),
             regions: self.regions.clone(),
@@ -1395,6 +1407,8 @@ impl AppController {
             machine: project.machine,
             post: project.post,
         };
+        self.operation_cache = project.toolpaths.cache;
+        self.toolpath_fingerprints = project.toolpaths.fingerprints;
         self.document = History::new(project.document);
         self.active_setup_id = self.document.current().setup().id;
         self.active_origin = self.document.current().setup().origin_index;
@@ -2470,6 +2484,7 @@ impl AppController {
     /// Run synchronously for CLI/tests, through the same services as GUI workers.
     pub fn run(&mut self, cancel: &CancelToken) -> &RunOutcome {
         self.cancel_run();
+        self.automatic_toolpath_run = false;
         let inputs = self.job_inputs();
         let mut cache = std::mem::take(&mut self.operation_cache);
         let result = inputs.execute(
@@ -2480,6 +2495,7 @@ impl AppController {
         );
         self.operation_cache = cache;
         self.outcome = Some(result);
+        self.record_toolpath_fingerprints();
         self.nc = None;
         self.outcome.as_ref().unwrap()
     }
@@ -3857,6 +3873,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_WITH_STROKE_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -3878,6 +3895,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -4460,6 +4478,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -4573,6 +4592,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -4611,6 +4631,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),

@@ -3,7 +3,7 @@ use cam_cldata::{MoveKind, Step};
 use cam_toolpath::{CancelToken, JobCompletion};
 
 #[test]
-fn adaptive_simplification_survives_project_reopening() {
+fn adaptive_tolerance_drives_simplification_and_survives_project_reopening() {
     let mut app = AppController::new(default_machine());
     app.open_project(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -11,17 +11,17 @@ fn adaptive_simplification_survives_project_reopening() {
     ).unwrap();
     let id = app.document().setup().operations[0].id();
     assert!(matches!(app.operation(id), Some(cam_model::Operation::Adaptive(op))
-        if op.params.simplification_tolerance == 0.02));
+        if op.params.simplification_tolerance() == 0.025));
     let original = app.run(&CancelToken::new());
     assert_eq!(original.completion, JobCompletion::Complete, "{:?}", original.diagnostics);
     let original_steps = original.program.steps().to_vec();
     app.edit_operation(id, |op| {
         let cam_model::Operation::Adaptive(op) = op else { panic!("adaptive fixture") };
-        op.params.simplification_tolerance = 0.005;
+        op.params.tolerance = 0.025;
     });
     let edited = app.run(&CancelToken::new());
     assert_eq!(edited.completion, JobCompletion::Complete, "{:?}", edited.diagnostics);
-    assert_ne!(edited.program.steps(), original_steps, "editing simplification must invalidate the cached path");
+    assert_ne!(edited.program.steps(), original_steps, "editing tolerance must invalidate the cached path");
     let path = std::env::temp_dir().join(format!("opencam-simplification-{}.ocam", std::process::id()));
     app.save_project(&path).unwrap();
     let mut reopened = AppController::new(default_machine());
@@ -30,17 +30,26 @@ fn adaptive_simplification_survives_project_reopening() {
     result.unwrap();
     assert_eq!(reopened.document(), app.document());
     assert!(matches!(reopened.operation(id), Some(cam_model::Operation::Adaptive(op))
-        if op.params.simplification_tolerance == 0.005));
+        if op.params.simplification_tolerance() == 0.00625));
 }
 
 #[test]
-fn supplied_3d_toolpath_project_calculates() {
+fn supplied_3d_project_stays_down_at_002_simplification() {
     let mut app = AppController::new(default_machine());
     app.open_project(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testfiles/3d_toolpath_calculation.ocam"),
     )
     .unwrap();
+    // Keep this path-shape regression at its original 0.02 mm simplification.
+    // The test above separately calculates the supplied default tolerance and
+    // verifies that changing tolerance invalidates the resulting path.
+    let id = app.document().setup().operations[0].id();
+    app.edit_operation(id, |op| {
+        let cam_model::Operation::Adaptive(op) = op else { panic!("adaptive fixture") };
+        op.params.tolerance = 0.08;
+        assert_eq!(op.params.simplification_tolerance(), 0.02);
+    });
     let result = app.run(&CancelToken::new());
     assert_eq!(
         result.completion,
@@ -84,7 +93,18 @@ fn supplied_3d_toolpath_project_calculates() {
             _ => {}
         }
     }
-    assert!(round_pocket_retracts.len() > 20, "the bore must still be machined through its depth");
+    for depth in (1000..=19000).step_by(2000) {
+        assert!(round_pocket_retracts.contains_key(&depth),
+            "primary roughing level Z{} missing: {round_pocket_retracts:?}", depth as f64 / 1000.);
+    }
+    assert!(round_pocket_retracts.len() < 20,
+        "unchanged bore walls must not repeat all fine levels: {round_pocket_retracts:?}");
+    for depth in round_pocket_retracts.keys().copied().filter(|z| *z < 16000) {
+        // Keep primary passes and the final reachable floor refinement. Fine
+        // passes for the exterior slope must not repeat the vertical bore.
+        assert!(depth == 0 || depth == 500 || (depth - 1000) % 2000 == 0,
+            "redundant fine bore pass at Z{}", depth as f64 / 1000.);
+    }
     for (depth, retracts) in round_pocket_retracts {
         assert_eq!(retracts, 1, "round pocket must stay down within the pass at Z{}", depth as f64 / 1000.);
     }

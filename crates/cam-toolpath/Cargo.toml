@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde = { workspace = true, features = ["rc"] }
 cam-geo = { path = "../cam-geo" }
 cam-cldata = { path = "../cam-cldata" }
 cam-model = { path = "../cam-model" }

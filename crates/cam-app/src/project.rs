@@ -160,11 +160,22 @@ impl OcamFile {
     }
 }
 
+/// Persisted cutting fragments and the input state they were last reviewed against.
+/// Missing on legacy projects; those operations start out of date.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredToolpaths {
+    pub cache: cam_toolpath::OperationCache,
+    /// Each value combines the local input hash and the ordered dependency hash.
+    pub fingerprints: std::collections::BTreeMap<u32, String>,
+}
+
 /// A saved OpenCAMStudio project: the editable document plus the imported geometry
 /// it was built from and the seed defaults. Self-contained — no references to
 /// external CAD files — so opening it needs nothing else on disk.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub toolpaths: StoredToolpaths,
     /// Schema version (mirrors [`cam_model::SCHEMA_VERSION`]).
     pub schema_version: u32,
     /// The editable document (setup, stock, tools, operations).

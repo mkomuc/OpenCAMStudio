@@ -3,10 +3,10 @@
 use crate::{CancelToken, JobEnv, StrategyResult};
 use cam_cldata::SpindleDir;
 use cam_model::{CuttingHeights, Heights, Operation, StockToLeave, Tool};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Dependencies {
     operation: Operation,
     heights: Heights,
@@ -22,15 +22,23 @@ pub struct CacheStats {
     pub reused: usize,
     pub computed: usize,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Entry {
     key: Dependencies,
     result: StrategyResult,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct OperationCache {
     entries: VecDeque<Arc<Entry>>,
+    #[serde(skip)]
     pub stats: CacheStats,
+}
+
+// Statistics describe the current request, not the persisted cutting fragments.
+impl PartialEq for OperationCache {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
 }
 
 /// Per-operation dependencies outside the serialized operation itself.
@@ -111,8 +119,9 @@ impl OperationCache {
                 key,
                 result: result.clone(),
             }));
-            // Bound both entry count and retained motions. Arc clones share entries
-            // with worker snapshots; completed workers replace the controller cache.
+            // Bound undo history, but always retain the latest path for every
+            // operation. Evicting a current path would force recalculation merely
+            // because a large project was reopened. Worker snapshots share Arcs.
             while self.entries.len() > 64
                 || self
                     .entries
@@ -121,7 +130,20 @@ impl OperationCache {
                     .sum::<usize>()
                     > 500_000
             {
-                self.entries.pop_front();
+                let mut seen = BTreeSet::new();
+                let obsolete = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter_map(|(index, entry)| {
+                        (!seen.insert(entry.key.operation.id())).then_some(index)
+                    })
+                    .last();
+                let Some(index) = obsolete else {
+                    break;
+                };
+                self.entries.remove(index);
             }
         }
         result
@@ -205,7 +227,7 @@ mod tests {
         for id in 0..100 {
             cache.compute(&operation(id), &env, &token, StrategyResult::default);
         }
-        assert_eq!(cache.entries.len(), 64);
+        assert_eq!(cache.entries.len(), 100);
         let copy = cache.clone();
         assert!(
             Arc::ptr_eq(&cache.entries[0], &copy.entries[0]),

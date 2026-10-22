@@ -10,8 +10,7 @@ The operation is named **3D Adaptive Clearing**. Its initial pass controls are:
 
 | Control | Meaning |
 | --- | --- |
-| Tolerance | Maximum permitted geometry approximation error, in mm |
-| Simplification tolerance | Frontier approximation and corner-detection tolerance, in mm; default 0.02, 0 disables it |
+| Tolerance | Maximum permitted geometry approximation error, in mm; also controls automatic frontier simplification |
 | Optimal Load | Requested radial engagement, in mm |
 | Stepdown | Maximum separation of primary roughing levels |
 | Fine Stepdown | Intermediate levels for reducing the roughing staircase |
@@ -37,13 +36,13 @@ the radial and axial fields (Face uses axial only). Those fields remain visible
 and are disabled while the checkbox is off. Apply the edit before
 generating.
 
-**Simplification tolerance** is saved per operation in Passes, directly below
-Tolerance. Smaller values retain more short segments and more detail; larger
-values suppress small projection zigzags and unnecessary corner reliefs. It must
-be finite, nonnegative and no greater than Tolerance. Setting it to 0 retains
-the unsimplified frontier and corner outline. Existing projects load with
-0.02 mm. Edits participate in Apply, Cancel, undo/redo and toolpath cache
-invalidation.
+**Tolerance** is the only accuracy parameter in Passes. Frontier simplification
+and corner detection automatically use one quarter of Tolerance: the default
+0.1 mm gives 0.025 mm simplification. Smaller tolerances retain more detail;
+larger tolerances suppress more short segments and small projection zigzags.
+Older projects' separate simplification values are ignored and are omitted
+when saving. Tolerance edits participate in Apply, Cancel, undo/redo and
+toolpath cache invalidation.
 
 ## Selected machining areas
 
@@ -85,8 +84,11 @@ also clears the selected floor when the roughing stepdown spans the entire depth
    deflection, arc-refitting error and planar rounding before subtracting the
    shadow from stock. Reject unavailable or incomplete machining geometry.
 3. Build primary Z levels and intermediate levels. After each deep roughing level,
-   work upwards through intermediate levels to reduce terraces, then move to the
-   next deep level. Protect every model shelf with the axial allowance, rather
+   work upwards only where intermediate levels expose additional material beyond
+   the remaining tolerance budget, then move to the next deep level. Unchanged
+   vertical walls retain the primary stepdown. Disconnected regions are compared
+   separately so a slope elsewhere does not repeat an unchanged pocket. Skipped
+   changes accumulate against the last emitted pass. Protect every model shelf with the axial allowance, rather
    than only raising the operation's final bottom. Constrain tool centres by the
    cutter radius and retain the requested radial wall allowance.
 4. Reuse the existing planar adaptive engine per region. Keep its coverage,
@@ -149,13 +151,15 @@ regression checks that every retract follows actual cutting; this removes
 3,272 empty cycles from that project while preserving every cutting segment
 and the existing engagement, coverage and gouge certification gates.
 
-Corner relief detection uses the operation's Simplification tolerance (default
-0.02 mm) to ignore small projection zigzags. The original cutter-centre boundary still
+Corner relief detection uses one quarter of the operation's Tolerance (default
+0.025 mm) to ignore small projection zigzags. The original cutter-centre boundary still
 guards motion and the resulting path still passes engagement, coverage and
 gouge certification. This prevents microscopic facets on rounded hole entrances
 from producing spurious corner relief loops. The supplied project regression
-requires one retract per cutting level inside its round pocket; its total
-retract count drops from 219 to 58.
+uses 0.08 mm Tolerance (0.02 mm simplification) and requires one retract per
+cutting level inside its round pocket. It also checks that the full-depth primary
+passes remain and that fine passes for the exterior slope do not repeat the
+unchanged vertical bore.
 
 Regression coverage includes changing model heights, overhang protection,
 intermediate shelf allowances, deep-then-upward fine-level ordering, display-mesh

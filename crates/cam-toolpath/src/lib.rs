@@ -69,7 +69,7 @@ pub(crate) fn passes_phrase(n: usize) -> String {
 }
 
 /// Severity of a [`Diagnostic`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
     /// Informational note.
     Info,
@@ -81,7 +81,7 @@ pub enum Severity {
 }
 
 /// Stable machine-readable diagnostic categories; message text is presentation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticCode {
     InvalidInput,
     GeometryUnresolved,
@@ -93,7 +93,7 @@ pub enum DiagnosticCode {
 }
 
 /// Source ownership survives worker/service boundaries.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SourceRef {
     pub setup: Option<u64>,
     pub operation: Option<u32>,
@@ -105,7 +105,7 @@ pub struct SourceRef {
 /// A typed message from a strategy, referencing what went wrong. (Geometry
 /// references — a specific vertex or chain — will attach here as the model
 /// grows; for now it carries a human-readable message.)
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Diagnostic {
     /// How serious the diagnostic is.
     pub severity: Severity,
@@ -184,7 +184,7 @@ impl Diagnostic {
 
 /// The outcome of a strategy: the motions it produced, any diagnostics, and
 /// whether it stopped early because it was cancelled.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct StrategyResult {
     /// The CL-data the strategy produced (possibly empty on error).
     pub program: Program,

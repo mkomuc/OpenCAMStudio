@@ -187,7 +187,6 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
         }
         Operation::Adaptive(_) => vec![
             Field::AdaptiveTolerance,
-            Field::AdaptiveSimplificationTolerance,
             Field::AdaptiveOptimalLoad,
             Field::Stepdown,
             Field::AdaptiveFineStepdown,

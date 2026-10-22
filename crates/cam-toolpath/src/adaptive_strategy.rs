@@ -38,15 +38,6 @@ impl Strategy for AdaptiveStrategy {
         if !op.params.tolerance.is_finite() || op.params.tolerance <= 0.0 {
             fail!("operation {}: tolerance must be finite and positive", op.id);
         }
-        if !op.params.simplification_tolerance.is_finite()
-            || op.params.simplification_tolerance < 0.0
-            || op.params.simplification_tolerance > op.params.tolerance
-        {
-            fail!(
-                "operation {}: simplification tolerance must be finite, nonnegative and no greater than tolerance",
-                op.id
-            );
-        }
         if !op.params.optimal_load.is_finite() || op.params.optimal_load <= 0.0 {
             fail!(
                 "operation {}: optimal load must be finite and positive",
@@ -174,6 +165,8 @@ impl Strategy for AdaptiveStrategy {
         let protected_growth = extra_shank + allowance + self.geometry.error_bound;
         let mut program = Program::new();
         let mut cleared_levels = 0usize;
+        let mut previous_z: Option<f64> = None;
+        let mut cleared_slice = Vec::new();
         for layer in &self.geometry.layers {
             if cancel.is_cancelled() {
                 return StrategyResult {
@@ -295,6 +288,26 @@ impl Strategy for AdaptiveStrategy {
                     op.id
                 ),
             };
+            // Levels ascend only while refining the preceding roughing slice.
+            // Compare individual disconnected regions too: a slope elsewhere
+            // must not make a straight-sided pocket repeat all its cleared paths.
+            let refinement = previous_z.is_some_and(|z| layer.z > z + 1e-9);
+            previous_z = Some(layer.z);
+            if !refinement {
+                cleared_slice.clear();
+            }
+            let already_cleared = if refinement {
+                match offset(
+                    &cleared_slice,
+                    (op.params.tolerance - self.geometry.error_bound).max(0.0),
+                    JoinStyle::Round,
+                ) {
+                    Ok(regions) => Some(regions),
+                    Err(e) => fail!("operation {}: could not compare fine clearing regions: {e}", op.id),
+                }
+            } else {
+                None
+            };
             for region in &waste {
                 if cancel.is_cancelled() {
                     return StrategyResult {
@@ -303,6 +316,13 @@ impl Strategy for AdaptiveStrategy {
                         cancelled: true,
                     };
                 }
+                if let Some(cleared) = &already_cleared {
+                    match difference(std::slice::from_ref(region), cleared) {
+                        Ok(rest) if rest.is_empty() => continue,
+                        Ok(_) => {}
+                        Err(e) => fail!("operation {}: could not derive fine rest material: {e}", op.id),
+                    }
+                }
                 let radius = tool.radius();
                 let spacing = op.params.optimal_load.min(tool.diameter);
                 let guard = offset(std::slice::from_ref(region), -radius, JoinStyle::Round)
@@ -310,7 +330,7 @@ impl Strategy for AdaptiveStrategy {
                 let fine_pitch = op.params.fine_stepdown.min(op.params.stepdown);
                 let job = crate::clearing::ClearJob {
                     id: op.id,
-                    simplification_tolerance: op.params.simplification_tolerance,
+                    simplification_tolerance: op.params.simplification_tolerance(),
                     radius,
                     finish: 0.0,
                     first: radius,
@@ -344,6 +364,15 @@ impl Strategy for AdaptiveStrategy {
                     Ok(n) => {
                         if n > 0 {
                             cleared_levels += 1;
+                            // Only advance the rest-material baseline when a
+                            // pass was emitted. Small skipped changes must
+                            // accumulate until they exceed the tolerance.
+                            cleared_slice = match cam_geo::union(
+                                &cleared_slice, std::slice::from_ref(region),
+                            ) {
+                                Ok(regions) => regions,
+                                Err(e) => fail!("operation {}: could not track cleared Adaptive regions: {e}", op.id),
+                            };
                         }
                     }
                     Err(crate::rings::RingsError::Cancelled) => {
@@ -448,7 +477,85 @@ mod tests {
     }
 
     #[test]
-    fn invalid_simplification_tolerances_fail_before_any_motion() {
+    fn fine_passes_only_revisit_regions_with_newly_exposed_material() {
+        let (mut strategy, tool) = fixture();
+        let rectangle = |x: f64| Polygon::new(Contour::new(vec![
+            Point::new(x, 0.), Point::new(x + 12., 0.),
+            Point::new(x + 12., 12.), Point::new(x, 12.),
+        ])).unwrap();
+        let left = rectangle(0.);
+        let right = rectangle(30.);
+        strategy.stock_to_leave = StockToLeave::default();
+        strategy.geometry.layers = vec![
+            cam_geometry3d::AdaptiveLayer {
+                z: 8., protected: vec![right.clone()],
+                body_domains: vec![], face_domains: vec![left.clone(), right.clone()],
+            },
+            cam_geometry3d::AdaptiveLayer {
+                z: 9., protected: vec![],
+                body_domains: vec![], face_domains: vec![left, right],
+            },
+        ];
+        let env = JobEnv {
+            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [42., 12.])), spindle: SpindleDir::Cw,
+        };
+        let result = strategy.compute(&env, &CancelToken::new());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let mut coarse = 0;
+        let mut fine = 0;
+        for step in result.program.steps() {
+            let point = match step {
+                Step::Linear { to, tag, .. } if tag.kind == cam_cldata::MoveKind::Cutting => to,
+                Step::Arc { end, tag, .. } if tag.kind == cam_cldata::MoveKind::Cutting => end,
+                _ => continue,
+            };
+            if (point.z - 8.).abs() < 1e-9 {
+                coarse += 1;
+                assert!(point.x < 12.);
+            } else if (point.z - 9.).abs() < 1e-9 {
+                fine += 1;
+                assert!(point.x > 30., "fine pass repeats an unchanged region: {point:?}");
+            }
+        }
+        assert!(coarse > 0 && fine > 0);
+    }
+
+    #[test]
+    fn small_skipped_refinements_accumulate_against_the_last_cut() {
+        let (mut strategy, tool) = fixture();
+        let rectangle = |width: f64| Polygon::new(Contour::new(vec![
+            Point::new(0., 0.), Point::new(width, 0.),
+            Point::new(width, 20.), Point::new(0., 20.),
+        ])).unwrap();
+        strategy.stock_to_leave = StockToLeave::default();
+        strategy.geometry.layers = (0..4).map(|i| cam_geometry3d::AdaptiveLayer {
+            z: 8.0 + i as f64 * 0.25,
+            protected: vec![rectangle(10.0 - i as f64 * 0.03)],
+            body_domains: vec![], face_domains: vec![rectangle(30.)],
+        }).collect();
+        let env = JobEnv {
+            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 20.])), spindle: SpindleDir::Cw,
+        };
+        let result = strategy.compute(&env, &CancelToken::new());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let mut depths = std::collections::BTreeSet::new();
+        for step in result.program.steps() {
+            let point = match step {
+                Step::Linear { to, tag, .. } if tag.kind == cam_cldata::MoveKind::Cutting => to,
+                Step::Arc { end, tag, .. } if tag.kind == cam_cldata::MoveKind::Cutting => end,
+                _ => continue,
+            };
+            depths.insert((point.z * 1000.).round() as i64);
+        }
+        // Each 0.03 mm change is within the 0.08 mm remaining budget, but
+        // three skipped changes together exceed it and must trigger a pass.
+        assert_eq!(depths, std::collections::BTreeSet::from([8000, 8750]));
+    }
+
+    #[test]
+    fn invalid_tolerances_fail_before_any_motion() {
         let (mut strategy, tool) = fixture();
         let env = JobEnv {
             heights: Heights::new(15., 12., 10.),
@@ -456,12 +563,12 @@ mod tests {
             stock: Some(([0., 0.], [30., 30.])),
             spindle: SpindleDir::Cw,
         };
-        for value in [-0.001, f64::NAN, f64::INFINITY, strategy.op.params.tolerance + 0.001] {
-            strategy.op.params.simplification_tolerance = value;
+        for value in [0.0, -0.001, f64::NAN, f64::INFINITY] {
+            strategy.op.params.tolerance = value;
             let result = strategy.compute(&env, &CancelToken::new());
-            assert!(result.has_errors(), "must reject simplification {value}");
+            assert!(result.has_errors(), "must reject tolerance {value}");
             assert!(result.program.steps().is_empty());
-            assert!(result.diagnostics.iter().any(|d| d.message.contains("simplification tolerance")));
+            assert!(result.diagnostics.iter().any(|d| d.message.contains("tolerance must be finite and positive")));
         }
     }
 

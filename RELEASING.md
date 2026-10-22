@@ -49,7 +49,10 @@ macOS also validates and mounts the final DMG. Linux measures the glibc floor
 across the binary and bundled shared libraries.
 
 These checks qualify the checked-in fixtures, not every STEP/IGES exporter or
-interactive graphics behavior. A release still needs manual desktop testing.
+interactive graphics behavior. Packaging also starts the staged GUI executable in
+`--help` mode with the OCCT SDK and loader-path environment hidden, checking that
+the app binary and its bundled OCCT runtime start together. A release still needs
+manual desktop testing.
 
 ## First run in a fork
 
