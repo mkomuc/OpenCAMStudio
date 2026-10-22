@@ -56,7 +56,8 @@ pub(crate) struct ClearJob<'a> {
     pub lead_out: Lead,
     /// Preferred entry point (part XY) for the innermost ring.
     pub start: Option<[f64; 2]>,
-    /// Cleared region the wall leads must stay inside (empty ⇒ no lead guard).
+    /// Cutter-centre region that bounds wall leads and entry helices
+    /// (empty ⇒ no containment guard).
     pub guard: &'a [Polygon],
 }
 
@@ -322,7 +323,9 @@ fn emit_adaptive_moves(
                 crate::profile::emit_open_ramp(prog, &ramp, from_z, z, job.entry_feeds.ramp(job.feed), plunge_tag);
             }
             None => crate::profile::emit_plunge(
-                prog, start, tan, out, from_z, z, job.plunge, job.plunge_feed, job.entry_feeds.ramp(job.feed),
+                prog, start, tan, out, from_z, z,
+                crate::leads::guard_plunge(job.guard, start, out, job.plunge),
+                job.plunge_feed, job.entry_feeds.ramp(job.feed),
                 plunge_tag,
             ),
         }

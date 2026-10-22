@@ -77,7 +77,7 @@ pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, 
         vertices.extend(quad.map(|corner| MeshVertex {
             position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
             normal: frame.to_world_vector(normal).map(|v| v as f32),
-            color: [0.55, 0.58, 0.63, 1.],
+            color: [0.72, 0.66, 0.22, 1.],
         }));
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -921,7 +921,7 @@ mod tests {
         assert!(opaque
             .mesh_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 1.0]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 1.0]));
         let frame_bounds = opaque.frame_bounds;
         let drawing = opaque.vertices.clone();
 
@@ -933,7 +933,7 @@ mod tests {
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 0.25]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 0.25]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -988,7 +988,7 @@ mod tests {
             let expected = if *owner == Some(id) {
                 [0.8, 0.3, 0.1, 0.25]
             } else {
-                [0.55, 0.58, 0.63, 0.25]
+                [0.72, 0.66, 0.22, 0.25]
             };
             assert_eq!(vertex.color, expected);
         }
@@ -999,7 +999,7 @@ mod tests {
             let expected = if *owner == Some(id) {
                 [0.2, 0.65, 0.3, 1.0]
             } else {
-                [0.55, 0.58, 0.63, 1.0]
+                [0.72, 0.66, 0.22, 1.0]
             };
             assert_eq!(vertex.color, expected);
         }
@@ -1060,7 +1060,7 @@ mod tests {
                 let expected = if *owner == Some(selected) {
                     [0.1, 0.9, 0.2, 1.]
                 } else {
-                    [0.55, 0.58, 0.63, 1.]
+                    [0.72, 0.66, 0.22, 1.]
                 };
                 assert_eq!(vertex.color, expected);
             }
@@ -1081,7 +1081,7 @@ mod tests {
         assert!(hidden
             .mesh_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 1.]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 1.]));
     }
 
     #[test]

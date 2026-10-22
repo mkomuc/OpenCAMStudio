@@ -466,7 +466,7 @@ impl App {
         if tab == OperationTab::Geometry && creating {
             list = list.push(self.creation_geometry_controls());
         }
-        if tab == OperationTab::Geometry && !creating {
+        if tab == OperationTab::Geometry {
             if let Operation::Adaptive(adaptive) = op {
                 list = list.push(text("Tool containment").size(12));
                 list = list.push(
@@ -486,6 +486,8 @@ impl App {
                     .width(Length::Fill),
                 );
             }
+        }
+        if tab == OperationTab::Geometry && !creating {
             let geometry = match op {
                 Operation::Profile(p) => format!(
                     "{} profile contour(s) · {}",
@@ -2027,6 +2029,32 @@ mod tests {
         assert!(app.setup_draft.is_none());
         assert!(app.pane_handle(Pane::Inspector).is_none());
     }
+    #[test]
+    fn adaptive_creation_retains_containment_before_first_apply() {
+        let (mut app, old_id) = linked_face_app();
+        app.setup_draft = None;
+        let reference = app.controller.geometry_state().bindings[&old_id].selected[0].clone();
+        let _ = app.update(Message::BeginOp(OpKind::Adaptive));
+        let _ = app.update(Message::CadSelect(reference));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        // Build the same inspector shown before the operation is committed.
+        let _ = app.operation_inspector(0);
+        let _ = app.update(Message::AdaptiveContainmentChanged(cam_model::AdaptiveContainment::Outside));
+        let _ = app.update(Message::FieldChanged(Field::AdaptiveOffset, "1.25".into()));
+        let (preview, _) = app.creation_operation().unwrap();
+        assert!(matches!(preview, Operation::Adaptive(op)
+            if op.params.containment == cam_model::AdaptiveContainment::Outside
+                && op.params.additional_offset == 1.25));
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("new adaptive operation selected: {}", app.status);
+        };
+        assert!(matches!(app.controller.operation(id), Some(Operation::Adaptive(op))
+            if op.params.containment == cam_model::AdaptiveContainment::Outside
+                && op.params.additional_offset == 1.25));
+    }
+
     #[test]
     fn step_creation_uses_shared_cutting_controls_and_one_undo_transaction() {
         let (mut app, old_id) = linked_face_app();

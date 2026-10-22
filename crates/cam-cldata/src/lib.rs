@@ -33,9 +33,11 @@
 //! backplot colouring and correctness checks such as "no rapid through stock".
 
 mod builder;
+mod processing_time;
 mod validate;
 
 pub use builder::ProgramBuilder;
+pub use processing_time::ProcessingTime;
 pub use validate::{
     arc_sweep, validate_program, MotionBounds, ValidationError, ValidationKind,
     ARC_RADIUS_TOLERANCE_MM,

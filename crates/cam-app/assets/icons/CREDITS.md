@@ -68,6 +68,7 @@ The remaining originals are in the flat 24×24 style:
 - `machine.svg` — Machine / post-processor setup (a settings gear)
 - `undo.svg`, `redo.svg`, `run.svg` — edit / run actions
 - `toolpath.svg` — recompute toolpaths (connected cutting passes and direction arrow)
+- `toolpath_time.svg` — processing time (the toolpath with an hourglass badge)
 - `pattern.svg` — operation pattern (a source square repeated on a regular grid)
 - `pattern_circular.svg` — circular operation pattern (a source repeated around a center)
 - `new.svg`, `open.svg`, `save.svg` — project file actions

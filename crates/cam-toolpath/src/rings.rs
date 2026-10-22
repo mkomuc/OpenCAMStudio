@@ -123,6 +123,7 @@ fn enter_with_plunge(
     id: u32,
     ring: &[Point],
     lead_path: Vec<Point>,
+    guard: &[Polygon],
 ) -> Option<f64> {
     // The ramp never travels through air to reach the material: its height is measured
     // from the top of stock, or from the floor the previous level left.
@@ -160,7 +161,7 @@ fn enter_with_plunge(
         out,
         from_z,
         z,
-        plunge,
+        crate::leads::guard_plunge(guard, p, out, plunge),
         plunge_feed,
         entry_feeds.ramp(feed),
         Tag::new(id, MoveKind::Plunge),
@@ -204,6 +205,7 @@ fn approach(
     link_threshold: f64,
     ring: &[Point],
     lead_path: Vec<Point>,
+    guard: &[Polygon],
 ) -> Option<f64> {
     let hop = (p.x - prev_end.x).hypot(p.y - prev_end.y);
     if hop <= link_threshold {
@@ -219,7 +221,7 @@ fn approach(
         tag: Tag::new(id, MoveKind::Link),
     });
     enter_with_plunge(
-        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path,
+        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path, guard,
     )
 }
 
@@ -274,6 +276,7 @@ fn emit_wall_ring(
         prog, prev_end, entry, tan_in, cin, from_z, z, h, plunge, feed, plunge_feed, entry_feeds, id,
         link_threshold, &ri,
         crate::profile::lead_in_path(start, entry, cin, eff_in),
+        guard,
     );
     match ramped {
         // It ramped: the lead was flown on the way down, and the cut must begin where
@@ -384,6 +387,7 @@ pub(crate) fn emit_stay_down(
                 let entry = crate::leads::lead_start_point(r0[0], tan, cin, eff);
                 crate::profile::lead_in_path(r0[0], entry, cin, eff)
             },
+            guard,
         );
         // A ramped entry begins its cut where the ramp ended, and goes a full perimeter
         // from there so the sloped stretch is re-machined at depth.
@@ -448,6 +452,7 @@ pub(crate) fn emit_stay_down(
                 &ri,
                 // An interior clearing ring has no lead of its own.
                 Vec::new(),
+                guard,
             );
             // As at the level entry: a ramped approach starts its cut where the ramp
             // ended and travels a full perimeter, so it re-machines what it sloped. A

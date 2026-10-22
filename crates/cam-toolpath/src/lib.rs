@@ -18,6 +18,7 @@
 
 mod carve;
 mod adaptive_strategy;
+mod adaptive_safety;
 mod chamfer;
 mod clearing;
 mod clearsim;

@@ -7,6 +7,7 @@ pub(super) enum ToolpathAction {
     Recompute,
     Simulate,
     Export,
+    ProcessingTime,
 }
 
 impl App {
@@ -94,6 +95,8 @@ impl App {
     fn rerun_with_review(&mut self, review_all: bool) {
         self.pending_toolpath_export = None;
         self.pending_simulation = None;
+        self.pending_processing_time = None;
+        self.processing_time_dialog = None;
         self.simulation = None;
         if self.controller.document().setup().operations.is_empty() {
             self.controller.cancel_run();
@@ -160,6 +163,8 @@ impl App {
         }
         self.pending_toolpath_export = None;
         self.pending_simulation = None;
+        self.pending_processing_time = None;
+        self.processing_time_dialog = None;
         self.simulation = None;
         self.tree_menu = None;
         self.open_op_menu = None;
@@ -187,8 +192,11 @@ impl App {
             self.controller
                 .start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)
         } else {
-            self.controller
-                .start_toolpath_run(operation, action == ToolpathAction::Recompute)
+            self.controller.start_toolpath_run_with_predecessors(
+                operation,
+                action == ToolpathAction::Recompute,
+                action == ToolpathAction::Simulate && operation.is_some(),
+            )
         };
         match run {
             Ok(stamp) => {
@@ -196,14 +204,35 @@ impl App {
                     self.pending_toolpath_export = Some(stamp.clone());
                 }
                 if action == ToolpathAction::Simulate {
-                    self.pending_simulation = Some(stamp);
+                    self.pending_simulation = Some(stamp.clone());
                     self.show_stock = true;
                     self.set_pane_visible(Pane::Output, true);
+                }
+                if action == ToolpathAction::ProcessingTime {
+                    self.pending_processing_time = Some(
+                        super::processing_time_view::PendingProcessingTime {
+                            stamp: stamp.clone(),
+                            label: match node {
+                                TreeNode::Setup(id) => self
+                                    .controller
+                                    .setups()
+                                    .iter()
+                                    .find(|setup| setup.id == id)
+                                    .map(|setup| format!("{} · setup #{id}", setup.name))
+                                    .unwrap_or_else(|| format!("Setup #{id}")),
+                                TreeNode::Operation(id) => format!("Operation #{id}"),
+                                TreeNode::Pattern(id) => format!("Pattern #{id}"),
+                                _ => "Program".to_string(),
+                            },
+                            feed_override: "100".to_string(),
+                        },
+                    );
                 }
                 self.status = match action {
                     ToolpathAction::Recompute => "Recomputing toolpaths…",
                     ToolpathAction::Simulate => "Simulating toolpaths…",
                     ToolpathAction::Export => "Preparing toolpaths for post processing…",
+                    ToolpathAction::ProcessingTime => "Calculating processing time…",
                 }
                 .into();
             }

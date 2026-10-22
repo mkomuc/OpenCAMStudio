@@ -46,6 +46,8 @@ mod height_reference;
 mod inspector_view;
 #[path = "gui_jobs.rs"]
 mod jobs_view;
+#[path = "gui_processing_time.rs"]
+mod processing_time_view;
 #[path = "gui_output.rs"]
 mod output_view;
 use jobs_view::ToolpathAction;
@@ -168,6 +170,7 @@ enum Icon {
     Redo,
     Run,
     Toolpath,
+    ToolpathTime,
     Pattern,
     CircularPattern,
     Profile,
@@ -204,7 +207,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 37] = [
+    const ALL: [Icon; 38] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -214,6 +217,7 @@ impl Icon {
         Icon::Redo,
         Icon::Run,
         Icon::Toolpath,
+        Icon::ToolpathTime,
         Icon::Pattern,
         Icon::CircularPattern,
         Icon::Profile,
@@ -257,6 +261,7 @@ impl Icon {
             Icon::Redo => include_bytes!("../assets/icons/redo.svg"),
             Icon::Run => include_bytes!("../assets/icons/run.svg"),
             Icon::Toolpath => include_bytes!("../assets/icons/toolpath.svg"),
+            Icon::ToolpathTime => include_bytes!("../assets/icons/toolpath_time.svg"),
             Icon::Pattern => include_bytes!("../assets/icons/pattern.svg"),
             Icon::CircularPattern => include_bytes!("../assets/icons/pattern_circular.svg"),
             Icon::Profile => include_bytes!("../assets/icons/profile.svg"),
@@ -303,6 +308,7 @@ impl Icon {
             Icon::Redo => "Redo the change just undone.",
             Icon::Run => "Generate toolpaths for every operation and simulate the result.",
             Icon::Toolpath => "Recompute the selected toolpaths.",
+            Icon::ToolpathTime => "Calculate the selected toolpath processing time.",
             Icon::Pattern => "Repeat source operations in a rectangular or circular pattern.",
             Icon::CircularPattern => "Repeat source operations around a circular pattern.",
             Icon::Profile => {
@@ -1042,6 +1048,8 @@ enum Field {
     MachineTravelX,
     MachineTravelY,
     MachineTravelZ,
+    MachineRapidRate,
+    MachineToolChangeSeconds,
     /// Workpiece origin (datum) X / Y / Z, part-space mm.
     OriginX,
     OriginY,
@@ -1204,6 +1212,8 @@ impl Field {
             Field::MachineTravelX => "X travel (mm)",
             Field::MachineTravelY => "Y travel (mm)",
             Field::MachineTravelZ => "Z travel (mm)",
+            Field::MachineRapidRate => "Rapid rate (mm/min)",
+            Field::MachineToolChangeSeconds => "Tool change time (s)",
             Field::OriginX => "Origin X (mm)",
             Field::OriginY => "Origin Y (mm)",
             Field::OriginZ => "Origin Z (mm)",
@@ -1336,6 +1346,8 @@ impl Field {
             }
             Field::MachineTravelY => "Working-envelope size in Y (see X travel).",
             Field::MachineTravelZ => "Working-envelope size in Z (see X travel).",
+            Field::MachineRapidRate => "Maximum rapid traverse rate used for time estimates and G0 limits.",
+            Field::MachineToolChangeSeconds => "Estimated seconds spent at each tool change.",
             Field::OriginX => {
                 "Part-space X of the workpiece datum — the (0,0,0) the G-code is written \
                  about. Set it to the corner or feature you'll touch off on the machine."
@@ -2039,6 +2051,8 @@ struct App {
     /// Export only the exact context-menu job that requested a save dialog.
     pending_toolpath_export: Option<crate::JobStamp>,
     pending_simulation: Option<crate::JobStamp>,
+    pending_processing_time: Option<processing_time_view::PendingProcessingTime>,
+    processing_time_dialog: Option<processing_time_view::ProcessingTimeDialog>,
     simulation: Option<SimulationPlayer>,
     op_menu_pos: iced::Point,
     /// The project tool (by number) whose right-click "Add to library" menu is open,
@@ -2763,7 +2777,15 @@ enum Message {
     /// cursor), and select that operation.
     OpMenu(u32),
     ToolpathCommand(TreeNode, ToolpathAction),
+    ProcessingTimeFeedOverride(String),
+    ProcessingTimeClose,
     SimulationPlayPause,
+    SimulationToolpathStart,
+    SimulationPreviousOperation,
+    SimulationPreviousPoint,
+    SimulationNextPoint,
+    SimulationNextOperation,
+    SimulationToolpathEnd,
     SimulationSpeed(f64),
     SimulationSeek(f64),
     SimulationTick,
@@ -3315,6 +3337,8 @@ impl App {
             open_op_menu: None,
             pending_toolpath_export: None,
             pending_simulation: None,
+            pending_processing_time: None,
+            processing_time_dialog: None,
             simulation: None,
             op_menu_pos: iced::Point::ORIGIN,
             open_tool_menu: None,
@@ -3464,6 +3488,29 @@ impl App {
     }
 
     fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        if self.processing_time_dialog.is_some()
+            && self.notice.is_none()
+            && matches!(message, Message::CadEscape)
+        {
+            self.processing_time_dialog = None;
+            return iced::Task::none();
+        }
+        if self.processing_time_dialog.is_some()
+            && !matches!(
+                &message,
+                Message::ProcessingTimeClose
+                    | Message::ProcessingTimeFeedOverride(_)
+                    | Message::CadEscape
+                    | Message::PollRun
+                    | Message::PollCadImport
+                    | Message::NoticeDismissed
+                    | Message::WindowResized(_)
+                    | Message::WindowCursor(_)
+                    | Message::ModifiersChanged(_)
+            )
+        {
+            return iced::Task::none();
+        }
         if (self.show_materials || self.show_preset_editor)
             && matches!(message, Message::CadEscape | Message::Apply)
         {
@@ -3655,6 +3702,7 @@ impl App {
             self.model_view = None;
             self.simulation = None;
             self.pending_simulation = None;
+            self.pending_processing_time = None;
         }
         // Any action other than opening a group-popup closes the open one (so a
         // command picked from a popup, or a click elsewhere, dismisses it).
@@ -3694,6 +3742,24 @@ impl App {
                     player.toggle();
                 }
             }
+            Message::SimulationToolpathStart => {
+                if let Some(player) = &mut self.simulation { player.seek_end(false); }
+            }
+            Message::SimulationPreviousOperation => {
+                if let Some(player) = &mut self.simulation { player.seek_operation(false); }
+            }
+            Message::SimulationPreviousPoint => {
+                if let Some(player) = &mut self.simulation { player.seek_point(false); }
+            }
+            Message::SimulationNextPoint => {
+                if let Some(player) = &mut self.simulation { player.seek_point(true); }
+            }
+            Message::SimulationNextOperation => {
+                if let Some(player) = &mut self.simulation { player.seek_operation(true); }
+            }
+            Message::SimulationToolpathEnd => {
+                if let Some(player) = &mut self.simulation { player.seek_end(true); }
+            }
             Message::SimulationSpeed(speed) => {
                 if let Some(player) = &mut self.simulation {
                     player.speed = speed.clamp(0.25, 10.);
@@ -3711,6 +3777,12 @@ impl App {
             }
             Message::SimulationClose => self.simulation = None,
             Message::ToolpathCommand(node, action) => return self.toolpath_command(node, action),
+            Message::ProcessingTimeFeedOverride(value) => {
+                self.processing_time_feed_override_changed(value);
+            }
+            Message::ProcessingTimeClose => {
+                self.processing_time_dialog = None;
+            }
             Message::RunJob => {
                 if self.setup_draft_dirty()
                     || self.inspector_dirty()
@@ -3963,7 +4035,9 @@ impl App {
                 self.status = "Geometry selection cancelled; other draft edits retained.".into();
             }
             Message::Tree(message) => return self.update_tree(message),
-            Message::OpenSample => match self.controller.open_dxf(SAMPLE_DXF, "sample.dxf") {
+            Message::OpenSample => {
+                self.pending_processing_time = None;
+                match self.controller.open_dxf(SAMPLE_DXF, "sample.dxf") {
                 Ok(n) => {
                     self.reset_model_browser();
                     self.planar_selection.clear();
@@ -3975,7 +4049,8 @@ impl App {
                     self.rerun();
                 }
                 Err(e) => self.status = format!("Import failed: {e}"),
-            },
+                }
+            }
             Message::SelectSetup(id) => {
                 if self.pattern_draft.is_some() { self.status = "Apply or cancel the pattern draft before switching setups.".into(); return iced::Task::none(); }
                 if self.setup_draft_dirty() {
@@ -4399,6 +4474,7 @@ impl App {
                     self.begin_operation_draft(id);
                 } else {
                     self.operation_draft = None;
+                    self.stock_to_leave_draft = None;
                 }
                 // Explicit Edit commands select the operation and open its editor.
                 self.focus_ops.clear();
@@ -4440,6 +4516,9 @@ impl App {
                 self.controller.select(sel);
                 self.end_setup_draft();
                 self.operation_draft = None;
+                // Browser selection reads the selected operation's saved allowance.
+                // An editor draft from the previous operation must not follow it.
+                self.stock_to_leave_draft = None;
                 self.operation_tools.clear();
                 self.operation_geometry = None;
                 self.operation_binding_preview = None;
@@ -4648,6 +4727,8 @@ impl App {
                 // The post is *not* touched: a new project does not move you to a
                 // different machine or control, so there is nothing to re-target.
                 self.planar_selection.clear();
+                self.pending_processing_time = None;
+                self.processing_time_dialog = None;
                 self.controller.new_project();
                 self.reset_model_browser();
                 self.focus_ops.clear();
@@ -4783,13 +4864,23 @@ impl App {
             Message::PollRun => {
                 if self.controller.poll_run() {
                     self.report_run();
+                    if let Some(pending) = self.pending_processing_time.take() {
+                        if self.controller.outcome().is_some_and(|outcome| {
+                            outcome.stamp.as_ref() == Some(&pending.stamp)
+                                && outcome.completion == JobCompletion::Complete
+                        }) {
+                            self.open_processing_time_dialog(pending);
+                        }
+                    }
                     if self.pending_simulation.take().is_some_and(|stamp| {
                         self.controller.outcome().is_some_and(|outcome| {
                             outcome.stamp.as_ref() == Some(&stamp)
                                 && outcome.completion == JobCompletion::Complete
                         })
                     }) {
-                        match SimulationPlayer::new(&self.controller) {
+                        let operation = (self.focus_ops.len() == 1)
+                            .then(|| self.focus_ops.iter().next().copied()).flatten();
+                        match SimulationPlayer::new_for_operation(&self.controller, operation) {
                             Ok(player) => {
                                 self.simulation = Some(player);
                                 self.status =
@@ -4815,6 +4906,8 @@ impl App {
             Message::CancelRun => {
                 self.pending_toolpath_export = None;
                 self.pending_simulation = None;
+                self.pending_processing_time = None;
+                self.processing_time_dialog = None;
                 self.controller.cancel_run();
                 self.status = "Run cancelled. Run again before exporting.".into();
             }
@@ -5486,6 +5579,11 @@ impl App {
                     });
                     match result {
                         Ok(id) => {
+                            // The creation draft was used to stage the allowance, but
+                            // the committed setup is now the source of truth for the
+                            // selected operation. Keeping it would mask the value just
+                            // saved (including fractional allowances) in the inspector.
+                            self.stock_to_leave_draft = None;
                             self.cad_pending_kind = None;
                             self.cad_filter_explicit = false;
                             self.geometry_additive = false;
@@ -6553,6 +6651,7 @@ impl App {
             Message::OpMenu(id) => {
                 self.simulation = None;
                 self.pending_simulation = None;
+                self.pending_processing_time = None;
                 // Context-clicking a member of the current highlight set keeps the
                 // whole set available to group commands; a fresh row establishes a
                 // one-operation selection.
@@ -7265,6 +7364,8 @@ impl App {
         }
         let buf = |f: Field| self.fields.get(&f).and_then(|s| s.parse::<f64>().ok());
         match field {
+            Field::MachineRapidRate => !(value > 0.0),
+            Field::MachineToolChangeSeconds => value < 0.0,
             Field::CornerRadius => {
                 matches!((buf(Field::CornerRadius), buf(Field::ToolDiameter)),
                     (Some(cr), Some(d)) if cr > d * 0.5 + 1e-9)
@@ -7657,6 +7758,8 @@ impl App {
                 Field::MachineTravelX,
                 Field::MachineTravelY,
                 Field::MachineTravelZ,
+                Field::MachineRapidRate,
+                Field::MachineToolChangeSeconds,
             ],
             Selection::Origin => vec![
                 Field::OriginIndex,
@@ -7732,6 +7835,12 @@ impl App {
                 Field::MachineTravelY => y,
                 _ => z,
             });
+        }
+        if field == Field::MachineRapidRate {
+            return Some(self.controller.machine().rapid_rate);
+        }
+        if field == Field::MachineToolChangeSeconds {
+            return Some(self.controller.machine().tool_change_seconds);
         }
         let setup = self.controller.document().setup();
         let heights = match self.controller.selection() {
@@ -7989,6 +8098,9 @@ impl App {
             };
             match result {
                 Ok(()) => {
+                    // Drop the staged copy after committing so refresh_fields reads
+                    // the newly saved setup value instead of the stale pre-Apply draft.
+                    self.stock_to_leave_draft = None;
                     self.operation_draft = None;
                     self.operation_tools.clear();
                     self.rebase_setup_draft();
@@ -8022,6 +8134,12 @@ impl App {
                 }
                 if let Some(&v) = parsed.get(&Field::MachineTravelZ) {
                     e.max.z = e.min.z + v.max(0.0);
+                }
+                if let Some(&v) = parsed.get(&Field::MachineRapidRate) {
+                    m.rapid_rate = v;
+                }
+                if let Some(&v) = parsed.get(&Field::MachineToolChangeSeconds) {
+                    m.tool_change_seconds = v;
                 }
             }),
             Selection::Origin => {
@@ -8073,12 +8191,19 @@ impl App {
                 }
             }),
         }
+        // The machine library snapshot was synced before numeric fields were applied.
+        // Sync once more now so rapid rate and tool-change time persist with the edit.
+        if self.controller.selection() == Selection::Machine {
+            self.sync_active_machine();
+        }
         self.refresh_fields();
         self.rerun();
     }
 
     /// Shared by startup loading and the native Open dialog.
     fn open_project(&mut self, path: &Path) -> Result<(), crate::ProjectError> {
+        self.pending_processing_time = None;
+        self.processing_time_dialog = None;
         self.controller.open_project(path)?;
         self.reset_model_browser();
         self.planar_selection.clear();
@@ -8177,6 +8302,11 @@ impl App {
         }
         if let Some(dialog) = self.tool_management_overlay() {
             layers = layers.push(dialog);
+        }
+        if let Some(dialog) = self.processing_time_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::ProcessingTimeClose);
+            layers = layers.push(catcher).push(dialog);
         }
         if let Some(dialog) = self.notice_overlay() {
             layers = layers.push(dialog);
@@ -11190,7 +11320,16 @@ impl Viewport {
                     .instance(reference.instance_id)
                     .is_some_and(|instance| instance.visible)
         });
-        let cad_lines = cad_scene.edges(&cad_selected, cad_hover);
+        let mut cad_lines = cad_scene.edges(&cad_selected, cad_hover);
+        // CAD selection strips use the shared highlight weight. Move them to
+        // the same through-model renderer used by silhouette selection; keep
+        // ordinary model edges depth tested.
+        let (highlights, edges): (Vec<_>, Vec<_>) = cad_lines
+            .strips
+            .into_iter()
+            .partition(|strip| strip.width > 1.0);
+        scene.strips.extend(highlights);
+        cad_lines.strips = edges;
         let silhouette_refs: BTreeSet<_> = cad_selected
             .iter()
             .chain(cad_hover)
@@ -12798,6 +12937,58 @@ mod multi_setup_draft_tests {
     }
 
     #[test]
+    fn saved_profile_selection_allows_switching_operations_without_escape() {
+        let (mut app, _) = App::new();
+        app.open_project(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testfiles/cant_edit_second_op.ocam"
+        )))
+        .unwrap();
+        let operations = &app.controller.document().setup().operations;
+        let first = operations[0].id();
+        let second = operations[1].id();
+        let before = app.controller.document().clone();
+        send(&mut app, Message::ClickOp(second));
+        send(&mut app, Message::ClickOp(first));
+        assert_eq!(app.controller.selection(), Selection::Operation(first));
+        send(&mut app, Message::Select(Selection::Operation(first)));
+        send(&mut app, Message::CancelOperationDraft);
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Press(TreeNode::Operation(second))),
+        );
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        assert_eq!(app.controller.selection(), Selection::Operation(second));
+        assert!(!app.inspector_dirty(), "an untouched selection must be clean");
+        assert!(
+            !app.any_field_invalid(),
+            "{:?}",
+            app.resolve_height_editor(second)
+        );
+        assert_eq!(
+            app.stock_to_leave_value(),
+            before.setup().stock_to_leave_for(second)
+        );
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Press(TreeNode::Operation(first))),
+        );
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        assert_eq!(
+            app.controller.selection(),
+            Selection::Operation(first),
+            "{}",
+            app.status
+        );
+        assert!(!app.inspector_dirty());
+        assert_eq!(
+            app.stock_to_leave_value(),
+            before.setup().stock_to_leave_for(first)
+        );
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
     fn setup_selection_and_context_menu_do_not_start_editing() {
         let (mut app, _) = App::new();
         assert!(app.setup_draft.is_none());
@@ -13040,13 +13231,14 @@ mod multi_setup_draft_tests {
         assert_eq!(app.controller.document().setup().stock_to_leave_for(id), Default::default());
 
         send(&mut app, Message::StockToLeaveToggled(true));
-        send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()));
+        send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.5".into()));
         send(&mut app, Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()));
         send(&mut app, Message::Apply);
         assert_eq!(
             app.controller.document().setup().stock_to_leave_for(id),
-            cam_model::StockToLeave { enabled: true, radial: 0.3, axial: 0.2 }
+            cam_model::StockToLeave { enabled: true, radial: 0.5, axial: 0.2 }
         );
+        assert_eq!(app.stock_to_leave_value().radial, 0.5);
         assert!(app.controller.undo());
         assert_eq!(app.controller.document().setup().stock_to_leave_for(id), Default::default());
     }

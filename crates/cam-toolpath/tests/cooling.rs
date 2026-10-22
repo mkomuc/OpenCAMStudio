@@ -158,6 +158,7 @@ fn estlcam_mms_uses_selected_outputs_and_none_never_turns_them_on() {
     let machine = Machine {
         name: "Cooling test".into(),
         rapid_rate: 2000.,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10000.,
         max_feed: 1000.,
         envelope: Envelope::new(Point3::new(0., 0., -50.), Point3::new(200., 200., 100.)),

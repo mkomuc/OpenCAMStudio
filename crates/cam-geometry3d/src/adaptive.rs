@@ -236,6 +236,9 @@ pub struct AdaptiveLayer {
 pub struct AdaptiveGeometry {
     pub layers: Vec<AdaptiveLayer>,
     pub fingerprint: String,
+    /// Highest setup-body point, including CAD projection uncertainty. A safe
+    /// clearance plane must clear every body, including unselected obstacles.
+    pub model_top: f64,
     /// Outward CAD approximation allowance, mm.
     pub error_bound: f64,
 }
@@ -553,6 +556,8 @@ pub fn resolve_adaptive(
     Ok(AdaptiveGeometry {
         layers,
         fingerprint: state.binding_fingerprint(binding),
+        model_top: triangles.iter().flatten().map(|p| p[2])
+            .fold(f64::NEG_INFINITY, f64::max) + obstacle_error_bound,
         error_bound,
     })
 }

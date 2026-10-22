@@ -58,7 +58,19 @@ setup bodies. Height overrides below the geometry-certified cutting interval
 remain invalid because they cannot be certified against the selected geometry.
 
 Selected bodies define local machining areas from their bounds in setup XY,
-then apply the selected containment and signed offset before clipping to stock.
+then apply the selected containment and signed offset. The stock clipping limit
+allows the same outward runout, so Center and Outside can reach beyond stock
+edges when the selected boundary reaches them. Inside with zero offset keeps
+the cutter within the stock outline.
+Entry helices must fit completely within the safe cutter-centre area. Where
+there is insufficient room, the tool feeds straight down at the plunge feed
+instead of swinging into the model or outside the containment boundary.
+Before a layer is accepted, a separate safety check verifies every emitted
+cutting move, entry and link against all setup bodies with the full cutter/shank
+radius and CAD approximation margin. It checks entire segments and arc bulges.
+Unsafe motions or a clearance plane below a setup body reject the operation;
+their toolpath is not accepted for export. Frontier simplification receives its
+own model clearance allowance.
 For compatibility, selecting the only body in a one-body setup retains the
 original full-stock clearing area; containment and offset still apply to that
 stock boundary.

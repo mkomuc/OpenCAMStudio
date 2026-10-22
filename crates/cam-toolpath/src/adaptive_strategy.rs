@@ -14,6 +14,9 @@ pub struct AdaptiveStrategy {
 }
 
 impl AdaptiveStrategy {
+    /// Invalidate persisted paths when machining domain or entry safety rules change.
+    pub const DOMAIN_REVISION: u32 = 3;
+
     pub fn new(op: AdaptiveOp, stock_to_leave: StockToLeave, geometry: AdaptiveGeometry) -> Self {
         Self {
             op,
@@ -90,6 +93,13 @@ impl Strategy for AdaptiveStrategy {
                 op.id
             );
         }
+        if !self.geometry.model_top.is_finite()
+            || !env.heights.clearance.is_finite()
+            || env.heights.clearance <= self.geometry.model_top
+        {
+            fail!("operation {}: clearance must be above every setup body (model top Z{:.4})",
+                op.id, self.geometry.model_top);
+        }
         let z_top = self
             .geometry
             .layers
@@ -155,6 +165,29 @@ impl Strategy for AdaptiveStrategy {
             Err(e) => fail!("operation {}: invalid stock bounds: {e}", op.id),
         };
 
+        let containment_expansion = match op.params.containment {
+            cam_model::AdaptiveContainment::Inside => 0.0,
+            cam_model::AdaptiveContainment::Center => tool.radius(),
+            cam_model::AdaptiveContainment::Outside => tool.diameter,
+        };
+        let user_expansion = match op.params.containment {
+            cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
+            cam_model::AdaptiveContainment::Center
+            | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
+        };
+        let domain_expansion = containment_expansion + user_expansion;
+        // Clearing insets its input by the cutter radius. Allow the same runout
+        // at stock edges as at selected boundaries, or that inset forces the
+        // cutter back inside stock even with Center/Outside containment.
+        let stock_limit = match offset(
+            std::slice::from_ref(&stock_region),
+            domain_expansion.max(0.0),
+            JoinStyle::Round,
+        ) {
+            Ok(regions) => regions,
+            Err(e) => fail!("operation {}: could not expand the stock machining limit: {e}", op.id),
+        };
+
         let largest_radius = (tool.diameter.max(tool.shank_dia()).max(tool.neck_dia())) / 2.0;
         let extra_shank = largest_radius - tool.radius();
         let allowance = if self.stock_to_leave.enabled {
@@ -162,7 +195,10 @@ impl Strategy for AdaptiveStrategy {
         } else {
             0.0
         };
-        let protected_growth = extra_shank + allowance + self.geometry.error_bound;
+        // Frontier simplification may move a chord inward. Reserve that motion
+        // as well as arc refitting before the final swept-cutter check.
+        let protected_growth = extra_shank + allowance + self.geometry.error_bound
+            + op.params.simplification_tolerance();
         let mut program = Program::new();
         let mut cleared_levels = 0usize;
         let mut previous_z: Option<f64> = None;
@@ -199,19 +235,9 @@ impl Strategy for AdaptiveStrategy {
                 }
             };
             let domains = if layer.body_domains.is_empty() && layer.face_domains.is_empty() {
-                let radius_adjustment = match op.params.containment {
-                    cam_model::AdaptiveContainment::Inside => 0.0,
-                    cam_model::AdaptiveContainment::Center => tool.radius(),
-                    cam_model::AdaptiveContainment::Outside => tool.diameter,
-                };
-                let user_adjustment = match op.params.containment {
-                    cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
-                    cam_model::AdaptiveContainment::Center
-                    | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
-                };
                 match offset(
                     std::slice::from_ref(&stock_region),
-                    radius_adjustment + user_adjustment,
+                    domain_expansion,
                     JoinStyle::Round,
                 ) {
                     Ok(regions) => regions,
@@ -223,19 +249,9 @@ impl Strategy for AdaptiveStrategy {
             } else {
                 let mut selected_domains = Vec::new();
                 if !layer.body_domains.is_empty() {
-                    let domain_expansion = match op.params.containment {
-                        cam_model::AdaptiveContainment::Inside => 0.0,
-                        cam_model::AdaptiveContainment::Center => tool.radius(),
-                        cam_model::AdaptiveContainment::Outside => tool.diameter,
-                    };
-                    let user_expansion = match op.params.containment {
-                        cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
-                        cam_model::AdaptiveContainment::Center
-                        | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
-                    };
                     match offset(
                         &layer.body_domains,
-                        domain_expansion + user_expansion
+                        domain_expansion
                             - self.geometry.error_bound
                             - 2.0 * cam_geo::GRID_MM,
                         JoinStyle::Round,
@@ -248,19 +264,9 @@ impl Strategy for AdaptiveStrategy {
                     }
                 }
                 if !layer.face_domains.is_empty() {
-                    let containment_distance = match op.params.containment {
-                        cam_model::AdaptiveContainment::Inside => 0.0,
-                        cam_model::AdaptiveContainment::Center => tool.radius(),
-                        cam_model::AdaptiveContainment::Outside => tool.diameter,
-                    };
-                    let user_offset = match op.params.containment {
-                        cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
-                        cam_model::AdaptiveContainment::Center
-                        | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
-                    };
                     match offset(
                         &layer.face_domains,
-                        containment_distance + user_offset
+                        domain_expansion
                             - self.geometry.error_bound
                             - 2.0 * cam_geo::GRID_MM,
                         JoinStyle::Round,
@@ -272,8 +278,7 @@ impl Strategy for AdaptiveStrategy {
                         ),
                     }
                 }
-                match cam_geo::intersection(&selected_domains, std::slice::from_ref(&stock_region))
-                {
+                match cam_geo::intersection(&selected_domains, &stock_limit) {
                     Ok(regions) => regions,
                     Err(e) => fail!(
                         "operation {}: could not clip selected machining domains to stock: {e}",
@@ -325,8 +330,13 @@ impl Strategy for AdaptiveStrategy {
                 }
                 let radius = tool.radius();
                 let spacing = op.params.optimal_load.min(tool.diameter);
-                let guard = offset(std::slice::from_ref(region), -radius, JoinStyle::Round)
-                    .unwrap_or_default();
+                let guard = match offset(std::slice::from_ref(region), -radius, JoinStyle::Round) {
+                    Ok(regions) => regions,
+                    Err(e) => fail!("operation {}: could not create the cutter-centre entry guard: {e}", op.id),
+                };
+                if guard.is_empty() {
+                    continue;
+                }
                 let fine_pitch = op.params.fine_stepdown.min(op.params.stepdown);
                 let job = crate::clearing::ClearJob {
                     id: op.id,
@@ -353,8 +363,9 @@ impl Strategy for AdaptiveStrategy {
                     start: None,
                     guard: &guard,
                 };
+                let mut layer_program = Program::new();
                 match crate::clearing::clear(
-                    &mut program,
+                    &mut layer_program,
                     region,
                     &job,
                     &env.heights,
@@ -363,6 +374,28 @@ impl Strategy for AdaptiveStrategy {
                 ) {
                     Ok(n) => {
                         if n > 0 {
+                            // Validate the emitted moves independently of the
+                            // clearing generator. Reserve the arc-refitting
+                            // budget already included in the model envelope.
+                            let certified_radius = largest_radius + allowance
+                                + (self.geometry.error_bound - crate::emit::ARCFIT_TOL).max(0.0);
+                            match crate::adaptive_safety::certify_layer(
+                                &layer_program, &layer.protected, certified_radius,
+                                layer.z, env.heights.clearance, cancel,
+                            ) {
+                                Ok(()) => {}
+                                Err(crate::adaptive_safety::SafetyFailure::Cancelled) => {
+                                    return StrategyResult { program, diagnostics, cancelled: true };
+                                }
+                                Err(crate::adaptive_safety::SafetyFailure::Motion { index, reason }) => {
+                                    diagnostics.push(Diagnostic::error(format!(
+                                        "operation {}: 3D Adaptive safety check rejected move {} at Z{:.4}: {reason}",
+                                        op.id, index + 1, layer.z,
+                                    )).with_code(crate::DiagnosticCode::InvalidMotion).for_op(op.id));
+                                    return StrategyResult { diagnostics, ..Default::default() };
+                                }
+                            }
+                            program.extend(layer_program);
                             cleared_levels += 1;
                             // Only advance the rest-material baseline when a
                             // pass was emitted. Small skipped changes must
@@ -396,7 +429,6 @@ impl Strategy for AdaptiveStrategy {
                 op.id
             );
         }
-        diagnostics.push(Diagnostic::warning("3D Adaptive uses certified CAD projection shadows and the existing 2D adaptive clearing engine; where that engine cannot certify a constant-engagement path it falls back to concentric rings. Toolholder geometry is not modeled."));
         StrategyResult {
             program,
             diagnostics,
@@ -445,6 +477,7 @@ mod tests {
                 },
             ],
             fingerprint: "fixture".into(),
+            model_top: 10.0,
             error_bound: 0.02,
         };
         let mut op = AdaptiveOp {
@@ -761,6 +794,164 @@ mod tests {
         assert!(center_negative.0 > center.0 + 0.8, "center negative offset should shrink the region: {center:?} -> {center_negative:?}");
         assert!(outside_offset.0 < outside.0 - 0.8, "outside positive offset should expand the region: {outside:?} -> {outside_offset:?}");
         assert!(inside.0 > center.0 && center.0 > outside.0, "tool center should move outward by containment mode: {inside:?}, {center:?}, {outside:?}");
+    }
+
+    #[test]
+    fn clearance_below_an_unselected_setup_body_rejects_all_motion() {
+        let (mut strategy, tool) = fixture();
+        strategy.geometry.model_top = 16.;
+        let env = JobEnv {
+            heights: Heights::new(15., 12., 10.),
+            tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 30.])),
+            spindle: SpindleDir::Cw,
+        };
+        let result = strategy.compute(&env, &CancelToken::new());
+        assert!(result.has_errors());
+        assert!(result.program.is_empty());
+        assert!(result.diagnostics.iter().any(|d| d.message.contains("clearance must be above every setup body")));
+    }
+
+    #[test]
+    fn outside_entries_keep_the_entire_cutter_clear_of_a_sloped_part() {
+        use cam_cldata::{ArcDir, MoveKind, Point3};
+        let (mut strategy, tool) = fixture();
+        let rectangle = |x0, y0, x1, y1| Polygon::new(Contour::new(vec![
+            Point::new(x0, y0), Point::new(x1, y0),
+            Point::new(x1, y1), Point::new(x0, y1),
+        ])).unwrap();
+        strategy.stock_to_leave = StockToLeave::default();
+        strategy.op.params.containment = cam_model::AdaptiveContainment::Outside;
+        // The solid's top is the plane z=y+40 over the front slope, then z=20.
+        // Its side edges at x=+/-50 leave narrow runout strips for entry.
+        strategy.geometry.layers = [19., 15., 10.5].into_iter().map(|z| {
+            cam_geometry3d::AdaptiveLayer {
+                z,
+                protected: vec![rectangle(-50., z - 40. - strategy.geometry.error_bound, 50., 30.)],
+                body_domains: vec![],
+                face_domains: vec![rectangle(-50., -30., 50., -20.)],
+            }
+        }).collect();
+        let env = JobEnv {
+            heights: Heights::new(36., 26., 21.),
+            tools: std::slice::from_ref(&tool),
+            stock: Some(([-51., -31.], [51., 31.])),
+            spindle: SpindleDir::Cw,
+        };
+        let result = strategy.compute(&env, &CancelToken::new());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let mut current: Option<Point3> = None;
+        let mut side_entries = 0;
+        let mut samples = 0;
+        for step in result.program.steps() {
+            let mut check = |p: Point3| {
+                // A cutter centred outside a side edge can still gouge with its
+                // flank. The disc's highest Y inside the solid determines the
+                // exact maximum surface height beneath this flat end mill.
+                let dx = (p.x.abs() - 50.).max(0.);
+                let reach = (tool.radius().powi(2) - dx * dx).max(0.).sqrt();
+                if dx < tool.radius() && p.y + reach > -30. && p.y - reach < 30. {
+                    let surface = (p.y + reach).min(-20.) + 40.;
+                    assert!(p.z >= surface - 0.02,
+                        "cutter gouges slope by {:.4} mm at {p:?}: {step:?}", surface - p.z);
+                }
+                samples += 1;
+            };
+            match step {
+                Step::Rapid { to, .. } | Step::Linear { to, .. } => {
+                    if let Some(a) = current {
+                        let n = ((to.x - a.x).hypot(to.y - a.y).hypot(to.z - a.z) / 0.05)
+                            .ceil().max(1.) as usize;
+                        for i in 0..=n {
+                            let t = i as f64 / n as f64;
+                            check(Point3::new(a.x + (to.x - a.x) * t,
+                                a.y + (to.y - a.y) * t, a.z + (to.z - a.z) * t));
+                        }
+                    }
+                    if matches!(step, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge)
+                        && to.x.abs() > 50. && to.x.abs() < 50. + tool.radius()
+                    {
+                        side_entries += 1;
+                    }
+                    current = Some(*to);
+                }
+                Step::Arc { end, center, dir, .. } => {
+                    if let Some(a) = current {
+                        let radius = (a.x - center.x).hypot(a.y - center.y);
+                        let start = (a.y - center.y).atan2(a.x - center.x);
+                        let raw = (end.y - center.y).atan2(end.x - center.x) - start;
+                        let sweep = match dir {
+                            ArcDir::Ccw => raw.rem_euclid(std::f64::consts::TAU),
+                            ArcDir::Cw => -(-raw).rem_euclid(std::f64::consts::TAU),
+                        };
+                        let n = (radius * sweep.abs() / 0.05).ceil().max(1.) as usize;
+                        for i in 0..=n {
+                            let t = i as f64 / n as f64;
+                            let angle = start + sweep * t;
+                            check(Point3::new(center.x + radius * angle.cos(),
+                                center.y + radius * angle.sin(), a.z + (end.z - a.z) * t));
+                        }
+                    }
+                    current = Some(*end);
+                }
+                _ => {}
+            }
+        }
+        assert!(samples > 0);
+        assert!(side_entries > 0, "exercise entries whose cutter overlaps the side edge");
+    }
+
+    #[test]
+    fn containment_at_stock_edges_allows_selected_face_and_body_runout() {
+        use cam_model::AdaptiveContainment::{Center, Inside, Outside};
+        for body_selection in [false, true] {
+            for (containment, extra, expected_min) in [
+                (Inside, 0.0, 3.0),
+                (Center, 0.0, 0.0),
+                (Outside, 0.0, -3.0),
+                (Outside, 1.0, -4.0),
+            ] {
+                let (mut strategy, tool) = fixture();
+                let boundary = Polygon::new(Contour::new(vec![
+                    Point::new(0., 0.), Point::new(30., 0.),
+                    Point::new(30., 30.), Point::new(0., 30.),
+                ])).unwrap();
+                strategy.geometry.layers.truncate(1);
+                let layer = &mut strategy.geometry.layers[0];
+                if body_selection {
+                    layer.body_domains = vec![boundary];
+                } else {
+                    layer.face_domains = vec![boundary];
+                }
+                strategy.op.params.containment = containment;
+                strategy.op.params.additional_offset = extra;
+                let env = JobEnv {
+                    heights: Heights::new(15., 12., 10.),
+                    tools: std::slice::from_ref(&tool),
+                    stock: Some(([0., 0.], [30., 30.])),
+                    spindle: SpindleDir::Cw,
+                };
+                let result = strategy.compute(&env, &CancelToken::new());
+                assert!(!result.has_errors(), "{:?}", result.diagnostics);
+                let mut min_x = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                for step in result.program.steps() {
+                    let point = match step {
+                        Step::Linear { to, tag, .. }
+                            if tag.kind == cam_cldata::MoveKind::Cutting => to,
+                        Step::Arc { end, tag, .. }
+                            if tag.kind == cam_cldata::MoveKind::Cutting => end,
+                        _ => continue,
+                    };
+                    min_x = min_x.min(point.x);
+                    max_x = max_x.max(point.x);
+                }
+                assert!((min_x - expected_min).abs() < 0.15,
+                    "{containment:?}, offset {extra}, body={body_selection}: min X {min_x}, expected {expected_min}");
+                assert!((max_x - (30.0 - expected_min)).abs() < 0.15,
+                    "{containment:?}, offset {extra}, body={body_selection}: max X {max_x}");
+            }
+        }
     }
 
     #[test]

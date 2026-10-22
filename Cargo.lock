@@ -571,6 +571,7 @@ dependencies = [
  "cam-post",
  "cam-sim",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ fn machine() -> Machine {
     Machine {
         name: "Estlcam router".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 24000.0,
         max_feed: 2000.0,
         envelope: Envelope::new(

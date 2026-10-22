@@ -38,11 +38,13 @@ impl App {
     pub(super) fn clear_browser_selection(&mut self) {
         self.simulation = None;
         self.pending_simulation = None;
+        self.pending_processing_time = None;
         self.cad_filter_explicit = false;
         self.geometry_additive = false;
         self.geometry_auto_pick = false;
         self.end_setup_draft();
         self.operation_draft = None;
+        self.stock_to_leave_draft = None;
         self.operation_tools.clear();
         self.operation_geometry = None;
         self.operation_binding_preview = None;
@@ -125,14 +127,17 @@ impl App {
                     self.expanded_patterns.insert(*id);
                     self.simulation = None;
                     self.pending_simulation = None;
+                    self.pending_processing_time = None;
                 }
                 iced::Task::none()
             }
             _ => {
                 self.simulation = None;
                 self.pending_simulation = None;
+                self.pending_processing_time = None;
                 self.end_setup_draft();
                 self.operation_draft = None;
+                self.stock_to_leave_draft = None;
                 self.controller.select(Selection::Setup);
                 self.controller.set_cad_selection(vec![]);
                 self.cad_hover = None;
@@ -616,6 +621,7 @@ impl App {
                 Message::ToolpathCommand(_, ToolpathAction::Recompute) => Some(Icon::Toolpath),
                 Message::ToolpathCommand(_, ToolpathAction::Simulate) => Some(Icon::Run),
                 Message::ToolpathCommand(_, ToolpathAction::Export) => Some(Icon::Export),
+                Message::ToolpathCommand(_, ToolpathAction::ProcessingTime) => Some(Icon::ToolpathTime),
                 Message::DuplicateOp | Message::SetupDuplicate(_) => Some(Icon::Duplicate),
                 Message::BeginPattern(true) => Some(Icon::CircularPattern),
                 Message::BeginPattern(false) => Some(Icon::Pattern),
@@ -673,6 +679,7 @@ impl App {
                 ("Recompute toolpath", ToolpathAction::Recompute),
                 ("Simulate toolpath", ToolpathAction::Simulate),
                 ("Post process and export…", ToolpathAction::Export),
+                ("Calculate processing time…", ToolpathAction::ProcessingTime),
             ] {
                 items = items.push(item(
                     label.into(),
@@ -740,7 +747,7 @@ impl App {
                     items = items.push(item("Dissolve pattern".into(), Message::PatternDissolve(*id)));
                     items = items.push(item(format!("Delete pattern and {} source operation(s)", pattern.members.len()), Message::PatternDelete(*id)));
                     items = items.push(popup_separator());
-                    for (label, action) in [("Recompute toolpath", ToolpathAction::Recompute), ("Simulate toolpath", ToolpathAction::Simulate), ("Post process and export…", ToolpathAction::Export)] {
+                    for (label, action) in [("Recompute toolpath", ToolpathAction::Recompute), ("Simulate toolpath", ToolpathAction::Simulate), ("Post process and export…", ToolpathAction::Export), ("Calculate processing time…", ToolpathAction::ProcessingTime)] {
                         items = items.push(item(label.into(), Message::ToolpathCommand(node.clone(), action)));
                     }
                 }
@@ -1104,7 +1111,9 @@ mod tests {
             .strips
             .iter()
             .filter_map(|strip| strip.op)
-            .all(|id| id == ids[1]));
+            .all(|id| id == ids[0] || id == ids[1]));
+        assert!(app.simulation.as_ref().unwrap().position > 0.,
+            "operation playback opens at the selected operation after its predecessors");
         send(&mut app, Message::SimulationSpeed(4.));
         send(&mut app, Message::SimulationPlayPause);
         assert!(app.simulation.as_ref().unwrap().playing);
@@ -1150,6 +1159,81 @@ mod tests {
         );
         assert!(app.status.contains("no longer exists"));
         assert!(!app.controller.run_pending());
+    }
+
+    #[test]
+    fn processing_time_is_scoped_to_the_requested_operation_and_cancelled_runs_show_nothing() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.refresh_fields();
+        send(
+            &mut app,
+            Message::ToolpathCommand(
+                TreeNode::Operation(ids[1]),
+                ToolpathAction::ProcessingTime,
+            ),
+        );
+        assert_eq!(app.focus_ops, BTreeSet::from([ids[1]]));
+        assert!(app.pending_processing_time.is_some());
+        drain_context_job(&mut app);
+        assert!(app.pending_processing_time.is_none());
+        assert!(app.processing_time_dialog.is_some());
+        let selected_index = ids.iter().position(|id| *id == ids[1]).unwrap() as u32;
+        let motion_ops: BTreeSet<_> = app
+            .controller
+            .outcome()
+            .unwrap()
+            .program
+            .steps()
+            .iter()
+            .filter_map(cam_cldata::Step::tag)
+            .map(|tag| tag.op_id)
+            .collect();
+        assert_eq!(motion_ops, BTreeSet::from([selected_index]));
+        send(&mut app, Message::ProcessingTimeFeedOverride("0".into()));
+        assert!(app
+            .processing_time_dialog
+            .as_ref()
+            .unwrap()
+            .estimate
+            .is_err());
+        send(&mut app, Message::ProcessingTimeClose);
+        assert!(app.processing_time_dialog.is_none());
+
+        let setup_id = app.controller.active_setup_id();
+        send(
+            &mut app,
+            Message::ToolpathCommand(
+                TreeNode::Setup(setup_id),
+                ToolpathAction::ProcessingTime,
+            ),
+        );
+        assert!(app.pending_processing_time.is_some());
+        send(&mut app, Message::CancelRun);
+        assert!(app.pending_processing_time.is_none());
+        assert!(app.processing_time_dialog.is_none());
+
+        let setup_id = app.controller.active_setup_id();
+        send(
+            &mut app,
+            Message::ToolpathCommand(
+                TreeNode::Setup(setup_id),
+                ToolpathAction::ProcessingTime,
+            ),
+        );
+        drain_context_job(&mut app);
+        assert!(app.processing_time_dialog.is_some());
+        let setup_motion_ops: BTreeSet<_> = app
+            .controller
+            .outcome()
+            .unwrap()
+            .program
+            .steps()
+            .iter()
+            .filter_map(cam_cldata::Step::tag)
+            .map(|tag| tag.op_id)
+            .collect();
+        assert_eq!(setup_motion_ops, BTreeSet::from([0, 1, 2]));
     }
 
     #[test]

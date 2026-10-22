@@ -3122,6 +3122,7 @@ mod tests {
         Machine {
             name: "test".into(),
             rapid_rate: 2000.0,
+            tool_change_seconds: 0.0,
             max_spindle_rpm: 10_000.0,
             max_feed: 800.0,
             envelope: Envelope::new(

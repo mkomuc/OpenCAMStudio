@@ -64,11 +64,27 @@ impl AppController {
         operation: Option<u32>,
         recompute: bool,
     ) -> Result<JobStamp, String> {
+        self.start_toolpath_run_with_predecessors(operation, recompute, false)
+    }
+
+    /// Build an operation simulation from the setup's earlier included cuts so
+    /// the selected operation starts with the remaining stock it will encounter.
+    pub fn start_toolpath_run_with_predecessors(
+        &mut self,
+        operation: Option<u32>,
+        recompute: bool,
+        include_predecessors: bool,
+    ) -> Result<JobStamp, String> {
         let mut inputs = self.job_inputs();
         if let Some(id) = operation {
             let document = Arc::make_mut(&mut inputs.document);
-            let ids: Vec<u32> = document.setup().operations.iter().map(Operation::id).collect();
-            document.excluded_operations.extend(ids.into_iter().filter(|op| *op != id));
+            let operations = &document.setup().operations;
+            let target = operations.iter().position(|op| op.id() == id)
+                .ok_or_else(|| "The selected operation no longer exists.".to_string())?;
+            let ids: Vec<u32> = operations.iter().enumerate()
+                .filter(|(index, op)| if include_predecessors { *index > target } else { op.id() != id })
+                .map(|(_, op)| op.id()).collect();
+            document.excluded_operations.extend(ids);
         }
         let ids: Vec<_> = inputs
             .document
@@ -254,7 +270,7 @@ impl AppController {
                     .iter()
                     .filter(|pattern| pattern.members.contains(&id))
                     .collect();
-                let bytes = serde_json::to_vec(&(
+                let mut bytes = serde_json::to_vec(&(
                     &common,
                     op,
                     tools,
@@ -267,6 +283,11 @@ impl AppController {
                     patterns,
                 ))
                 .expect("operation dependencies serialize");
+                if matches!(op, Operation::Adaptive(_)) {
+                    bytes.extend_from_slice(
+                        &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),
+                    );
+                }
                 let own = cam_model::GeometryAsset::fingerprint_source(&bytes);
                 previous = cam_model::GeometryAsset::fingerprint_source(
                     format!("{previous}:{own}").as_bytes(),

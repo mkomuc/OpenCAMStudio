@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Dependencies {
+    #[serde(default)]
+    adaptive_domain_revision: u32,
     operation: Operation,
     heights: Heights,
     tools: Vec<Tool>,
@@ -93,6 +95,11 @@ impl OperationCache {
             axial,
         };
         let key = Dependencies {
+            adaptive_domain_revision: if matches!(op, Operation::Adaptive(_)) {
+                crate::AdaptiveStrategy::DOMAIN_REVISION
+            } else {
+                0
+            },
             operation: op.clone(),
             heights: env.heights,
             tools: required
@@ -171,6 +178,41 @@ mod tests {
             work_offset: 1,
             feed: 100.,
         })
+    }
+
+    #[test]
+    fn persisted_adaptive_paths_with_outdated_safety_revisions_are_recomputed() {
+        let adaptive = Operation::Adaptive(cam_model::AdaptiveOp {
+            id: 17,
+            tool: 1,
+            spindle_rpm: 1000.0,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            params: Default::default(),
+        });
+        let env = JobEnv {
+            heights: Heights::new(10., 5., 0.),
+            tools: &[], stock: None, spindle: SpindleDir::Cw,
+        };
+        let token = CancelToken::new();
+        let mut cache = OperationCache::default();
+        cache.compute(&adaptive, &env, &token, StrategyResult::default);
+        for old_revision in 0..crate::AdaptiveStrategy::DOMAIN_REVISION {
+            let mut saved = serde_json::to_value(&cache).unwrap();
+            if old_revision == 0 {
+                saved["entries"][0]["key"].as_object_mut().unwrap().remove("adaptive_domain_revision");
+            } else {
+                saved["entries"][0]["key"]["adaptive_domain_revision"] = old_revision.into();
+            }
+            let mut reopened: OperationCache = serde_json::from_value(saved).unwrap();
+            reopened.compute(&adaptive, &env, &token, StrategyResult::default);
+            assert_eq!(reopened.stats.computed, 1);
+            assert_eq!(reopened.stats.reused, 0);
+            reopened.compute(&adaptive, &env, &token, || panic!("current path must be reused"));
+            assert_eq!(reopened.stats.reused, 1);
+        }
     }
 
     #[test]

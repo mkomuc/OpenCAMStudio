@@ -16,6 +16,7 @@ cam-model = { path = "../cam-model" }
 cam-geometry3d = { path = "../cam-geometry3d" }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 cam-post = { path = "../cam-post" }
 # The collision simulator, so the clearing tests can assert what the GUI asserts.
 cam-sim = { path = "../cam-sim" }

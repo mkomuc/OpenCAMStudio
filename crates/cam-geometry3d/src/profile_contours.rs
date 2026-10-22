@@ -103,16 +103,49 @@ fn extract_impl(
             continue;
         }
         let derive_error = derived.unwrap_err();
-        // Inner boundaries on an upward top face delimit an accessible void.
-        // Its adjoining constant-section walls certify the complete depth.
+        // Upward faces can bound either a feature's rim or its floor.
+        // Their adjoining constant-section walls certify the complete depth.
         let face = view.face(wire.face_id)?;
         let (z, normal) = view.plane(face)?;
-        if wire.is_outer || normal[2] <= 0. || z < view.bounds(view.body.bounds)[1][2] - T {
+        if normal[2] <= 0. {
             return Err(derive_error);
         }
         let (chain, _) = view.contour(wire)?;
+        let walls = view.walls(wire)?;
+        if !walls.is_empty()
+            && walls.iter().all(|wall| {
+                view.extent(wall)
+                    .is_ok_and(|(lo, hi)| (lo - z).abs() <= T && hi > z + T)
+            })
+        {
+            // A floor contour follows the same wall as its upper rim. Reuse
+            // pocket certification for access, full-height walls and rim adjacency.
+            let floor_binding = GeometryBinding {
+                selected: vec![EntityRef {
+                    kind: EntityKind::Face,
+                    id: face.id,
+                    ..refs[0].clone()
+                }],
+                recipe: ExtractionRecipe::PocketFloor,
+                ..binding
+            };
+            let (_, _, interval) = derive(state, &floor_binding, 0.)?;
+            accept(
+                ProfileContour {
+                    chain,
+                    closed: true,
+                    side: if wire.is_outer {
+                        Side::Inside
+                    } else {
+                        Side::Outside
+                    },
+                },
+                interval,
+            )?;
+            continue;
+        }
         let mut bottom: Option<f64> = None;
-        for wall in view.walls(wire)? {
+        for wall in walls {
             let (lo, hi) = view.extent(wall)?;
             if (hi - z).abs() > T {
                 return Err("Face contour must be the top of its wall".into());
@@ -125,11 +158,20 @@ fn extract_impl(
         }
         let region = Polygon::new(chain.clone()).map_err(|error| error.to_string())?;
         view.roofs_over(&region, z)?;
+        // Face Contours can select the perimeter of a raised island as well
+        // as the inner boundary of a pocket. The wall certification above
+        // and roof check below establish that the selected face is the top of
+        // the feature, so the loop's face-local outer/inner flag does not
+        // determine the machining side.
         accept(
             ProfileContour {
                 chain,
                 closed: true,
-                side: Side::Inside,
+                side: if wire.is_outer {
+                    Side::Outside
+                } else {
+                    Side::Inside
+                },
             },
             CuttingHeights {
                 top: z,
