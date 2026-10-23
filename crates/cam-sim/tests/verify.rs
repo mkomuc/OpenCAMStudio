@@ -26,6 +26,7 @@ fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile_square(id: u32, chain: Contour) -> ProfileOp {
     ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -284,7 +285,16 @@ fn a_bad_setup_that_rapids_low_is_caught() {
         height_settings: Default::default(),
         tool_change_height: None,
     });
-    let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let rejected=build_job(&doc,1000.,SpindleDir::Cw,None,50.,&CancelToken::new());
+    assert!(rejected.diagnostics.iter().any(|d|d.severity==cam_toolpath::Severity::Error),"The strategy must reject unsafe safety planes before emission");
+    // The simulator must also catch unsafe imported/programmatic IR independently
+    // of the now-stricter generator. Only the first entry column has been cleared.
+    use cam_cldata::{MoveKind,Point3,Program,Step,Tag};
+    let mut program=Program::new();
+    program.push(Step::Rapid {to:Point3::new(5.,5.,5.),tag:Tag::new(0,MoveKind::Link)});
+    program.push(Step::Linear {to:Point3::new(5.,5.,-2.),feed:100.,tag:Tag::new(0,MoveKind::Plunge)});
+    program.push(Step::Rapid {to:Point3::new(5.,5.,-1.),tag:Tag::new(0,MoveKind::Retract)});
+    program.push(Step::Rapid {to:Point3::new(25.,25.,-1.),tag:Tag::new(1,MoveKind::Link)});
     let sim = simulate(
         &program,
         STOCK_MIN,

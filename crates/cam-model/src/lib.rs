@@ -16,6 +16,8 @@
 mod document;
 mod profile_selection;
 pub use profile_selection::*;
+mod profile_parameters;
+pub use profile_parameters::*;
 mod operation_heights;
 pub use operation_heights::*;
 mod cad_curves;

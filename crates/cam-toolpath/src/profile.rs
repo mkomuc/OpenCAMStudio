@@ -30,71 +30,66 @@ pub fn profile_tab_preview(
     {
         return Vec::new();
     }
-    let Ok(region) = Polygon::new(op.chain.clone()) else {
+    let Ok(loops) = compensated_loops(op, diameter) else {
         return Vec::new();
     };
-    let sign = match op.side {
-        Side::Outside => 1.0,
-        Side::Inside => -1.0,
-        Side::On => 0.0,
-    };
-    let radius = if op.comp == Comp::Computed {
-        diameter * 0.5
-    } else {
-        0.0
-    };
-    let signed = sign * (radius + op.offset);
-    let loops = if signed == 0.0 {
-        vec![region]
-    } else {
-        offset(&[region], signed, JoinStyle::Round).unwrap_or_default()
-    };
-    let paths: Vec<_> = loops
+    let contours = loops
         .iter()
         .map(|p| profile_loop_points(p.outer().points(), op, spindle))
         .collect();
-    let mut result = Vec::new();
-    let mut append = |points: &[Point], distance: f64| {
-        let (center, tangent) = point_on_loop(points, distance);
-        let source_distance = nearest_on_loop(op.chain.points(), [center.x, center.y]).0;
-        let (position, _) = point_on_loop(op.chain.points(), source_distance);
-        result.push(ProfileTabPreview {
-            position: [position.x, position.y],
-            center: [center.x, center.y],
-            tangent,
-        });
+    let Ok((paths, layouts)) = tab_layouts(contours, op, diameter) else {
+        return Vec::new();
     };
-    if op.tabs.manual {
-        for &point in op.tabs.positions.iter().take(10_000) {
-            if point.iter().any(|v| !v.is_finite()) {
-                continue;
-            }
-            let Some(points) = paths.iter().min_by(|a, b| {
-                nearest_on_loop(a, point)
-                    .1
-                    .total_cmp(&nearest_on_loop(b, point).1)
-            }) else {
-                continue;
-            };
-            append(points, nearest_on_loop(points, point).0);
-        }
-    } else if op.tabs.spacing.is_finite() && op.tabs.spacing > 0.0 {
-        for points in &paths {
-            let perimeter = loop_length(points);
-            let count = (perimeter / op.tabs.spacing).ceil().max(1.0);
-            if !count.is_finite() || count > 10_000.0 {
-                continue;
-            }
-            for i in 0..count as usize {
-                append(points, (i as f64 + 0.5) * perimeter / count);
-            }
+    let mut result = Vec::new();
+    for (points, layout) in paths.iter().zip(layouts) {
+        let Some(layout) = layout else {
+            continue;
+        };
+        for (left, right) in layout.spans {
+            let (center, tangent) = point_on_loop(points, (left + right) * 0.5);
+            let source_distance = nearest_on_loop(op.chain.points(), [center.x, center.y]).0;
+            let (position, _) = point_on_loop(op.chain.points(), source_distance);
+            result.push(ProfileTabPreview {
+                position: [position.x, position.y],
+                center: [center.x, center.y],
+                tangent,
+            });
         }
     }
     result
 }
 
+fn compensated_loops(op: &ProfileOp, diameter: f64) -> Result<Vec<Polygon>, String> {
+    let region =
+        Polygon::new(op.chain.clone()).map_err(|e| format!("Invalid profile region: {e}"))?;
+    let sign = match op.side {
+        Side::Outside => 1.,
+        Side::Inside => -1.,
+        Side::On => 0.,
+    };
+    let radius = if op.comp == Comp::Computed {
+        diameter * 0.5
+    } else {
+        0.
+    };
+    let distance = sign * (radius + op.offset);
+    let loops = if distance == 0. {
+        vec![region]
+    } else {
+        offset(&[region], distance, op.passes.outer_corner.join())
+            .map_err(|e| format!("Profile offset failed: {e}"))?
+    };
+    if loops.is_empty() {
+        Err(format!(
+            "Tool (diameter {diameter}) is too large: offset consumed the feature"
+        ))
+    } else {
+        Ok(loops)
+    }
+}
+
 fn point_on_loop(points: &[Point], distance: f64) -> (Point, [f64; 2]) {
-    let mut distance = distance.rem_euclid(loop_length(points).max(1e-12));
+    let mut distance = distance.rem_euclid(loop_perimeter(points).max(1e-12));
     for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
         let length = (b.x - a.x).hypot(b.y - a.y);
         if length <= 1e-12 {
@@ -125,15 +120,41 @@ impl ProfileStrategy {
     }
 }
 
+#[path = "profile_schedule.rs"]
+mod schedule;
+
 impl Strategy for ProfileStrategy {
     fn name(&self) -> &str {
         "profile"
     }
-
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if cancel.is_cancelled() {
+            return StrategyResult {
+                cancelled: true,
+                ..Default::default()
+            };
+        }
+        if let Err(message) = env
+            .heights
+            .validate()
+            .and_then(|_| self.op.validate_profile(env.heights.top_of_stock))
+        {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        schedule::compute(&self.op, env, cancel)
+    }
+}
+impl ProfileStrategy {
+    fn compute_base(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if let Err(reason) = op.entry_feeds.validate() {
-            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            };
         }
         if !op.additional_chains.is_empty() {
             if op.tabs.enabled || op.stepover > 0. {
@@ -156,12 +177,24 @@ impl Strategy for ProfileStrategy {
                 single.additional_chains.clear();
                 single.clearing.climb ^= op.contour_reversed(index);
                 single.selections = None;
-                let part = Self::new(single).compute(env, cancel);
+                let part = Self::new(single).compute_base(env, cancel);
                 result.diagnostics.extend(part.diagnostics.clone());
                 if part.has_errors() || part.cancelled {
                     result.program = Program::new();
                     result.cancelled = part.cancelled;
                     return result;
+                }
+                if result
+                    .program
+                    .steps()
+                    .len()
+                    .saturating_add(part.program.steps().len())
+                    > cam_model::MAX_PROFILE_MOVES
+                {
+                    return StrategyResult {
+                        diagnostics: vec![Diagnostic::error("Profile motion budget exceeded")],
+                        ..Default::default()
+                    };
                 }
                 result.program.extend(part.program);
             }
@@ -171,7 +204,7 @@ impl Strategy for ProfileStrategy {
             let mut single = op.clone();
             single.selections = None;
             single.clearing.climb = !single.clearing.climb;
-            return Self::new(single).compute(env, cancel);
+            return Self::new(single).compute_base(env, cancel);
         }
         let mut diagnostics = Vec::new();
 
@@ -187,12 +220,30 @@ impl Strategy for ProfileStrategy {
             };
         };
 
+        if !tool.diameter.is_finite()
+            || tool.diameter <= 0.
+            || !tool.length.is_finite()
+            || tool.length <= 0.
+        {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(
+                    "Profile tool diameter and length must be positive and finite",
+                )],
+                ..Default::default()
+            };
+        }
         // The tool must be able to cut a vertical wall to the requested depth with a
         // *cutting* surface (see `guards`): a pointed tool has no cylindrical flank,
         // and a cut past the flute length drags the shank along the wall.
         if !crate::guards::check_side_milling(op.id, "profile", tool, op.depth, &mut diagnostics) {
             return StrategyResult {
                 diagnostics,
+                ..Default::default()
+            };
+        }
+        if let Err(message) = op.validate_control_leads(tool.radius()) {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
                 ..Default::default()
             };
         }
@@ -257,7 +308,10 @@ impl Strategy for ProfileStrategy {
                 || !tabs.height.is_finite()
                 || tabs.height <= 0.0
                 || tabs.height >= env.heights.top_of_stock - floor
-                || (!tabs.manual && (!tabs.spacing.is_finite() || tabs.spacing <= 0.0))
+                || (!tabs.manual
+                    && tabs.count.is_none()
+                    && (!tabs.spacing.is_finite() || tabs.spacing <= 0.0))
+                || tabs.count.is_some_and(|count| count == 0 || count > 10_000)
                 || (tabs.manual
                     && (tabs.positions.is_empty()
                         || tabs.positions.len() > 10_000
@@ -279,20 +333,6 @@ impl Strategy for ProfileStrategy {
                 };
             }
         }
-        let region = match Polygon::new(op.chain.clone()) {
-            Ok(p) => p,
-            Err(e) => {
-                diagnostics.push(Diagnostic::error(format!(
-                    "operation {}: chain is not a valid region: {e}",
-                    op.id
-                )));
-                return StrategyResult {
-                    diagnostics,
-                    ..Default::default()
-                };
-            }
-        };
-
         // Computed comp offsets the geometry ourselves; control comp keeps the
         // path on the contour and lets the controller (G41/G42) do the radius. The
         // finishing allowance (`offset`) leaves stock on the wall — it moves the
@@ -307,26 +347,28 @@ impl Strategy for ProfileStrategy {
         };
         let (radius, comp) = match op.comp {
             Comp::Computed => (tool.radius(), None),
-            Comp::ControlLeft | Comp::ControlRight => {
+            Comp::Control => {
                 let left = op.clearing.climb == (env.spindle == SpindleDir::Cw);
                 let compensation = if left {
                     CutterComp::Left(op.tool)
                 } else {
                     CutterComp::Right(op.tool)
                 };
-                (0.0, Some(compensation))
+                (0.0, Some((compensation, tool.radius())))
             }
         };
-        let signed = side_sign * (radius + op.offset);
 
         // Radial roughing (stepover) is **outside-only**: clear the frame out to the
         // raw stock in concentric passes, leaving the finishing `offset` on the wall
         // — the roughing half of the rough-then-finish workflow. Inner clearing is a
         // pocket's job (an inner profile is a single-pass wall finish), so stepover
-        // is ignored for Inside/On. Not applicable ⇒ fall through to a single pass.
+        // is rejected for Inside/On by shared validation.
         // (Leads apply to the single-pass finish, not the roughing rings.)
         if op.stepover > 0.0 && matches!(op.comp, Comp::Computed) && side_sign > 0.0 {
-            if let Some(region) = roughing_region(op, env.stock) {
+            let Some(region) = roughing_region(op, env.stock) else {
+                return StrategyResult { diagnostics: vec![Diagnostic::error("Requested profile roughing needs stock strictly containing the offset part; select valid stock or set stepover to zero")], ..Default::default() };
+            };
+            {
                 let levels = depth_levels(env.heights.top_of_stock, floor, op.stepdown);
                 let mut program = Program::new();
                 // Clear the frame through the shared engine (stay-down inside-out,
@@ -352,7 +394,7 @@ impl Strategy for ProfileStrategy {
                     lead_out: Lead::None,
                     start: op.start,
                     guard: &[],
-                                    spindle: env.spindle,
+                    spindle: env.spindle,
                 };
                 match crate::clearing::clear(
                     &mut program,
@@ -362,8 +404,8 @@ impl Strategy for ProfileStrategy {
                     &levels,
                     cancel,
                 ) {
-                    // Degenerate frame (no rings) — fall through to a single pass.
-                    Ok(0) => {}
+                    // A requested roughing stage must produce actual clearing rings.
+                    Ok(0) => return StrategyResult { diagnostics: vec![Diagnostic::error("The requested roughing region has no machinable rings; select a smaller tool or change the stock")], ..Default::default() },
                     Ok(_) => {
                         return StrategyResult {
                             program,
@@ -378,7 +420,7 @@ impl Strategy for ProfileStrategy {
                             ..Default::default()
                         };
                     }
-                    Err(crate::rings::RingsError::Offset(e)) => {
+                    Err(crate::rings::RingsError::Offset(e) | crate::rings::RingsError::Limit(e)) => {
                         diagnostics.push(Diagnostic::error(format!(
                             "operation {}: offset failed: {e}",
                             op.id
@@ -411,33 +453,15 @@ impl Strategy for ProfileStrategy {
             }
         }
 
-        let loops = if signed == 0.0 {
-            vec![region]
-        } else {
-            match offset(&[region], signed, JoinStyle::Round) {
-                Ok(v) => v,
-                Err(e) => {
-                    diagnostics.push(Diagnostic::error(format!(
-                        "operation {}: offset failed: {e}",
-                        op.id
-                    )));
-                    return StrategyResult {
-                        diagnostics,
-                        ..Default::default()
-                    };
+        let loops = match compensated_loops(op, tool.diameter) {
+            Ok(loops) => loops,
+            Err(message) => {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(format!("operation {}: {message}", op.id))],
+                    ..Default::default()
                 }
             }
         };
-        if loops.is_empty() {
-            diagnostics.push(Diagnostic::error(format!(
-                "operation {}: tool (⌀{}) is too large — the offset consumed the whole feature",
-                op.id, tool.diameter
-            )));
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
 
         // Which side of the tool-centre loop is cleared air the lead eases in from:
         // outside the loop for an outside profile, the hole interior for an inside
@@ -446,52 +470,123 @@ impl Strategy for ProfileStrategy {
 
         // Validate every loop before emitting any motion. The cutter needs a gap
         // between protected spans so entry and exit remain below the tab tops.
-        let mut contours: Vec<_> = loops
+        let contours: Vec<_> = loops
             .iter()
             .map(|poly| profile_loop_points(poly.outer().points(), op, env.spindle))
             .collect();
-        let mut assigned = vec![Vec::new(); contours.len()];
-        if op.tabs.enabled && op.tabs.manual {
-            for &point in &op.tabs.positions {
-                let nearest = contours
-                    .iter()
-                    .enumerate()
-                    .min_by(|(_, a), (_, b)| {
-                        nearest_on_loop(a, point)
-                            .1
-                            .total_cmp(&nearest_on_loop(b, point).1)
-                    })
-                    .map(|(index, _)| index)
-                    .unwrap_or(0);
-                assigned[nearest].push(point);
-            }
-        }
-        let mut layouts = Vec::new();
-        for (index, points) in contours.iter_mut().enumerate() {
-            if !op.tabs.enabled || (op.tabs.manual && assigned[index].is_empty()) {
-                layouts.push(None);
-                continue;
-            }
-            let mut tab_op = op.clone();
-            if op.tabs.manual {
-                tab_op.tabs.positions = assigned[index].clone();
-                move_tab_seam(points, &tab_op, tool.diameter);
-            }
-            if let Some(layout) = TabLayout::new(points, &tab_op, tool.diameter) {
-                layouts.push(Some(layout));
-            } else {
-                diagnostics.push(Diagnostic::error(format!(
-                    "operation {}: holding tabs overlap or leave insufficient room for entry; \
-                     move tabs, increase spacing, or reduce tab width or lead size",
-                    op.id
-                )));
+        let (contours, layouts) = match tab_layouts(contours, op, tool.diameter) {
+            Ok(result) => result,
+            Err(message) => {
                 return StrategyResult {
-                    diagnostics,
+                    diagnostics: vec![Diagnostic::error(message)],
                     ..Default::default()
-                };
+                }
+            }
+        };
+        let levels = depth_levels(env.heights.top_of_stock, floor, op.stepdown);
+        let vertices: usize = contours.iter().map(Vec::len).sum();
+        let factor = if matches!(op.plunge, Plunge::Ramp { .. }) {
+            MAX_RAMP_LAPS + 2
+        } else {
+            2
+        };
+        if vertices.saturating_mul(levels.len()).saturating_mul(factor)
+            > cam_model::MAX_PROFILE_MOVES
+        {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(
+                    "Profile motion budget exceeded; simplify geometry or increase stepdown",
+                )],
+                ..Default::default()
+            };
+        }
+        for points in &contours {
+            let mut previous = env.heights.top_of_stock;
+            for &z in &levels {
+                if let Err(message) =
+                    validate_ramp_travel(op.plunge, previous - z, loop_perimeter(points))
+                {
+                    return StrategyResult {
+                        diagnostics: vec![Diagnostic::error(message)],
+                        ..Default::default()
+                    };
+                }
+                previous = z;
             }
         }
-        let levels = depth_levels(env.heights.top_of_stock, floor, op.stepdown);
+        if comp.is_some() && air_sign < 0. {
+            for points in &contours {
+                let guard = Polygon::new(Contour::new(points.clone()))
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let tangent = start_tangent(points);
+                let normal = outward_normal(points);
+                let normal = (-normal.0, -normal.1);
+                let (_, exit, tan_out) = crate::emit::loop_with_overlap(points, op.lead_overlap);
+                let exit_normal = outward_normal_at(tan_out, is_ccw(points));
+                let exit_normal = (-exit_normal.0, -exit_normal.1);
+                if crate::leads::guard_lead(&guard, points[0], tangent, normal, op.lead_in, true)
+                    != op.lead_in
+                    || crate::leads::guard_lead(
+                        &guard,
+                        exit,
+                        tan_out,
+                        exit_normal,
+                        op.lead_out,
+                        false,
+                    ) != op.lead_out
+                {
+                    return StrategyResult { diagnostics: vec![Diagnostic::error("Control compensation lead does not fit inside the contour; choose another start point or shorter lead")], ..Default::default() };
+                }
+            }
+        }
+        if let Some((_, radius)) = comp {
+            for points in &contours {
+                let region =
+                    Polygon::new(Contour::new(points.clone())).expect("validated profile loop");
+                let safe_region = match offset(
+                    &[region],
+                    if air_sign < 0. { -radius } else { radius },
+                    JoinStyle::Round,
+                ) {
+                    Ok(region) => region,
+                    Err(error) => {
+                        return StrategyResult {
+                            diagnostics: vec![Diagnostic::error(format!(
+                                "Cannot validate control entry clearance: {error}"
+                            ))],
+                            ..Default::default()
+                        }
+                    }
+                };
+                let tangent = start_tangent(points);
+                let normal = outward_normal(points);
+                let normal = (normal.0 * air_sign, normal.1 * air_sign);
+                let entry = control_air_point(
+                    crate::leads::lead_start_point(points[0], tangent, normal, op.lead_in),
+                    normal,
+                    comp,
+                );
+                let (_, end, tan_out) = crate::emit::loop_with_overlap(points, op.lead_overlap);
+                let out = outward_normal_at(tan_out, is_ccw(points));
+                let out = (out.0 * air_sign, out.1 * air_sign);
+                let exit = control_air_point(
+                    crate::leads::lead_end_point(end, tan_out, out, op.lead_out),
+                    out,
+                    comp,
+                );
+                let safe = |point| {
+                    if air_sign < 0. {
+                        safe_region.iter().any(|r| r.contains(point))
+                    } else {
+                        !safe_region.iter().any(|r| r.contains(point))
+                    }
+                };
+                if !safe(entry) || !safe(exit) {
+                    return StrategyResult {diagnostics:vec![Diagnostic::error("Uncompensated control entry/exit does not clear the retained wall; change the start point or lead length")],..Default::default()};
+                }
+            }
+        }
         let mut program = Program::new();
         for (index, points) in contours.iter().enumerate() {
             if cancel.is_cancelled() {
@@ -501,15 +596,24 @@ impl Strategy for ProfileStrategy {
                     cancelled: true,
                 };
             }
+            let mut effective = op.clone();
+            let perimeter = loop_perimeter(points);
+            if effective.lead_overlap > perimeter {
+                effective.lead_overlap = perimeter;
+                diagnostics.push(Diagnostic::warning(format!(
+                    "Closure overlap limited to one full contour ({perimeter:.3} mm)"
+                )));
+            }
             emit_loop(
                 &mut program,
                 points,
-                op,
+                &effective,
                 &env.heights,
                 &levels,
                 comp,
                 air_sign,
                 layouts[index].as_ref(),
+                cancel,
             );
         }
 
@@ -583,44 +687,28 @@ fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken)
         diagnostics: vec![Diagnostic::error(format!("operation {}: {message}", op.id))],
         ..Default::default()
     };
-    if op.chain.len() < 2
-        || op
-            .chain
-            .points()
-            .iter()
-            .any(|p| !p.x.is_finite() || !p.y.is_finite())
-    {
-        return fail("an open profile needs at least two finite points");
+    let mut source = op.chain.points().to_vec();
+    if source.len() < 2 {
+        return fail("An open profile needs at least two points");
     }
-    if !op.stepdown.is_finite()
-        || op.stepdown <= 0.
-        || !op.depth.is_finite()
-        || op.depth <= 0.
-        || !op.offset.is_finite()
-    {
-        return fail(
-            "profile depth and stepdown must be positive and finite; allowance must be finite",
-        );
-    }
-    if op.comp != Comp::Computed
-        || op.tabs.enabled
-        || op.stepover > 0.
-        || op.plunge != Plunge::Straight
-        || op.lead_overlap != 0.
-        || op.lead_in != Lead::None
-        || op.lead_out != Lead::None
-    {
-        return fail("open profiles require computed compensation, straight plunge, no tabs, roughing, leads or overlap");
-    }
+    let n = source.len();
+    let a = unit(source[1].x - source[0].x, source[1].y - source[0].y);
+    let b = unit(
+        source[n - 1].x - source[n - 2].x,
+        source[n - 1].y - source[n - 2].y,
+    );
+    source[0].x -= a.0 * op.passes.start_extension;
+    source[0].y -= a.1 * op.passes.start_extension;
+    source[n - 1].x += b.0 * op.passes.end_extension;
+    source[n - 1].y += b.1 * op.passes.end_extension;
     let sign = match op.side {
         Side::Outside => 1.,
         Side::Inside => -1.,
         Side::On => 0.,
     };
-    let distance = sign * (radius + op.offset);
-    let mut points = match offset_open_chain(op.chain.points(), distance) {
-        Ok(points) => points,
-        Err(error) => return fail(&error),
+    let mut points = match offset_open_chain(&source, sign * (radius + op.offset)) {
+        Ok(p) => p,
+        Err(e) => return fail(&e),
     };
     let material_right = op.clearing.climb == (env.spindle == SpindleDir::Cw);
     let reverse = match op.side {
@@ -630,44 +718,106 @@ fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken)
     if reverse {
         points.reverse();
     }
-    let first = points[0];
-    let last = *points.last().unwrap();
+    let levels = depth_levels(env.heights.top_of_stock, -op.depth, op.stepdown);
+    if levels.len().saturating_mul(points.len()).saturating_mul(4) > cam_model::MAX_PROFILE_MOVES {
+        return fail("Open profile motion budget exceeded");
+    }
     let mut program = Program::new();
-    for z in depth_levels(env.heights.top_of_stock, -op.depth, op.stepdown) {
+    let mut previous = env.heights.top_of_stock;
+    for (level, z) in levels.into_iter().enumerate() {
         if cancel.is_cancelled() {
             return StrategyResult {
                 cancelled: true,
                 ..Default::default()
             };
         }
+        let alternate = op.passes.both_ways && level % 2 == 1;
+        let mut path = points.clone();
+        if alternate {
+            path.reverse();
+        }
+        let first = path[0];
+        let last = *path.last().unwrap();
+        let tin = start_tangent(&path);
+        let tout = unit(
+            last.x - path[path.len() - 2].x,
+            last.y - path[path.len() - 2].y,
+        );
+        let left = material_right != alternate;
+        let normal = |t: (f64, f64)| if left { (-t.1, t.0) } else { (t.1, -t.0) };
+        let entry = crate::leads::lead_start_point(first, tin, normal(tin), op.lead_in);
+        let exit = crate::leads::lead_end_point(last, tout, normal(tout), op.lead_out);
+        let lead_path = lead_in_path(first, entry, normal(tin), op.lead_in);
+        let mut ramp_path = lead_path;
+        ramp_path.extend(path.iter().skip(1).copied());
+        let required = contour_ramp_len(op.plunge, previous - z);
+        if required.is_some_and(|length| length > path_length(&ramp_path) + 1e-9) {
+            return fail("The open contour is too short for this ramp angle; reduce stepdown, extend the contour or use zigzag entry");
+        }
         program.push(Step::Rapid {
-            to: Point3::new(first.x, first.y, env.heights.clearance),
+            to: Point3::new(entry.x, entry.y, env.heights.clearance),
             tag: Tag::new(op.id, MoveKind::Link),
         });
-        program.push(Step::Rapid {
-            to: Point3::new(
-                first.x,
-                first.y,
-                env.heights.retract.max(env.heights.top_of_stock),
-            ),
-            tag: Tag::new(op.id, MoveKind::Link),
-        });
-        program.push(Step::Linear {
-            to: Point3::new(first.x, first.y, z),
-            feed: op.plunge_feed,
-            tag: Tag::new(op.id, MoveKind::Plunge),
-        });
-        crate::emit::cut_polyline(
+        crate::emit::descend_to(
             &mut program,
-            &points,
+            entry,
+            previous.max(z),
+            &env.heights,
             op.feed,
-            Tag::new(op.id, MoveKind::Cutting),
+            op.id,
+        );
+        if let Some(length) = required {
+            let ramp = advance_along_path(&ramp_path, length);
+            emit_open_ramp(
+                &mut program,
+                &ramp,
+                previous,
+                z,
+                op.entry_feeds.ramp(op.feed),
+                Tag::new(op.id, MoveKind::Plunge),
+            );
+        } else {
+            emit_plunge(
+                &mut program,
+                entry,
+                tin,
+                normal(tin),
+                previous,
+                z,
+                op.plunge,
+                op.plunge_feed,
+                op.entry_feeds.ramp(op.feed),
+                Tag::new(op.id, MoveKind::Plunge),
+            );
+        }
+        crate::leads::emit_lead(
+            &mut program,
+            entry,
+            first,
+            first,
+            normal(tin),
+            op.lead_in,
             z,
+            op.entry_feeds.lead_in(op.feed),
+            Tag::new(op.id, MoveKind::LeadIn),
+        );
+        cut_profile_path(&mut program, &path, op, z);
+        crate::leads::emit_lead(
+            &mut program,
+            last,
+            exit,
+            last,
+            normal(tout),
+            op.lead_out,
+            z,
+            op.entry_feeds.lead_out(op.feed),
+            Tag::new(op.id, MoveKind::LeadOut),
         );
         program.push(Step::Rapid {
-            to: Point3::new(last.x, last.y, env.heights.clearance),
+            to: Point3::new(exit.x, exit.y, env.heights.clearance),
             tag: Tag::new(op.id, MoveKind::Retract),
         });
+        previous = z;
     }
     StrategyResult {
         program,
@@ -681,38 +831,35 @@ fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken)
 /// does not apply (no stock, or the stock does not contain the part), so the caller
 /// falls back to a single pass.
 fn roughing_region(op: &ProfileOp, stock: Option<([f64; 2], [f64; 2])>) -> Option<Polygon> {
-    let chain_poly = Polygon::new(op.chain.clone()).ok()?;
-    // The stock must strictly contain the part for there to be a frame.
-    let (smin, smax) = stock?;
-    let (mut xmin, mut ymin, mut xmax, mut ymax) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for p in op.chain.points() {
-        xmin = xmin.min(p.x);
-        ymin = ymin.min(p.y);
-        xmax = xmax.max(p.x);
-        ymax = ymax.max(p.y);
-    }
-    if !(smin[0] < xmin && smin[1] < ymin && smax[0] > xmax && smax[1] > ymax) {
+    let part = Polygon::new(op.chain.clone()).ok()?;
+    let island = if op.offset == 0. {
+        part
+    } else {
+        let mut regions = offset(&[part], op.offset, JoinStyle::Round).ok()?;
+        if regions.len() != 1 {
+            return None;
+        }
+        regions.remove(0)
+    };
+    let stock = if let Some(boundary) = &op.passes.stock_boundary {
+        Polygon::new(boundary.clone()).ok()?
+    } else {
+        let (min, max) = stock?;
+        Polygon::new(Contour::new(vec![
+            Point::new(min[0], min[1]),
+            Point::new(max[0], min[1]),
+            Point::new(max[0], max[1]),
+            Point::new(min[0], max[1]),
+        ]))
+        .ok()?
+    };
+    if !cam_geo::difference(std::slice::from_ref(&island), std::slice::from_ref(&stock))
+        .ok()?
+        .is_empty()
+    {
         return None;
     }
-    // The part is an island, dilated by the finishing allowance so that much stock
-    // is left on the wall.
-    let island = if op.offset > 0.0 {
-        offset(&[chain_poly], op.offset, JoinStyle::Round)
-            .ok()?
-            .into_iter()
-            .next()?
-            .outer()
-            .clone()
-    } else {
-        op.chain.clone()
-    };
-    let stock_rect = Contour::new(vec![
-        Point::new(smin[0], smin[1]),
-        Point::new(smax[0], smin[1]),
-        Point::new(smax[0], smax[1]),
-        Point::new(smin[0], smax[1]),
-    ]);
-    Polygon::with_holes(stock_rect, vec![island]).ok()
+    Polygon::with_holes(stock.outer().clone(), vec![island.outer().clone()]).ok()
 }
 
 /// Emit approach, stepdown passes, and retract for one closed tool-path loop.
@@ -724,9 +871,10 @@ fn emit_loop(
     op: &ProfileOp,
     h: &Heights,
     levels: &[f64],
-    comp: Option<CutterComp>,
+    comp: Option<(CutterComp, f64)>,
     air_sign: f64,
     tabs: Option<&TabLayout>,
+    cancel: &CancelToken,
 ) {
     if pts.len() < 3 {
         return;
@@ -741,13 +889,12 @@ fn emit_loop(
         || op.lead_overlap > 0.0
         || op.plunge != Plunge::Straight
     {
-        emit_loop_rich(prog, pts, op, h, levels, comp, air_sign, tabs);
+        emit_loop_rich(prog, pts, op, h, levels, comp, air_sign, tabs, cancel);
         return;
     }
 
     let link = Tag::new(op.id, MoveKind::Link);
     let plunge = Tag::new(op.id, MoveKind::Plunge);
-    let cut = Tag::new(op.id, MoveKind::Cutting);
     let retract = Tag::new(op.id, MoveKind::Retract);
 
     // Approach: rapid over the start at clearance, then down to the **retract
@@ -764,13 +911,16 @@ fn emit_loop(
     });
 
     for &z in levels {
+        if cancel.is_cancelled() {
+            return;
+        }
         // Plunge to this level, then cut the loop (arcs refitted) and close it.
         prog.push(Step::Linear {
             to: Point3::new(start.x, start.y, z),
             feed: op.plunge_feed,
             tag: plunge,
         });
-        if let Some(c) = comp {
+        if let Some((c, _)) = comp {
             prog.push(Step::CutterComp(c));
         }
         if let Some(tabs) = tabs {
@@ -778,7 +928,9 @@ fn emit_loop(
             closed.push(start);
             tabs.cut(prog, &closed, op, z);
         } else {
-            crate::emit::cut_loop(prog, pts, op.feed, cut, z);
+            let mut closed = pts.to_vec();
+            closed.push(pts[0]);
+            cut_profile_path(prog, &closed, op, z);
         }
         if comp.is_some() {
             prog.push(Step::CutterComp(CutterComp::Off));
@@ -792,6 +944,42 @@ fn emit_loop(
     });
 }
 
+/// Split at the feed boundary before fitting so a fitted arc cannot erase it.
+fn cut_profile_path(prog: &mut Program, points: &[Point], op: &ProfileOp, z: f64) {
+    let tag = Tag::new(op.id, MoveKind::Cutting);
+    let distance = op.passes.lead_end_distance;
+    let emit = |prog: &mut Program, path: &[Point], feed| {
+        crate::emit::cut_polyline_tolerance(prog, path, feed, tag, z, op.passes.tolerance);
+    };
+    if distance <= 0. || points.len() < 2 {
+        emit(prog, points, op.feed);
+        return;
+    }
+    let length = path_length(points);
+    if distance >= length {
+        emit(prog, points, op.entry_feeds.lead_out(op.feed));
+        return;
+    }
+    let first = advance_along_path(points, length - distance);
+    let reversed: Vec<_> = points.iter().copied().rev().collect();
+    let mut last = advance_along_path(&reversed, distance);
+    last.reverse();
+    last[0] = *first.last().expect("nonempty path prefix");
+    emit(prog, &first, op.feed);
+    emit(prog, &last, op.entry_feeds.lead_out(op.feed));
+}
+
+/// Uncompensated approach/cancellation points must clear the retained wall by
+/// the full cutter radius. A tangent point on the nominal wall would plunge
+/// through the wall before G41/G42 has had a chance to engage.
+fn control_air_point(point: Point, normal: (f64, f64), comp: Option<(CutterComp, f64)>) -> Point {
+    let clearance = comp.map_or(0., |(_, radius)| radius + crate::emit::FLOOR_CLEARANCE);
+    Point::new(
+        point.x + normal.0 * clearance,
+        point.y + normal.1 * clearance,
+    )
+}
+
 /// The rich profile emission (leads and/or a non-straight plunge). Per level: rapid
 /// to the entry footprint (off the contour when there is a lead-in), rapid down
 /// through the already-cut air to the previous level, enter Z per the plunge
@@ -803,15 +991,16 @@ fn emit_loop_rich(
     op: &ProfileOp,
     h: &Heights,
     levels: &[f64],
-    comp: Option<CutterComp>,
+    comp: Option<(CutterComp, f64)>,
     air_sign: f64,
     tabs: Option<&TabLayout>,
+    cancel: &CancelToken,
 ) {
     let start = pts[0];
     let tan_in = start_tangent(pts); // leaving start, into the cut
-    // The cleared/air side the lead eases in from. For an outside profile that is
-    // outward (away from the part); for an inside one it flips inward, into the hole
-    // — otherwise the lead would swing onto the material side and gouge the wall.
+                                     // The cleared/air side the lead eases in from. For an outside profile that is
+                                     // outward (away from the part); for an inside one it flips inward, into the hole
+                                     // — otherwise the lead would swing onto the material side and gouge the wall.
     let out = {
         let o = outward_normal(pts);
         (o.0 * air_sign, o.1 * air_sign)
@@ -820,13 +1009,14 @@ fn emit_loop_rich(
     // against overshooting it (a hole narrower than the lead drops to a plain pass);
     // an outside profile leads into open stock, which needs no bound.
     let guard: Vec<Polygon> = if air_sign < 0.0 {
-        Polygon::new(Contour::new(pts.to_vec())).into_iter().collect()
+        Polygon::new(Contour::new(pts.to_vec()))
+            .into_iter()
+            .collect()
     } else {
         Vec::new()
     };
     let link = Tag::new(op.id, MoveKind::Link);
     let lead = Tag::new(op.id, MoveKind::LeadIn);
-    let cut = Tag::new(op.id, MoveKind::Cutting);
     let retract = Tag::new(op.id, MoveKind::Retract);
     let plunge_tag = Tag::new(op.id, MoveKind::Plunge);
 
@@ -848,8 +1038,16 @@ fn emit_loop_rich(
     // empty for outside profiles, so this leaves them untouched).
     let lead_in = crate::leads::guard_lead(&guard, start, tan_in, out, op.lead_in, true);
     let lead_out = crate::leads::guard_lead(&guard, exit_on, tan_out, out_exit, op.lead_out, false);
-    let entry = crate::leads::lead_start_point(start, tan_in, out, lead_in);
-    let exit = crate::leads::lead_end_point(exit_on, tan_out, out_exit, lead_out);
+    let entry = control_air_point(
+        crate::leads::lead_start_point(start, tan_in, out, lead_in),
+        out,
+        comp,
+    );
+    let exit = control_air_point(
+        crate::leads::lead_end_point(exit_on, tan_out, out_exit, lead_out),
+        out_exit,
+        comp,
+    );
 
     // The first pass rapids down to the **retract plane**, not to the stock top:
     // ending a rapid exactly on the surface leaves no margin, so slightly proud
@@ -868,15 +1066,18 @@ fn emit_loop_rich(
     // the descent, which differs at the first level (it begins at the retract plane).
     // So it always ends the pass away from where the next one begins — the same
     // condition a lead already creates.
-    let ramps = matches!(op.plunge, Plunge::Ramp { angle_deg } if angle_deg > 0.0 && angle_deg < 90.0);
+    let ramps =
+        matches!(op.plunge, Plunge::Ramp { angle_deg } if angle_deg > 0.0 && angle_deg < 90.0);
     let perimeter = loop_perimeter(pts);
     // A ramped pass ends further round the loop than an unramped one (it must re-cut
     // the stretch it descended over), so its exit — and the lead-off with it — is a
     // per-level quantity rather than a fixed one.
-    let repositions =
-        ramps || (exit.x - entry.x).abs() > 1e-9 || (exit.y - entry.y).abs() > 1e-9;
+    let repositions = ramps || (exit.x - entry.x).abs() > 1e-9 || (exit.y - entry.y).abs() > 1e-9;
     let mut prev_z = h.retract.max(h.top_of_stock);
     for (i, &z) in levels.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return;
+        }
         // **The ramp never travels through air.** Its height is measured from the top
         // of material — the stock surface on the first level, the previous floor after
         // that — not from the retract plane. Descending from the retract plane made two
@@ -909,8 +1110,13 @@ fn emit_loop_rich(
             let o = outward_normal_at(tan_out, signed_area2(pts) > 0.0);
             (o.0 * air_sign, o.1 * air_sign)
         };
-        let lead_out = crate::leads::guard_lead(&guard, exit_on, tan_out, out_exit, op.lead_out, false);
-        let exit = crate::leads::lead_end_point(exit_on, tan_out, out_exit, lead_out);
+        let lead_out =
+            crate::leads::guard_lead(&guard, exit_on, tan_out, out_exit, op.lead_out, false);
+        let exit = control_air_point(
+            crate::leads::lead_end_point(exit_on, tan_out, out_exit, lead_out),
+            out_exit,
+            comp,
+        );
 
         // The tool comes down where the entry begins — the lead-in's own start, which
         // when ramping now sits *above* the cutting plane by exactly the ramp's height,
@@ -936,9 +1142,21 @@ fn emit_loop_rich(
             // lead and contour can merge their arcs and cut below the stock top
             // before the lead reaches the contour.
             emit_descending_path(
-                prog, &path[..=lead_end], *top, ramp_top, op.entry_feeds.ramp(op.feed), plunge_tag,
+                prog,
+                &path[..=lead_end],
+                *top,
+                ramp_top,
+                op.entry_feeds.ramp(op.feed),
+                plunge_tag,
             );
-            emit_descending_path(prog, &path[lead_end..], ramp_top, z, op.entry_feeds.ramp(op.feed), plunge_tag);
+            emit_descending_path(
+                prog,
+                &path[lead_end..],
+                ramp_top,
+                z,
+                op.entry_feeds.ramp(op.feed),
+                plunge_tag,
+            );
         } else {
             emit_plunge(
                 prog,
@@ -953,26 +1171,45 @@ fn emit_loop_rich(
                 plunge_tag,
             );
 
+            if let Some((c, _)) = comp {
+                prog.push(Step::CutterComp(c));
+            }
             // Lead onto the contour at depth: entry → start.
-            crate::leads::emit_lead(prog, entry, start, start, out, lead_in, z, op.entry_feeds.lead_in(op.feed), lead);
+            crate::leads::emit_lead(
+                prog,
+                entry,
+                start,
+                start,
+                out,
+                lead_in,
+                z,
+                op.entry_feeds.lead_in(op.feed),
+                lead,
+            );
         }
 
-        if let Some(c) = comp {
-            prog.push(Step::CutterComp(c));
-        }
         if let Some(tabs) = tabs {
             tabs.cut(prog, &loop_pts, op, z);
         } else {
-            crate::emit::cut_polyline(prog, &loop_pts, op.feed, cut, z);
-        }
-        if comp.is_some() {
-            prog.push(Step::CutterComp(CutterComp::Off));
+            cut_profile_path(prog, &loop_pts, op, z);
         }
 
         // Lead off the contour at depth — **flat**. Only the lead-in descends.
         crate::leads::emit_lead(
-            prog, exit_on, exit, exit_on, out_exit, lead_out, z, op.entry_feeds.lead_out(op.feed), Tag::new(op.id, MoveKind::LeadOut),
+            prog,
+            exit_on,
+            exit,
+            exit_on,
+            out_exit,
+            lead_out,
+            z,
+            op.entry_feeds.lead_out(op.feed),
+            Tag::new(op.id, MoveKind::LeadOut),
         );
+
+        if comp.is_some() {
+            prog.push(Step::CutterComp(CutterComp::Off));
+        }
 
         // Lift only when the next pass has somewhere else to start from; the final
         // retract is unconditional (the operation must leave the tool clear).
@@ -1004,14 +1241,6 @@ fn profile_loop_points(points: &[Point], op: &ProfileOp, spindle: SpindleDir) ->
     rotate_to_start(&points, op.start)
 }
 
-fn loop_length(points: &[Point]) -> f64 {
-    points
-        .iter()
-        .zip(points.iter().cycle().skip(1))
-        .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
-        .sum()
-}
-
 /// Arc length and squared distance of the nearest point on a closed loop.
 fn nearest_on_loop(points: &[Point], point: [f64; 2]) -> (f64, f64) {
     let mut walked = 0.0;
@@ -1038,12 +1267,13 @@ fn lead_extent(lead: Lead) -> f64 {
         Lead::None => 0.0,
         Lead::Linear { length } => length,
         Lead::Arc { radius } => radius * std::f64::consts::SQRT_2,
+        Lead::ArcSweep { radius, angle_deg } => 2. * radius * (angle_deg.to_radians() * 0.5).sin(),
     }
 }
 
 /// Keep entry and leads in an unprotected gap, including tabs at the old seam.
 fn move_tab_seam(points: &mut Vec<Point>, op: &ProfileOp, diameter: f64) {
-    let perimeter = loop_length(points);
+    let perimeter = loop_perimeter(points);
     if perimeter <= 0.0 {
         return;
     }
@@ -1087,9 +1317,52 @@ struct TabLayout {
     top: f64,
 }
 
+type TabPaths = (Vec<Vec<Point>>, Vec<Option<TabLayout>>);
+fn tab_layouts(
+    mut contours: Vec<Vec<Point>>,
+    op: &ProfileOp,
+    diameter: f64,
+) -> Result<TabPaths, String> {
+    let mut assigned = vec![Vec::new(); contours.len()];
+    if op.tabs.enabled && op.tabs.manual {
+        for &point in &op.tabs.positions {
+            if point.iter().any(|v| !v.is_finite()) {
+                return Err("Tab positions must be finite".into());
+            }
+            if let Some(index) = contours
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    nearest_on_loop(a, point)
+                        .1
+                        .total_cmp(&nearest_on_loop(b, point).1)
+                })
+                .map(|(index, _)| index)
+            {
+                assigned[index].push(point);
+            }
+        }
+    }
+    let mut layouts = Vec::new();
+    for (index, points) in contours.iter_mut().enumerate() {
+        if !op.tabs.enabled || (op.tabs.manual && assigned[index].is_empty()) {
+            layouts.push(None);
+            continue;
+        }
+        let mut tab_op = op.clone();
+        if op.tabs.manual {
+            tab_op.tabs.positions = assigned[index].clone();
+            move_tab_seam(points, &tab_op, diameter);
+        }
+        let layout = TabLayout::new(points,&tab_op,diameter).ok_or("Holding tabs overlap or leave insufficient room for entry; move tabs, increase spacing, or reduce width/lead size")?;
+        layouts.push(Some(layout));
+    }
+    Ok((contours, layouts))
+}
+
 impl TabLayout {
     fn new(pts: &[Point], op: &ProfileOp, diameter: f64) -> Option<Self> {
-        let perimeter = loop_length(pts);
+        let perimeter = loop_perimeter(pts);
         let width = op.tabs.width + diameter;
         let lead_room = lead_extent(op.lead_in).max(lead_extent(op.lead_out));
         let mut centers = if op.tabs.manual {
@@ -1099,7 +1372,10 @@ impl TabLayout {
                 .map(|&point| nearest_on_loop(pts, point).0)
                 .collect::<Vec<_>>()
         } else {
-            let count = (perimeter / op.tabs.spacing).ceil().max(1.0);
+            let count = op
+                .tabs
+                .count
+                .map_or_else(|| (perimeter / op.tabs.spacing).ceil().max(1.0), f64::from);
             if !count.is_finite() || count > 10_000.0 {
                 return None;
             }
@@ -1127,9 +1403,66 @@ impl TabLayout {
         })
     }
 
+    fn cut_triangular(&self, prog: &mut Program, pts: &[Point], op: &ProfileOp, z: f64) {
+        let floor = self.top - op.tabs.height;
+        let half_width = op.tabs.width * 0.5;
+        let mut breaks = vec![0.];
+        let mut distance = 0.;
+        for edge in pts.windows(2) {
+            distance += edge[0].distance(edge[1]);
+            breaks.push(distance);
+        }
+        let fraction = ((z - floor) / op.tabs.height).clamp(0., 1.);
+        for &(left, right) in &self.spans {
+            let center = (left + right) * 0.5;
+            let radius = (right - left - op.tabs.width) * 0.5;
+            breaks.extend([
+                left,
+                center - radius - half_width * (1. - fraction),
+                center - radius,
+                center + radius,
+                center + radius + half_width * (1. - fraction),
+                right,
+            ]);
+        }
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup_by(|a, b| (*a - *b).abs() < 1e-10);
+        for s in breaks.into_iter().skip(1) {
+            let (point, _) = point_on_loop(pts, s);
+            let roof = self
+                .spans
+                .iter()
+                .map(|&(left, right)| {
+                    let center = (left + right) * 0.5;
+                    let radius = (right - left - op.tabs.width) * 0.5;
+                    floor
+                        + op.tabs.height
+                            * (1. - ((s - center).abs() - radius).max(0.) / half_width)
+                                .clamp(0., 1.)
+                })
+                .fold(z, f64::max);
+            prog.push(Step::Linear {
+                to: Point3::new(point.x, point.y, roof.max(z)),
+                feed: op.feed.min(op.plunge_feed),
+                tag: Tag::new(op.id, MoveKind::Cutting),
+            });
+        }
+    }
+
     fn cut(&self, prog: &mut Program, pts: &[Point], op: &ProfileOp, z: f64) {
+        if op.tabs.shape == cam_model::TabShape::Triangular && z < self.top {
+            self.cut_triangular(prog, pts, op, z);
+            return;
+        }
         if z >= self.top {
-            crate::emit::cut_polyline(prog, pts, op.feed, Tag::new(op.id, MoveKind::Cutting), z);
+            crate::emit::cut_polyline_tolerance(
+                prog,
+                pts,
+                op.feed,
+                Tag::new(op.id, MoveKind::Cutting),
+                z,
+                op.passes.tolerance,
+            );
             return;
         }
         let cut = Tag::new(op.id, MoveKind::Cutting);
@@ -1363,18 +1696,36 @@ pub(crate) fn contour_ramp_len(plunge: Plunge, dz: f64) -> Option<f64> {
     }
 }
 
-/// Most laps a contour ramp may take around a loop before it is steepened to fit.
+/// Maximum allocated laps. Profile preflight rejects longer requests.
 ///
 /// A shallow angle on a small loop is otherwise unbounded: 0.5° needs 115 mm of
 /// travel per millimetre of descent, so a 20 mm circle takes nearly two laps per
 /// millimetre and the emitted vertex count grows with it. Beyond the cap the ramp
-/// descends over 32 laps instead of the requested length, which is *steeper* than
-/// asked — the safe direction to err, since the alternative is an unbounded buffer.
+/// walker truncates at the allocation limit. Callers must preflight the requested
+/// travel; a truncated path must never be used to increase the requested slope.
 pub(crate) const MAX_RAMP_LAPS: usize = 32;
+
+pub(crate) fn validate_ramp_travel(
+    plunge: Plunge,
+    descent: f64,
+    perimeter: f64,
+) -> Result<(), String> {
+    if contour_ramp_len(plunge, descent).is_some_and(|length| {
+        !length.is_finite() || length > perimeter * (MAX_RAMP_LAPS as f64 - 1.)
+    }) {
+        return Err(
+            "Requested ramp requires too many laps; reduce stepdown or increase the ramp angle"
+                .into(),
+        );
+    }
+    Ok(())
+}
 
 /// Total length of an open polyline.
 pub(crate) fn path_length(pts: &[Point]) -> f64 {
-    pts.windows(2).map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y)).sum()
+    pts.windows(2)
+        .map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y))
+        .sum()
 }
 
 /// The perimeter of the closed loop through `pts`.
@@ -1465,6 +1816,9 @@ pub(crate) fn lead_in_path(start: Point, entry: Point, out: (f64, f64), lead: Le
     // an arc lead-in came out as a fan of chords — Andreas, reading a pocket export:
     // "it's doing ramp-along with no arcs".
     let n = match lead {
+        Lead::ArcSweep { radius, angle_deg } => {
+            crate::leads::arc_lead_density(radius, angle_deg.to_radians(), crate::emit::ARCFIT_TOL)
+        }
         Lead::Arc { radius } => crate::leads::arc_lead_density(
             radius,
             std::f64::consts::FRAC_PI_2,
@@ -1737,13 +2091,27 @@ fn project_point_seg(p: cam_geo::Point, a: cam_geo::Point, b: cam_geo::Point) ->
 /// The absolute Z of each stepdown pass, from just below `top` down to `depth`
 /// (inclusive), never stepping more than `stepdown` at a time.
 pub(crate) fn depth_levels(top: f64, depth: f64, stepdown: f64) -> Vec<f64> {
-    let mut levels = Vec::new();
-    if depth >= top {
-        return levels;
+    let count = ((top - depth) / stepdown).ceil();
+    if !top.is_finite()
+        || !depth.is_finite()
+        || !stepdown.is_finite()
+        || stepdown <= 0.
+        || count <= 0.
+        || !count.is_finite()
+        || count > cam_model::MAX_PROFILE_LEVELS as f64
+        || top - stepdown == top
+    {
+        return Vec::new();
     }
-    let mut z = top;
-    loop {
-        z = (z - stepdown).max(depth);
+    let epsilon = 1e-12 * (1. + top.abs().max(depth.abs()));
+    let mut levels = Vec::with_capacity(count as usize);
+    for i in 1..=count as usize {
+        let next = (top - i as f64 * stepdown).max(depth);
+        let z = if (next - depth).abs() <= epsilon {
+            depth
+        } else {
+            next
+        };
         levels.push(z);
         if z <= depth {
             break;
@@ -1871,7 +2239,11 @@ mod tests {
         );
         // 950 mm on a 400 mm perimeter: two full laps and 150 mm.
         let long = walk_loop(&pts, 0.0, 950.0);
-        assert!((path_len(&long) - 950.0).abs() < 1e-6, "got {}", path_len(&long));
+        assert!(
+            (path_len(&long) - 950.0).abs() < 1e-6,
+            "got {}",
+            path_len(&long)
+        );
         // And a walk starting part-way round begins where it was told to.
         let offset = walk_loop(&pts, 150.0, 10.0);
         assert!(
@@ -2051,6 +2423,7 @@ mod tests {
 
     fn inner_op(hole: f64, lead_r: f64, start: Option<[f64; 2]>) -> ProfileOp {
         ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: true,
             additional_chains: Vec::new(),
@@ -2182,6 +2555,7 @@ mod tests {
     /// the stock frames, with a stepover and (optionally) an engagement cap.
     fn outside_rough_op(engagement: f64) -> ProfileOp {
         ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: true,
             additional_chains: Vec::new(),
@@ -2242,7 +2616,9 @@ mod tests {
                             op.clearing.climb = climb;
                             op.start = Some([30., 20.]);
                             if controller {
-                                op.comp = Comp::ControlLeft;
+                                op.comp = Comp::Control;
+                                op.lead_in = Lead::Linear { length: 3. };
+                                op.lead_out = Lead::Linear { length: 3. };
                             }
                             if reversed {
                                 let mut points = op.chain.points().to_vec();
@@ -2255,13 +2631,16 @@ mod tests {
                                 stock: None,
                                 spindle,
                             };
-                            let result = ProfileStrategy::new(op).compute(&env, &CancelToken::new());
+                            let result =
+                                ProfileStrategy::new(op).compute(&env, &CancelToken::new());
                             let points: Vec<Point> = result
                                 .program
                                 .steps()
                                 .iter()
                                 .filter_map(|step| match step {
-                                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                                    Step::Linear { to, tag, .. }
+                                        if tag.kind == MoveKind::Cutting =>
+                                    {
                                         Some(Point::new(to.x, to.y))
                                     }
                                     Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => {
@@ -2280,7 +2659,10 @@ mod tests {
                                 } else {
                                     CutterComp::Right(1)
                                 };
-                                assert!(result.program.steps().contains(&Step::CutterComp(expected)));
+                                assert!(result
+                                    .program
+                                    .steps()
+                                    .contains(&Step::CutterComp(expected)));
                             }
                         }
                     }
@@ -2366,6 +2748,8 @@ mod tests {
         op.depth = 6.0;
         op.stepdown = 2.0;
         op.tabs = cam_model::ProfileTabs {
+            shape: Default::default(),
+            count: None,
             enabled: true,
             width: 2.0,
             height: 3.0,
@@ -2558,7 +2942,7 @@ mod tests {
         op.plunge = Plunge::Ramp { angle_deg: 5.0 };
         variants.push(op);
         let mut op = tabbed_op();
-        op.comp = Comp::ControlLeft;
+        op.comp = Comp::Control;
         variants.push(op);
         let mut op = tabbed_op();
         op.lead_overlap = 10.0;
@@ -2684,7 +3068,13 @@ mod tests {
                     (to.x - pos.x).hypot(to.y - pos.y),
                 ),
                 Step::Rapid { to, .. } => (*to, false, 0.),
-                Step::Arc { end, center, dir, tag, .. } => {
+                Step::Arc {
+                    end,
+                    center,
+                    dir,
+                    tag,
+                    ..
+                } => {
                     let start_angle = (pos.y - center.y).atan2(pos.x - center.x);
                     let end_angle = (end.y - center.y).atan2(end.x - center.x);
                     let sweep = if *dir == ArcDir::Ccw {
@@ -2758,10 +3148,13 @@ mod tests {
                 Step::Linear { to, .. } | Step::Rapid { to, .. } if to.z < -1e-9)),
             "nothing may reach cutting depth before the ramp"
         );
-        assert!(!on_contour(match &r.program.steps()[first_plunge] {
-            Step::Linear { to, .. } | Step::Arc { end: to, .. } => *to,
-            _ => unreachable!(),
-        }), "the ramp's first move should be along the lead, not the contour");
+        assert!(
+            !on_contour(match &r.program.steps()[first_plunge] {
+                Step::Linear { to, .. } | Step::Arc { end: to, .. } => *to,
+                _ => unreachable!(),
+            }),
+            "the ramp's first move should be along the lead, not the contour"
+        );
     }
 
     /// **A ramp keeps its arcs.** The path it descends is a flattened polyline, so it
@@ -2791,8 +3184,16 @@ mod tests {
             Tag::new(0, MoveKind::Plunge),
         );
 
-        let arcs = prog.steps.iter().filter(|s| matches!(s, Step::Arc { .. })).count();
-        assert!(arcs >= 1, "a flattened circle must come back as an arc:\n{:#?}", prog.steps);
+        let arcs = prog
+            .steps
+            .iter()
+            .filter(|s| matches!(s, Step::Arc { .. }))
+            .count();
+        assert!(
+            arcs >= 1,
+            "a flattened circle must come back as an arc:\n{:#?}",
+            prog.steps
+        );
         assert!(
             prog.steps.len() < 24,
             "{} moves for a single quarter circle — it is still emitting chords",
@@ -2804,7 +3205,11 @@ mod tests {
         for w in zs.windows(2) {
             assert!(w[1] <= w[0] + 1e-9, "the ramp must descend monotonically");
         }
-        assert!((zs.last().unwrap() + 2.0).abs() < 1e-9, "exact depth: {:?}", zs.last());
+        assert!(
+            (zs.last().unwrap() + 2.0).abs() < 1e-9,
+            "exact depth: {:?}",
+            zs.last()
+        );
 
         // And the descent is spread by *arc* length, so a curve does not steepen it: a
         // quarter of r=10 is 15.708 mm, and 2 mm over that is 7.26°.
@@ -2960,7 +3365,10 @@ mod tests {
             }
             pos = to;
         }
-        assert_eq!(vertical, 0, "a ramped profile emitted {vertical} vertical plunges");
+        assert_eq!(
+            vertical, 0,
+            "a ramped profile emitted {vertical} vertical plunges"
+        );
         assert!(ramped > 0, "no descending ramp moves were emitted at all");
     }
 
@@ -3033,7 +3441,11 @@ mod tests {
         let adaptive = run_outside_rough(outside_rough_op(2.0));
         assert!(!adaptive.has_errors(), "{:?}", adaptive.diagnostics);
 
-        assert!(cut_count(&adaptive) > 50, "the frame cuts, got {}", cut_count(&adaptive));
+        assert!(
+            cut_count(&adaptive) > 50,
+            "the frame cuts, got {}",
+            cut_count(&adaptive)
+        );
         assert_ne!(
             (plunge_count(&adaptive), cut_count(&adaptive)),
             (plunge_count(&concentric), cut_count(&concentric)),

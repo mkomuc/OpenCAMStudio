@@ -2,6 +2,8 @@
 
 Review date: 2026-10-23. Source baseline: `8417102dfb75f4804aec6ca06eaa2d81f0aeba9d`, document schema 25.
 
+Implementation progress and remaining scope are recorded in [Profile operation implementation status](profile-operation-implementation.md). This review retains the baseline findings and original acceptance scope; source line numbers below refer to that baseline.
+
 This is a source review and proposed backlog. No machining behavior or GUI controls were changed. Suggested sequencing is advisory; the **User priority** column is deliberately unassigned so the work can be prioritized later.
 
 ## Reference and scope

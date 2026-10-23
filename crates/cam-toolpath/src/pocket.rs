@@ -101,6 +101,7 @@ impl Strategy for PocketStrategy {
         let guard = offset(std::slice::from_ref(&region), -first, JoinStyle::Round).unwrap_or_default();
 
         let levels = depth_levels(env.heights.top_of_stock, floor, op.clear.stepdown);
+        if levels.is_empty() { fail!("operation {}: invalid or excessive depth levels; increase stepdown",op.id); }
         let mut program = Program::new();
         // Clear through the shared engine: engagement-spaced, climb-oriented,
         // stay-down inside-out rings, with the finishing wall leads.
@@ -136,7 +137,7 @@ impl Strategy for PocketStrategy {
                     ..Default::default()
                 };
             }
-            Err(crate::rings::RingsError::Offset(e)) => {
+            Err(crate::rings::RingsError::Offset(e) | crate::rings::RingsError::Limit(e)) => {
                 fail!("operation {}: offset failed: {e}", op.id)
             }
         }

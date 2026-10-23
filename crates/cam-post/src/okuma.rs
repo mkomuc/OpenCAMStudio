@@ -165,11 +165,22 @@ pub(crate) fn emit(
                 }
                 .to_string(),
             ),
-            Step::CutterComp(c) => w.line(match c {
-                CutterComp::Off => "G40".to_string(),
-                CutterComp::Left(d) => format!("G41 D{d}"),
-                CutterComp::Right(d) => format!("G42 D{d}"),
-            }),
+            Step::CutterComp(c) => match c {
+                CutterComp::Off => w.line("G40".into()),
+                CutterComp::Left(d) | CutterComp::Right(d) => {
+                    if !matches!(steps.get(i + 1), Some(Step::Linear { .. })) {
+                        return Err(PostError::Unsupported(
+                            "Controller compensation must engage on a linear move".into(),
+                        ));
+                    }
+                    let code = if matches!(c, CutterComp::Left(_)) {
+                        "G41"
+                    } else {
+                        "G42"
+                    };
+                    w.prefix_next_linear(format!("{code} D{d}"));
+                }
+            },
             Step::Dwell { seconds } => {
                 // Standalone dwell is `G04 F<sec>` on OSP (OKUMA_PLAN §6b). Emit an
                 // explicit decimal so the value reads as seconds regardless of the

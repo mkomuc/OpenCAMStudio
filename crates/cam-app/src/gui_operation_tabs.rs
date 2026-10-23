@@ -45,10 +45,9 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::LeadOutFeed
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
-        Field::MajorDia
-        | Field::TabWidth
-        | Field::TabHeight
-        | Field::TabSpacing => OperationTab::Geometry,
+        Field::MajorDia | Field::TabWidth | Field::TabHeight | Field::TabSpacing => {
+            OperationTab::Geometry
+        }
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -128,6 +127,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         return true;
     }
     match field {
+        Field::Profile(n) => n.invalid(value),
         Field::Depth
         | Field::ChamferWidth
         | Field::Feed
@@ -182,51 +182,33 @@ fn profile_climb_control(climb: bool, show_help: bool) -> Element<'static, Messa
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    if !show_help {
-        return control.into();
-    }
-    let help = column![
-        text("Climb and conventional milling").size(15).font(iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT }),
-        text("Checked: Climb (down milling). The chip starts thick and becomes thinner as the cutting edge exits the material.").size(12),
-        text("Unchecked: Conventional (up milling). The chip starts thin and becomes thicker through the cut.").size(12),
-        iced::widget::svg(iced::widget::svg::Handle::from_memory(include_bytes!("../assets/help/climb-conventional.svg"))).width(440).height(160),
-        text("The profile's travel direction follows this setting, the spindle rotation and the selected Inside/Outside side. It also applies to radial roughing. On-contour slotting engages both sides of the cutter; here the setting reverses travel.").size(12),
-    ].spacing(10).width(440);
-    delayed_tooltip(
-        control,
-        container(help).padding(12).style(popup_surface),
-        tooltip::Position::Left,
-    )
-    .into()
+    help_wrap(control, help::CLIMB, show_help)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Compensation {
     Computed,
-    Left,
-    Right,
+    Control,
 }
 impl Compensation {
-    const ALL: [Self; 3] = [Self::Computed, Self::Left, Self::Right];
+    const ALL: [Self; 2] = [Self::Computed, Self::Control];
     fn of(comp: Comp) -> Self {
         match comp {
             Comp::Computed => Self::Computed,
-            Comp::ControlLeft => Self::Left,
-            Comp::ControlRight => Self::Right,
+            Comp::Control => Self::Control,
         }
     }
     fn available(post: PostKind) -> &'static [Self] {
-        if matches!(post, PostKind::Grbl | PostKind::FluidNc | PostKind::GrblHal | PostKind::Estlcam) {
-            &Self::ALL[..1]
-        } else {
+        if post.supports_cutter_comp() {
             &Self::ALL
+        } else {
+            &Self::ALL[..1]
         }
     }
     fn value(self) -> Comp {
         match self {
             Self::Computed => Comp::Computed,
-            Self::Left => Comp::ControlLeft,
-            Self::Right => Comp::ControlRight,
+            Self::Control => Comp::Control,
         }
     }
 }
@@ -234,8 +216,7 @@ impl std::fmt::Display for Compensation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Computed => "Computed",
-            Self::Left => "Control G41",
-            Self::Right => "Control G42",
+            Self::Control => "In control (automatic side)",
         })
     }
 }
@@ -255,11 +236,17 @@ impl App {
         let linked = self
             .operation_binding_preview
             .as_ref()
-            .or_else(|| self.controller.geometry_state().bindings.get(&id))
             .or_else(|| {
                 creation_preview
                     .as_ref()
                     .and_then(|(_, binding)| binding.as_ref())
+            })
+            .or_else(|| {
+                if creating {
+                    None
+                } else {
+                    self.controller.geometry_state().bindings.get(&id)
+                }
             });
         let heading = if creating {
             format!("New {} operation", op_kind(op))
@@ -427,9 +414,20 @@ impl App {
             if tab == OperationTab::Heights && field != Field::ThreadBlindAllowance {
                 continue;
             }
+            if linked.is_some()
+                && matches!(op,Operation::Profile(p) if p.stepover==0.)
+                && matches!(field, Field::Stepover | Field::Engagement)
+            {
+                continue;
+            }
             if matches!(
                 field,
-                Field::TabWidth | Field::TabHeight | Field::TabSpacing | Field::StartX | Field::StartY
+                Field::Profile(_)
+                    | Field::TabWidth
+                    | Field::TabHeight
+                    | Field::TabSpacing
+                    | Field::StartX
+                    | Field::StartY
             ) {
                 continue; // Grouped beneath their section toggles.
             }
@@ -492,13 +490,7 @@ impl App {
         match op {
             Operation::Profile(p) => {
                 if tab == OperationTab::Geometry && linked.is_none() {
-                    let comp = if p.comp == Comp::Computed {
-                        p.comp
-                    } else if p.clearing.climb {
-                        Comp::ControlLeft
-                    } else {
-                        Comp::ControlRight
-                    };
+                    let comp = p.comp;
                     list = list.push(profile_picker(
                         "Compensation",
                         "Computed offsets the geometry; Control uses the machine's G41/G42 cutter compensation. Climb in Passes also determines the compensation side.",
@@ -512,7 +504,12 @@ impl App {
                     list = list.push(inspector_optional_section(
                         "Holding tabs",
                         p.tabs.enabled,
-                        (p.tabs.enabled || (p.closed && p.additional_chains.is_empty()))
+                        (p.tabs.enabled
+                            || p.capabilities(
+                                linked.is_some(),
+                                self.controller.post_kind().supports_cutter_comp(),
+                            )
+                            .tabs)
                             .then_some(Message::ProfileTabsEnabled),
                     ));
                     if !p.closed || !p.additional_chains.is_empty() {
@@ -522,11 +519,22 @@ impl App {
                                 .color(INSPECTOR_MUTED),
                         );
                     }
+                    if p.closed
+                        && p.additional_chains.is_empty()
+                        && !p
+                            .capabilities(
+                                linked.is_some(),
+                                self.controller.post_kind().supports_cutter_comp(),
+                            )
+                            .tabs
+                    {
+                        list=list.push(text("Tabs need computed compensation, straight plunge, and zero roughing, overlap and taper.").size(11).color(INSPECTOR_MUTED));
+                    }
                     if !p.closed {
-                        list = list.push(text("Open chains use computed compensation and straight plunge, without leads or radial roughing.").size(11).color(INSPECTOR_MUTED));
+                        list = list.push(text("Open chains support leads, ramps and tangent extensions with computed compensation. Ramps retrace their entry at depth; short chains need a smaller stepdown.").size(11).color(INSPECTOR_MUTED));
                     }
                     if p.tabs.enabled {
-                        list = list.push(text("Tab shape: Rectangular").size(12));
+                        list = list.push(profile_picker("Tab shape","Rectangular tabs keep a flat top; triangular tabs rise and fall gradually.",self.tooltips,p.tabs.shape,&cam_model::TabShape::ALL[..],Message::ProfileTabShape));
                         for field in [Field::TabWidth, Field::TabHeight] {
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
                             list = list.push(field_row_labeled(
@@ -540,11 +548,15 @@ impl App {
                         }
                         list = list.push(profile_picker(
                             "Tab positioning", "Place tabs automatically by contour distance, or select locations on the contour.", self.tooltips,
-                            if p.tabs.manual { profile_tabs::Positioning::Manual } else { profile_tabs::Positioning::ByDistance },
+                            if p.tabs.manual { profile_tabs::Positioning::Manual } else if p.tabs.count.is_some() { profile_tabs::Positioning::ByCount } else { profile_tabs::Positioning::ByDistance },
                             &profile_tabs::Positioning::ALL[..], Message::ProfileTabPositioning,
                         ));
                         if !p.tabs.manual {
-                            let field = Field::TabSpacing;
+                            let field = if p.tabs.count.is_some() {
+                                Field::Profile(profile_parameters::Number::TabCount)
+                            } else {
+                                Field::TabSpacing
+                            };
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
                             list = list.push(field_row_labeled(
                                 field,
@@ -558,6 +570,12 @@ impl App {
                         list = list.push(self.tab_location_controls(p));
                     }
                 }
+                if matches!(
+                    tab,
+                    OperationTab::Tool | OperationTab::Passes | OperationTab::Linking
+                ) {
+                    list = list.push(self.profile_extra_controls(p, tab, linked.is_some()));
+                }
                 if tab == OperationTab::Passes {
                     list = list.push(profile_climb_control(p.clearing.climb, self.tooltips));
                 }
@@ -567,23 +585,42 @@ impl App {
                         help::LEAD_IN,
                         self.tooltips,
                         LeadKind::of(p.lead_in),
-                        &LeadKind::ALL[..],
+                        if p.comp == Comp::Control {
+                            &LeadKind::ALL[1..2]
+                        } else {
+                            &LeadKind::ALL[..]
+                        },
                         Message::LeadInKindChanged,
                     ));
-                    list = list.push(profile_picker(
-                        "Lead-out",
-                        help::LEAD_OUT,
-                        self.tooltips,
-                        LeadKind::of(p.lead_out),
-                        &LeadKind::ALL[..],
-                        Message::LeadOutKindChanged,
-                    ));
+                    if !p.passes.same_lead_out {
+                        list = list.push(profile_picker(
+                            "Lead-out",
+                            help::LEAD_OUT,
+                            self.tooltips,
+                            LeadKind::of(p.lead_out),
+                            if p.comp == Comp::Control {
+                                &LeadKind::ALL[1..2]
+                            } else {
+                                &LeadKind::ALL[..]
+                            },
+                            Message::LeadOutKindChanged,
+                        ));
+                    }
                     list = list.push(profile_picker(
                         "Plunge",
                         help::PLUNGE,
                         self.tooltips,
                         PlungeKind::of(p.plunge),
-                        &PlungeKind::ALL[..],
+                        if p.capabilities(
+                            linked.is_some(),
+                            self.controller.post_kind().supports_cutter_comp(),
+                        )
+                        .ramp
+                        {
+                            &PlungeKind::ALL[..]
+                        } else {
+                            &PlungeKind::ALL[..1]
+                        },
                         Message::PlungeKindChanged,
                     ));
                 }
@@ -659,16 +696,14 @@ impl App {
                 if tab == OperationTab::Passes {
                     let field = Field::ChamferWidth;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list
-                        .push(inspector_section("Fase"))
-                        .push(field_row_labeled(
-                            field,
-                            self.field_label(field),
-                            self.field_help(field),
-                            &value,
-                            self.tooltips,
-                            self.field_invalid(field),
-                        ));
+                    list = list.push(inspector_section("Fase")).push(field_row_labeled(
+                        field,
+                        self.field_label(field),
+                        self.field_help(field),
+                        &value,
+                        self.tooltips,
+                        self.field_invalid(field),
+                    ));
                     list = list.push(
                         row![
                             label_help("Gradual", help::CHAMFER_GRADUAL, self.tooltips),
@@ -1421,7 +1456,12 @@ mod tests {
 
     #[test]
     fn compensation_availability_and_radial_passes_follow_post_and_strategy() {
-        for post in [PostKind::Grbl, PostKind::FluidNc, PostKind::GrblHal, PostKind::Estlcam] {
+        for post in [
+            PostKind::Grbl,
+            PostKind::FluidNc,
+            PostKind::GrblHal,
+            PostKind::Estlcam,
+        ] {
             assert_eq!(Compensation::available(post), &[Compensation::Computed]);
         }
         for post in [
@@ -1430,7 +1470,7 @@ mod tests {
             PostKind::LinuxCnc,
             PostKind::Okuma,
         ] {
-            assert_eq!(Compensation::available(post).len(), 3);
+            assert_eq!(Compensation::available(post).len(), 2);
         }
         let mut operation = operations()
             .into_iter()
@@ -1438,7 +1478,7 @@ mod tests {
             .unwrap();
         assert!(operation_fields(&operation).contains(&Field::Stepover));
         if let Operation::Profile(o) = &mut operation {
-            o.comp = Comp::ControlLeft;
+            o.comp = Comp::Control;
         }
         assert!(!operation_fields(&operation).contains(&Field::Stepover));
         assert!(!operation_fields(&operation).contains(&Field::Engagement));
@@ -2147,7 +2187,7 @@ mod tests {
             );
             let _ = app.update(Message::CadEscape);
             assert!(app.geometry_editor.is_none());
-            assert_eq!(app.controller.cad_selection(), &[source.clone()]);
+            assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&source));
             assert_eq!(app.fields[&Field::Feed], "322.5");
             assert_eq!(app.controller.document(), &before);
             let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(

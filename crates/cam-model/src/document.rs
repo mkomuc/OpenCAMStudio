@@ -82,7 +82,8 @@ use crate::Tool;
 /// v24: modeled chamfer-face boundaries and axial finishing bands. Older readers
 /// must refuse these operations rather than treating their projected face as an edge.
 /// v25: open chamfer chains; absent closed flags retain legacy closed rims.
-pub const SCHEMA_VERSION: u32 = 25;
+/// v26: profile pass controls, tab shapes/counts, and one controller compensation method.
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -333,13 +334,11 @@ impl std::fmt::Display for Hand {
 /// How cutter-radius compensation is applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Comp {
-    /// We compute the offset geometry ourselves (kernel-independent). The only
-    /// mode for first light.
+    /// Compute the tool-radius offset in software.
     Computed,
-    /// Left-hand control compensation (`G41`) — deferred to a later phase.
-    ControlLeft,
-    /// Right-hand control compensation (`G42`) — deferred to a later phase.
-    ControlRight,
+    /// Controller compensation; its effective G41/G42 side follows actual travel.
+    #[serde(alias = "ControlLeft", alias = "ControlRight")]
+    Control,
 }
 
 /// How the tool eases onto (lead-in) or off (lead-out) a profiled contour at the
@@ -353,6 +352,8 @@ pub enum Lead {
     Linear { length: f64 },
     /// A tangent arc of `radius` mm onto/off the contour.
     Arc { radius: f64 },
+    /// A tangent lead with an explicitly chosen sweep (0 < angle <= 170 degrees).
+    ArcSweep { radius: f64, angle_deg: f64 },
 }
 
 /// How the tool enters the material in Z at the start of each pass.
@@ -381,10 +382,13 @@ pub enum Plunge {
     ZigZag { length: f64, angle_deg: f64 },
 }
 
-/// Rectangular holding tabs placed by distance or at selected contour locations.
+/// Holding tabs placed by distance, exact count or selected contour locations.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ProfileTabs {
+    pub shape: crate::TabShape,
+    /// None uses spacing; Some distributes this exact number per contour.
+    pub count: Option<u32>,
     pub enabled: bool,
     /// Retained material width along the contour (mm).
     pub width: f64,
@@ -401,6 +405,8 @@ pub struct ProfileTabs {
 impl Default for ProfileTabs {
     fn default() -> Self {
         Self {
+            shape: crate::TabShape::Rectangular,
+            count: None,
             enabled: false,
             width: 9.0,
             height: 3.0,
@@ -427,6 +433,9 @@ fn profile_closed_default() -> bool {
 /// A profile operation may contain several independently retracted contours.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    /// Additional pass controls. Defaults preserve existing saved cuts.
+    #[serde(default)]
+    pub passes: crate::ProfilePasses,
     /// None preserves legacy selections; Some(empty) is an explicitly empty collection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selections: Option<Vec<crate::ProfileGeometryEntry>>,
@@ -434,7 +443,7 @@ pub struct ProfileOp {
     pub closed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_chains: Vec<ProfileContour>,
-    /// Optional rectangular holding tabs (disabled in older projects).
+    /// Optional holding tabs (disabled in older projects).
     #[serde(default)]
     pub tabs: ProfileTabs,
     /// Operation id (0-based within the setup); stamped onto every emitted tag.
@@ -1948,6 +1957,7 @@ mod tests {
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: true,
             additional_chains: Vec::new(),
@@ -2015,6 +2025,8 @@ mod tests {
         let restored: ProfileOp = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.tabs, ProfileTabs::default());
         op.tabs = ProfileTabs {
+            shape: Default::default(),
+            count: None,
             enabled: true,
             width: 9.0,
             height: 3.0,

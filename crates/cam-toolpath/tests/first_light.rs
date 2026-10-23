@@ -50,6 +50,7 @@ fn document() -> Document {
         ..Default::default()
     };
     let outer = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -78,6 +79,7 @@ fn document() -> Document {
         plunge: Plunge::Straight,
     };
     let hole = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -206,6 +208,7 @@ fn tool_too_large_for_hole_reports_error() {
         ..Default::default()
     };
     let op = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -256,6 +259,7 @@ fn cancellation_stops_before_emitting() {
         ..Default::default()
     };
     let op = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -314,6 +318,7 @@ fn lead_overlap_recuts_past_the_start() {
     };
     let overlap = 2.0;
     let op = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -400,6 +405,7 @@ fn offset_leaves_stock_on_the_wall() {
     // out, leaving `offset` mm of stock on the wall for a later finishing pass.
     let run_offset = |offset: f64| {
         let op = ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: true,
             additional_chains: Vec::new(),
@@ -473,6 +479,7 @@ fn plunge_count(prog: &Program) -> usize {
 
 fn rough_op(side: Side, chain: Contour, stepover: f64) -> ProfileOp {
     ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -514,31 +521,16 @@ fn end_mill_tools() -> [Tool; 1] {
 }
 
 #[test]
-fn inside_profile_ignores_stepover_and_warns_on_uncut_core() {
-    // Radial stepover is outside-only: an inner profile is a single-pass wall
-    // finish, so a set stepover is ignored (one plunge). A hole far larger than
-    // the tool would leave an uncut core, so it warns (rough it with a pocket).
-    let op = rough_op(Side::Inside, rect(0.0, 0.0, 40.0, 40.0), 4.0);
+fn inside_profile_rejects_inapplicable_roughing_and_warns_for_a_plain_finish() {
+    let mut op = rough_op(Side::Inside, rect(0., 0., 40., 40.), 4.);
     let tools = end_mill_tools();
-    let env = JobEnv {
-        heights: Heights::new(5.0, 2.0, 0.0),
-        tools: &tools,
-        stock: None,
-        spindle: cam_cldata::SpindleDir::Cw,
-    };
-    let r = ProfileStrategy::new(op).compute(&env, &CancelToken::new());
-    assert!(!r.has_errors(), "{:?}", r.diagnostics);
-    assert_eq!(
-        plunge_count(&r.program),
-        1,
-        "an inner profile is a single finishing pass, not radial roughing"
-    );
-    assert!(
-        r.diagnostics
-            .iter()
-            .any(|d| d.severity == cam_toolpath::Severity::Warning),
-        "warns that the inner profile leaves an uncut core"
-    );
+    let env = JobEnv { heights: Heights::new(5., 2., 0.), tools: &tools, stock: None, spindle: cam_cldata::SpindleDir::Cw };
+    let bad=ProfileStrategy::new(op.clone()).compute(&env,&CancelToken::new());
+    assert!(bad.has_errors()); assert!(bad.program.is_empty());
+    op.stepover=0.;
+    let r=ProfileStrategy::new(op).compute(&env,&CancelToken::new());
+    assert!(!r.has_errors(),"{:?}",r.diagnostics); assert_eq!(plunge_count(&r.program),1);
+    assert!(r.diagnostics.iter().any(|d|d.severity==cam_toolpath::Severity::Warning));
 }
 
 #[test]
@@ -595,20 +587,12 @@ fn stepover_roughs_outside_frame_to_the_stock() {
 }
 
 #[test]
-fn outside_stepover_without_stock_is_a_single_pass() {
-    // No stock ⇒ there is no frame to define, so roughing falls back to a single
-    // finishing pass: one plunge for the single depth level.
-    let op = rough_op(Side::Outside, rect(10.0, 10.0, 50.0, 50.0), 4.0);
-    let tools = end_mill_tools();
-    let env = JobEnv {
-        heights: Heights::new(5.0, 2.0, 0.0),
-        tools: &tools,
-        stock: None,
-        spindle: cam_cldata::SpindleDir::Cw,
-    };
-    let r = ProfileStrategy::new(op).compute(&env, &CancelToken::new());
-    assert!(!r.has_errors(), "{:?}", r.diagnostics);
-    assert_eq!(plunge_count(&r.program), 1, "falls back to one finishing pass");
+fn outside_stepover_without_stock_is_an_explicit_error() {
+    let op=rough_op(Side::Outside,rect(10.,10.,50.,50.),4.);
+    let tools=end_mill_tools();
+    let env=JobEnv { heights:Heights::new(5.,2.,0.),tools:&tools,stock:None,spindle:cam_cldata::SpindleDir::Cw };
+    let r=ProfileStrategy::new(op).compute(&env,&CancelToken::new());
+    assert!(r.has_errors()); assert!(r.program.is_empty());
 }
 
 /// Parse grbl output (modal, absolute) and assert safety/correctness invariants:
@@ -755,6 +739,7 @@ fn ascii_backplot(prog: &Program, w: usize, h: usize) -> String {
 #[test]
 fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
     let op = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -904,6 +889,7 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
     let mut operations = vec![Operation::Carve(carve)];
     if let Some(t) = trailing_tool {
         operations.push(Operation::Profile(ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: true,
             additional_chains: Vec::new(),

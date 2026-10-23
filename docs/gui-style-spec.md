@@ -138,6 +138,13 @@ visibility only and must not imply that machining behavior has been disabled.
 
 ## Review checklist for GUI changes
 
+Inspector hover help uses `help_wrap` and the shared content renderer in
+`gui_help.rs`. Reuse the 600 ms delay, popup surface and tooltip setting. Spatial
+concepts can include bundled SVG artwork alongside readable explanatory text;
+icons alone do not explain the machining effect. Profile's persistent help action
+uses the same content and remains available without hovering. New optional
+controls must follow the existing section-toggle rules above.
+
 - Reuse the shared styles; document any new shared token or component here.
 - Check headings against parameter labels: equal size, section names bold.
 - Check default, hover, pressed, selected, focused, invalid and disabled states

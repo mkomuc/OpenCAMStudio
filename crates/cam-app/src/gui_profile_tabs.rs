@@ -5,15 +5,17 @@ use iced::widget::column;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Positioning {
     ByDistance,
+    ByCount,
     Manual,
 }
 impl Positioning {
-    pub(super) const ALL: [Self; 2] = [Self::ByDistance, Self::Manual];
+    pub(super) const ALL: [Self; 3] = [Self::ByDistance, Self::ByCount, Self::Manual];
 }
 impl std::fmt::Display for Positioning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::ByDistance => "By distance",
+            Self::ByCount => "By count",
             Self::Manual => "Manual",
         })
     }

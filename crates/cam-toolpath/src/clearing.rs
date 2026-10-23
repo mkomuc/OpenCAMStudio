@@ -167,6 +167,7 @@ pub(crate) fn clear(
     // clearer. Front-advance kills the *slots* (the machine-and-tool hazard); the benign
     // floor is a per-loop feedrate matter. See [`crate::frontadvance::CERT_ENGAGEMENT_SLACK`].
     if job.clearing.engagement > 0.0
+        && !matches!(job.plunge, Plunge::Ramp { .. })
         && job.adaptive_may_run()
         && job.lead_in == Lead::None
         && job.lead_out == Lead::None
@@ -197,6 +198,7 @@ pub(crate) fn clear(
     }
 
     if job.clearing.engagement > 0.0
+        && !matches!(job.plunge, Plunge::Ramp { .. })
         && job.adaptive_may_run()
         && region.holes().is_empty()
         && job.lead_in == Lead::None
@@ -222,6 +224,17 @@ pub(crate) fn clear(
         return Ok(0);
     }
     let n = rings.len();
+    let vertices: usize = rings.iter().map(|r|r.pts.len()).sum();
+    if vertices.saturating_mul(levels.len()).saturating_mul(34) > cam_model::MAX_PROFILE_MOVES {
+        return Err(RingsError::Limit("Clearing motion budget exceeded; increase stepover/stepdown".into()));
+    }
+    for ring in &rings {
+        let mut previous=heights.top_of_stock;
+        for &z in levels {
+            crate::profile::validate_ramp_travel(job.plunge,previous-z,crate::profile::loop_perimeter(&ring.pts)).map_err(RingsError::Limit)?;
+            previous=z;
+        }
+    }
 
     // Conventional milling reverses every loop's travel; the wall-lead geometry is
     // told via `reversed` so the leads still sit on the cleared side. Which winding
@@ -252,7 +265,9 @@ pub(crate) fn clear(
         heights,
         levels,
         1.5 * spacing,
+        cancel,
     );
+    if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
     Ok(n)
 }
 

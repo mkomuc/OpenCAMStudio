@@ -11,9 +11,10 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
     let mut fields = match op {
         Operation::Profile(p) => {
             let mut fields = vec![Field::Depth, Field::Stepdown];
+            fields.extend(profile_parameters::numeric_fields(p));
             // Radial roughing (stepover) is outside-only; an inner profile is
             // a single-pass wall finish (rough the pocket first).
-            if p.closed && p.additional_chains.is_empty() && p.side == Side::Outside && p.comp == cam_model::Comp::Computed {
+            if p.capabilities(false, true).roughing || p.stepover != 0. {
                 fields.push(Field::Stepover);
                 fields.push(Field::Engagement);
             }
@@ -25,7 +26,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             ]);
             if p.tabs.enabled {
                 fields.extend([Field::TabWidth, Field::TabHeight]);
-                if !p.tabs.manual {
+                if !p.tabs.manual && p.tabs.count.is_none() {
                     fields.push(Field::TabSpacing);
                 }
             }
@@ -33,7 +34,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             if p.lead_in != Lead::None {
                 fields.push(Field::LeadInSize);
             }
-            if p.lead_out != Lead::None {
+            if p.lead_out != Lead::None && !p.passes.same_lead_out {
                 fields.push(Field::LeadOutSize);
             }
             fields.push(Field::LeadOverlap);

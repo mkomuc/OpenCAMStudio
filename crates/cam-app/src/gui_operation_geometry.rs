@@ -109,8 +109,7 @@ impl App {
                     .padding(4)
                     .style(inspector_secondary)
                     .on_press(Message::OperationGeometry(GeometryMessage::Add(filter))),
-                description,
-            ));
+                description, self.tooltips));
         }
         toolbar = toolbar.push(hint(
             button(icon("remove", 28.))
@@ -119,8 +118,7 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Remove)),
                 ),
-            "Delete the selected geometry item.",
-        ));
+            "Delete the selected geometry item.", self.tooltips));
         toolbar = toolbar.push(hint(
             button(icon("settings", 28.))
                 .padding(4)
@@ -128,8 +126,7 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Edit)),
                 ),
-            "Configure the selected geometry and its selection mode.",
-        ));
+            "Configure the selected geometry and its selection mode.", self.tooltips));
         geometry_collection(
             if kind == OpKind::Thread {
                 "Thread selection"
@@ -494,8 +491,7 @@ impl App {
                         .padding(4)
                         .style(move |theme, status| inspector_tab(theme, status, active))
                         .on_press(Message::GeometryFilterChanged(filter)),
-                    description,
-                ));
+                    description, self.tooltips));
             }
             body = body.push(controls);
         }

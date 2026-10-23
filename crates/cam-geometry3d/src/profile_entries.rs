@@ -194,7 +194,12 @@ fn collect(
         if let Some(interval) = interval {
             merge_heights(&mut heights, interval)?;
         }
-        profiles.extend(contours);
+        for contour in contours {
+            if profiles.iter().any(|previous| cam_model::equivalent_profile_contours(previous,&contour)) {
+                return Err(format!("Profile geometry entry '{}': this contour repeats an earlier selected boundary; remove the duplicate",entry.name));
+            }
+            profiles.push(contour);
+        }
     }
     Ok((profiles, heights))
 }

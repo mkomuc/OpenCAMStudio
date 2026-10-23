@@ -388,6 +388,7 @@ impl Strategy for CarveStrategy {
                     op.plunge_feed
                 };
                 let levels = crate::profile::depth_levels(op.top, op.top - op.depth, stepdown);
+                if levels.is_empty() { fail!("operation {}: invalid or excessive clearing depths; increase stepdown",op.id); }
                 // `offset` is a real finishing allowance here: how far the end mill stays
                 // off the carved surface, leaving that skin for the V-bit — which cuts it
                 // better, with the flank of its cone rather than a corner. Nothing is left
@@ -468,7 +469,7 @@ impl Strategy for CarveStrategy {
                                     ..Default::default()
                                 };
                             }
-                            Err(crate::rings::RingsError::Offset(e)) => {
+                            Err(crate::rings::RingsError::Offset(e) | crate::rings::RingsError::Limit(e)) => {
                                 fail!("operation {}: clearing offset failed: {e}", op.id)
                             }
                         }

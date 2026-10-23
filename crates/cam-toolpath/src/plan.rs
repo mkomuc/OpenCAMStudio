@@ -459,6 +459,14 @@ fn compute_at_heights(
     compute: &mut impl FnMut(&Operation, &JobEnv, &CancelToken) -> StrategyResult,
     linked: bool,
 ) -> StrategyResult {
+    if let Operation::Profile(p) = operation {
+        if let Err(reason) = p.validate_profile_source(linked) {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            };
+        }
+    }
     if let Err(reason) = heights.validate() {
         return StrategyResult {
             diagnostics: vec![Diagnostic::error(reason)],

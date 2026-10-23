@@ -27,6 +27,7 @@ pub(crate) enum RingsError {
     Cancelled,
     /// A geometry offset failed.
     Offset(String),
+    Limit(String),
 }
 
 /// Concentric offset rings clearing a region: offset it inward from the wall by
@@ -64,10 +65,21 @@ pub(crate) fn concentric_rings(
                 });
             }
         }
-        d += stepover;
+        let next = d + stepover;
+        if stepover > 0. && next == d {
+            return Err(RingsError::Limit(
+                "Radial stepover is too small to advance the offset".into(),
+            ));
+        }
+        d = next;
         is_wall = false;
         // A non-positive stepover would never advance; take the wall ring and stop.
-        if stepover <= 0.0 || rings.len() > MAX_RINGS {
+        if rings.len() > MAX_RINGS {
+            return Err(RingsError::Limit(
+                "Too many roughing rings; increase stepover".into(),
+            ));
+        }
+        if stepover <= 0.0 {
             break;
         }
     }
@@ -75,7 +87,14 @@ pub(crate) fn concentric_rings(
 }
 
 /// Cut one closed ring (plus closure overlap) at `z`, returning the exit point.
-fn cut_ring(prog: &mut Program, pts: &[Point], feed: f64, tag: Tag, lead_overlap: f64, z: f64) -> Point {
+fn cut_ring(
+    prog: &mut Program,
+    pts: &[Point],
+    feed: f64,
+    tag: Tag,
+    lead_overlap: f64,
+    z: f64,
+) -> Point {
     let (loop_pts, exit, _tan) = crate::emit::loop_with_overlap(pts, lead_overlap);
     crate::emit::cut_polyline(prog, &loop_pts, feed, tag, z);
     exit
@@ -218,7 +237,20 @@ fn approach(
         tag: Tag::new(id, MoveKind::Link),
     });
     enter_with_plunge(
-        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path,
+        prog,
+        p,
+        tan,
+        out,
+        from_z,
+        z,
+        h,
+        plunge,
+        plunge_feed,
+        entry_feeds,
+        feed,
+        id,
+        ring,
+        lead_path,
     )
 }
 
@@ -270,8 +302,21 @@ fn emit_wall_ring(
     // and then along the ring. So the lead is handed to the entry rather than emitted
     // after it.
     let ramped = approach(
-        prog, prev_end, entry, tan_in, cin, from_z, z, h, plunge, feed, plunge_feed, entry_feeds, id,
-        link_threshold, &ri,
+        prog,
+        prev_end,
+        entry,
+        tan_in,
+        cin,
+        from_z,
+        z,
+        h,
+        plunge,
+        feed,
+        plunge_feed,
+        entry_feeds,
+        id,
+        link_threshold,
+        &ri,
         crate::profile::lead_in_path(start, entry, cin, eff_in),
     );
     match ramped {
@@ -289,13 +334,43 @@ fn emit_wall_ring(
             let exit = crate::leads::lead_end_point(last, tan_out, cout, eff_out);
             crate::emit::cut_polyline(prog, &walked, feed, cut, z);
             // The lead-**out** stays flat at depth; only the lead-in descends.
-            crate::leads::emit_lead(prog, last, exit, last, cout, eff_out, z, entry_feeds.lead_out(feed), Tag::new(id, MoveKind::LeadOut));
+            crate::leads::emit_lead(
+                prog,
+                last,
+                exit,
+                last,
+                cout,
+                eff_out,
+                z,
+                entry_feeds.lead_out(feed),
+                Tag::new(id, MoveKind::LeadOut),
+            );
             exit
         }
         None => {
-            crate::leads::emit_lead(prog, entry, start, start, cin, eff_in, z, entry_feeds.lead_in(feed), lead);
+            crate::leads::emit_lead(
+                prog,
+                entry,
+                start,
+                start,
+                cin,
+                eff_in,
+                z,
+                entry_feeds.lead_in(feed),
+                lead,
+            );
             crate::emit::cut_polyline(prog, &loop_pts, feed, cut, z);
-            crate::leads::emit_lead(prog, exit_on, exit, exit_on, cout, eff_out, z, entry_feeds.lead_out(feed), Tag::new(id, MoveKind::LeadOut));
+            crate::leads::emit_lead(
+                prog,
+                exit_on,
+                exit,
+                exit_on,
+                cout,
+                eff_out,
+                z,
+                entry_feeds.lead_out(feed),
+                Tag::new(id, MoveKind::LeadOut),
+            );
             exit
         }
     }
@@ -334,6 +409,7 @@ pub(crate) fn emit_stay_down(
     h: &Heights,
     levels: &[f64],
     link_threshold: f64,
+    cancel: &CancelToken,
 ) {
     if rings.is_empty() {
         return;
@@ -346,6 +422,9 @@ pub(crate) fn emit_stay_down(
 
     let mut from_z = h.retract.max(h.top_of_stock);
     for &z in levels {
+        if cancel.is_cancelled() {
+            return;
+        }
         // Enter at the innermost ring (a boundary loop, so the plunge strategy's
         // helix/ramp is placed on the inward, cleared side), per the operator's
         // start preference. The descent after the first level is one stepdown into
@@ -397,6 +476,9 @@ pub(crate) fn emit_stay_down(
         };
 
         for ring in &rings[1..] {
+            if cancel.is_cancelled() {
+                return;
+            }
             if ring.is_wall && leaded {
                 prev_end = emit_wall_ring(
                     prog,

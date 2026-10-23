@@ -93,11 +93,14 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
 }
 
 fn post(doc: &Document, name: &str) -> (Program, String) {
+    // A roughing fixture must provide real stock rather than exercising the old
+    // silent single-pass fallback. Other strategies do not consume these bounds.
+    let stock=doc.setup().operations.iter().any(|op|matches!(op,Operation::Profile(p) if p.stepover>0.)).then_some(([0.,0.],[60.,50.]));
     let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         doc,
         1000.0,
         SpindleDir::Cw,
-        None,
+        stock,
         machine().envelope.max.z,
         &CancelToken::new(),
     );
@@ -209,6 +212,7 @@ fn pocket_doc() -> Document {
 /// An outside profile with radial roughing — the *other* caller of the clearing engine.
 fn roughing_doc() -> Document {
     let op = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),

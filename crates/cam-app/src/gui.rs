@@ -90,6 +90,10 @@ mod picking_view;
 mod profile_entries_view;
 #[path = "gui_profile_sides.rs"]
 mod profile_sides;
+#[path = "gui_help.rs"]
+mod illustrated_help;
+#[path = "gui_profile_parameters.rs"]
+mod profile_parameters;
 #[path = "gui_profile_tabs.rs"]
 mod profile_tabs;
 #[path = "gui_wcs.rs"]
@@ -715,6 +719,7 @@ impl LeadKind {
             Lead::None => LeadKind::None,
             Lead::Linear { .. } => LeadKind::Linear,
             Lead::Arc { .. } => LeadKind::Arc,
+            Lead::ArcSweep { .. } => LeadKind::Arc,
         }
     }
 
@@ -723,12 +728,16 @@ impl LeadKind {
         let size = match prev {
             Lead::None => 3.0,
             Lead::Linear { length } => length,
-            Lead::Arc { radius } => radius,
+            Lead::Arc { radius } | Lead::ArcSweep { radius, .. } => radius,
         };
         match self {
             LeadKind::None => Lead::None,
             LeadKind::Linear => Lead::Linear { length: size },
-            LeadKind::Arc => Lead::Arc { radius: size },
+            LeadKind::Arc => if let Lead::ArcSweep { angle_deg, .. } = prev {
+                Lead::ArcSweep { radius: size, angle_deg }
+            } else {
+                Lead::Arc { radius: size }
+            },
         }
     }
 }
@@ -1091,6 +1100,7 @@ enum Field {
     Stepover,
     /// Profile finishing allowance left on the wall (mm).
     ProfileOffset,
+    Profile(profile_parameters::Number),
     TabWidth,
     TabHeight,
     TabSpacing,
@@ -1222,7 +1232,8 @@ impl Field {
             Field::TabWidth => "Tab width (mm)",
             Field::TabHeight => "Tab height (mm)",
             Field::TabSpacing => "Tab spacing (mm)",
-            Field::ProfileOffset => "Offset / leave (mm)",
+            Field::ProfileOffset => "Wall allowance (mm)",
+            Field::Profile(n) => n.label(),
             Field::Stepdown => "Stepdown (mm)",
             Field::Stepover => "Stepover (mm)",
             Field::SpindleRpm => "Spindle (rpm)",
@@ -1422,6 +1433,7 @@ impl Field {
             Field::TabWidth => "Retained tab width along the contour. Tool diameter is added to the protected travel length.",
             Field::TabHeight => "Tab height above the final profile floor; must be less than the cut depth.",
             Field::TabSpacing => "Maximum distance between tab centres. Tabs are distributed evenly along each toolpath contour.",
+            Field::Profile(n) => n.help(),
             Field::ProfileOffset => {
                 "Finishing allowance left on the wall (mm): the roughing pass stops this \
                  far from the final profile so a finish pass can clean it up. 0 = cut to \
@@ -1620,10 +1632,7 @@ fn help_wrap<'a>(
     }
     delayed_tooltip(
         content,
-        container(text(help).size(12))
-            .padding(8)
-            .max_width(300.0)
-            .style(container::rounded_box),
+        illustrated_help::content(help),
         tooltip::Position::Left,
     )
     .into()
@@ -1650,12 +1659,10 @@ fn label_help<'a>(
 /// Numeric fields carry their own via [`Field::help`].
 mod help {
     pub const SIDE: &str =
-        "Which side of the selected chain the tool runs. Outside keeps the chain as the \
-         finished part (cut around it); Inside cuts a pocket/bore to the chain; On centres \
-         the tool on the line.";
+        "Which side of the chain the tool runs. Outside retains the enclosed part. Inside finishes the wall and can leave an uncut core: clear the pocket separately. On centers the tool on the line. Open left/right sides follow the selected chain direction.";
     pub const LEAD_IN: &str =
         "How the tool eases onto the wall at the start of a pass instead of diving \
-         straight in — an arc or a straight ramp — to avoid a dwell/witness mark. None \
+         straight in — a flat arc or tangent line — to avoid a dwell/witness mark. None \
          starts cutting directly.";
     pub const LEAD_OUT: &str =
         "How the tool eases off the wall at the end of a pass (see lead-in).";
@@ -1664,10 +1671,7 @@ mod help {
          centre-cutting tool or pre-drilled hole); Ramp descends along the toolpath itself, \
          arriving on the contour at full depth; Zig-zag oscillates in place, for a slot too \
          narrow to ramp along; Helix spirals down — all gentler than a straight plunge.";
-    pub const CLIMB: &str =
-        "Milling direction. Climb (recommended) gives a cleaner finish and is required for \
-         adaptive clearing; unticking it is conventional milling, which reverses the pass \
-         direction.";
+    pub const CLIMB: &str = "Climb (down milling) starts with a thick chip that becomes thinner. Conventional (up milling) starts thin and becomes thicker. Profile travel follows this choice, the spindle rotation and cutter side. On-contour slots engage both sides; here the setting reverses travel. Conventional clearing uses the concentric strategy.";
     pub const CARVE_CLEAR: &str =
         "Clear the flat areas the depth cap leaves with a second, flat-bottomed tool \
          before the V-bit runs. A cone cannot leave a flat floor, so without this those \
@@ -1730,7 +1734,7 @@ fn lead_size(lead: Lead) -> f64 {
     match lead {
         Lead::None => 0.0,
         Lead::Linear { length } => length,
-        Lead::Arc { radius } => radius,
+        Lead::Arc { radius } | Lead::ArcSweep { radius, .. } => radius,
     }
 }
 
@@ -1751,6 +1755,7 @@ fn set_lead_size(lead: Lead, size: f64) -> Lead {
         Lead::None => Lead::None,
         Lead::Linear { .. } => Lead::Linear { length: size },
         Lead::Arc { .. } => Lead::Arc { radius: size },
+        Lead::ArcSweep { angle_deg, .. } => Lead::ArcSweep { radius: size, angle_deg },
     }
 }
 
@@ -1898,6 +1903,7 @@ struct App {
     geometry_additive: bool,
     geometry_editor: Option<operation_geometry::GeometryEditor>,
     profile_tab_picking: bool,
+    profile_help_open: bool,
     profile_tab_selection: Option<usize>,
     profile_contour_selection: usize,
     profile_side_overrides: Vec<cam_model::ProfileContour>,
@@ -2370,7 +2376,13 @@ enum Message {
     CancelToolDraft,
     RunJob,
     OperationTabChanged(OperationTab),
+    ProfileHelp,
     ProfileCompChanged(cam_model::Comp),
+    ProfilePassToggle(profile_parameters::Toggle, bool),
+    ProfileOrder(cam_model::ProfileOrder),
+    ProfileTabShape(cam_model::TabShape),
+    ProfileCorner(cam_model::ProfileCorner),
+    ProfileStockBoundary(profile_parameters::StockChoice),
     ProfileTabsEnabled(bool),
     ProfileTabPositioning(profile_tabs::Positioning),
     ProfileTabPickToggle,
@@ -3203,6 +3215,7 @@ impl App {
             geometry_additive: false,
             geometry_editor: None,
             profile_tab_picking: false,
+            profile_help_open: false,
             profile_tab_selection: None,
             profile_contour_selection: 0,
             profile_side_overrides: Vec::new(),
@@ -3713,6 +3726,7 @@ impl App {
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(p) = op {
                         p.tabs.manual = mode == profile_tabs::Positioning::Manual;
+                        p.tabs.count = if mode == profile_tabs::Positioning::ByCount { Some(p.tabs.count.unwrap_or(4)) } else { None };
                         if let Some(spacing) = spacing {
                             p.tabs.spacing = spacing;
                         }
@@ -3803,13 +3817,51 @@ impl App {
                     }
                 });
             }
+            Message::ProfileHelp => {
+                self.profile_help_open = !self.profile_help_open;
+            }
+            Message::ProfilePassToggle(toggle, value) => {
+                let parsed = self.fields.iter().filter_map(|(f, s)| {
+                    s.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (*f, v))
+                }).collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Profile(p) = op { toggle.set(p, value); }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ProfileOrder(order) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(p) = op { p.passes.order = order; }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ProfileStockBoundary(choice) => {
+                let boundary = match choice {
+                    profile_parameters::StockChoice::Setup => None,
+                    profile_parameters::StockChoice::Drawing(index) => {
+                        self.controller.regions().get(index).map(|p| p.outer().clone())
+                    }
+                    profile_parameters::StockChoice::Saved => return iced::Task::none(),
+                };
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(p) = op { p.passes.stock_boundary = boundary; }
+                });
+            }
+            Message::ProfileCorner(corner) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(p) = op { p.passes.outer_corner = corner; }
+                });
+            }
+            Message::ProfileTabShape(shape) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Profile(p) = op { p.tabs.shape = shape; }
+                });
+            }
             Message::ProfileCompChanged(comp) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(profile) = op {
                         profile.comp = comp;
-                        if comp != cam_model::Comp::Computed {
-                            profile.clearing.climb = comp == cam_model::Comp::ControlLeft;
-                        }
                     }
                 });
                 self.refresh_operation_fields();
@@ -6096,13 +6148,6 @@ impl App {
                     Operation::Pocket(p) => p.clear.clearing.climb = on,
                     Operation::Profile(p) => {
                         p.clearing.climb = on;
-                        if p.comp != cam_model::Comp::Computed {
-                            p.comp = if on {
-                                cam_model::Comp::ControlLeft
-                            } else {
-                                cam_model::Comp::ControlRight
-                            };
-                        }
                     }
                     _ => {}
                 });
@@ -7257,6 +7302,9 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
+        if self.profile_parameter_error().is_some() {
+            return true;
+        }
         if self.library_mode() && self.preset_edit_invalid() {
             return true;
         }
@@ -9983,6 +10031,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (op, Field::LeadInFeed) => Some(op.entry_feeds().lead_in.unwrap_or(0.)),
         (op, Field::LeadOutFeed) => Some(op.entry_feeds().lead_out.unwrap_or(0.)),
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
+        (Operation::Profile(o), Field::Profile(n)) => Some(n.get(o)),
         (Operation::Profile(o), Field::Stepover) => Some(o.stepover),
         (Operation::Profile(o), Field::TabWidth) => Some(o.tabs.width),
         (Operation::Profile(o), Field::TabHeight) => Some(o.tabs.height),
@@ -10093,6 +10142,11 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
     }
     match op {
         Operation::Profile(o) => {
+            for (&field, &value) in parsed {
+                if let Field::Profile(n) = field {
+                    if !n.invalid(value) { n.set(o, value); }
+                }
+            }
             if let Some(v) = get(Field::TabWidth) {
                 o.tabs.width = v;
             }
@@ -13175,9 +13229,9 @@ mod inspector_field_tests {
                 let Some(before) = op_field(op, field) else {
                     panic!("{}: {field:?} is shown but cannot be read", op_kind(op));
                 };
-                // +1 clears every lower clamp in `apply_op_fields` (all are `max(0.0)`
-                // or `max(1)`) without reaching the one upper clamp (overlap, 99%).
-                let want = before + 1.0;
+                // Exercise a valid edit; bottom-referenced taper permits only
+                // nonpositive slopes for the supported cylindrical tools.
+                let want = if field==Field::Profile(profile_parameters::Number::Taper) {before-1.} else {before+1.};
                 let mut edited = op.clone();
                 let mut parsed = BTreeMap::new();
                 parsed.insert(field, want);

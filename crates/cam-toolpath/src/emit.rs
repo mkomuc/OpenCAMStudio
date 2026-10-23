@@ -1,13 +1,13 @@
 //! Shared move emission: cut a closed loop, refitting flattened corners to arcs,
 //! and the one rule every strategy's descent obeys ([`descend_to`]).
 
-use cam_cldata::{MoveKind, Point3, Program, Step, Tag};
 use cam_cldata::ArcDir;
+use cam_cldata::{MoveKind, Point3, Program, Step, Tag};
 use cam_geo::{fit_arcs, PathSeg, Point};
 use cam_model::Heights;
 
 /// Tolerance for recognising arcs in flattened offset loops (mm).
-pub(crate) const ARCFIT_TOL: f64 = 0.01;
+pub(crate) const ARCFIT_TOL: f64 = cam_model::DEFAULT_ARC_FIT_TOLERANCE;
 
 /// How far above a cut floor a rapid must stop, mm.
 ///
@@ -85,10 +85,21 @@ pub(crate) fn descend_to(
 /// [`cut_loop`] this does not auto-close — the caller supplies the full point list
 /// (e.g. a pre-closed loop, or a loop-plus-overlap from [`loop_with_overlap`]).
 pub(crate) fn cut_polyline(prog: &mut Program, pts: &[Point], feed: f64, tag: Tag, z: f64) {
+    cut_polyline_tolerance(prog, pts, feed, tag, z, ARCFIT_TOL);
+}
+
+pub(crate) fn cut_polyline_tolerance(
+    prog: &mut Program,
+    pts: &[Point],
+    feed: f64,
+    tag: Tag,
+    z: f64,
+    tolerance: f64,
+) {
     if pts.len() < 2 {
         return;
     }
-    for seg in fit_arcs(pts, ARCFIT_TOL) {
+    for seg in fit_arcs(pts, tolerance) {
         match seg {
             PathSeg::Line { end } => prog.push(Step::Linear {
                 to: Point3::new(end.x, end.y, z),

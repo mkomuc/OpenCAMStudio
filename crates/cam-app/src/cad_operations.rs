@@ -453,6 +453,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: resolved.profiles.first().is_none_or(|p| p.closed),
             additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
@@ -727,9 +728,7 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                 }
                 (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {
-                    if p.comp != Comp::Computed || p.offset < 0. || p.stepover > 0. {
-                        return Err("CAD profiles require computed compensation, nonnegative allowance and no radial roughing".into());
-                    }
+                    p.validate_profile_source(true)?;
                     let mut contours = input.profiles.clone();
                     let first = contours.remove(0);
                     p.chain = first.chain;
@@ -744,9 +743,7 @@ pub(crate) fn resolve_document_checked(
                     ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette,
                 ) => {
                     let first = input.profiles.first().ok_or("No resolved profile chains")?;
-                    if p.comp != Comp::Computed || p.offset < 0. || p.stepover > 0. {
-                        return Err(format!("Operation {id}: CAD profiles require computed compensation, nonnegative allowance and no radial roughing"));
-                    }
+                    p.validate_profile_source(true)?;
                     p.chain = first.chain.clone();
                     p.closed = first.closed;
                     let sides: Vec<_> = p
@@ -772,9 +769,7 @@ pub(crate) fn resolve_document_checked(
                 (Operation::Profile(p), ExtractionRecipe::ProfileLoop { .. }) => {
                     // The recipe certifies the source geometry and cutting interval.
                     // Cutter side is an independent, per-contour operation setting.
-                    if p.comp != Comp::Computed || p.offset < 0.0 || p.stepover > 0.0 {
-                        return Err(format!("Operation {id}: CAD profiles require computed compensation, nonnegative allowance and no radial roughing"));
-                    }
+                    p.validate_profile_source(true)?;
                     p.chain = region()?.outer().clone();
                     p.closed = true;
                     p.additional_chains.clear();

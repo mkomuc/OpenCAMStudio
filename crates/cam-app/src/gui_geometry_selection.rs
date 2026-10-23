@@ -107,15 +107,17 @@ pub(super) fn selection_icon(name: &str, size: f32) -> iced::widget::Svg<'static
 pub(super) fn selection_hint<'a>(
     control: impl Into<Element<'a, Message>>,
     label: impl Into<String>,
+    show: bool,
 ) -> Element<'a, Message> {
+    let control = control.into();
+    if !show {
+        return control;
+    }
     delayed_tooltip(
         control,
-        container(text(label.into()).size(12).width(260))
-            .padding(10)
-            .style(popup_surface),
+        illustrated_help::content(&label.into()),
         tooltip::Position::Left,
-    )
-    .into()
+    ).into()
 }
 
 /// Shared frame, rows and toolbar placement for every operation's collection.

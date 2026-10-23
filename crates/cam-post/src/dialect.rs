@@ -125,7 +125,7 @@ pub(crate) fn emit(
     // nothing (see the `Datum` arm).
     let mut current_offset = options.work_offset;
 
-    for step in program.steps() {
+    for (step_index, step) in program.steps().iter().enumerate() {
         match step {
             Step::Comment(text) => {
                 let text = sanitize(text);
@@ -217,11 +217,25 @@ pub(crate) fn emit(
             }
             Step::CutterComp(c) => {
                 if dialect.cutter_comp {
-                    w.line(match c {
-                        CutterComp::Off => "G40".to_string(),
-                        CutterComp::Left(d) => format!("G41 D{d}"),
-                        CutterComp::Right(d) => format!("G42 D{d}"),
-                    });
+                    match c {
+                        CutterComp::Off => w.line("G40".into()),
+                        CutterComp::Left(d) | CutterComp::Right(d) => {
+                            if !matches!(
+                                program.steps().get(step_index + 1),
+                                Some(Step::Linear { .. })
+                            ) {
+                                return Err(PostError::Unsupported(
+                                    "Controller compensation must engage on a linear move".into(),
+                                ));
+                            }
+                            let code = if matches!(c, CutterComp::Left(_)) {
+                                "G41"
+                            } else {
+                                "G42"
+                            };
+                            w.prefix_next_linear(format!("{code} D{d}"));
+                        }
+                    }
                 } else {
                     // No cutter comp on this control — refuse control comp rather
                     // than silently drop it.

@@ -1964,6 +1964,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                passes: Default::default(),
                 selections: None,
                 closed,
                 additional_chains: islands
@@ -2464,6 +2465,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    passes: Default::default(),
                     selections: None,
                     closed: true,
                     additional_chains: Vec::new(),
@@ -4239,27 +4241,15 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_heights_surface_a_rapid_collision() {
+    fn unsafe_heights_are_rejected_before_profile_motion() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        // A clean run has no collisions.
         assert!(app.run(&CancelToken::new()).collisions.is_empty());
-        // Clearance/retract below the stock top force lateral rapids through the
-        // stock — the simulator must catch what a green backplot would hide.
-        app.edit_heights(|h| {
-            h.clearance = -1.0;
-            h.retract = -1.0;
-        });
+        app.edit_heights(|h| { h.clearance = -1.; h.retract = -1.; });
         let outcome = app.run(&CancelToken::new());
-        assert!(
-            !outcome.collisions.is_empty(),
-            "a rapid through stock must be flagged"
-        );
-        // ...and it blocks export (a machine-crash hazard).
-        assert!(
-            matches!(app.export_nc(), Err(ExportError::RapidThroughStock(_))),
-            "a rapid through stock must block export"
-        );
+        assert!(outcome.has_errors(), "Invalid safety planes must prevent generation");
+        assert_ne!(outcome.completion, JobCompletion::Complete);
+        assert!(app.export_nc().is_err(), "Invalid safety planes must block export");
     }
 
     #[test]
