@@ -15,6 +15,7 @@ The 2026-10-13 review is pinned to source revision `5c510b504fe39f4e40700ff3b1e3
 ## Existing project references
 
 - [GUI style specification](gui-style-spec.md): shared typography, colors, buttons, form layout, optional-section behavior, and review requirements for new GUI features.
+- [Profile operation review and implementation plan](profile-operation-review-plan.md): 2026-10-23 comparison with Autodesk's 2D Contour reference, correctness findings, duplicate-function and naming consolidation, a prioritizable backlog, and illustrated hover-help requirements.
 - [Setup operation patterns](operation-patterns-implementation.md): rectangular and circular patterns for one or multiple operations, context-menu creation, transactional editing, toolpath reuse and qualification limits. The [feature plan](operation-patterns-plan.md) records the broader acceptance specification.
 - [CAD import and feature selection plan](cad-import-feature-selection.md): STEP/IGES import, selectable topology, linked operation geometry, backend evaluation and staged acceptance gates.
 - [Adaptive-clearing baseline fix](adaptive-clearing-fix.md): root cause, conservative restart change, measurements and regression validation on the fork.
