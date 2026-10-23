@@ -415,22 +415,6 @@ impl App {
             list = list.push(self.reference_height_controls(id));
         }
         if tab == OperationTab::Linking {
-            let supports_start = matches!(
-                op,
-                Operation::Profile(_) | Operation::Pocket(_) | Operation::Carve(_)
-            ) || matches!(op, Operation::Engrave(o) if o.closed)
-                || matches!(op, Operation::Chamfer(o) if o.closed && o.faces.is_empty());
-            if supports_start {
-                list = list.push(
-                    row![
-                        text("Preferred start XY").size(12),
-                        checkbox(operation_start(op).is_some())
-                            .size(15)
-                            .on_toggle(Message::OperationStartEnabled)
-                    ]
-                    .spacing(8),
-                );
-            }
             match op {
                 Operation::Drill(_) => list = list.push(text("Approach and retract follow the drilling cycle and operation safety heights.").size(12)),
                 Operation::Face(_) => list = list.push(text("Facing links and turnaround arcs are determined by the strategy. Overshoot is on Passes.").size(12)),
@@ -445,9 +429,9 @@ impl App {
             }
             if matches!(
                 field,
-                Field::TabWidth | Field::TabHeight | Field::TabSpacing
+                Field::TabWidth | Field::TabHeight | Field::TabSpacing | Field::StartX | Field::StartY
             ) {
-                continue; // Grouped beneath the holding-tabs toggle.
+                continue; // Grouped beneath their section toggles.
             }
             if let Operation::Chamfer(chamfer) = op {
                 if field == Field::ChamferWidth
@@ -525,18 +509,12 @@ impl App {
                     ));
                 }
                 if tab == OperationTab::Geometry {
-                    list = list.push(iced::widget::rule::horizontal(1));
-                    list = list.push(
-                        row![
-                            text("Holding tabs").size(12),
-                            checkbox(p.tabs.enabled).size(15).on_toggle_maybe(
-                                (p.tabs.enabled || (p.closed && p.additional_chains.is_empty()))
-                                    .then_some(Message::ProfileTabsEnabled)
-                            )
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    );
+                    list = list.push(inspector_optional_section(
+                        "Holding tabs",
+                        p.tabs.enabled,
+                        (p.tabs.enabled || (p.closed && p.additional_chains.is_empty()))
+                            .then_some(Message::ProfileTabsEnabled),
+                    ));
                     if !p.closed || !p.additional_chains.is_empty() {
                         list = list.push(
                             text("Holding tabs require a single closed contour.")
@@ -822,21 +800,16 @@ impl App {
                     tab,
                     OperationTab::Tool | OperationTab::Passes | OperationTab::Linking
                 ) {
-                    list = list.push(iced::widget::rule::horizontal(1)).push(
-                        text("Clearing pass (end mill)")
-                            .size(12)
-                            .color(palette::GROUP_LABEL),
-                    );
+                    list = list.push(help_wrap(
+                        inspector_optional_section(
+                            "Clearing pass (end mill)",
+                            c.clear.is_some(),
+                            Some(Message::CarveClearToggled),
+                        ),
+                        help::CARVE_CLEAR,
+                        self.tooltips,
+                    ));
                     if tab == OperationTab::Tool {
-                        list = list.push(
-                            row![
-                                label_help("Clear flat areas", help::CARVE_CLEAR, self.tooltips),
-                                checkbox(c.clear.is_some())
-                                    .size(15)
-                                    .on_toggle(Message::CarveClearToggled)
-                            ]
-                            .spacing(8),
-                        );
                         if let Some(cl) = &c.clear {
                             let choices: Vec<ToolChoice> = self
                                 .library
@@ -871,6 +844,8 @@ impl App {
                                 })
                                 .placeholder("Choose an end mill")
                                 .text_size(12)
+                                .padding([7, 9])
+                                .style(inspector_picker)
                                 .width(Length::Fill),
                             );
                             list = list.push(text("Clearing feeds 0 inherit the V-bit feeds. One operation RPM applies to both tools.").size(11).color(palette::GROUP_LABEL));
@@ -928,16 +903,37 @@ impl App {
                                 Message::CarveClearLeadOutChanged,
                             ));
                         }
-                    } else if tab != OperationTab::Tool {
-                        list = list.push(
-                            text("Enable a clearing tool on Tool to edit its parameters.")
-                                .size(11)
-                                .color(palette::GROUP_LABEL),
-                        );
                     }
                 }
             }
             _ => {}
+        }
+        if tab == OperationTab::Linking {
+            let supports_start = matches!(
+                op,
+                Operation::Profile(_) | Operation::Pocket(_) | Operation::Carve(_)
+            ) || matches!(op, Operation::Engrave(o) if o.closed)
+                || matches!(op, Operation::Chamfer(o) if o.closed && o.faces.is_empty());
+            if supports_start {
+                list = list.push(inspector_optional_section(
+                    "Preferred start XY",
+                    operation_start(op).is_some(),
+                    Some(Message::OperationStartEnabled),
+                ));
+                if operation_start(op).is_some() {
+                    for field in [Field::StartX, Field::StartY] {
+                        let value = self.fields.get(&field).cloned().unwrap_or_default();
+                        list = list.push(field_row_labeled(
+                            field,
+                            self.field_label(field),
+                            self.field_help(field),
+                            &value,
+                            self.tooltips,
+                            self.field_invalid(field),
+                        ));
+                    }
+                }
+            }
         }
         let footer = inspector_footer(
             row![

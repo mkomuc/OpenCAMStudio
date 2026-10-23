@@ -143,6 +143,9 @@ cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam" # o
 Stable Rust, pinned in `rust-toolchain.toml`. GUI prerequisites and platform
 notes: [RUNNING.md](RUNNING.md).
 
+GUI contributions follow the [GUI style specification](docs/gui-style-spec.md)
+for shared controls, colors, typography, and configuration-section behavior.
+
 Load a saved setup/project at startup (useful for automated GUI tests):
 
 ```bash

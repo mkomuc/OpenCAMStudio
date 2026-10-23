@@ -82,6 +82,7 @@ impl App {
             .map(|p| (p, fmt_num(settings.definition(p).offset)))
             .collect();
         self.height_draft = Some(settings);
+        self.height_disabled_feed_reference = None;
         self.sync_creation_tool();
         let work_offset = self.controller.active_origin();
         self.edit_operation_draft(|op| op.set_work_offset(work_offset));

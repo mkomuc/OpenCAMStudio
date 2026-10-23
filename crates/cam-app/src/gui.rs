@@ -1908,6 +1908,7 @@ struct App {
     focused_height: Option<String>,
     height_draft_id: Option<u32>,
     height_draft: Option<cam_model::OperationHeightSettings>,
+    height_disabled_feed_reference: Option<cam_model::HeightReference>,
     height_offsets: BTreeMap<cam_model::HeightPlaneKind, String>,
     height_reference_pick: Option<cam_model::HeightPlaneKind>,
     collapsed_heights: BTreeSet<cam_model::HeightPlaneKind>,
@@ -2437,6 +2438,7 @@ enum Message {
     HeightOffsetChanged(cam_model::HeightPlaneKind, String),
     HeightSourceToggled(cam_model::HeightPlaneKind, cam_model::HeightReference, bool),
     HeightSectionToggle(cam_model::HeightPlaneKind),
+    HeightFeedEnabled(bool),
     HeightPickToggle(cam_model::HeightPlaneKind),
     HeightSelectionClear(cam_model::HeightPlaneKind),
     HeightEntityRemove(cam_model::HeightPlaneKind, usize),
@@ -3211,6 +3213,7 @@ impl App {
             focused_height: None,
             height_draft_id: None,
             height_draft: None,
+            height_disabled_feed_reference: None,
             height_offsets: BTreeMap::new(),
             height_reference_pick: None,
             collapsed_heights: BTreeSet::new(),
@@ -4380,6 +4383,18 @@ impl App {
             Message::HeightReferenceChanged(plane, reference) => {
                 self.height_reference_selected(plane, reference)
             }
+            Message::HeightFeedEnabled(enabled) => {
+                use cam_model::{HeightPlaneKind as Plane, HeightReference as Reference};
+                let reference = if enabled {
+                    self.height_disabled_feed_reference
+                        .take()
+                        .unwrap_or(Reference::Plane(Plane::Top))
+                } else {
+                    Reference::Disabled
+                };
+                self.height_reference_selected(Plane::Feed, reference);
+                self.collapsed_heights.remove(&Plane::Feed);
+            }
             Message::HeightOffsetChanged(plane, value) => {
                 self.height_offsets.insert(plane, value);
                 self.focused_height = Some(height_editor::plane_input_id(plane));
@@ -4401,6 +4416,7 @@ impl App {
                     .map(|p| (p, fmt_num(settings.definition(p).offset)))
                     .collect();
                 self.height_draft = Some(settings);
+                self.height_disabled_feed_reference = None;
                 self.height_reference_pick = None;
             }
             Message::HeightSectionToggle(plane) => {

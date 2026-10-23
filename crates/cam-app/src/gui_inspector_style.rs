@@ -1,4 +1,5 @@
 //! Shared visual language for inspector forms, navigation and actions.
+//! New GUI features must follow docs/gui-style-spec.md and reuse these helpers.
 use super::*;
 use iced::widget::column;
 
@@ -6,6 +7,11 @@ pub(super) const INSPECTOR_TEXT: Color = Color::from_rgb(0.86, 0.88, 0.91);
 pub(super) const INSPECTOR_MUTED: Color = Color::from_rgb(0.61, 0.65, 0.71);
 const SURFACE: Color = Color::from_rgb(0.16, 0.18, 0.21);
 const OUTLINE: Color = Color::from_rgb(0.25, 0.28, 0.32);
+pub(super) const INSPECTOR_TEXT_SIZE: f32 = 12.0;
+pub(super) const INSPECTOR_SECTION_FONT: iced::Font = iced::Font {
+    weight: iced::font::Weight::Bold,
+    ..iced::Font::DEFAULT
+};
 
 /// Shared popup treatment for reference selectors and project context menus.
 pub(super) fn popup_item_style(
@@ -67,6 +73,43 @@ pub(super) fn inspector_heading(label: impl Into<String>) -> Element<'static, Me
 }
 
 pub(super) fn inspector_section(label: &str) -> Element<'static, Message> {
+    inspector_section_frame(inspector_section_label(label))
+}
+
+pub(super) fn inspector_section_label(label: &str) -> iced::widget::Text<'static> {
+    text(label.to_owned())
+        .size(INSPECTOR_TEXT_SIZE)
+        .font(INSPECTOR_SECTION_FONT)
+        .color(INSPECTOR_TEXT)
+}
+
+/// The checkbox label is clickable too. Only render the section body when enabled.
+pub(super) fn inspector_section_toggle(
+    label: &str,
+    enabled: bool,
+    on_toggle: Option<impl Fn(bool) -> Message + 'static>,
+) -> iced::widget::Checkbox<'static, Message> {
+    checkbox(enabled)
+        .label(label.to_owned())
+        .size(14)
+        .spacing(8)
+        .text_size(INSPECTOR_TEXT_SIZE)
+        .font(INSPECTOR_SECTION_FONT)
+        .on_toggle_maybe(on_toggle)
+}
+
+pub(super) fn inspector_optional_section(
+    label: &str,
+    enabled: bool,
+    on_toggle: Option<impl Fn(bool) -> Message + 'static>,
+) -> Element<'static, Message> {
+    inspector_section_frame(inspector_section_toggle(label, enabled, on_toggle))
+}
+
+fn inspector_section_frame(
+    content: impl Into<Element<'static, Message>>,
+) -> Element<'static, Message> {
+    let content: Element<'static, Message> = content.into();
     container(
         column![
             iced::widget::rule::horizontal(1).style(|_| iced::widget::rule::Style {
@@ -75,13 +118,7 @@ pub(super) fn inspector_section(label: &str) -> Element<'static, Message> {
                 fill_mode: iced::widget::rule::FillMode::Full,
                 snap: true,
             }),
-            text(label.to_owned())
-                .size(12)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::DEFAULT
-                })
-                .color(INSPECTOR_MUTED),
+            content,
         ]
         .spacing(10),
     )
@@ -97,7 +134,7 @@ pub(super) fn inspector_section(label: &str) -> Element<'static, Message> {
 pub(super) fn inspector_button<'a>(label: impl Into<String>) -> iced::widget::Button<'a, Message> {
     button(
         text(label.into())
-            .size(12)
+            .size(INSPECTOR_TEXT_SIZE)
             .align_x(iced::alignment::Horizontal::Center),
     )
     .padding([7, 10])
@@ -185,7 +222,7 @@ pub(super) fn inspector_input<'a>(
     value: &str,
 ) -> iced::widget::TextInput<'a, Message> {
     text_input(placeholder, value)
-        .size(12)
+        .size(INSPECTOR_TEXT_SIZE)
         .padding([7, 9])
         .style(inspector_input_style)
 }
@@ -239,7 +276,7 @@ pub(super) fn inspector_value<'a>(
     let invalid = value.trim().parse::<f64>().is_err();
     row![
         text(label.into())
-            .size(12)
+            .size(INSPECTOR_TEXT_SIZE)
             .color(INSPECTOR_TEXT)
             .width(Length::FillPortion(5)),
         inspector_input("", value)
