@@ -12010,7 +12010,7 @@ impl Viewport {
                 );
                 candidates
             }
-            OpKind::Drill | OpKind::Thread => self
+            OpKind::Drill | OpKind::Bore | OpKind::Thread => self
                 .cad_scene
                 .pick_drill_candidates(ray, aperture, through),
             OpKind::Adaptive => self.cad_scene.pick_any_candidates(
@@ -12070,7 +12070,7 @@ impl Viewport {
                             EntityKind::Silhouette => 1,
                             _ => 2,
                         },
-                        OpKind::Drill | OpKind::Thread => 0,
+                        OpKind::Drill | OpKind::Bore | OpKind::Thread => 0,
                     };
                     rank(&a.entity).cmp(&rank(&b.entity))
                 })
