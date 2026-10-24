@@ -77,7 +77,7 @@ pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, 
         vertices.extend(quad.map(|corner| MeshVertex {
             position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
             normal: frame.to_world_vector(normal).map(|v| v as f32),
-            color: [0.55, 0.58, 0.63, 1.],
+            color: [0.72, 0.66, 0.22, 1.],
         }));
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -510,11 +510,19 @@ impl App {
         } else {
             self.cad_filter.kind()
         };
+        viewport.cad_filter_explicit = self.cad_filter_explicit
+            || self.setup_model_pick
+            || self.height_reference_pick.is_some();
+        viewport.geometry_pick_active = (self.geometry_additive || self.geometry_auto_pick)
+            && self.operation_tab == OperationTab::Geometry;
         viewport.cad_select_through = self.cad_select_through;
         viewport.controls = self.view;
         viewport.show_gizmo = self.show_gizmo;
         viewport.gizmo_size = self.gizmo_size;
         viewport.setup_axis = self.setup_axis_pick.is_some();
+        viewport.operation_position_picking = self.operation_position_pick.is_some()
+            && self.operation_preview_active()
+            && self.operation_tab == OperationTab::Linking && !model_view;
         viewport.setup_hover = self.setup_hover.clone();
         viewport.setup_snaps = if self.settings.snapping.enabled {
             self.snaps.clone()
@@ -537,6 +545,10 @@ impl App {
                 self.current_operation(id)
                     .map(AppController::operation_kind)
             })
+        }).or_else(|| {
+            (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
+                .then(|| self.geometry_operation_kind())
+                .flatten()
         });
         if self
             .profile_entry_editor
@@ -555,12 +567,12 @@ impl App {
                 ProfileSelectionMode::Chain if self.profile_chain_edges => EntityKind::Edge,
                 _ => EntityKind::Loop,
             };
-            viewport.cad_silhouette |=
-                self.profile_selection_mode == ProfileSelectionMode::Silhouette;
+            viewport.cad_silhouette |= self.cad_filter_explicit
+                && self.profile_selection_mode == ProfileSelectionMode::Silhouette;
         }
         if matches!(
             viewport.cad_operation_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread)
         ) {
             viewport.cad_silhouette = false;
         }
@@ -912,7 +924,7 @@ mod tests {
         assert!(opaque
             .mesh_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 1.0]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 1.0]));
         let frame_bounds = opaque.frame_bounds;
         let drawing = opaque.vertices.clone();
 
@@ -924,7 +936,7 @@ mod tests {
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 0.25]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 0.25]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -979,7 +991,7 @@ mod tests {
             let expected = if *owner == Some(id) {
                 [0.8, 0.3, 0.1, 0.25]
             } else {
-                [0.55, 0.58, 0.63, 0.25]
+                [0.72, 0.66, 0.22, 0.25]
             };
             assert_eq!(vertex.color, expected);
         }
@@ -990,7 +1002,7 @@ mod tests {
             let expected = if *owner == Some(id) {
                 [0.2, 0.65, 0.3, 1.0]
             } else {
-                [0.55, 0.58, 0.63, 1.0]
+                [0.72, 0.66, 0.22, 1.0]
             };
             assert_eq!(vertex.color, expected);
         }
@@ -1051,7 +1063,7 @@ mod tests {
                 let expected = if *owner == Some(selected) {
                     [0.1, 0.9, 0.2, 1.]
                 } else {
-                    [0.55, 0.58, 0.63, 1.]
+                    [0.72, 0.66, 0.22, 1.]
                 };
                 assert_eq!(vertex.color, expected);
             }
@@ -1072,7 +1084,7 @@ mod tests {
         assert!(hidden
             .mesh_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 1.]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 1.]));
     }
 
     #[test]
@@ -1650,7 +1662,7 @@ mod tests {
         app.controller = controller;
         app.modifiers = iced::keyboard::Modifiers::CTRL;
         let _ = app.update(Message::CadPicked(candidates.clone()));
-        assert_eq!(app.controller.cad_selection(), &[selected.clone()]);
+        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&selected));
         assert!(
             app.machining_viewport()
                 .vertices

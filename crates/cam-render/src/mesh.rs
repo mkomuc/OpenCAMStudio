@@ -32,7 +32,7 @@ pub fn mesh_vertices(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<MeshVe
         .map(|(&position, &normal)| MeshVertex {
             position,
             normal,
-            color: [0.55, 0.58, 0.63, 1.0],
+            color: [0.72, 0.66, 0.22, 1.0],
         })
         .collect()
 }

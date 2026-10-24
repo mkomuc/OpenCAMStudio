@@ -9,15 +9,53 @@
 
 use cam_cldata::{ArcDir, Point3, Program, Step, Tag};
 use cam_geo::{Point, Polygon};
-use cam_model::Lead;
+use cam_model::{Lead, Plunge};
+
+/// A point on a legal cutting path does not guarantee room for an entry circle.
+/// Check the whole disc bounded by the helix against the cutter-centre region,
+/// including its holes. A straight descent keeps the certified XY footprint.
+pub(crate) fn guard_plunge(
+    guard: &[Polygon],
+    at: Point,
+    out: (f64, f64),
+    plunge: Plunge,
+) -> Plunge {
+    let Plunge::Helix { radius, pitch } = plunge else {
+        return plunge;
+    };
+    if guard.is_empty() || radius <= 0.0 || pitch <= 0.0 {
+        return plunge;
+    }
+    let center = Point::new(at.x + out.0 * radius, at.y + out.1 * radius);
+    if guard.iter().any(|region| {
+        region.contains(center)
+            && crate::frontadvance::boundary_dist(region, center) >= radius
+    }) {
+        plunge
+    } else {
+        Plunge::Straight
+    }
+}
 
 /// The point the tool plunges at for a lead-in (off the contour), given the start,
 /// its tangent, the outward normal, and the lead. `None` plunges on the contour.
-pub(crate) fn lead_start_point(start: Point, tan: (f64, f64), out: (f64, f64), lead: Lead) -> Point {
+pub(crate) fn lead_start_point(
+    start: Point,
+    tan: (f64, f64),
+    out: (f64, f64),
+    lead: Lead,
+) -> Point {
     match lead {
         Lead::None => start,
         Lead::Linear { length } => Point::new(start.x - tan.0 * length, start.y - tan.1 * length),
         // The far end of a 90° tangent arc: centre − tangent·r, centre = start + out·r.
+        Lead::ArcSweep { radius, angle_deg } => {
+            let angle = angle_deg.to_radians();
+            Point::new(
+                start.x + out.0 * radius * (1. - angle.cos()) - tan.0 * radius * angle.sin(),
+                start.y + out.1 * radius * (1. - angle.cos()) - tan.1 * radius * angle.sin(),
+            )
+        }
         Lead::Arc { radius } => Point::new(
             start.x + (out.0 - tan.0) * radius,
             start.y + (out.1 - tan.1) * radius,
@@ -31,6 +69,13 @@ pub(crate) fn lead_end_point(start: Point, tan: (f64, f64), out: (f64, f64), lea
     match lead {
         Lead::None => start,
         Lead::Linear { length } => Point::new(start.x + tan.0 * length, start.y + tan.1 * length),
+        Lead::ArcSweep { radius, angle_deg } => {
+            let angle = angle_deg.to_radians();
+            Point::new(
+                start.x + out.0 * radius * (1. - angle.cos()) + tan.0 * radius * angle.sin(),
+                start.y + out.1 * radius * (1. - angle.cos()) + tan.1 * radius * angle.sin(),
+            )
+        }
         Lead::Arc { radius } => Point::new(
             start.x + (out.0 + tan.0) * radius,
             start.y + (out.1 + tan.1) * radius,
@@ -45,7 +90,15 @@ pub(crate) fn lead_end_point(start: Point, tan: (f64, f64), out: (f64, f64), lea
 /// extreme; an arc is a 90° tangent arc about `on + out·radius`, sampled along its
 /// sweep so a bulge that pokes past the far wall is caught, not just the endpoints.
 pub(crate) fn lead_samples(on: Point, off: Point, out: (f64, f64), lead: Lead) -> Vec<Point> {
-    lead_samples_n(on, off, out, lead, 8)
+    let n = match lead {
+        Lead::ArcSweep { radius, angle_deg } => arc_lead_density(
+            radius,
+            angle_deg.to_radians(),
+            cam_model::DEFAULT_ARC_FIT_TOLERANCE,
+        ),
+        _ => 8,
+    };
+    lead_samples_n(on, off, out, lead, n)
 }
 
 /// [`lead_samples`] at a chosen density.
@@ -67,7 +120,7 @@ pub(crate) fn lead_samples_n(
     match lead {
         Lead::None => Vec::new(),
         Lead::Linear { .. } => vec![off],
-        Lead::Arc { radius } => {
+        Lead::Arc { radius } | Lead::ArcSweep { radius, .. } => {
             let centre = Point::new(on.x + out.0 * radius, on.y + out.1 * radius);
             arc_samples(centre, on, off, n.max(2))
         }
@@ -182,7 +235,7 @@ pub(crate) fn emit_lead(
             feed,
             tag,
         }),
-        Lead::Arc { radius } => {
+        Lead::Arc { radius } | Lead::ArcSweep { radius, .. } => {
             let centre = Point::new(on.x + out.0 * radius, on.y + out.1 * radius);
             let dir = short_arc_dir(centre, from, to);
             prog.push(Step::Arc {
@@ -193,5 +246,28 @@ pub(crate) fn emit_lead(
                 tag,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod plunge_tests {
+    use super::*;
+    use cam_geo::Contour;
+
+    #[test]
+    fn entry_circle_cannot_cross_an_island_between_legal_endpoints() {
+        let rectangle = |x0, y0, x1, y1| Contour::new(vec![
+            Point::new(x0, y0), Point::new(x1, y0),
+            Point::new(x1, y1), Point::new(x0, y1),
+        ]);
+        let outer = rectangle(-3., -3., 3., 3.);
+        let at = Point::new(0., -1.5);
+        let opposite = Point::new(0., 1.5);
+        let helix = Plunge::Helix { radius: 1.5, pitch: 0.5 };
+        let island = Polygon::with_holes(outer.clone(), vec![rectangle(0.95, 0.95, 1.15, 1.15)]).unwrap();
+        assert!(island.contains(at) && island.contains(opposite));
+        assert_eq!(guard_plunge(&[island], at, (0., 1.), helix), Plunge::Straight);
+        let open = Polygon::new(outer).unwrap();
+        assert_eq!(guard_plunge(&[open], at, (0., 1.), helix), helix);
     }
 }

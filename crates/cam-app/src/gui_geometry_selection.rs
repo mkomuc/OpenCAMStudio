@@ -33,9 +33,9 @@ pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
         .iter()
         .map(|entity| {
             if entity.kind == EntityKind::Silhouette {
-                format!("XY silhouette · Body {}", entity.body_id)
+                format!("XY silhouette · Instance {} · Body {}", entity.instance_id, entity.body_id)
             } else {
-                format!("{:?} {} · Body {}", entity.kind, entity.id, entity.body_id)
+                format!("{:?} {} · Instance {} · Body {}", entity.kind, entity.id, entity.instance_id, entity.body_id)
             }
         })
         .collect()
@@ -59,9 +59,13 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
         Operation::Drill(op) => (0..op.points.len())
             .map(|i| format!("Hole {}", i + 1))
             .collect(),
+        Operation::Bore(op) => (0..op.points.len())
+            .map(|i| format!("Bore centre {}", i + 1))
+            .collect(),
         Operation::Thread(op) => (0..op.points.len())
             .map(|i| format!("Thread centre {}", i + 1))
             .collect(),
+        Operation::Adaptive(_) => vec!["Machining geometry".into()],
         Operation::Pocket(op) => std::iter::once("Boundary".into())
             .chain((0..op.islands.len()).map(|i| format!("Island {}", i + 1)))
             .collect(),
@@ -95,6 +99,7 @@ pub(super) fn selection_icon(name: &str, size: f32) -> iced::widget::Svg<'static
         "all" => include_bytes!("../assets/icons/profile-selection/all.svg"),
         "outer" => include_bytes!("../assets/icons/profile-selection/outer.svg"),
         "inner" => include_bytes!("../assets/icons/profile-selection/inner.svg"),
+        "bore" => include_bytes!("../assets/icons/bore.svg"),
         "thread" => include_bytes!("../assets/icons/thread.svg"),
         "remove" => include_bytes!("../assets/icons/delete_operation.svg"),
         _ => include_bytes!("../assets/icons/profile-selection/settings.svg"),
@@ -107,15 +112,17 @@ pub(super) fn selection_icon(name: &str, size: f32) -> iced::widget::Svg<'static
 pub(super) fn selection_hint<'a>(
     control: impl Into<Element<'a, Message>>,
     label: impl Into<String>,
+    show: bool,
 ) -> Element<'a, Message> {
+    let control = control.into();
+    if !show {
+        return control;
+    }
     delayed_tooltip(
         control,
-        container(text(label.into()).size(12).width(260))
-            .padding(10)
-            .style(popup_surface),
+        illustrated_help::content(&label.into()),
         tooltip::Position::Left,
-    )
-    .into()
+    ).into()
 }
 
 /// Shared frame, rows and toolbar placement for every operation's collection.
@@ -185,8 +192,14 @@ impl App {
         if self.profile_geometry_active() {
             return self.profile_geometry_collection();
         }
-        if let Some(kind @ (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)) =
-            self.geometry_operation_kind()
+        if let Some(
+            kind @ (OpKind::Chamfer
+            | OpKind::Engrave
+            | OpKind::Carve
+            | OpKind::Bore
+            | OpKind::Thread
+            | OpKind::Adaptive),
+        ) = self.geometry_operation_kind()
         {
             return self.operation_geometry_collection(kind, labels);
         }
@@ -407,7 +420,12 @@ impl App {
             } else {
                 selected.clear();
             }
-            if let Err(error) = self.controller.try_set_cad_selection(selected) {
+            let result = if self.geometry_operation_kind() == Some(OpKind::Adaptive) {
+                self.controller.try_set_adaptive_cad_selection(selected)
+            } else {
+                self.controller.try_set_cad_selection(selected)
+            };
+            if let Err(error) = result {
                 self.status = error;
             }
         } else if self.controller.pending_op().is_some() {

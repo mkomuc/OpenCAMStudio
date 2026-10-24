@@ -388,6 +388,7 @@ impl Strategy for CarveStrategy {
                     op.plunge_feed
                 };
                 let levels = crate::profile::depth_levels(op.top, op.top - op.depth, stepdown);
+                if levels.is_empty() { fail!("operation {}: invalid or excessive clearing depths; increase stepdown",op.id); }
                 // `offset` is a real finishing allowance here: how far the end mill stays
                 // off the carved surface, leaving that skin for the V-bit — which cuts it
                 // better, with the flank of its cone rather than a corner. Nothing is left
@@ -431,6 +432,7 @@ impl Strategy for CarveStrategy {
                                 .unwrap_or_default();
                         let job = crate::clearing::ClearJob {
                             id: op.id,
+                            simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
                             radius: r,
                             finish,
                             first,
@@ -444,6 +446,7 @@ impl Strategy for CarveStrategy {
                             lead_in: cp.lead_in,
                             lead_out: cp.lead_out,
                             start: op.start,
+                            end: op.end,
                             guard: &guards,
                                                     spindle: env.spindle,
                         };
@@ -468,7 +471,7 @@ impl Strategy for CarveStrategy {
                                     ..Default::default()
                                 };
                             }
-                            Err(crate::rings::RingsError::Offset(e)) => {
+                            Err(crate::rings::RingsError::Offset(e) | crate::rings::RingsError::Limit(e)) => {
                                 fail!("operation {}: clearing offset failed: {e}", op.id)
                             }
                         }
@@ -949,14 +952,14 @@ fn emit_loop(
         // The cut begins where the ramp ended and runs a full perimeter from there.
         Some((_, on_loop, _)) => {
             let perim = crate::profile::loop_perimeter(&pts);
-            let walked = crate::profile::walk_loop(&pts, *on_loop, perim);
+            let walked = crate::profile::walk_loop(&pts, *on_loop, perim + crate::profile::exit_overlap(&pts, *on_loop, 0.0, op.end));
             crate::emit::cut_polyline(body, &walked, op.feed, tags.cut, z);
             st.at = Some((walked[walked.len() - 1], z));
         }
         None => {
-            crate::emit::cut_loop(body, &pts, op.feed, tags.cut, z);
-            // `cut_loop` closes back to the start, so that is where the tool is.
-            st.at = Some((start, z));
+            let (walked, end, _) = crate::emit::loop_with_exit(&pts, 0.0, op.end);
+            crate::emit::cut_polyline(body, &walked, op.feed, tags.cut, z);
+            st.at = Some((end, z));
         }
     }
     st.guard = guard_next.to_vec();
@@ -1409,6 +1412,7 @@ mod tests {
             plunge_feed: 100.0,
             plunge: Plunge::Straight,
             stay_down: false,
+            end: None,
             start: None,
         }
     }
@@ -2951,7 +2955,7 @@ mod tests {
     /// it leaves — so consecutive entries bound the travel between loops.
     ///
     /// Measuring the *first cutting move* instead is wrong and was tried first:
-    /// `cut_loop` emits its first move to the loop's **second** vertex, which on a
+    /// A closed-loop cut emits its first move to the loop's **second** vertex, which on a
     /// rectangular ring is a whole side away, and turns a well-ordered path into what
     /// looks like a 35 mm hop.
     fn floor_loops_of(r: &StrategyResult, floor_z: f64) -> Vec<((f64, f64), f64)> {

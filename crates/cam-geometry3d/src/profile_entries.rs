@@ -76,14 +76,11 @@ pub fn profile_entry_contours(
                         .map(|faces| (faces, ExtractionRecipe::ProfileContours)),
                 );
             } else {
-                let recipe = if selected.len() == 1 && selected[0].kind == EntityKind::Loop {
-                    ExtractionRecipe::ProfileLoop {
-                        side: profile_side(state, selected)?,
-                    }
-                } else {
-                    ExtractionRecipe::ProfileContours
-                };
-                groups.push((selected.clone(), recipe));
+                // Resolve selected loops through the contour extractor. It can
+                // certify exterior walls, blind bores, and accessible inner
+                // walls, while ProfileLoop deliberately accepts only a whole
+                // body's exterior loop for outside cutting.
+                groups.push((selected.clone(), ExtractionRecipe::ProfileContours));
             }
             let mut all = Vec::new();
             for (references, recipe) in groups {
@@ -194,7 +191,12 @@ fn collect(
         if let Some(interval) = interval {
             merge_heights(&mut heights, interval)?;
         }
-        profiles.extend(contours);
+        for contour in contours {
+            if profiles.iter().any(|previous| cam_model::equivalent_profile_contours(previous,&contour)) {
+                return Err(format!("Profile geometry entry '{}': this contour repeats an earlier selected boundary; remove the duplicate",entry.name));
+            }
+            profiles.push(contour);
+        }
     }
     Ok((profiles, heights))
 }

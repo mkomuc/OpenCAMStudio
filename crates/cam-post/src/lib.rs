@@ -149,6 +149,11 @@ impl PostKind {
         }
     }
 
+    /// Whether the selected post can emit controller radius compensation.
+    pub fn supports_cutter_comp(self) -> bool {
+        self.dialect().map_or(self == Self::Okuma, |d| d.cutter_comp)
+    }
+
     /// Post `program` in this dialect.
     pub fn post(
         self,

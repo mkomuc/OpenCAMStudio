@@ -219,7 +219,8 @@ jobs:
       # Neither of us has a Mac, so this is the only verification the .dmg gets
       # before a user opens it. It proves everything except that a window appears:
       # the bundle is well-formed, the plist parses, the architecture is right, the
-      # icon is a real icns, the image mounts, and the binary is the GUI build.
+      # icon is a real icns, the image mounts, and the binary is the GUI build. The
+      # packaging verification also starts it with --help after hiding the OCCT SDK.
       - name: Verify the bundle and the disk image
         run: |
           set -euo pipefail

@@ -64,9 +64,9 @@ use cam_geo::{intersection, offset, union, Arc, Contour, JoinStyle, Point, Polyg
 /// Guard on the number of outward passes.
 const MAX_PASSES: usize = 800;
 
-/// Vertex-decimation tolerance (mm) for the cleared frontier — far below any stepover,
-/// so the frontier shifts negligibly and engagement is unaffected.
-const SIMPLIFY_EPS: f64 = 0.02;
+/// Default vertex-decimation tolerance (mm). Adaptive operations can override
+/// it; legacy 2D clearing retains this value.
+pub(crate) const SIMPLIFY_EPS: f64 = 0.02;
 
 /// Length of a loop-to-loop seam hand-off, in stepovers.
 ///
@@ -326,7 +326,7 @@ pub(crate) fn entry_point(tc: &Polygon) -> Option<Point> {
 /// pathological ring can't blow the stack). Keeps the ring closed.
 fn simplify_ring(ring: &[Point], eps: f64) -> Vec<Point> {
     let n = ring.len();
-    if n < 8 {
+    if n < 8 || eps <= 0.0 {
         return ring.to_vec();
     }
     // Treat as a polyline 0..n with an appended closing vertex, so the seam vertex is
@@ -825,8 +825,12 @@ struct Corner {
 /// These are the pocket's **concave** corners seen from the tool: the walls close around
 /// the tool there, so the uncut collar wraps its leading edge instead of facing it
 /// head-on. Blunt vertices are skipped — no wrap, no spike, no relief needed.
-fn sharp_corners(tc: &Polygon) -> Vec<Corner> {
-    let pts = tc.outer().points();
+fn sharp_corners(tc: &Polygon, simplification_tolerance: f64) -> Vec<Corner> {
+    // CAD layer projections can leave microscopic zigzags on a smooth wall.
+    // Measure corners on the same simplified outline used for frontier rings,
+    // otherwise their short edges trigger large, unnecessary corner reliefs.
+    // This only classifies corners; the original tc still guards all motion.
+    let pts = simplify_ring(tc.outer().points(), simplification_tolerance);
     let n = pts.len();
     if n < 3 {
         return Vec::new();
@@ -980,8 +984,16 @@ pub(crate) fn front_advance_certified(
     finish: f64,
     e: f64,
     start: Option<[f64; 2]>,
+    simplification_tolerance: f64,
 ) -> Option<Vec<(Point, bool)>> {
-    let path = front_advance_path(region, r, finish, e, start)?;
+    if !simplification_tolerance.is_finite() || simplification_tolerance < 0.0 {
+        return None;
+    }
+    let mut path = front_advance_tuned(region, r, finish, e, start, Tuning {
+        simplification_tolerance,
+        ..Tuning::new(r, e)
+    })?;
+    compact_repositions(&mut path);
     // The material to remove (skin left on the walls) — the same region the generator
     // clears, recomputed here so the certifier scores against the true target. `largest`
     // keeps the holes: an island is a hole of this polygon, and the oracle reads it as
@@ -1002,11 +1014,29 @@ pub(crate) fn front_advance_certified(
     ok.then_some(path)
 }
 
-/// The generator's tuning, bundled so it can be swept as a unit. Defaults come from the
-/// constants above; every field is an oracle-swept number, not a preference — see each
-/// constant's doc for the measurements behind it.
+/// A rejected segment needs a lift, but its endpoint only needs a re-entry
+/// when a cutting segment follows it. Runs of rejected segments otherwise
+/// become repeated plunge/retract cycles along an unmachinable loop.
+/// Keep the start and end of every cutting segment unchanged; certification
+/// still runs on the resulting path before it can be emitted.
+fn compact_repositions(path: &mut Vec<(Point, bool)>) {
+    let mut kept = 0;
+    for i in 0..path.len() {
+        if path[i].1 || path.get(i + 1).is_some_and(|next| next.1) {
+            path[kept] = path[i];
+            kept += 1;
+        }
+    }
+    path.truncate(kept);
+}
+
+/// The generator's tuning, bundled so it can be swept as a unit. Shape-control
+/// defaults come from the measured constants above; simplification is also
+/// configurable per adaptive operation. Certification gates remain unchanged.
 #[derive(Clone, Copy, Debug)]
 struct Tuning {
+    /// Frontier approximation and corner-detection tolerance, mm; 0 disables it.
+    simplification_tolerance: f64,
     /// Loop-to-loop seam hand-off length, in mm. See [`SEAM_ARC`].
     seam_arc: f64,
     /// How far the frontier stands off a sharp corner, in mm. See [`STANDOFF_RADII`].
@@ -1028,6 +1058,7 @@ impl Tuning {
     fn new(r: f64, e: f64) -> Self {
         Self {
             seam_arc: SEAM_ARC,
+            simplification_tolerance: SIMPLIFY_EPS,
             standoff: STANDOFF_RADII * r,
             entry_target: ENTRY_TARGET * e,
             relief_reach: RELIEF_REACH,
@@ -1040,6 +1071,8 @@ impl Tuning {
 /// rings belong to the *same pass* (far apart, no shared seam) and which are a pass apart
 /// (adjacent, a stepover of drift between them), and a flattened ring list cannot say.
 struct Frontier {
+    /// Approximation shared by frontier generation and corner classification.
+    simplification_tolerance: f64,
     /// Where the tool plunges.
     entry: Point,
     /// The tool-centre region (the region eroded by `r + finish`).
@@ -1056,21 +1089,19 @@ struct Frontier {
 /// Advance the cleared region outward one stepover per pass, collecting the frontier.
 /// This is the half of the generator that carries the engagement guarantee; connecting
 /// what it produces is [`connect_seam_spiral`]'s problem, and a much harder one.
-fn frontier(
+fn frontier_tuned(
     region: &Polygon,
     r: f64,
     finish: f64,
     e: f64,
     start: Option<[f64; 2]>,
-    standoff: f64,
-    entry_target: f64,
+    tuning: Tuning,
 ) -> Option<Frontier> {
+    let Tuning { standoff, entry_target, simplification_tolerance, .. } = tuning;
     let to_clear = largest(offset(std::slice::from_ref(region), -finish, JoinStyle::Round).ok()?)?;
     let tc = largest(offset(std::slice::from_ref(region), -(r + finish), JoinStyle::Round).ok()?)?;
 
-    let entry = start
-        .map(|s| Point::new(s[0], s[1]))
-        .filter(|p| tc.contains(*p))
+    let entry = preferred_entry(&tc, start, e.min(r) * 0.5)
         .or_else(|| entry_point(&tc))?;
 
     let clear_slice = std::slice::from_ref(&to_clear);
@@ -1145,7 +1176,7 @@ fn frontier(
         // joins, and an un-decimated ring carries that straight into the point count.
         let rings: Vec<Vec<Point>> = pass
             .iter()
-            .map(|poly| simplify_ring(poly.outer().points(), SIMPLIFY_EPS))
+            .map(|poly| simplify_ring(poly.outer().points(), simplification_tolerance))
             .collect();
         if let Some(prev) = prev_area {
             if (area_now - prev).abs() < DUP_LAP_TOL {
@@ -1161,10 +1192,10 @@ fn frontier(
         prev_area = Some(area_now);
         passes.push(rings);
         // Advance: the new cleared region is what the tool cut (opening of `grown`),
-        // decimated so repeated round offsets don't balloon its vertex count (the
-        // tolerance is far below the stepover — engagement unaffected).
+        // decimated at the requested tolerance to limit vertex growth from
+        // repeated round offsets. The completed path still has to certify.
         let opened = offset(&pass, r, JoinStyle::Round).ok()?;
-        cleared = simplify_polys(&union(&cleared, &opened).ok().unwrap_or(opened), SIMPLIFY_EPS);
+        cleared = simplify_polys(&union(&cleared, &opened).ok().unwrap_or(opened), simplification_tolerance);
         // Done once the frontier fills the stock — stable, unlike an area-delta check
         // (which the decimation jitter would trip early or never).
         if to_clear_area - total_area(&grown) < covered_tol {
@@ -1174,7 +1205,43 @@ fn frontier(
     if passes.is_empty() {
         return None;
     }
-    Some(Frontier { entry, tc, to_clear, passes, split })
+    Some(Frontier { entry, tc, to_clear, passes, split, simplification_tolerance })
+}
+
+/// Resolve a model-space preference onto an eligible cutter-centre region.
+pub(crate) fn preferred_entry(tc: &Polygon, start: Option<[f64; 2]>, margin: f64) -> Option<Point> {
+    let start = start.filter(|p| p.iter().all(|v| v.is_finite()))?;
+    let point = Point::new(start[0], start[1]);
+    if tc.contains(point) {
+        return Some(point);
+    }
+    let inset = offset(std::slice::from_ref(tc), -margin, JoinStyle::Round).ok()?;
+    inset
+        .iter()
+        .flat_map(|p| std::iter::once(p.outer()).chain(p.holes().iter()))
+        .map(|contour| crate::profile::rotate_to_start(contour.points(), Some(start))[0])
+        .filter(|p| tc.contains(*p))
+        .min_by(|a, b| {
+            ((a.x - point.x).powi(2) + (a.y - point.y).powi(2))
+                .total_cmp(&((b.x - point.x).powi(2) + (b.y - point.y).powi(2)))
+        })
+}
+
+#[cfg(test)]
+fn frontier(
+    region: &Polygon,
+    r: f64,
+    finish: f64,
+    e: f64,
+    start: Option<[f64; 2]>,
+    standoff: f64,
+    entry_target: f64,
+) -> Option<Frontier> {
+    frontier_tuned(region, r, finish, e, start, Tuning {
+        standoff,
+        entry_target,
+        ..Tuning::new(r, e)
+    })
 }
 
 /// [`front_advance_path`] with the tuning exposed, so it can be swept.
@@ -1186,11 +1253,11 @@ fn front_advance_tuned(
     start: Option<[f64; 2]>,
     t: Tuning,
 ) -> Option<Vec<(Point, bool)>> {
-    let Tuning { seam_arc, standoff, entry_target, relief_reach } = t;
+    let Tuning { seam_arc, entry_target, relief_reach, .. } = t;
     if !(e > 0.0 && e < 2.0 * r) {
         return None;
     }
-    let f = frontier(region, r, finish, e, start, standoff, entry_target)?;
+    let f = frontier_tuned(region, r, finish, e, start, t)?;
     let (path, _) = connect(&f, r, e, seam_arc, relief_reach, entry_target)?;
     (path.len() > 3).then_some(path)
 }
@@ -1210,7 +1277,7 @@ fn connect(
     let loops: Vec<Vec<Point>> = f.passes.iter().flatten().cloned().collect();
     // Trochoidal relief for each sharp corner of the tool-centre region. Every loop is a
     // maximal inscribed circle, so these cannot gouge however they are sequenced.
-    let reliefs: Vec<Vec<Point>> = sharp_corners(&f.tc)
+    let reliefs: Vec<Vec<Point>> = sharp_corners(&f.tc, f.simplification_tolerance)
         .into_iter()
         .map(|c| corner_relief_tuned(c, r, e, relief_reach, RELIEF_PITCH))
         .filter(|p| p.len() > 2)
@@ -1246,6 +1313,47 @@ fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_segments_only_reenter_before_a_cut() {
+        let mut path = vec![
+            (Point::new(4., 4.), false),
+            (Point::new(8., 4.), true),
+            (Point::new(12., 4.), false),
+            (Point::new(16., 4.), false),
+            (Point::new(20., 4.), false),
+            (Point::new(24., 4.), true),
+            (Point::new(28., 4.), false),
+            (Point::new(32., 4.), false),
+        ];
+        let cutting_segments = |moves: &[(Point, bool)]| {
+            moves.windows(2)
+                .filter(|pair| pair[1].1)
+                .map(|pair| (pair[0].0, pair[1].0))
+                .collect::<Vec<_>>()
+        };
+        let original_segments = cutting_segments(&path);
+        let before = crate::clearsim::certify_moves(&path, R, &square(40.));
+        compact_repositions(&mut path);
+        assert_eq!(path.len(), 4);
+        assert_eq!(cutting_segments(&path), original_segments);
+        assert!(path.windows(2).all(|pair| pair[0].1 || pair[1].1));
+        assert!(path.last().unwrap().1, "no re-entry after the last cut");
+        let after = crate::clearsim::certify_moves(&path, R, &square(40.));
+        assert_eq!(after.max_engagement, before.max_engagement);
+        assert_eq!(after.uncut_area, before.uncut_area);
+        assert_eq!(after.gouge_area, before.gouge_area);
+    }
+
+    #[test]
+    fn entirely_rejected_path_has_no_reentries() {
+        let mut path = vec![
+            (Point::new(4., 4.), false),
+            (Point::new(8., 4.), false),
+        ];
+        compact_repositions(&mut path);
+        assert!(path.is_empty());
+    }
 
     /// Reference tool radius and engagement cap for the measured tests.
     const R: f64 = 3.0;
@@ -2107,7 +2215,7 @@ mod tests {
             let tc =
                 largest(offset(std::slice::from_ref(&region), -r, JoinStyle::Round).unwrap())
                     .unwrap();
-            let corners = sharp_corners(&tc);
+            let corners = sharp_corners(&tc, SIMPLIFY_EPS);
             assert_eq!(corners.len(), 4, "{name}: a square pocket has four sharp corners");
             for c in &corners {
                 for (reach, pitch) in [(0.75, 0.35), (1.0, 1.0), (0.5, 0.2)] {
@@ -2134,7 +2242,69 @@ mod tests {
             offset(std::slice::from_ref(&circle(30.0, 96)), -R, JoinStyle::Round).unwrap(),
         )
         .unwrap();
-        assert!(sharp_corners(&tc).is_empty(), "a circle has no sharp corner");
+        assert!(sharp_corners(&tc, SIMPLIFY_EPS).is_empty(), "a circle has no sharp corner");
+    }
+
+    #[test]
+    fn cad_projection_zigzags_do_not_create_corners_on_a_round_wall() {
+        let mut points = Vec::new();
+        for i in 0..720 {
+            let angle = std::f64::consts::TAU * i as f64 / 720.;
+            for (a, radius) in [(angle, 12.), (angle + 0.0001, 12.0025)] {
+                points.push(Point::new(-30. + radius * a.cos(), 10. + radius * a.sin()));
+            }
+        }
+        for shift in [0, 1, 57] {
+            let mut rotated = points.clone();
+            rotated.rotate_left(shift);
+            for reverse in [false, true] {
+                let mut outline = rotated.clone();
+                if reverse {
+                    outline.reverse();
+                }
+                let tc = Polygon::new(Contour::new(outline)).unwrap();
+                assert!(!sharp_corners(&tc, 0.0).is_empty(), "zero must disable noise simplification");
+                assert!(
+                    sharp_corners(&tc, SIMPLIFY_EPS).is_empty(),
+                    "projection noise must not request corner relief (shift {shift}, reverse {reverse})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simplification_tolerance_changes_the_certified_frontier() {
+        let region = circle(12., 96);
+        let fine = front_advance_certified(&region, R, 0., E, None, 0.005)
+            .expect("fine approximation must certify");
+        let coarse = front_advance_certified(&region, R, 0., E, None, 0.02)
+            .expect("default approximation must certify");
+        assert_ne!(fine, coarse, "the operation setting must affect the path");
+        let ring = region.outer().points();
+        assert_eq!(simplify_ring(ring, 0.), ring, "zero retains the original outline");
+    }
+
+    #[test]
+    fn simplifying_corner_detection_preserves_real_corners_on_a_dense_square() {
+        let vertices = square(40.).outer().points().to_vec();
+        let mut points = Vec::new();
+        for i in 0..4 {
+            let (a, b) = (vertices[i], vertices[(i + 1) % 4]);
+            for j in 0..100 {
+                let t = j as f64 / 100.;
+                points.push(Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+            }
+        }
+        for reverse in [false, true] {
+            let mut outline = points.clone();
+            if reverse {
+                outline.reverse();
+            }
+            let tc = Polygon::new(Contour::new(outline)).unwrap();
+            let corners = sharp_corners(&tc, SIMPLIFY_EPS);
+            assert_eq!(corners.len(), 4, "real corners still need relief");
+            assert!(corners.iter().all(|corner| vertices.contains(&corner.v)));
+        }
     }
 
     /// The frontier converges onto the tool-centre boundary a hair before the coverage

@@ -471,8 +471,9 @@ impl ToolLibrary {
                 .iter()
                 .filter(|t| matches!(t.kind, ToolKind::EndMill | ToolKind::FaceMill))
                 .max_by(|a, b| a.diameter.total_cmp(&b.diameter)),
-            OpKind::Profile | OpKind::Pocket => middle(|k| matches!(k, ToolKind::EndMill)),
+            OpKind::Profile | OpKind::Pocket | OpKind::Adaptive => middle(|k| matches!(k, ToolKind::EndMill)),
             OpKind::Drill => middle(|k| matches!(k, ToolKind::Drill { .. })),
+            OpKind::Bore => middle(|k| matches!(k, ToolKind::EndMill)),
             OpKind::Thread => middle(|k| matches!(k, ToolKind::ThreadMill { .. })),
             OpKind::Chamfer => middle(|k| matches!(k, ToolKind::ChamferMill { .. })),
             // Engraving *requires* a V-bit (a chamfer mill's tip does not cut), so
@@ -643,9 +644,11 @@ pub fn families_for(kind: OpKind) -> &'static [ToolKindPick] {
     match kind {
         // Side-milling a vertical wall: the end-mill family only.
         OpKind::Profile | OpKind::Pocket => &[F::EndMill, F::BallMill, F::BullNose],
+        OpKind::Adaptive => &[F::EndMill],
         // A flat floor: flat-bottomed tools (a bull-nose floor is still flat).
         OpKind::Face => &[F::EndMill, F::BullNose, F::FaceMill],
         OpKind::Drill => &[F::Drill],
+        OpKind::Bore => &[F::EndMill],
         OpKind::Thread => &[F::ThreadMill],
         // A chamfer is cut by the flank, which both of these have.
         OpKind::Chamfer => &[F::ChamferMill, F::VBit],

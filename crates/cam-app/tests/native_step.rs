@@ -21,6 +21,23 @@ fn reference(state: &GeometryState, kind: EntityKind, id: u64) -> EntityRef {
         id,
     }
 }
+fn instance_reference(
+    state: &GeometryState,
+    instance_id: u64,
+    kind: EntityKind,
+    id: u64,
+) -> EntityRef {
+    let instance = state.instance(instance_id).unwrap();
+    let asset = state.asset(instance.asset_id).unwrap();
+    EntityRef {
+        asset_id: asset.id,
+        revision: asset.revision,
+        instance_id,
+        body_id: instance.body_id,
+        kind,
+        id,
+    }
+}
 fn cutting_z_range(program: &cam_cldata::Program) -> (f64, f64) {
     let mut z: Vec<f64> = Vec::new();
     for step in program.steps() {
@@ -294,6 +311,218 @@ fn step_plate_floor_island_four_holes_profile_generates_and_reopens_without_sour
     assert_eq!(reopened.run(&CancelToken::new()).program, program);
     assert_eq!(reopened.export_nc().unwrap(), nc);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn adaptive_clearing_creates_runs_posts_and_round_trips() {
+    let mut app = new_app();
+    app.import_cad(fixture("pocket-island-holes-mm.step")).unwrap();
+    select_all_models(&mut app);
+    let topology = &app.geometry_state().assets[0].topology;
+    assert_eq!(topology.bodies.len(), 1);
+    let body = reference(app.geometry_state(), EntityKind::Body, topology.bodies[0].id);
+    let id = app
+        .create_cad_operation(OpKind::Adaptive, vec![body.clone()])
+        .unwrap();
+    app.edit_operation(id, |operation| {
+        if let Operation::Adaptive(adaptive) = operation {
+            adaptive.params.optimal_load = 2.9;
+            adaptive.params.stepdown = 10.0;
+            adaptive.params.fine_stepdown = 10.0;
+        }
+    });
+    assert!(matches!(app.operation(id), Some(Operation::Adaptive(_))));
+    assert_eq!(app.geometry_state().bindings[&id].selected, vec![body]);
+
+    let run = app.run(&CancelToken::new());
+    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    let program = run.program.clone();
+    assert!(program.steps().iter().any(|step| matches!(
+        step,
+        cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
+            if tag.kind == cam_cldata::MoveKind::Cutting
+    )));
+    let nc = app.export_nc().unwrap().to_owned();
+    assert!(nc.contains("G"));
+
+    let path = std::env::temp_dir().join(format!("adaptive-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.run(&CancelToken::new()).program, program);
+    assert_eq!(reopened.export_nc().unwrap(), nc);
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn adaptive_body_subset_can_target_a_nonfirst_setup_instance_and_persist() {
+    let mut app = new_app();
+    app.import_cad(fixture("repeated-boxes.step")).unwrap();
+    select_all_models(&mut app);
+    let geometry = app.geometry_state();
+    assert_eq!(geometry.instances.len(), 2);
+    let setup_instances = app.document().setup().model_instances.clone();
+    assert_eq!(setup_instances.len(), 2);
+    let second = geometry.instances[1].id;
+    let body_id = geometry.instances[1].body_id;
+    let body = instance_reference(geometry, second, EntityKind::Body, body_id);
+    let preview = app.preview_cad_operation(OpKind::Adaptive, std::slice::from_ref(&body)).unwrap();
+
+    let id = app.create_cad_operation(OpKind::Adaptive, vec![body.clone()]).unwrap();
+    assert_eq!(app.geometry_state().bindings[&id].selected, vec![body.clone()]);
+    assert_eq!(app.document().setup().model_instances, setup_instances);
+    let run = app.run(&CancelToken::new());
+    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    let (cut_bottom, _) = cutting_z_range(&run.program);
+    assert!(cut_bottom < preview.heights.top - 1.0, "selected body must produce cuts below stock top");
+    assert!(run.program.steps().iter().any(|step| matches!(
+        step,
+        cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
+            if tag.kind == cam_cldata::MoveKind::Cutting
+    )));
+    assert!(app.export_nc().unwrap().contains("G"));
+
+    let path = std::env::temp_dir().join(format!("adaptive-subset-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.document().setup().model_instances, setup_instances);
+    assert_eq!(reopened.geometry_state().bindings[&id].selected, vec![body]);
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn adaptive_selection_across_two_component_instances_creates_runs_and_round_trips() {
+    let mut app = new_app();
+    app.import_cad(fixture("repeated-boxes.step")).unwrap();
+    select_all_models(&mut app);
+    let geometry = app.geometry_state();
+    assert_eq!(geometry.instances.len(), 2);
+    let selected: Vec<_> = geometry
+        .instances
+        .iter()
+        .map(|instance| {
+            instance_reference(
+                geometry,
+                instance.id,
+                EntityKind::Body,
+                instance.body_id,
+            )
+        })
+        .collect();
+    assert_ne!(selected[0].instance_id, selected[1].instance_id);
+    let setup_instances = app.document().setup().model_instances.clone();
+    assert_eq!(setup_instances.len(), 2);
+
+    let preview = app.preview_cad_operation(OpKind::Adaptive, &selected).unwrap();
+    assert!(preview.heights.depth() > 1.0);
+    let id = app.create_cad_operation(OpKind::Adaptive, selected.clone()).unwrap();
+    assert_eq!(app.geometry_state().bindings[&id].selected, selected);
+    assert_eq!(app.document().setup().model_instances, setup_instances);
+
+    let run = app.run(&CancelToken::new());
+    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    assert!(run.program.steps().iter().any(|step| matches!(
+        step,
+        cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
+            if tag.kind == cam_cldata::MoveKind::Cutting
+    )));
+    let program = run.program.clone();
+    let nc = app.export_nc().unwrap().to_owned();
+    assert!(nc.contains("G"));
+
+    let path = std::env::temp_dir().join(format!("adaptive-multi-instance-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.document().setup().model_instances, setup_instances);
+    assert_eq!(reopened.geometry_state().bindings[&id].selected, selected);
+    assert_eq!(reopened.run(&CancelToken::new()).program, program);
+    assert_eq!(reopened.export_nc().unwrap(), nc);
+}
+
+#[test]
+#[ignore = "requires OCCT SDK; run explicitly for native qualification"]
+fn adaptive_selected_pocket_floor_face_scope_and_reference_survive_project_round_trip() {
+    let mut app = new_app();
+    app.import_cad(fixture("pocket-island-holes-mm.step")).unwrap();
+    select_all_models(&mut app);
+    let geometry = app.geometry_state();
+    let instance = &geometry.instances[0];
+    let asset = geometry.asset(instance.asset_id).unwrap();
+    let body = asset.topology.bodies.iter().find(|body| body.id == instance.body_id).unwrap();
+    let body_bounds = body.bounds;
+    let face = asset
+        .topology
+        .faces
+        .iter()
+        .find(|face| {
+            matches!(&face.surface, CadSurface::Plane { normal, .. } if normal[2] > 0.99)
+                && face.bounds[0][2] > body.bounds[0][2] + 0.1
+                && face.bounds[1][2] < body.bounds[1][2] - 0.1
+                && face.bounds[1][0] > face.bounds[0][0]
+                && face.bounds[1][1] > face.bounds[0][1]
+        })
+        .expect("upward-facing pocket floor below the stock top")
+        .id;
+    let selected = instance_reference(geometry, instance.id, EntityKind::Face, face);
+    let preview = app.preview_cad_operation(OpKind::Adaptive, std::slice::from_ref(&selected)).unwrap();
+    assert!(preview.heights.bottom.is_finite());
+    let id = app.create_cad_operation(OpKind::Adaptive, vec![selected.clone()]).unwrap();
+    assert_eq!(app.geometry_state().bindings[&id].selected, vec![selected.clone()]);
+    app.edit_operation(id, |operation| {
+        if let Operation::Adaptive(adaptive) = operation {
+            adaptive.params.optimal_load = 2.9;
+            adaptive.params.stepdown = 10.;
+            adaptive.params.fine_stepdown = 10.;
+        }
+    });
+    let setup_geometry = app.setup_geometry_state().unwrap();
+    let scoped = cam_geometry3d::resolve_adaptive(
+        &setup_geometry,
+        &app.geometry_state().bindings[&id],
+        cam_geometry3d::AdaptiveResolveConfig {
+            heights: preview.heights,
+            stock_to_leave: StockToLeave::default(),
+            stepdown: 2.,
+            fine_stepdown: 1.,
+            tolerance: 0.1,
+        },
+        || false,
+    )
+    .unwrap();
+    assert!(!scoped.layers.is_empty());
+    assert!(scoped.layers.iter().all(|layer| layer.body_domains.is_empty()));
+    assert!(scoped.layers.iter().all(|layer| !layer.face_domains.is_empty()));
+    let selected_area: f64 = scoped.layers[0].face_domains.iter().map(cam_geo::Polygon::area).sum();
+    let body_area = (body_bounds[1][0] - body_bounds[0][0]) * (body_bounds[1][1] - body_bounds[0][1]);
+    assert!(selected_area < body_area, "face domain must remain narrower than the body XY bounds");
+    let run = app.run(&CancelToken::new());
+    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    let (cut_bottom, _) = cutting_z_range(&run.program);
+    assert!(cut_bottom < preview.heights.top - 1.0, "selected pocket floor must produce real cuts below stock top");
+    assert!(run.program.steps().iter().any(|step| matches!(
+        step,
+        cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
+            if tag.kind == cam_cldata::MoveKind::Cutting
+    )));
+    assert!(app.export_nc().unwrap().contains("G"));
+
+    let path = std::env::temp_dir().join(format!("adaptive-face-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.geometry_state().bindings[&id].selected, vec![selected]);
+    let resolved = reopened.preview_cad_operation(
+        OpKind::Adaptive,
+        &reopened.geometry_state().bindings[&id].selected,
+    ).unwrap();
+    assert_eq!(resolved.heights, preview.heights);
 }
 
 #[test]
@@ -895,7 +1124,9 @@ fn profile_face_contours_and_silhouette_resolve_real_step_boundaries() {
     assert_eq!(contours.profiles.len(), 6, "outside, pocket opening and four bores");
     assert_eq!(contours.profiles.iter().filter(|p| p.side == Side::Inside).count(), 5);
     assert!((contours.heights.bottom + 6.).abs() < 1e-6, "stop all contours at the shallowest wall");
-    let projected = app.preview_cad_operation(OpKind::Profile, &[silhouette.clone()]).unwrap();
+    let projected = app
+        .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&silhouette))
+        .unwrap();
     assert_eq!(projected.profiles.len(), 5, "outside plus four through holes; blind pocket is filled by its floor");
     let id = app.create_cad_operation(OpKind::Profile, vec![silhouette]).unwrap();
     assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.additional_chains.len() == 4));

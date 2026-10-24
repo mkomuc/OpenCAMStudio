@@ -11,9 +11,15 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
     let mut fields = match op {
         Operation::Profile(p) => {
             let mut fields = vec![Field::Depth, Field::Stepdown];
+            fields.extend(profile_parameters::numeric_fields(p));
             // Radial roughing (stepover) is outside-only; an inner profile is
             // a single-pass wall finish (rough the pocket first).
-            if p.closed && p.additional_chains.is_empty() && p.side == Side::Outside && p.comp == cam_model::Comp::Computed {
+            if (p.capabilities(false, true).roughing || p.stepover != 0.)
+                && p.closed
+                && p.additional_chains.is_empty()
+                && p.side == Side::Outside
+                && p.comp == cam_model::Comp::Computed
+            {
                 fields.push(Field::Stepover);
                 fields.push(Field::Engagement);
             }
@@ -25,7 +31,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             ]);
             if p.tabs.enabled {
                 fields.extend([Field::TabWidth, Field::TabHeight]);
-                if !p.tabs.manual {
+                if !p.tabs.manual && p.tabs.count.is_none() {
                     fields.push(Field::TabSpacing);
                 }
             }
@@ -33,7 +39,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             if p.lead_in != Lead::None {
                 fields.push(Field::LeadInSize);
             }
-            if p.lead_out != Lead::None {
+            if p.lead_out != Lead::None && !p.passes.same_lead_out {
                 fields.push(Field::LeadOutSize);
             }
             fields.push(Field::LeadOverlap);
@@ -181,6 +187,41 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
+        Operation::Adaptive(_) => vec![
+            Field::AdaptiveTolerance,
+            Field::AdaptiveOptimalLoad,
+            Field::Stepdown,
+            Field::AdaptiveFineStepdown,
+            Field::AdaptiveOffset,
+            Field::SpindleRpm,
+            Field::Feed,
+            Field::PlungeFeed,
+        ],
+        Operation::Bore(b) => {
+            let mut fields = vec![
+                Field::BoreDiameter,
+                Field::BoreTaper,
+                Field::BoreTolerance,
+                Field::BoreStepovers,
+                Field::BoreStepover,
+                Field::BoreFinishing,
+                Field::BoreRadialStock,
+                Field::BoreAxialStock,
+                Field::BoreSafeDistance,
+                Field::SpindleRpm,
+                Field::Feed,
+                Field::PlungeFeed,
+            ];
+            fields.push(if b.ramp_angle.is_some() {
+                Field::BoreAngle
+            } else {
+                Field::BorePitch
+            });
+            if !b.internal || !b.lead_to_center {
+                fields.push(Field::BoreLeadRadius);
+            }
+            fields
+        }
         Operation::Thread(t) => {
             let mut fields = vec![
                 Field::MajorDia,
@@ -203,11 +244,24 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             fields
         }
     };
-    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Carve(_)) {
+    if matches!(op, Operation::Profile(p) if p.closed)
+        || matches!(
+            op,
+            Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_) | Operation::Bore(_)
+        )
+    {
         fields.push(Field::RampFeed);
     }
-    if matches!(op, Operation::Profile(p) if p.closed) || matches!(op, Operation::Pocket(_) | Operation::Chamfer(_) | Operation::Thread(_))
-        || matches!(op, Operation::Carve(c) if c.clear.is_some()) {
+    if matches!(op, Operation::Profile(p) if p.closed)
+        || matches!(
+            op,
+            Operation::Pocket(_)
+                | Operation::Chamfer(_)
+                | Operation::Thread(_)
+                | Operation::Bore(_)
+        )
+        || matches!(op, Operation::Carve(c) if c.clear.is_some())
+    {
         fields.extend([Field::LeadInFeed, Field::LeadOutFeed]);
     }
     if super::operation_tabs::operation_start(op).is_some() {

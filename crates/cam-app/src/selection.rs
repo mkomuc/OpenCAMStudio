@@ -27,7 +27,7 @@ impl AppController {
             );
         }
         if op_selects_circles(kind) && (!closed || fit_circle(&points).is_none()) {
-            return Err("Drill and Thread require a circular hole".into());
+            return Err("Drill, Thread and Bore require a circular hole".into());
         }
         if op_selects_circles(kind) {
             let radius = fit_circle(&points).unwrap().1;
@@ -35,10 +35,17 @@ impl AppController {
                 let contour = self
                     .loop_contour(*reference)
                     .ok_or("Select existing circular holes")?;
-                let (_, other_radius) = fit_circle(contour.points())
-                    .ok_or("Drill and Thread require circular holes of the same geometry kind")?;
-                if kind == OpKind::Thread && (radius - other_radius).abs() > 0.001 {
-                    return Err("Thread uses one major diameter per operation; select equal-diameter holes or create separate operations".into());
+                let (_, other_radius) = fit_circle(contour.points()).ok_or(
+                    "Drill, Thread and Bore require circular holes of the same geometry kind",
+                )?;
+                if matches!(kind, OpKind::Thread | OpKind::Bore)
+                    && (radius - other_radius).abs() > 0.001
+                {
+                    return Err(if kind == OpKind::Thread {
+                        "Thread uses one major diameter per operation; select equal-diameter holes or create separate operations"
+                    } else {
+                        "Bore uses one diameter per operation; select equal-diameter features or create separate operations"
+                    }.into());
                 }
             }
             return Ok(());

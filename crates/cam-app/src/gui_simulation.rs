@@ -191,15 +191,22 @@ pub(super) struct SimulationPlayer {
 }
 
 impl SimulationPlayer {
-    pub fn new(controller: &AppController) -> Result<Self, String> {
+    pub fn new_for_operation(controller: &AppController, operation: Option<u32>) -> Result<Self, String> {
         let outcome = controller.outcome().ok_or("No toolpath to simulate.")?;
         let source = outcome
             .stamp
             .clone()
             .ok_or("Run the toolpath before playback.")?;
         let timeline = Timeline::new(&outcome.program, controller.machine().rapid_rate)?;
+        let position = operation.and_then(|id| timeline.steps.iter().find_map(|step| {
+            let tag = match &step.step {
+                Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(tag),
+                _ => None,
+            }?;
+            (tag.op_id == id).then_some(step.start)
+        })).unwrap_or(0.);
         let preview = crate::RunOutcome {
-            program: timeline.prefix(0.),
+            program: timeline.prefix(position),
             ..Default::default()
         };
         let mut inputs = controller.job_inputs();
@@ -210,9 +217,9 @@ impl SimulationPlayer {
             timeline,
             jobs: JobService::default(),
             preview,
-            position: 0.,
-            requested: 0.,
-            rendered: 0.,
+            position,
+            requested: position,
+            rendered: position,
             playing: false,
             speed: 1.,
             error: None,
@@ -242,6 +249,47 @@ impl SimulationPlayer {
         self.position = seconds.clamp(0., self.timeline.duration);
         self.last_tick = Instant::now();
         self.request_frame();
+    }
+    pub fn seek_end(&mut self, end: bool) {
+        self.seek(if end { self.timeline.duration } else { 0. });
+    }
+    pub fn seek_point(&mut self, forward: bool) {
+        let points: Vec<f64> = self
+            .timeline
+            .steps
+            .iter()
+            .filter(|step| matches!(&step.step, Step::Rapid { .. } | Step::Linear { .. } | Step::Arc { .. }))
+            .map(|step| if forward { step.end } else { step.start })
+            .collect();
+        let target = if forward {
+            points.into_iter().find(|time| *time > self.position + 1e-6)
+                .unwrap_or(self.timeline.duration)
+        } else {
+            points.into_iter().rev().find(|time| *time < self.position - 1e-6).unwrap_or(0.)
+        };
+        self.seek(target);
+    }
+    pub fn seek_operation(&mut self, forward: bool) {
+        let mut operations: Vec<(u32, f64)> = Vec::new();
+        for step in &self.timeline.steps {
+            let op_id = match &step.step {
+                Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(tag.op_id),
+                _ => None,
+            };
+            if let Some(id) = op_id {
+                if operations.last().map(|entry| entry.0) != Some(id) {
+                    operations.push((id, step.start));
+                }
+            }
+        }
+        let target = if forward {
+            operations.iter().find(|(_, time)| *time > self.position + 1e-6)
+                .map(|(_, time)| *time).unwrap_or(self.timeline.duration)
+        } else {
+            operations.iter().rev().find(|(_, time)| *time < self.position - 1e-6)
+                .map(|(_, time)| *time).unwrap_or(0.)
+        };
+        self.seek(target);
     }
     pub fn toggle(&mut self) {
         if self.position >= self.timeline.duration {
@@ -318,8 +366,14 @@ impl SimulationPlayer {
         container(
             column![
                 row![
+                    inspector_button("⏮").on_press(Message::SimulationToolpathStart),
+                    inspector_button("◀| Op").on_press(Message::SimulationPreviousOperation),
+                    inspector_button("◀ Point").on_press(Message::SimulationPreviousPoint),
                     inspector_button(if self.playing { "Pause" } else { "Play" })
                         .on_press(Message::SimulationPlayPause),
+                    inspector_button("Point ▶").on_press(Message::SimulationNextPoint),
+                    inspector_button("Op |▶").on_press(Message::SimulationNextOperation),
+                    inspector_button("⏭").on_press(Message::SimulationToolpathEnd),
                     text(format!(
                         "{} / {}",
                         time(self.position),
@@ -516,7 +570,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let nc = controller.export_nc().unwrap().to_owned();
-        let mut player = SimulationPlayer::new(&controller).unwrap();
+        let mut player = SimulationPlayer::new_for_operation(&controller, None).unwrap();
         drain_player(&mut player);
         assert!(
             !player.preview.stock_vertices.is_empty(),

@@ -102,6 +102,7 @@ class PackagingTests(unittest.TestCase):
                         f'-Wl,-rpath,{library_dir}', '-o', str(smoke)], check=True)
         destination = self.root / 'extracted AppImage'
         (destination / 'usr/bin').mkdir(parents=True)
+        shutil.copy2(smoke, destination / 'usr/bin/opencamstudio')
         package.stage(destination, 'Linux')
         package.verify(destination, smoke, 'Linux')
         self.assertTrue(self.sdk.is_dir())

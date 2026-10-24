@@ -24,6 +24,7 @@ pub(super) struct GeometryEditor {
     additive: bool,
     row: Option<usize>,
     filter: CadFilter,
+    filter_explicit: bool,
     heights: Option<cam_model::OperationHeightSettings>,
     offsets: BTreeMap<cam_model::HeightPlaneKind, String>,
     height_defaults: Option<cam_model::OperationHeightSettings>,
@@ -45,13 +46,33 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
             (CadFilter::Loop, "chain", "Add Chain. Select one closed boundary enclosing the carving region."),
         ],
         OpKind::Carve => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary; its holes remain uncut islands.")],
+        OpKind::Bore => vec![(CadFilter::Face, "bore", "Select cylindrical holes or bosses with equal diameter and heights, or circular drawing loops.")],
         OpKind::Thread => vec![(CadFilter::Face, "thread", "Add Thread Centres. Select cylindrical bores or bosses with the same diameter and cutting heights; for a drawing, select circular holes.")],
+        OpKind::Adaptive => vec![
+            (CadFilter::Body, "silhouette", "Add solid bodies to 3D Adaptive Clearing. Multiple bodies and instances can be selected."),
+            (CadFilter::Face, "face", "Add individual faces to 3D Adaptive Clearing. Faces need a positive-area projection onto setup XY; selection never expands to the whole body."),
+        ],
         _ => Vec::new(),
     }
 }
 
 impl App {
-    fn operation_uses_cad_geometry(&self) -> bool {
+    pub(super) fn stock_to_leave_supported(operation: &Operation) -> bool {
+        matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_))
+    }
+
+    pub(super) fn stock_to_leave_enabled(&self) -> bool {
+        self.stock_to_leave_value().enabled
+    }
+
+    pub(super) fn stock_to_leave_value(&self) -> cam_model::StockToLeave {
+        self.stock_to_leave_draft.unwrap_or_else(|| match self.controller.selection() {
+            Selection::Operation(id) => self.controller.document().setup().stock_to_leave_for(id),
+            _ => cam_model::StockToLeave::default(),
+        })
+    }
+
+    pub(super) fn operation_uses_cad_geometry(&self) -> bool {
         self.cad_pending_kind.is_some()
             || self.cad_editing_op.is_some()
             || self.operation_draft.as_ref().is_some_and(|op| {
@@ -88,8 +109,14 @@ impl App {
             .into_iter()
             .enumerate()
             .map(|(index, label)| GeometryRow {
-                icon: if kind == OpKind::Thread {
+                icon: if kind == OpKind::Bore {
+                    "bore"
+                } else if kind == OpKind::Thread {
                     "thread"
+                } else if kind == OpKind::Adaptive
+                    && sources.get(index).is_some_and(|r| r.kind == EntityKind::Body)
+                {
+                    "silhouette"
                 } else if sources
                     .get(index)
                     .is_some_and(|r| r.kind == EntityKind::Face)
@@ -109,8 +136,7 @@ impl App {
                     .padding(4)
                     .style(inspector_secondary)
                     .on_press(Message::OperationGeometry(GeometryMessage::Add(filter))),
-                description,
-            ));
+                description, self.tooltips));
         }
         toolbar = toolbar.push(hint(
             button(icon("remove", 28.))
@@ -119,8 +145,7 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Remove)),
                 ),
-            "Delete the selected geometry item.",
-        ));
+            "Delete the selected geometry item.", self.tooltips));
         toolbar = toolbar.push(hint(
             button(icon("settings", 28.))
                 .padding(4)
@@ -128,11 +153,14 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Edit)),
                 ),
-            "Configure the selected geometry and its selection mode.",
-        ));
+            "Configure the selected geometry and its selection mode.", self.tooltips));
         geometry_collection(
-            if kind == OpKind::Thread {
+            if kind == OpKind::Bore {
+                "Bore selection"
+            } else if kind == OpKind::Thread {
                 "Thread selection"
+            } else if kind == OpKind::Adaptive {
+                "Machining geometry"
             } else {
                 "Contour selection"
             },
@@ -212,6 +240,14 @@ impl App {
 
     pub(super) fn geometry_operation_fields(&self, operation: &Operation) -> Vec<Field> {
         let mut fields = operation_fields(operation);
+        if self.stock_to_leave_draft.is_some_and(|stock| stock.enabled) {
+            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_)) {
+                fields.push(Field::StockLeaveRadial);
+            }
+            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_)) {
+                fields.push(Field::StockLeaveAxial);
+            }
+        }
         if self.chamfer_faces_active() {
             fields.retain(|field| {
                 !matches!(
@@ -240,6 +276,12 @@ impl App {
             })
             .chain((0..self.controller.open_paths().len()).map(LoopRef::open))
             .collect();
+        if let Operation::Bore(op) = operation {
+            return op.points.iter().map(|point| candidates.iter().copied().find(|reference| {
+                matches!(self.controller.operation_with_drawing_geometry(operation, &[*reference]), Ok(Operation::Bore(replacement))
+                    if replacement.points.iter().any(|p| (p[0] - point[0]).abs() < 1e-8 && (p[1] - point[1]).abs() < 1e-8))
+            })).collect::<Option<Vec<_>>>().unwrap_or_default();
+        }
         if let Operation::Thread(op) = operation {
             return op.points.iter().map(|point| candidates.iter().copied().find(|reference| {
                 matches!(self.controller.operation_with_drawing_geometry(operation, &[*reference]), Ok(Operation::Thread(replacement))
@@ -279,7 +321,12 @@ impl App {
                     return;
                 }
                 let Some(
-                    kind @ (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread),
+                    kind @ (OpKind::Chamfer
+                    | OpKind::Engrave
+                    | OpKind::Carve
+                    | OpKind::Bore
+                    | OpKind::Thread
+                    | OpKind::Adaptive),
                 ) = self.geometry_operation_kind()
                 else {
                     return;
@@ -295,6 +342,7 @@ impl App {
                     additive: self.geometry_additive,
                     row: self.geometry_row_selection,
                     filter: self.cad_filter,
+                    filter_explicit: self.cad_filter_explicit,
                     heights: self.height_draft.clone(),
                     offsets: self.height_offsets.clone(),
                     height_defaults: self.creation_geometry_height_defaults.clone(),
@@ -339,6 +387,7 @@ impl App {
                 self.geometry_additive = editor.additive;
                 self.geometry_row_selection = editor.row;
                 self.cad_filter = editor.filter;
+                self.cad_filter_explicit = editor.filter_explicit;
                 self.height_draft = editor.heights;
                 self.height_offsets = editor.offsets;
                 self.creation_geometry_height_defaults = editor.height_defaults;
@@ -412,7 +461,9 @@ impl App {
             OpKind::Chamfer => "Chamfer",
             OpKind::Engrave => "Engrave",
             OpKind::Carve => "Carve",
+            OpKind::Bore => "Bore",
             OpKind::Thread => "Thread",
+            OpKind::Adaptive => "3D Adaptive Clearing",
             _ => unreachable!(),
         };
         let labels = if cad {
@@ -425,6 +476,8 @@ impl App {
                 icon(
                     if kind == OpKind::Thread {
                         "thread"
+                    } else if kind == OpKind::Adaptive {
+                        if self.cad_filter == CadFilter::Body { "silhouette" } else { "face" }
                     } else if kind == OpKind::Carve && cad && self.cad_filter == CadFilter::Face {
                         "face"
                     } else {
@@ -454,8 +507,13 @@ impl App {
                 .color(INSPECTOR_MUTED),
         ]
         .spacing(9);
-        if cad && matches!(kind, OpKind::Chamfer | OpKind::Engrave | OpKind::Carve) {
-            let options = if kind == OpKind::Carve {
+        if cad && matches!(kind, OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive) {
+            let options = if kind == OpKind::Adaptive {
+                vec![
+                    (CadFilter::Body, "silhouette", "Whole solid body"),
+                    (CadFilter::Face, "face", "Selected faces only; each needs a positive-area setup XY projection"),
+                ]
+            } else if kind == OpKind::Carve {
                 vec![
                     (CadFilter::Face, "face", "Face and islands"),
                     (CadFilter::Loop, "chain", "Closed boundary loop"),
@@ -494,8 +552,7 @@ impl App {
                         .padding(4)
                         .style(move |theme, status| inspector_tab(theme, status, active))
                         .on_press(Message::GeometryFilterChanged(filter)),
-                    description,
-                ));
+                    description, self.tooltips));
             }
             body = body.push(controls);
         }
@@ -503,7 +560,9 @@ impl App {
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes > Fase. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
+            OpKind::Bore => "Select cylindrical holes or bosses, or circular drawing loops. Selected features must share diameter and cutting heights.",
             OpKind::Thread => "Select cylindrical bores or bosses, or circular drawing holes. Selected features must share diameter and cutting heights.",
+            OpKind::Adaptive => "Select whole solid bodies, individual faces, or both. Body selection includes all of its faces; face selection limits machining to the chosen face footprint.",
             _ => unreachable!(),
         };
         body = body.push(text(description).size(12));
@@ -552,6 +611,222 @@ mod tests {
         app.setup_draft = None;
         app.refresh_fields();
         app
+    }
+
+    #[test]
+    fn adaptive_geometry_modes_preserve_mixed_body_and_face_selection() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testfiles/chamfer_test.ocam"),
+            )
+            .unwrap();
+        app.controller.select(Selection::Setup);
+        app.setup_draft = None;
+        let geometry = app.controller.geometry_state();
+        let instance = &geometry.instances[0];
+        let asset = geometry.asset(instance.asset_id).unwrap();
+        let body = EntityRef {
+            asset_id: asset.id,
+            revision: asset.revision,
+            instance_id: instance.id,
+            body_id: instance.body_id,
+            kind: EntityKind::Body,
+            id: instance.body_id,
+        };
+        let face = EntityRef {
+            kind: EntityKind::Face,
+            id: asset.topology.faces[0].id,
+            ..body.clone()
+        };
+        assert_eq!(
+            modes(OpKind::Adaptive, true)
+                .into_iter()
+                .map(|(filter, _, _)| filter)
+                .collect::<Vec<_>>(),
+            vec![CadFilter::Body, CadFilter::Face]
+        );
+        app.cad_pending_kind = Some(OpKind::Adaptive);
+        app.controller
+            .try_set_adaptive_cad_selection(vec![body.clone()])
+            .unwrap();
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Face));
+        assert_eq!(app.cad_filter, CadFilter::Face);
+        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&body));
+        app.geometry_additive = true;
+        let _ = app.update(Message::CadSelect(face.clone()));
+        assert_eq!(app.controller.cad_selection(), &[body, face]);
+    }
+
+    #[test]
+    fn geometry_tab_auto_selects_supported_adaptive_feature_and_resets_for_idle_view() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testfiles/chamfer_test.ocam"),
+            )
+            .unwrap();
+        app.controller.select(Selection::Setup);
+        app.setup_draft = None;
+        let (body, face, face_bounds, placement) = {
+            let geometry = app.controller.geometry_state();
+            let instance = &geometry.instances[0];
+            let asset = geometry.asset(instance.asset_id).unwrap();
+            let face_topology = asset
+                .topology
+                .faces
+                .iter()
+                .find(|candidate| {
+                    let reference = EntityRef {
+                        asset_id: asset.id,
+                        revision: asset.revision,
+                        instance_id: instance.id,
+                        body_id: instance.body_id,
+                        kind: EntityKind::Face,
+                        id: candidate.id,
+                    };
+                    app.controller
+                        .preview_cad_operation(OpKind::Adaptive, &[reference])
+                        .is_ok()
+                })
+                .expect("fixture has a face with a positive-area setup XY projection");
+            (
+                EntityRef {
+                    asset_id: asset.id,
+                    revision: asset.revision,
+                    instance_id: instance.id,
+                    body_id: instance.body_id,
+                    kind: EntityKind::Body,
+                    id: instance.body_id,
+                },
+                EntityRef {
+                    asset_id: asset.id,
+                    revision: asset.revision,
+                    instance_id: instance.id,
+                    body_id: instance.body_id,
+                    kind: EntityKind::Face,
+                    id: face_topology.id,
+                },
+                face_topology.bounds,
+                instance.placement,
+            )
+        };
+
+        let _ = app.update(Message::BeginOp(OpKind::Adaptive));
+        assert_eq!(app.cad_pending_kind, Some(OpKind::Adaptive));
+        assert_eq!(app.cad_filter, CadFilter::Body);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        assert!(app.geometry_additive);
+        assert!(!app.cad_filter_explicit);
+
+        let _ = app.update(Message::CadSelect(face.clone()));
+        assert_eq!(app.cad_filter, CadFilter::Face);
+        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&face));
+        assert!(!app.cad_filter_explicit);
+
+        let _ = app.update(Message::CadEscape);
+        assert!(app.cad_pending_kind.is_none());
+        assert!(!app.cad_filter_explicit);
+        let viewport = app.machining_viewport();
+        assert!(viewport.cad_operation_kind.is_none());
+        let bounds = iced::Rectangle::new(
+            iced::Point::ORIGIN,
+            iced::Size::new(900., 600.),
+        );
+        let point: [f64; 3] = std::array::from_fn(|axis| {
+            (face_bounds[0][axis] + face_bounds[1][axis]) / 2.
+        });
+        let point = placement.transform_point(point);
+        let cursor = picking_view::project(viewport.camera(), bounds, point).unwrap().0;
+        let candidates = viewport.cad_candidates_at(cursor, bounds);
+        assert!(candidates.iter().any(|pick| pick.entity.kind == EntityKind::Face));
+        assert!(candidates.iter().any(|pick| pick.entity.kind == EntityKind::Body));
+
+        let id = app
+            .controller
+            .create_cad_operation(OpKind::Adaptive, vec![body.clone()])
+            .unwrap();
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        assert_eq!(app.cad_editing_op, None, "opening the tab must stay clean");
+        assert!(app.geometry_auto_pick);
+        assert_eq!(app.machining_viewport().cad_operation_kind, Some(OpKind::Adaptive));
+        assert!(!app.cad_filter_explicit);
+        let _ = app.update(Message::GeometryClear);
+        let _ = app.update(Message::CadSelect(face.clone()));
+        assert_eq!(app.cad_editing_op, Some(id));
+        assert_eq!(app.cad_filter, CadFilter::Face);
+        let selected = app.controller.cad_selection().to_vec();
+        assert_eq!(selected, vec![face]);
+        let preview = app
+            .controller
+            .preview_cad_operation(OpKind::Adaptive, &selected);
+        assert!(preview.is_ok(), "{preview:?}");
+    }
+
+    #[test]
+    fn profile_geometry_auto_pick_edits_a_named_entry_without_legacy_geometry_mode() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testfiles/chamfer_test.ocam"),
+            )
+            .unwrap();
+        app.controller.select(Selection::Setup);
+        app.setup_draft = None;
+        let body = {
+            let geometry = app.controller.geometry_state();
+            let instance = &geometry.instances[0];
+            let asset = geometry.asset(instance.asset_id).unwrap();
+            EntityRef {
+                asset_id: asset.id,
+                revision: asset.revision,
+                instance_id: instance.id,
+                body_id: instance.body_id,
+                kind: EntityKind::Body,
+                id: instance.body_id,
+            }
+        };
+        let silhouette = EntityRef {
+            kind: EntityKind::Silhouette,
+            id: body.body_id,
+            ..body.clone()
+        };
+        let id = app
+            .controller
+            .create_cad_operation(OpKind::Profile, vec![silhouette.clone()])
+            .unwrap();
+        app.controller.edit_operation(id, |operation| {
+            if let Operation::Profile(profile) = operation {
+                profile.selections = Some(Vec::new());
+            }
+        });
+        app.controller.select(Selection::Operation(id));
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        assert!(app.geometry_auto_pick);
+        assert_eq!(app.cad_editing_op, None);
+
+        let _ = app.update(Message::CadSelect(silhouette.clone()));
+        assert!(app.profile_entry_editor.as_ref().is_some_and(|entry| entry.picking));
+        assert_eq!(app.cad_editing_op, None);
+        app.profile_entry_message(profile_entries_view::EntryMessage::Confirm);
+        assert!(app.profile_entry_editor.is_none(), "the picked entry must validate and close");
+        assert_eq!(app.cad_editing_op, None);
+        assert!(app.profile_entries().iter().any(|entry| {
+            matches!(&entry.source, cam_model::ProfileGeometrySource::Cad(refs) if refs.contains(&silhouette))
+        }));
+        let _ = app.update(Message::Apply);
+        assert_eq!(app.cad_editing_op, None);
+        assert!(matches!(app.controller.operation(id), Some(Operation::Profile(profile))
+            if profile.selections.as_ref().is_some_and(|entries| entries.iter().any(|entry|
+                matches!(&entry.source, cam_model::ProfileGeometrySource::Cad(refs) if refs.contains(&silhouette))))));
     }
 
     #[test]

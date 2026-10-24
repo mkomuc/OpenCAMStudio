@@ -3,12 +3,13 @@
 
 use cam_cldata::{CutterComp, MoveKind, Point3, Program, ProgramBuilder, SpindleDir, Step, Tag};
 use cam_model::{Envelope, Machine};
-use cam_post::{FanucPost, GrblPost, Post, PostError, PostOptions};
+use cam_post::{FanucPost, GrblPost, Post, PostError, PostKind, PostOptions};
 
 fn machine() -> Machine {
     Machine {
         name: "test".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: Envelope::new(
@@ -67,4 +68,69 @@ fn grbl_rejects_control_comp() {
 fn fanuc_declares_the_capability_grbl_does_not() {
     assert!(FanucPost.capabilities().cutter_comp);
     assert!(!GrblPost.capabilities().cutter_comp);
+}
+
+#[test]
+fn supported_posts_activate_on_the_linear_engagement_block_and_reject_rapid_engagement() {
+    for post in [
+        PostKind::Fanuc,
+        PostKind::Haas,
+        PostKind::LinuxCnc,
+        PostKind::Okuma,
+    ] {
+        let program = comp_program();
+        let nc = post
+            .post(&program, &machine(), &PostOptions::default())
+            .unwrap();
+        let activation = nc.lines().find(|line| line.contains("G41 D1")).unwrap();
+        assert!(
+            activation.contains("G1") && activation.contains("X50."),
+            "{post}: {activation}"
+        );
+        let mut bad = program;
+        let index = bad
+            .steps
+            .iter()
+            .position(|s| matches!(s, Step::CutterComp(CutterComp::Left(_))))
+            .unwrap();
+        bad.steps.insert(
+            index + 1,
+            Step::Rapid {
+                to: Point3::new(11., 11., 5.),
+                tag: Tag::new(0, MoveKind::Link),
+            },
+        );
+        assert!(matches!(
+            post.post(&bad, &machine(), &PostOptions::default()),
+            Err(PostError::Unsupported(_))
+        ));
+    }
+}
+
+#[test]
+fn compensation_cannot_engage_on_vertical_or_rounded_away_motion() {
+    for post in [
+        PostKind::Fanuc,
+        PostKind::Haas,
+        PostKind::LinuxCnc,
+        PostKind::Okuma,
+    ] {
+        for to in [Point3::new(10., 10., -2.), Point3::new(10.00001, 10., -1.)] {
+            let mut program = comp_program();
+            let index = program
+                .steps
+                .iter()
+                .position(|step| matches!(step, Step::CutterComp(CutterComp::Left(_))))
+                .unwrap();
+            program.steps[index + 1] = Step::Linear {
+                to,
+                feed: 300.,
+                tag: Tag::new(0, MoveKind::LeadIn),
+            };
+            assert!(matches!(
+                post.post(&program, &machine(), &PostOptions::default()),
+                Err(PostError::Unsupported(_))
+            ));
+        }
+    }
 }

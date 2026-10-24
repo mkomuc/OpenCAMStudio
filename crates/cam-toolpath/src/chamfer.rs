@@ -290,7 +290,7 @@ impl Strategy for ChamferStrategy {
                 Vec::new()
             };
             let (loop_pts, exit_on, tan_out) =
-                crate::emit::loop_with_overlap(pts, op.lead_overlap);
+                crate::emit::loop_with_exit(pts, op.lead_overlap, op.end);
             // The lead-off normal follows the arrival tangent (see the profile note):
             // at a corner start it differs from the start's, so deriving it here avoids
             // a degenerate lead; mid-edge the two coincide.
@@ -602,6 +602,7 @@ mod tests {
             gradual: false,
             feed: 200.0,
             plunge_feed: 100.0,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,

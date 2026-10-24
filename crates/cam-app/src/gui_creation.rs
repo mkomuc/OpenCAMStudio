@@ -69,12 +69,20 @@ impl App {
         self.profile_contour_selection = 0;
         self.profile_side_overrides.clear();
         self.profile_entry_editor = None;
+        self.operation_position_pick = None;
         self.operation_tab = OperationTab::Tool;
         self.creation_edited_fields.clear();
         self.inspector_active = true;
         self.operation_binding_preview = None;
         self.operation_geometry = None;
         self.operation_draft = Some(self.controller.operation_template(kind, 0));
+        self.stock_to_leave_draft = Some(
+            self.controller
+                .pending_op()
+                .and_then(|pending| pending.replacing)
+                .map(|id| self.controller.document().setup().stock_to_leave_for(id))
+                .unwrap_or_default(),
+        );
         self.height_draft_id = Some(0);
         let settings = cam_model::OperationHeightSettings::default();
         self.height_offsets = cam_model::HeightPlaneKind::ALL
@@ -82,6 +90,7 @@ impl App {
             .map(|p| (p, fmt_num(settings.definition(p).offset)))
             .collect();
         self.height_draft = Some(settings);
+        self.height_disabled_feed_reference = None;
         self.sync_creation_tool();
         let work_offset = self.controller.active_origin();
         self.edit_operation_draft(|op| op.set_work_offset(work_offset));
@@ -96,7 +105,7 @@ impl App {
     pub(super) fn sync_creation_geometry_heights(&mut self) {
         if !matches!(
             self.cad_pending_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive)
         ) {
             return;
         }
@@ -251,6 +260,13 @@ impl App {
                     op.islands = new.islands;
                     op.top = new.top;
                 }
+                (Operation::Bore(op), Operation::Bore(new)) => {
+                    op.points = new.points;
+                    op.internal = new.internal;
+                    op.diameter = new.diameter;
+                    op.z_top = new.z_top;
+                    op.z_bottom = new.z_bottom;
+                }
                 (Operation::Thread(op), Operation::Thread(new)) => {
                     op.points = new.points;
                     op.internal = new.internal;
@@ -260,6 +276,7 @@ impl App {
                     op.z_top = new.z_top;
                     op.z_bottom = new.z_bottom;
                 }
+                (Operation::Adaptive(_), Operation::Adaptive(_)) => {}
                 _ => return Err("Geometry does not match operation".into()),
             }
             if crate::cad_operations::surface_recipe(&binding.recipe) {
@@ -280,6 +297,11 @@ impl App {
             )?;
             if let Operation::Profile(profile) = &mut operation {
                 self.apply_profile_side_overrides(profile);
+            }
+            if self.creation_edited_fields.contains(&Field::BoreDiameter) {
+                if let (Operation::Bore(op), Operation::Bore(edited)) = (&mut operation, &draft) {
+                    op.diameter = edited.diameter;
+                }
             }
             if self.creation_edited_fields.contains(&Field::MajorDia) {
                 if let (Operation::Thread(op), Operation::Thread(edited)) = (&mut operation, &draft)

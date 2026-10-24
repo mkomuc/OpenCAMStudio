@@ -19,6 +19,7 @@ pub(crate) struct Writer<'a> {
     mode: Option<u8>,
     feed: Option<f64>,
     explicit_motion: bool,
+    linear_prefix: Option<String>,
 }
 
 impl<'a> Writer<'a> {
@@ -31,12 +32,19 @@ impl<'a> Writer<'a> {
             mode: None,
             feed: None,
             explicit_motion: false,
+            linear_prefix: None,
         }
     }
 
     /// Controls such as Estlcam require a G word on every motion line.
     pub(crate) fn explicit_motion(&mut self) {
         self.explicit_motion = true;
+    }
+
+    /// Put compensation activation on the same block as its linear engagement.
+    /// Callers validate that the next IR step is a linear move.
+    pub(crate) fn prefix_next_linear(&mut self, prefix: String) {
+        self.linear_prefix = Some(prefix);
     }
 
     /// Coordinate precision (decimals).
@@ -104,6 +112,18 @@ impl<'a> Writer<'a> {
     ) -> Result<(), PostError> {
         let p = self.precision;
         let mut words: Vec<String> = Vec::new();
+        if let Some(prefix) = self.linear_prefix.take() {
+            let xy_motion = self.cur.is_some_and(|from| {
+                num(from.x, p) != num(to.x, p) || num(from.y, p) != num(to.y, p)
+            });
+            if g != 1 || !xy_motion {
+                return Err(PostError::Unsupported(
+                    "Controller compensation must engage on a linear XY move".into(),
+                ));
+            }
+            words.push(prefix);
+            self.mode = None;
+        }
 
         if self.explicit_motion || self.mode != Some(g) {
             words.push(format!("G{g}"));

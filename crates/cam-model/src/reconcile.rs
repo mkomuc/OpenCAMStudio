@@ -403,6 +403,7 @@ mod tests {
             origin_index: 1,
             operation_heights: Default::default(),
             height_settings: Default::default(),
+            stock_to_leave: Default::default(),
             tool_change_height: None,
         };
         let shop = [t(4, 12.0, ToolKind::EndMill)]; // ⌀12 is shop #4
