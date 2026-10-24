@@ -518,7 +518,7 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
         "blocked entry",
         "invalid solid",
         "partial rim",
-        "protected island",
+        "ambiguous floor",
         "wrong setup",
     ] {
         let (mut state, selected) = blind_bore_with_unrelated_surface();
@@ -526,7 +526,18 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
         let reason = match defect {
             "blocked entry" => {
                 topology.bodies[0].bounds[1][2] = 1.;
-                "above the bore entry"
+                // Face Contours checks local access. Enlarging only the body
+                // bounds does not put material above the selected opening.
+                topology.faces.push(CadFace {
+                    id: 1000,
+                    body_id: 1,
+                    loop_ids: Vec::new(),
+                    surface: CadSurface::Unsupported {
+                        description: "roof above the bore".into(),
+                    },
+                    bounds: [[9., 9., 0.5], [11., 11., 1.]],
+                });
+                "blocks vertical access"
             }
             "invalid solid" => {
                 topology.bodies[0].valid_solid = false;
@@ -542,9 +553,9 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
                 if let CadCurve::CircleArc { end_angle, .. } = &mut edge.curve {
                     *end_angle = std::f64::consts::PI;
                 }
-                "complete constant-diameter bore"
+                "open boundary"
             }
-            "protected island" => {
+            "ambiguous floor" => {
                 let floor_id = topology
                     .loops
                     .iter()
@@ -562,7 +573,7 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
                     .find(|w| w.face_id == floor_id && w.id != selected.id)
                     .unwrap();
                 floor.loop_ids.push(other_loop.id);
-                "circular floor boundary"
+                "multiple outer boundaries"
             }
             _ => {
                 state.instances[0].placement.rotation = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]];
@@ -576,7 +587,7 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
         let before = app.document().clone();
         let error = app
             .create_cad_operation(OpKind::Profile, vec![selected])
-            .unwrap_err();
+            .expect_err(defect);
         assert!(error.contains(reason), "{defect}: {error}");
         assert_eq!(app.document(), &before);
     }
