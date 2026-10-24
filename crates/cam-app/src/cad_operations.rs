@@ -177,7 +177,7 @@ pub(crate) fn recipe(
         OpKind::Chamfer => ExtractionRecipe::ChamferLoop,
         OpKind::Engrave => ExtractionRecipe::EngravePath,
         OpKind::Carve => ExtractionRecipe::CarveRegion,
-        OpKind::Thread => {
+        OpKind::Thread | OpKind::Bore => {
             let reference = selected
                 .first()
                 .ok_or("Select cylindrical bore or boss faces")?;
@@ -185,11 +185,15 @@ pub(crate) fn recipe(
                 .asset(reference.asset_id)
                 .and_then(|a| a.topology.faces.iter().find(|f| f.id == reference.id))
                 .filter(|_| reference.kind == EntityKind::Face)
-                .ok_or("Thread requires cylindrical bore or boss faces")?;
+                .ok_or("Thread/Bore requires cylindrical bore or boss faces")?;
             let CadSurface::Cylinder { inward, .. } = face.surface else {
-                return Err("Thread requires cylindrical bore or boss faces".into());
+                return Err("Thread/Bore requires cylindrical bore or boss faces".into());
             };
-            ExtractionRecipe::ThreadCylinders { internal: inward }
+            if kind == OpKind::Bore {
+                ExtractionRecipe::BoreCylinders { internal: inward }
+            } else {
+                ExtractionRecipe::ThreadCylinders { internal: inward }
+            }
         }
         OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette => {
             ExtractionRecipe::ProfileSilhouette
@@ -309,6 +313,7 @@ pub(crate) fn operation_type(operation: &Operation) -> &'static str {
         Operation::Drill(_) => "Drill",
         Operation::Face(_) => "Face",
         Operation::Chamfer(_) => "Chamfer",
+        Operation::Bore(_) => "Bore",
         Operation::Thread(_) => "Thread",
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
@@ -607,6 +612,27 @@ pub(crate) fn create_operation(
             plunge: Plunge::Straight,
             stay_down: true,
         }),
+        OpKind::Bore => Operation::Bore(BoreOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            points: resolved
+                .holes
+                .iter()
+                .map(|h| [h.center.x, h.center.y])
+                .collect(),
+            internal: matches!(
+                binding.recipe,
+                ExtractionRecipe::BoreCylinders { internal: true }
+            ),
+            diameter: resolved.holes[0].diameter,
+            z_top: resolved.heights.top,
+            z_bottom: resolved.heights.bottom,
+            feed: defaults.feed,
+            plunge_feed: defaults.plunge_feed,
+            ..Default::default()
+        }),
         OpKind::Thread => Operation::Thread(ThreadOp {
             id,
             tool,
@@ -837,6 +863,24 @@ pub(crate) fn resolve_document_checked(
                     p.top = input.heights.top;
                     p.depth = depth;
                 }
+                (Operation::Bore(p), ExtractionRecipe::BoreCylinders { internal }) => {
+                    if p.internal != *internal || p.taper_angle != 0. {
+                        return Err(
+                            "Bore type and straight wall must match the selected cylinder".into(),
+                        );
+                    }
+                    p.points = input
+                        .holes
+                        .iter()
+                        .map(|h| [h.center.x, h.center.y])
+                        .collect();
+                    p.diameter = input.holes[0].diameter;
+                    p.z_top = input.heights.top;
+                    p.z_bottom = input.heights.bottom;
+                    if p.axial_stock < 0. {
+                        return Err("CAD Bore axial stock cannot extend below the certified face; use a qualified bottom selection".into());
+                    }
+                }
                 (Operation::Thread(p), ExtractionRecipe::ThreadCylinders { internal }) => {
                     if p.internal != *internal {
                         return Err("Thread type must match the selected bore or boss".into());
@@ -997,6 +1041,7 @@ pub(crate) fn capture_height_override(
         Operation::Face(p) => (before.depth(), p.depth),
         Operation::Engrave(p) => (before.depth(), p.depth),
         Operation::Carve(p) => (before.depth(), p.depth),
+        Operation::Bore(p) => (before.depth(), p.z_top - p.z_bottom),
         Operation::Thread(p) => (before.depth(), p.z_top - p.z_bottom),
         Operation::Chamfer(_) | Operation::Adaptive(_) => return,
     };

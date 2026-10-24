@@ -8,7 +8,7 @@
 
 use cam_geo::Contour;
 
-use crate::Tool;
+use crate::{BoreOp, Tool};
 
 /// The document schema version. Bumped when the on-disk model format changes;
 /// present from the start so save-files are versioned before there is a loader.
@@ -88,7 +88,8 @@ use crate::Tool;
 /// v27: introduced an optional adaptive simplification tolerance. That legacy
 /// member is now ignored; simplification is derived from the operation tolerance.
 /// v28: profile pass controls, tab shapes/counts, and one controller compensation method.
-pub const SCHEMA_VERSION: u32 = 28;
+/// v29: helical Bore operations and cylindrical Bore geometry bindings.
+pub const SCHEMA_VERSION: u32 = 29;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1600,6 +1601,8 @@ pub enum Operation {
     Chamfer(ChamferOp),
     /// A thread-milling operation.
     Thread(ThreadOp),
+    /// Helical milling of circular holes and bosses.
+    Bore(BoreOp),
     /// A V-carve engraving operation.
     Engrave(EngraveOp),
     /// A V-carving operation over a region.
@@ -1616,6 +1619,7 @@ impl Operation {
             Operation::Adaptive(op) => op.id,
             Operation::Face(op) => op.id,
             Operation::Chamfer(op) => op.id,
+            Operation::Bore(op) => op.id,
             Operation::Thread(op) => op.id,
             Operation::Engrave(op) => op.id,
             Operation::Carve(op) => op.id,
@@ -1632,6 +1636,7 @@ impl Operation {
             Operation::Adaptive(op) => op.tool,
             Operation::Face(op) => op.tool,
             Operation::Chamfer(op) => op.tool,
+            Operation::Bore(op) => op.tool,
             Operation::Thread(op) => op.tool,
             Operation::Engrave(op) => op.tool,
             Operation::Carve(op) => op.tool,
@@ -1666,6 +1671,7 @@ impl Operation {
             Operation::Adaptive(op) => op.spindle_rpm,
             Operation::Face(op) => op.spindle_rpm,
             Operation::Chamfer(op) => op.spindle_rpm,
+            Operation::Bore(op) => op.spindle_rpm,
             Operation::Thread(op) => op.spindle_rpm,
             Operation::Engrave(op) => op.spindle_rpm,
             Operation::Carve(op) => op.spindle_rpm,
@@ -1681,6 +1687,7 @@ impl Operation {
             Operation::Adaptive(op) => op.spindle_rpm = rpm,
             Operation::Face(op) => op.spindle_rpm = rpm,
             Operation::Chamfer(op) => op.spindle_rpm = rpm,
+            Operation::Bore(op) => op.spindle_rpm = rpm,
             Operation::Thread(op) => op.spindle_rpm = rpm,
             Operation::Engrave(op) => op.spindle_rpm = rpm,
             Operation::Carve(op) => op.spindle_rpm = rpm,
@@ -1698,6 +1705,7 @@ impl Operation {
             Operation::Adaptive(op) => op.work_offset,
             Operation::Face(op) => op.work_offset,
             Operation::Chamfer(op) => op.work_offset,
+            Operation::Bore(op) => op.work_offset,
             Operation::Thread(op) => op.work_offset,
             Operation::Engrave(op) => op.work_offset,
             Operation::Carve(op) => op.work_offset,
@@ -1713,6 +1721,7 @@ impl Operation {
             Operation::Adaptive(op) => op.work_offset = work_offset,
             Operation::Face(op) => op.work_offset = work_offset,
             Operation::Chamfer(op) => op.work_offset = work_offset,
+            Operation::Bore(op) => op.work_offset = work_offset,
             Operation::Thread(op) => op.work_offset = work_offset,
             Operation::Engrave(op) => op.work_offset = work_offset,
             Operation::Carve(op) => op.work_offset = work_offset,
@@ -1728,6 +1737,7 @@ impl Operation {
             Operation::Adaptive(op) => op.id = id,
             Operation::Face(op) => op.id = id,
             Operation::Chamfer(op) => op.id = id,
+            Operation::Bore(op) => op.id = id,
             Operation::Thread(op) => op.id = id,
             Operation::Engrave(op) => op.id = id,
             Operation::Carve(op) => op.id = id,
@@ -1745,6 +1755,7 @@ impl Operation {
             Operation::Adaptive(op) => op.tool = tool,
             Operation::Face(op) => op.tool = tool,
             Operation::Chamfer(op) => op.tool = tool,
+            Operation::Bore(op) => op.tool = tool,
             Operation::Thread(op) => op.tool = tool,
             Operation::Engrave(op) => op.tool = tool,
             Operation::Carve(op) => op.tool = tool,
@@ -1901,7 +1912,7 @@ impl Setup {
                     }
                     true
                 }
-                Operation::Drill(_) | Operation::Chamfer(_) | Operation::Thread(_)
+                Operation::Drill(_) | Operation::Bore(_) | Operation::Chamfer(_) | Operation::Thread(_)
                 | Operation::Engrave(_) | Operation::Carve(_) => false,
             };
             if !supported && (radial > 0.0 || axial > 0.0) {

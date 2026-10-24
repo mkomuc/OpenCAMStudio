@@ -580,6 +580,11 @@ fn compute_at_heights(
             p.depth = depth;
             0.0
         }
+        Operation::Bore(p) => {
+            p.z_top = heights.top;
+            p.z_bottom = heights.bottom;
+            0.0
+        }
         Operation::Thread(p) => {
             p.z_top = heights.top;
             p.z_bottom = heights.bottom;
@@ -631,6 +636,7 @@ fn apply_feed_height(
         Operation::Face(o) => o.plunge_feed,
         Operation::Adaptive(o) => o.params.plunge_feed,
         Operation::Drill(o) => o.feed,
+        Operation::Bore(o) => o.plunge_feed,
         Operation::Thread(o) => o.plunge_feed,
         Operation::Chamfer(o) => o.plunge_feed,
         Operation::Engrave(o) => o.plunge_feed,
@@ -1052,6 +1058,7 @@ fn compute_with_stock(
             FaceStrategy::new(op).compute(env, cancel)
         }
         Operation::Chamfer(op) => ChamferStrategy::new(op.clone()).compute(env, cancel),
+        Operation::Bore(op) => crate::BoreStrategy::new(op.clone()).compute(env, cancel),
         Operation::Thread(op) => ThreadStrategy::new(op.clone()).compute(env, cancel),
         Operation::Engrave(op) => EngraveStrategy::new(op.clone()).compute(env, cancel),
         Operation::Carve(op) => CarveStrategy::new(op.clone()).compute(env, cancel),

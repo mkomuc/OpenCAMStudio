@@ -58,6 +58,7 @@ fn all_operation_kinds_apply_presets_and_allow_independent_values() {
         OpKind::Drill,
         OpKind::Chamfer,
         OpKind::Thread,
+        OpKind::Bore,
         OpKind::Engrave,
         OpKind::Carve,
     ] {
@@ -86,6 +87,7 @@ fn all_operation_kinds_apply_presets_and_allow_independent_values() {
                 assert_eq!(o.feed, 600.);
                 assert_eq!(o.step, 0.);
             }
+            Operation::Bore(o) => assert_eq!(o.feed, 600.),
             Operation::Thread(o) => assert_eq!(o.feed, 600.),
             Operation::Engrave(o) => {
                 assert_eq!(o.feed, 600.);

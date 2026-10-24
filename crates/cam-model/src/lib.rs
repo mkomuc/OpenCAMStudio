@@ -13,6 +13,8 @@
 //! by swapping the [`Machine`] it is handed. Keeping them separate is a core
 //! design rule (see `ARCHITECTURE.md`).
 
+mod bore;
+pub use bore::{BoreOp, BoreOrder};
 mod document;
 mod profile_selection;
 pub use profile_selection::*;

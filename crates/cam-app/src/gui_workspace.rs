@@ -572,7 +572,7 @@ impl App {
         }
         if matches!(
             viewport.cad_operation_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread)
         ) {
             viewport.cad_silhouette = false;
         }

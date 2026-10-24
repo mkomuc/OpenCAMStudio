@@ -1230,7 +1230,8 @@ fn derive(
             Ok((vec![region], vec![], heights))
         }
         ExtractionRecipe::DrillHoles => derive_holes(&view, refs, true),
-        ExtractionRecipe::ThreadCylinders { internal } => derive_holes(&view, refs, internal),
+        ExtractionRecipe::BoreCylinders { internal }
+        | ExtractionRecipe::ThreadCylinders { internal } => derive_holes(&view, refs, internal),
         ExtractionRecipe::ChamferFaces
         | ExtractionRecipe::ChamferLoop
         | ExtractionRecipe::EngravePath

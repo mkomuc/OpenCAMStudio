@@ -161,6 +161,7 @@ impl App {
                     } else if matches!(
                         op,
                         Operation::Drill(_)
+                            | Operation::Bore(_)
                             | Operation::Thread(_)
                             | Operation::Chamfer(_)
                             | Operation::Engrave(_)
@@ -217,6 +218,7 @@ impl App {
                 Operation::Chamfer(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
                 Operation::Engrave(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
                 Operation::Drill(p) => centers.extend(p.points.iter().copied()),
+                Operation::Bore(p) => centers.extend(p.points.iter().copied()),
                 Operation::Thread(p) => centers.extend(p.points.iter().copied()),
                 Operation::Profile(_) | Operation::Adaptive(_) => {}
             }

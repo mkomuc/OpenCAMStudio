@@ -197,6 +197,31 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             Field::Feed,
             Field::PlungeFeed,
         ],
+        Operation::Bore(b) => {
+            let mut fields = vec![
+                Field::BoreDiameter,
+                Field::BoreTaper,
+                Field::BoreTolerance,
+                Field::BoreStepovers,
+                Field::BoreStepover,
+                Field::BoreFinishing,
+                Field::BoreRadialStock,
+                Field::BoreAxialStock,
+                Field::BoreSafeDistance,
+                Field::SpindleRpm,
+                Field::Feed,
+                Field::PlungeFeed,
+            ];
+            fields.push(if b.ramp_angle.is_some() {
+                Field::BoreAngle
+            } else {
+                Field::BorePitch
+            });
+            if !b.internal || !b.lead_to_center {
+                fields.push(Field::BoreLeadRadius);
+            }
+            fields
+        }
         Operation::Thread(t) => {
             let mut fields = vec![
                 Field::MajorDia,
@@ -222,7 +247,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
     if matches!(op, Operation::Profile(p) if p.closed)
         || matches!(
             op,
-            Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_)
+            Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_) | Operation::Bore(_)
         )
     {
         fields.push(Field::RampFeed);
@@ -230,7 +255,10 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
     if matches!(op, Operation::Profile(p) if p.closed)
         || matches!(
             op,
-            Operation::Pocket(_) | Operation::Chamfer(_) | Operation::Thread(_)
+            Operation::Pocket(_)
+                | Operation::Chamfer(_)
+                | Operation::Thread(_)
+                | Operation::Bore(_)
         )
         || matches!(op, Operation::Carve(c) if c.clear.is_some())
     {

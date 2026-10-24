@@ -78,6 +78,8 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::TabHeight
         | Field::TabSpacing
         | Field::AdaptiveOffset => OperationTab::Geometry,
+        Field::BoreDiameter | Field::BoreTaper => OperationTab::Geometry,
+        Field::BoreSafeDistance | Field::BoreLeadRadius => OperationTab::Linking,
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -181,6 +183,12 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         {
             value <= 0.0
         }
+        Field::BoreDiameter | Field::BorePitch | Field::BoreTolerance | Field::BoreSafeDistance => {
+            value <= 0.
+        }
+        Field::BoreAngle => value <= 0. || value >= 90.,
+        Field::BoreStepovers => value < 0. || value.fract() != 0. || value > 10000.,
+        Field::BoreTaper | Field::BoreRadialStock | Field::BoreAxialStock => false,
         Field::ThreadPasses => value < 1.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::ThreadSpringPasses => value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::Overlap | Field::ClearOverlap => !(0.0..=99.0).contains(&value),
@@ -509,6 +517,7 @@ impl App {
                 }
                 Operation::Face(_) => "Rectangular facing boundary".into(),
                 Operation::Drill(o) => format!("{} hole centres", o.points.len()),
+                Operation::Bore(o) => format!("{} bore centres", o.points.len()),
                 Operation::Thread(o) => format!("{} thread centres", o.points.len()),
                 Operation::Adaptive(_) => linked.map_or_else(
                     || "Selected geometry".into(),
@@ -624,12 +633,14 @@ impl App {
                         | Field::ThreadTop
                         | Field::ThreadBottom
                         | Field::ChamferTop
+                        | Field::BoreDiameter
+                        | Field::BoreTaper
                 )
             {
                 continue;
             }
             let value = if creating
-                && field == Field::MajorDia
+                && matches!(field, Field::MajorDia | Field::BoreDiameter)
                 && !self.creation_edited_fields.contains(&field)
             {
                 op_field(op, field).map(fmt_num).unwrap_or_default()
@@ -889,6 +900,65 @@ impl App {
                         &LeadKind::ALL[..],
                         Message::LeadOutKindChanged,
                     ));
+                }
+            }
+            Operation::Bore(b) => {
+                let toggle = |label: &'static str, value, option: fn(bool) -> BoreOption| {
+                    row![
+                        text(label).size(12),
+                        checkbox(value)
+                            .size(15)
+                            .on_toggle(move |v| Message::BoreOption(option(v)))
+                    ]
+                    .spacing(8)
+                };
+                if tab == OperationTab::Geometry {
+                    if linked.is_some() {
+                        list = list.push(
+                            text(format!(
+                                "CAD {} · diameter {:.3} mm · straight wall",
+                                if b.internal { "hole" } else { "boss" },
+                                b.diameter
+                            ))
+                            .size(12),
+                        );
+                    } else {
+                        list = list.push(toggle("Internal hole", b.internal, BoreOption::Internal));
+                    }
+                    list = list.push(pick_list(
+                        &cam_model::BoreOrder::ALL[..],
+                        Some(b.order),
+                        |v| Message::BoreOption(BoreOption::Order(v)),
+                    ));
+                    list = list.push(toggle(
+                        "Reverse order",
+                        b.reverse_order,
+                        BoreOption::Reverse,
+                    ));
+                }
+                if tab == OperationTab::Passes {
+                    list = list.push(toggle(
+                        "Use ramp angle",
+                        b.ramp_angle.is_some(),
+                        BoreOption::Angle,
+                    ));
+                    list = list.push(toggle("Climb milling", b.climb, BoreOption::Climb));
+                    list = list.push(toggle(
+                        "Repeat final pass",
+                        b.repeat_pass,
+                        BoreOption::Repeat,
+                    ));
+                    list = list.push(text("Tool compensation is computed in CAM.").size(12));
+                }
+                if tab == OperationTab::Linking {
+                    if b.internal {
+                        list = list.push(toggle(
+                            "Lead to centre",
+                            b.lead_to_center,
+                            BoreOption::Center,
+                        ));
+                    }
+                    list = list.push(text("Tangent horizontal leads; retract to clearance between passes and features.").size(12));
                 }
             }
             Operation::Thread(t) => {
@@ -1403,6 +1473,34 @@ mod tests {
         assert_eq!(stock_offset_fields(face), [Field::StockLeaveAxial]);
     }
 
+    #[test]
+    fn bore_editor_exposes_fields_and_ramp_toggle_keeps_geometry() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.select(Selection::Setup);
+        app.setup_draft = None;
+        app.refresh_fields();
+        let _ = app.update(Message::BeginOp(OpKind::Bore));
+        assert!(matches!(app.operation_draft, Some(Operation::Bore(_))));
+        let _ = app.update(Message::FieldChanged(Field::BorePitch, "0.75".into()));
+        let _ = app.update(Message::BoreOption(BoreOption::Angle(true)));
+        let operation = app.operation_draft.as_ref().unwrap();
+        assert!(operation_fields(operation).contains(&Field::BoreAngle));
+        assert!(!operation_fields(operation).contains(&Field::BorePitch));
+        for field in operation_fields(operation) {
+            assert!(op_field(operation, field).is_some(), "{field:?}");
+        }
+        let _ = app.update(Message::BoreOption(BoreOption::Repeat(true)));
+        let _ = app.update(Message::BoreOption(BoreOption::Angle(false)));
+        assert!(
+            matches!(app.operation_draft, Some(Operation::Bore(ref b)) if b.pitch == 0.75 && b.repeat_pass && b.ramp_angle.is_none())
+        );
+        assert_eq!(field_tab(Field::BoreDiameter), OperationTab::Geometry);
+        assert_eq!(field_tab(Field::BorePitch), OperationTab::Passes);
+        assert_eq!(field_tab(Field::BoreSafeDistance), OperationTab::Linking);
+    }
+
     fn operations() -> Vec<Operation> {
         let mut controller = AppController::new(crate::default_machine());
         controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
@@ -1653,6 +1751,7 @@ mod tests {
         let baseline = controller.document().clone();
         for mut operation in operations() {
             let kind = match operation {
+                Operation::Bore(_) => ToolKind::EndMill,
                 Operation::Thread(_) => ToolKind::ThreadMill { pitch: None },
                 Operation::Carve(_) | Operation::Engrave(_) => ToolKindPick::VBit.to_kind(),
                 Operation::Chamfer(_) => ToolKindPick::ChamferMill.to_kind(),

@@ -619,6 +619,9 @@ pub enum ExtractionRecipe {
     /// A planar face (including islands) or closed loop to V-carve.
     CarveRegion,
     /// Constant-diameter cylindrical bores or bosses aligned with setup Z.
+    BoreCylinders {
+        internal: bool,
+    },
     ThreadCylinders {
         internal: bool,
     },

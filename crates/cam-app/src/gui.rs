@@ -183,6 +183,7 @@ enum Icon {
     Pocket,
     Drill,
     Thread,
+    Bore,
     Chamfer,
     Engrave,
     Carve,
@@ -213,7 +214,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 38] = [
+    const ALL: [Icon; 39] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -230,6 +231,7 @@ impl Icon {
         Icon::Pocket,
         Icon::Drill,
         Icon::Thread,
+        Icon::Bore,
         Icon::Chamfer,
         Icon::Engrave,
         Icon::Carve,
@@ -273,6 +275,7 @@ impl Icon {
             Icon::Profile => include_bytes!("../assets/icons/profile.svg"),
             Icon::Pocket => include_bytes!("../assets/icons/pocket.svg"),
             Icon::Drill => include_bytes!("../assets/icons/drill.svg"),
+            Icon::Bore => include_bytes!("../assets/icons/bore.svg"),
             Icon::Thread => include_bytes!("../assets/icons/thread.svg"),
             Icon::Chamfer => include_bytes!("../assets/icons/chamfer.svg"),
             Icon::Engrave => include_bytes!("../assets/icons/engrave.svg"),
@@ -322,6 +325,7 @@ impl Icon {
             }
             Icon::Pocket => "Add a Pocket operation — clear the area inside a closed boundary.",
             Icon::Drill => "Add a Drill operation — peck/drill the selected hole circles.",
+            Icon::Bore => "Add a Bore operation to helically mill a hole or boss.",
             Icon::Thread => "Add a Thread-milling operation on a bore or boss.",
             Icon::Chamfer => "Add a Chamfer operation — break an edge with a V/chamfer tool.",
             Icon::Engrave => {
@@ -1103,6 +1107,19 @@ enum Field {
     PointAngle,
     /// Thread mill's ground pitch (mm); 0 means single-form (any pitch).
     ToolThreadPitch,
+    BoreDiameter,
+    BoreTaper,
+    BorePitch,
+    BoreAngle,
+    BoreStepovers,
+    BoreStepover,
+    BoreFinishing,
+    BoreRadialStock,
+    BoreAxialStock,
+    BoreTolerance,
+    BoreSafeDistance,
+    BoreLeadRadius,
+
     Depth,
     /// Drill start plane, as a distance below the stock top (mm); 0 = at the top.
     DrillStartOffset,
@@ -1246,6 +1263,18 @@ impl Field {
             Field::TipDiameter => "Tip ⌀ (mm)",
             Field::TipRadius => "Tip radius (mm)",
             Field::PointAngle => "Point angle (deg)",
+            Field::BoreDiameter => "Diameter (mm)",
+            Field::BoreTaper => "Taper angle (deg)",
+            Field::BorePitch => "Pitch (mm/rev)",
+            Field::BoreAngle => "Ramp angle (deg)",
+            Field::BoreStepovers => "Roughing stepovers",
+            Field::BoreStepover => "Radial stepover (mm)",
+            Field::BoreFinishing => "Finishing stepover (mm, 0=off)",
+            Field::BoreRadialStock => "Radial stock to leave (mm)",
+            Field::BoreAxialStock => "Axial stock to leave (mm)",
+            Field::BoreTolerance => "Tolerance (mm)",
+            Field::BoreSafeDistance => "Safe distance (mm)",
+            Field::BoreLeadRadius => "Horizontal lead radius (mm)",
             Field::ToolThreadPitch => "Pitch (mm)",
             Field::Depth => "Depth (mm)",
             Field::DrillStartOffset => "Start offset (mm)",
@@ -1313,6 +1342,19 @@ impl Field {
     /// shown as a hover tooltip on its label in the inspector.
     fn help(self) -> &'static str {
         match self {
+            Field::BoreDiameter => "Finished feature diameter at the top height.",
+            Field::BoreTaper => "Positive narrows downward; negative widens downward. Undercuts are rejected.",
+            Field::BorePitch => "Axial travel per revolution of the bore helix.",
+            Field::BoreAngle => "Maximum ramp angle, evaluated at the smallest tool-centre orbit.",
+            Field::BoreStepovers => "Additional radial passes before the final wall pass.",
+            Field::BoreStepover => "Radial distance between successive helical passes.",
+            Field::BoreFinishing => "Radial allowance removed by an additional finishing helix.",
+            Field::BoreRadialStock => "Positive leaves wall stock; negative removes material beyond the nominal wall.",
+            Field::BoreAxialStock => "Raises the cut bottom by this amount. Negative extends below the bottom.",
+            Field::BoreTolerance => "Maximum chord error when linearizing a tapered helix.",
+            Field::BoreSafeDistance => "Minimum standoff above the feature at the retract height and outside boss leads.",
+            Field::BoreLeadRadius => "Tangent lead radius; hole leads are limited to half the tool-centre orbit.",
+
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
             Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres. Path simplification is calculated automatically from this tolerance.",
             Field::AdaptiveOptimalLoad => "Target radial engagement for adaptive clearing, in millimetres.",
@@ -2411,6 +2453,17 @@ fn face_view(normal: [f32; 3]) -> (f32, f32) {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum BoreOption {
+    Internal(bool),
+    Climb(bool),
+    Angle(bool),
+    Repeat(bool),
+    Center(bool),
+    Reverse(bool),
+    Order(cam_model::BoreOrder),
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     OutputAction(iced::widget::text_editor::Action),
@@ -2591,6 +2644,7 @@ enum Message {
     ProfileEntry(profile_entries_view::EntryMessage),
     /// Change the selected thread between internal (bore) and external (boss).
     ThreadInternalChanged(bool),
+    BoreOption(BoreOption),
     /// Change the selected thread's hand.
     ThreadHandChanged(Hand),
     /// Change the selected thread between climb and conventional milling.
@@ -5226,6 +5280,18 @@ impl App {
                                             op.islands = region.holes().to_vec();
                                         }
                                     }
+                                    Operation::Bore(op) => {
+                                        op.points = input
+                                            .holes
+                                            .iter()
+                                            .map(|h| [h.center.x, h.center.y])
+                                            .collect();
+                                        if let Some(hole) = input.holes.first() {
+                                            op.diameter = hole.diameter;
+                                        }
+                                        op.z_top = input.heights.top;
+                                        op.z_bottom = input.heights.bottom;
+                                    }
                                     Operation::Thread(op) => {
                                         op.points = input
                                             .holes
@@ -6405,6 +6471,35 @@ impl App {
                         self.set_profile_contour_side(index, next);
                     }
                 }
+            }
+            Message::BoreOption(option) => {
+                // Preserve edits before a toggle replaces the visible pitch/angle
+                // or lead-radius field. Seed newly revealed fields from the draft.
+                let values = self
+                    .fields
+                    .iter()
+                    .filter_map(|(field, text)| {
+                        text.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*field, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &values);
+                    if let Operation::Bore(b) = op {
+                        match option {
+                            BoreOption::Internal(v) => b.internal = v,
+                            BoreOption::Climb(v) => b.climb = v,
+                            BoreOption::Angle(v) => b.ramp_angle = v.then_some(3.),
+                            BoreOption::Repeat(v) => b.repeat_pass = v,
+                            BoreOption::Center(v) => b.lead_to_center = v,
+                            BoreOption::Reverse(v) => b.reverse_order = v,
+                            BoreOption::Order(v) => b.order = v,
+                        }
+                    }
+                });
+                self.refresh_operation_fields();
             }
             Message::ThreadInternalChanged(internal) => {
                 self.edit_operation_draft(|op| {
@@ -9028,6 +9123,7 @@ impl App {
                     cmd(Icon::Pocket, "Pocket", begin(OpKind::Pocket)),
                     cmd(Icon::Drill, "Drill", begin(OpKind::Drill)),
                     cmd(Icon::Thread, "Thread", begin(OpKind::Thread)),
+                    cmd(Icon::Bore, "Bore", begin(OpKind::Bore)),
                     cmd(Icon::Chamfer, "Chamfer", begin(OpKind::Chamfer)),
                     cmd(Icon::Engrave, "Engrave", begin(OpKind::Engrave)),
                     cmd(Icon::Carve, "Carve", begin(OpKind::Carve)),
@@ -9426,7 +9522,13 @@ impl App {
             || self.cad_editing_op.and_then(|id| self.current_operation(id)).is_some_and(|op| matches!(op, Operation::Adaptive(_)))
             || matches!(
                 self.cad_pending_kind,
-                Some(OpKind::Drill | OpKind::Thread | OpKind::Engrave | OpKind::Chamfer)
+                Some(
+                    OpKind::Drill
+                        | OpKind::Bore
+                        | OpKind::Thread
+                        | OpKind::Engrave
+                        | OpKind::Chamfer
+                )
             )
             || self
                 .cad_editing_op
@@ -9435,6 +9537,7 @@ impl App {
                     matches!(
                         op,
                         Operation::Drill(_)
+                            | Operation::Bore(_)
                             | Operation::Thread(_)
                             | Operation::Engrave(_)
                             | Operation::Chamfer(_)
@@ -10437,6 +10540,7 @@ fn op_kind(op: &Operation) -> &'static str {
         Operation::Pocket(_) => "Pocket",
         Operation::Face(_) => "Face",
         Operation::Chamfer(_) => "Chamfer",
+        Operation::Bore(_) => "Bore",
         Operation::Thread(_) => "Thread",
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
@@ -10529,6 +10633,20 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Chamfer(o), Field::LeadInSize) => Some(lead_size(o.lead_in)),
         (Operation::Chamfer(o), Field::LeadOutSize) => Some(lead_size(o.lead_out)),
         (Operation::Chamfer(o), Field::LeadOverlap) => Some(o.lead_overlap),
+        (Operation::Bore(o), Field::BoreDiameter) => Some(o.diameter),
+        (Operation::Bore(o), Field::BoreTaper) => Some(o.taper_angle),
+        (Operation::Bore(o), Field::BorePitch) => Some(o.pitch),
+        (Operation::Bore(o), Field::BoreAngle) => Some(o.ramp_angle.unwrap_or(3.)),
+        (Operation::Bore(o), Field::BoreStepovers) => Some(o.stepovers as f64),
+        (Operation::Bore(o), Field::BoreStepover) => Some(o.stepover),
+        (Operation::Bore(o), Field::BoreFinishing) => Some(o.finishing_stepover),
+        (Operation::Bore(o), Field::BoreRadialStock) => Some(o.radial_stock),
+        (Operation::Bore(o), Field::BoreAxialStock) => Some(o.axial_stock),
+        (Operation::Bore(o), Field::BoreTolerance) => Some(o.tolerance),
+        (Operation::Bore(o), Field::BoreSafeDistance) => Some(o.safe_distance),
+        (Operation::Bore(o), Field::BoreLeadRadius) => Some(o.lead_radius),
+        (Operation::Bore(o), Field::Feed) => Some(o.feed),
+        (Operation::Bore(o), Field::PlungeFeed) => Some(o.plunge_feed),
         (Operation::Thread(o), Field::MajorDia) => Some(o.major_dia),
         (Operation::Thread(o), Field::Pitch) => Some(o.pitch),
         (Operation::Thread(o), Field::ThreadTop) => Some(o.z_top),
@@ -10736,6 +10854,52 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
             if let Some(v) = get(Field::LeadOverlap) {
                 o.lead_overlap = v.max(0.0);
+            }
+        }
+        Operation::Bore(o) => {
+            if let Some(v) = get(Field::BoreDiameter) {
+                o.diameter = v;
+            }
+            if let Some(v) = get(Field::BoreTaper) {
+                o.taper_angle = v;
+            }
+            if let Some(v) = get(Field::BorePitch) {
+                o.pitch = v;
+            }
+            if o.ramp_angle.is_some() {
+                if let Some(v) = get(Field::BoreAngle) {
+                    o.ramp_angle = Some(v);
+                }
+            }
+            if let Some(v) = get(Field::BoreStepovers) {
+                o.stepovers = v as u32;
+            }
+            if let Some(v) = get(Field::BoreStepover) {
+                o.stepover = v;
+            }
+            if let Some(v) = get(Field::BoreFinishing) {
+                o.finishing_stepover = v;
+            }
+            if let Some(v) = get(Field::BoreRadialStock) {
+                o.radial_stock = v;
+            }
+            if let Some(v) = get(Field::BoreAxialStock) {
+                o.axial_stock = v;
+            }
+            if let Some(v) = get(Field::BoreTolerance) {
+                o.tolerance = v;
+            }
+            if let Some(v) = get(Field::BoreSafeDistance) {
+                o.safe_distance = v;
+            }
+            if let Some(v) = get(Field::BoreLeadRadius) {
+                o.lead_radius = v;
+            }
+            if let Some(v) = get(Field::Feed) {
+                o.feed = v;
+            }
+            if let Some(v) = get(Field::PlungeFeed) {
+                o.plunge_feed = v;
             }
         }
         Operation::Thread(o) => {
@@ -11774,10 +11938,9 @@ impl Viewport {
                 aperture as f64,
                 self.cad_select_through,
             ),
-            Some(OpKind::Drill | OpKind::Thread) => {
-                self.cad_scene
-                    .pick_drill_candidates(ray, aperture as f64, self.cad_select_through)
-            }
+            Some(OpKind::Drill | OpKind::Bore | OpKind::Thread) => self
+                .cad_scene
+                .pick_drill_candidates(ray, aperture as f64, self.cad_select_through),
             _ => self.cad_scene.pick_candidates(
                 ray,
                 if self.setup_axis {

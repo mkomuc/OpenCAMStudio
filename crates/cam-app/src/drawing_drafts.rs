@@ -8,6 +8,7 @@ impl AppController {
             Operation::Drill(_) => OpKind::Drill,
             Operation::Face(_) => OpKind::Face,
             Operation::Chamfer(_) => OpKind::Chamfer,
+            Operation::Bore(_) => OpKind::Bore,
             Operation::Thread(_) => OpKind::Thread,
             Operation::Engrave(_) => OpKind::Engrave,
             Operation::Carve(_) => OpKind::Carve,
@@ -71,6 +72,10 @@ impl AppController {
                     op.end = None;
                     op.lead_overlap = 0.;
                 }
+            }
+            (Operation::Bore(op), Operation::Bore(new)) => {
+                op.points = self.selected_centers(selected)?;
+                op.diameter = new.diameter;
             }
             (Operation::Thread(op), Operation::Thread(new)) => {
                 op.points = self.selected_centers(selected)?;

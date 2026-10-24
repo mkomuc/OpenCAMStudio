@@ -399,6 +399,10 @@ impl OperationHeightSettings {
 }
 pub fn legacy_cutting(op: &Operation, h: &Heights) -> CuttingHeights {
     op.legacy_cutting_heights(h).unwrap_or_else(|| match op {
+        Operation::Bore(o) => CuttingHeights {
+            top: o.z_top,
+            bottom: o.z_bottom,
+        },
         Operation::Thread(o) => CuttingHeights {
             top: o.z_top,
             bottom: o.z_bottom,
@@ -444,6 +448,7 @@ impl Document {
                 | crate::ExtractionRecipe::ChamferFaces
                 | crate::ExtractionRecipe::EngravePath
                 | crate::ExtractionRecipe::CarveRegion
+                | crate::ExtractionRecipe::BoreCylinders { .. }
                 | crate::ExtractionRecipe::ThreadCylinders { .. }
         ) {
             return Ok(binding.heights.top);
