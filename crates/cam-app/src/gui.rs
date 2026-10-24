@@ -7538,7 +7538,7 @@ impl App {
         }
         let buf = |f: Field| self.fields.get(&f).and_then(|s| s.parse::<f64>().ok());
         match field {
-            Field::MachineRapidRate => !(value > 0.0),
+            Field::MachineRapidRate => value <= 0.0,
             Field::MachineToolChangeSeconds => value < 0.0,
             Field::CornerRadius => {
                 matches!((buf(Field::CornerRadius), buf(Field::ToolDiameter)),
@@ -13214,12 +13214,24 @@ mod multi_setup_draft_tests {
 
     #[test]
     fn saved_profile_selection_allows_switching_operations_without_escape() {
+        let path = std::env::temp_dir().join(format!(
+            "saved-profile-selection-{}.ocam", std::process::id()
+        ));
+        let mut source = AppController::new(crate::default_machine());
+        source.open_dxf(SAMPLE_DXF, "profiles.dxf").unwrap();
+        source.new_operation(OpKind::Profile);
+        source.new_operation(OpKind::Profile);
+        let second = source.document().setup().operations[1].id();
+        source.edit_setup(|setup| {
+            setup.stock_to_leave.insert(second, cam_model::StockToLeave {
+                enabled: true, radial: 0.25, axial: 0.1,
+            });
+        });
+        source.save_project(&path).unwrap();
         let (mut app, _) = App::new();
-        app.open_project(Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../testfiles/cant_edit_second_op.ocam"
-        )))
-        .unwrap();
+        let loaded = app.open_project(&path);
+        std::fs::remove_file(&path).unwrap();
+        loaded.unwrap();
         let operations = &app.controller.document().setup().operations;
         let first = operations[0].id();
         let second = operations[1].id();

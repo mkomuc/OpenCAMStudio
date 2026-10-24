@@ -15,7 +15,7 @@ pub struct AdaptiveStrategy {
 
 impl AdaptiveStrategy {
     /// Invalidate persisted paths when machining domain or entry safety rules change.
-    pub const DOMAIN_REVISION: u32 = 3;
+    pub const DOMAIN_REVISION: u32 = 4;
 
     pub fn new(op: AdaptiveOp, stock_to_leave: StockToLeave, geometry: AdaptiveGeometry) -> Self {
         Self {
@@ -365,13 +365,28 @@ impl Strategy for AdaptiveStrategy {
                     guard: &guard,
                 };
                 let mut layer_program = Program::new();
-                match crate::clearing::clear(
+                match crate::clearing::clear_validated(
                     &mut layer_program,
                     region,
                     &job,
                     &env.heights,
                     &[layer.z],
                     cancel,
+                    |candidate| {
+                        // A fragmented frontier in a hole-free region can turn
+                        // a simple bore into repeated retract/re-entry cycles.
+                        // Prefer the concentric fallback in that case; it still
+                        // has to pass the complete swept-cutter check below.
+                        let fragmented = region.holes().is_empty() && candidate.steps().iter()
+                            .filter(|step| matches!(step, cam_cldata::Step::Rapid { tag, .. }
+                                if tag.kind == cam_cldata::MoveKind::Retract))
+                            .take(2).count() > 1;
+                        !fragmented && crate::adaptive_safety::certify_layer(
+                            candidate, &layer.protected,
+                            largest_radius + allowance + self.geometry.error_bound,
+                            layer.z, env.heights.clearance, cancel,
+                        ).is_ok()
+                    },
                 ) {
                     Ok(n) => {
                         if n > 0 {

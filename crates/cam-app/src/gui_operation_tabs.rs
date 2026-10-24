@@ -376,7 +376,7 @@ impl App {
             row(OperationTab::ALL
                 .iter()
                 .copied()
-                .map(|value| tab_button(value).into()))
+                .map(tab_button))
             .spacing(3),
         );
         let header = list;

@@ -2,6 +2,7 @@
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
 mod adaptive;
+mod bore_entry;
 mod chamfer_faces;
 mod profile_contours;
 mod profile_entries;
@@ -646,6 +647,12 @@ impl<'a> View<'a> {
     /// faces elsewhere on the body do not matter, but overlapping unknown
     /// surfaces must never be silently treated as empty space.
     fn roofs_over(&self, region: &Polygon, entry: f64) -> Result<(), String> {
+        self.roofs_over_except(region, entry, &BTreeSet::new())
+    }
+
+    /// Skip only entry surfaces independently certified to widen away from the
+    /// bore. Other overlapping faces still have to pass the roof checks.
+    fn roofs_over_except(&self, region: &Polygon, entry: f64, open_entries: &BTreeSet<EntityId>) -> Result<(), String> {
         for f in self
             .asset
             .topology
@@ -653,6 +660,9 @@ impl<'a> View<'a> {
             .iter()
             .filter(|f| f.body_id == self.body.id)
         {
+            if open_entries.contains(&f.id) {
+                continue;
+            }
             let bounds = self.bounds(f.bounds);
             if bounds[1][2] <= entry + T {
                 continue;
@@ -1230,8 +1240,8 @@ fn derive(
             Ok((vec![region], vec![], heights))
         }
         ExtractionRecipe::DrillHoles => derive_holes(&view, refs, true),
-        ExtractionRecipe::BoreCylinders { internal }
-        | ExtractionRecipe::ThreadCylinders { internal } => derive_holes(&view, refs, internal),
+        ExtractionRecipe::BoreCylinders { internal } => derive_cylinders(&view, refs, internal, true),
+        ExtractionRecipe::ThreadCylinders { internal } => derive_holes(&view, refs, internal),
         ExtractionRecipe::ChamferFaces
         | ExtractionRecipe::ChamferLoop
         | ExtractionRecipe::EngravePath
@@ -1247,6 +1257,15 @@ fn derive_holes(
     view: &View<'_>,
     refs: &[EntityRef],
     internal: bool,
+) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+    derive_cylinders(view, refs, internal, false)
+}
+
+fn derive_cylinders(
+    view: &View<'_>,
+    refs: &[EntityRef],
+    internal: bool,
+    rounded_entries: bool,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
     let mut holes: Vec<ResolvedHole> = vec![];
     let mut heights: Option<CuttingHeights> = None;
@@ -1306,6 +1325,7 @@ fn derive_holes(
             })
             .collect();
         let mut rim_edges = BTreeSet::new();
+        let mut open_entries = BTreeSet::new();
         let mut top_sweep = 0.0;
         let mut bottom_sweep = 0.0;
         for face in group {
@@ -1345,6 +1365,14 @@ fn derive_holes(
                             for fid in &edge.face_ids {
                                 let adjacent = view.face(*fid)?;
                                 if matches!(adjacent.surface, CadSurface::Cylinder { .. }) {
+                                    continue;
+                                }
+                                if rounded_entries && internal && (c[2] - hi).abs() < T
+                                    && matches!(adjacent.surface, CadSurface::Torus { .. })
+                                {
+                                    bore_entry::certify(view, adjacent, face, edge)?;
+                                    open_entries.insert(adjacent.id);
+                                    terminations += 1;
                                     continue;
                                 }
                                 let (z,n)=view.plane(adjacent).map_err(|_|"blind drill tips, blends or ambiguous hole terminations need explicit qualification".to_string())?;
@@ -1407,7 +1435,7 @@ fn derive_holes(
                 })
                 .collect(),
         );
-        view.roofs_over(&Polygon::new(circle).map_err(|e| e.to_string())?, hi)?;
+        view.roofs_over_except(&Polygon::new(circle).map_err(|e| e.to_string())?, hi, &open_entries)?;
         if let Some(existing) = heights {
             if (h.top - existing.top).abs() > T
                 || (h.bottom - existing.bottom).abs() > T
@@ -2142,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-    fn coplanar_faces_stay_in_the_selected_body_and_require_matching_cutting_intervals() {
+    fn coplanar_faces_stay_in_the_selected_body_and_use_the_shallowest_wall() {
         let (state, _) = pocket();
         let top = state.assets[0].topology.faces.iter().find(|f| matches!(f.surface, CadSurface::Plane { origin, normal } if origin[2] == 0. && normal[2] > 0.)).unwrap();
         let refs = coplanar_profile_faces(&state, &reference(top.id, EntityKind::Face)).unwrap();
@@ -2150,10 +2178,14 @@ mod tests {
         assert!(refs
             .iter()
             .all(|r| r.kind == EntityKind::Face && r.body_id == 1));
-        assert!(
-            resolve_selection(&state, &refs, ExtractionRecipe::ProfileContours, 0.).is_err(),
-            "different wall depths cannot silently share one profile depth"
-        );
+        let mut binding = resolve_selection(&state, &refs, ExtractionRecipe::ProfileContours, 0.).unwrap();
+        assert_eq!(binding.heights, CuttingHeights { top: 0., bottom: -3. });
+        let resolved = resolve_binding(&state, &binding).unwrap();
+        assert_eq!(resolved.profiles.len(), 3);
+        assert_eq!(resolved.heights, binding.heights);
+        binding.overrides.bottom = Some(-5.);
+        assert!(resolve_binding(&state, &binding).is_err(),
+            "the deeper exterior wall must not allow cutting below the pocket floor");
     }
 
     #[test]

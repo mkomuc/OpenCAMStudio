@@ -8,6 +8,13 @@ the diameter, internal/external side, top and bottom; reselection refreshes thos
 dimensions without discarding cutting settings. Multiple selected features must
 share diameter, side and cutting heights.
 
+A cylindrical hole may have a rounded entrance when its exact topology proves
+a complete coaxial quarter-torus widening upward to an open planar rim. Bore
+machines only the cylinder beneath that entrance. For example, the Ø30 hole in
+`testfiles/3d_toolpath_calculation.ocam` has a 4 mm entrance radius above Z16;
+its Bore cutting interval is Z16 to Z0, while the opening reaches Z20. Capped,
+incomplete, noncoaxial or obstructed entrances and rounded bottoms are rejected.
+
 The operation is based on the supplied Autodesk *Fusion Help — Bore reference*.
 It is implemented as a separate `BoreOp` / `BoreStrategy`, not a drill cycle or a
 thread-milling operation. Saved projects use schema v26; older projects migrate

@@ -33,6 +33,7 @@ fn profile() -> ProfileOp {
         work_offset: 1,
         feed: 300.,
         plunge_feed: 100.,
+        end: None,
         start: Some([10., 0.]),
         lead_in: Lead::None,
         lead_out: Lead::None,

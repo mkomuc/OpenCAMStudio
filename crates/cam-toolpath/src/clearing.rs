@@ -109,6 +109,21 @@ pub(crate) fn clear(
     levels: &[f64],
     cancel: &CancelToken,
 ) -> Result<usize, RingsError> {
+    clear_validated(prog, region, job, heights, levels, cancel, |_| true)
+}
+
+/// Allow a caller with additional model constraints to reject a frontier path
+/// and use the concentric fallback. Validation never emits a rejected candidate.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clear_validated(
+    prog: &mut Program,
+    region: &Polygon,
+    job: &ClearJob,
+    heights: &Heights,
+    levels: &[f64],
+    cancel: &CancelToken,
+    accept: impl Fn(&Program) -> bool,
+) -> Result<usize, RingsError> {
     // **Adaptive dispatch: the front-advance clearer, behind the exact oracle.**
     //
     // When an engagement cap is set and the cut is climb, try [`crate::frontadvance`]: it
@@ -195,8 +210,12 @@ pub(crate) fn clear(
             job.start,
             cancel,
         ) {
-            emit_adaptive_moves(prog, &moves, &air, job, heights, levels);
-            return Ok(1);
+            let mut candidate = Program::new();
+            emit_adaptive_moves(&mut candidate, &moves, &air, job, heights, levels);
+            if accept(&candidate) {
+                prog.extend(candidate);
+                return Ok(1);
+            }
         }
         // Uncertified — fall through to the proven concentric path below.
     }
@@ -216,13 +235,20 @@ pub(crate) fn clear(
             job.start,
             job.simplification_tolerance,
         ) {
-            emit_adaptive_moves(prog, &moves, &[], job, heights, levels);
-            // One continuous certified path (not a ring count); `Ok(_)` ⇒ emitted.
-            return Ok(1);
+            let mut candidate = Program::new();
+            emit_adaptive_moves(&mut candidate, &moves, &[], job, heights, levels);
+            if accept(&candidate) {
+                prog.extend(candidate);
+                // One certified path (not a ring count); `Ok(_)` ⇒ emitted.
+                return Ok(1);
+            }
         }
         // Uncertified — fall through to the proven concentric path below.
     }
 
+    if cancel.is_cancelled() {
+        return Err(RingsError::Cancelled);
+    }
     let spacing = job.effective_spacing();
     let mut rings = concentric_rings(region, job.first, spacing, cancel)?;
     if rings.is_empty() {
@@ -531,6 +557,37 @@ mod tests {
             guard: &[],
             spindle: cam_cldata::SpindleDir::Cw,
         }
+    }
+
+    #[test]
+    fn rejected_frontier_is_discarded_before_concentric_fallback() {
+        let region = Polygon::new(Contour::new(vec![
+            Point::new(0., 0.), Point::new(40., 0.),
+            Point::new(40., 40.), Point::new(0., 40.),
+        ])).unwrap();
+        let mut job = frame_clearjob(frame_job());
+        let heights = Heights { clearance: 5., retract: 2., top_of_stock: 0. };
+        let token = CancelToken::new();
+        let checked = std::cell::Cell::new(false);
+        let mut actual = Program::new();
+        actual.push(Step::Comment("preceding region".into()));
+        let rings = clear_validated(
+            &mut actual, &region, &job, &heights, &[-1.], &token,
+            |candidate| {
+                assert!(!candidate.steps().is_empty());
+                checked.set(true);
+                false
+            },
+        ).unwrap();
+        assert!(checked.get(), "fixture must exercise frontier rejection");
+        // Disable frontier dispatch while preserving the same ring spacing.
+        job.spacing = job.effective_spacing();
+        job.clearing.engagement = 0.;
+        let mut expected = Program::new();
+        expected.push(Step::Comment("preceding region".into()));
+        let expected_rings = clear(&mut expected, &region, &job, &heights, &[-1.], &token).unwrap();
+        assert_eq!(rings, expected_rings);
+        assert_eq!(actual, expected, "no rejected moves may leak into the output");
     }
 
     /// **A re-entry descends at cutting feed, and rapids down to the stock top.** Both

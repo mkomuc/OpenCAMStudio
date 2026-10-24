@@ -37,29 +37,6 @@ pub(crate) fn guard_plunge(
     }
 }
 
-#[cfg(test)]
-mod plunge_tests {
-    use super::*;
-    use cam_geo::Contour;
-
-    #[test]
-    fn entry_circle_cannot_cross_an_island_between_legal_endpoints() {
-        let rectangle = |x0, y0, x1, y1| Contour::new(vec![
-            Point::new(x0, y0), Point::new(x1, y0),
-            Point::new(x1, y1), Point::new(x0, y1),
-        ]);
-        let outer = rectangle(-3., -3., 3., 3.);
-        let at = Point::new(0., -1.5);
-        let opposite = Point::new(0., 1.5);
-        let helix = Plunge::Helix { radius: 1.5, pitch: 0.5 };
-        let island = Polygon::with_holes(outer.clone(), vec![rectangle(0.95, 0.95, 1.15, 1.15)]).unwrap();
-        assert!(island.contains(at) && island.contains(opposite));
-        assert_eq!(guard_plunge(&[island], at, (0., 1.), helix), Plunge::Straight);
-        let open = Polygon::new(outer).unwrap();
-        assert_eq!(guard_plunge(&[open], at, (0., 1.), helix), helix);
-    }
-}
-
 /// The point the tool plunges at for a lead-in (off the contour), given the start,
 /// its tangent, the outward normal, and the lead. `None` plunges on the contour.
 pub(crate) fn lead_start_point(
@@ -269,5 +246,28 @@ pub(crate) fn emit_lead(
                 tag,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod plunge_tests {
+    use super::*;
+    use cam_geo::Contour;
+
+    #[test]
+    fn entry_circle_cannot_cross_an_island_between_legal_endpoints() {
+        let rectangle = |x0, y0, x1, y1| Contour::new(vec![
+            Point::new(x0, y0), Point::new(x1, y0),
+            Point::new(x1, y1), Point::new(x0, y1),
+        ]);
+        let outer = rectangle(-3., -3., 3., 3.);
+        let at = Point::new(0., -1.5);
+        let opposite = Point::new(0., 1.5);
+        let helix = Plunge::Helix { radius: 1.5, pitch: 0.5 };
+        let island = Polygon::with_holes(outer.clone(), vec![rectangle(0.95, 0.95, 1.15, 1.15)]).unwrap();
+        assert!(island.contains(at) && island.contains(opposite));
+        assert_eq!(guard_plunge(&[island], at, (0., 1.), helix), Plunge::Straight);
+        let open = Polygon::new(outer).unwrap();
+        assert_eq!(guard_plunge(&[open], at, (0., 1.), helix), helix);
     }
 }

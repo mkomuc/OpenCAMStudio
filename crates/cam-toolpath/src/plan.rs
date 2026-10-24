@@ -1091,6 +1091,7 @@ mod tests {
 
     fn profile_operation() -> Operation {
         Operation::Profile(cam_model::ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: true,
             additional_chains: Vec::new(),
