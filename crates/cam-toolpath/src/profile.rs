@@ -1245,14 +1245,6 @@ fn profile_loop_points(points: &[Point], op: &ProfileOp, spindle: SpindleDir) ->
     rotate_to_start(&points, op.start)
 }
 
-fn loop_length(points: &[Point]) -> f64 {
-    points
-        .iter()
-        .zip(points.iter().cycle().skip(1))
-        .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
-        .sum()
-}
-
 /// Additional travel after a complete contour, ending at the requested exit.
 /// Minimum overlap is preserved by adding whole laps when necessary.
 pub(crate) fn exit_overlap(points: &[Point], from: f64, minimum: f64, end: Option<[f64; 2]>) -> f64 {
@@ -1473,6 +1465,8 @@ impl TabLayout {
                 tag: Tag::new(op.id, MoveKind::Cutting),
             });
         }
+    }
+
     /// Move an exit away from holding tabs and leave enough room for its lead.
     fn eligible_exit(&self, pts: &[Point], point: [f64; 2], room: f64) -> [f64; 2] {
         let desired = nearest_on_loop(pts, point).0;
