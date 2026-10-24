@@ -29,3 +29,5 @@ The 2026-10-13 review is pinned to source revision `5c510b504fe39f4e40700ff3b1e3
 
 - [CAD import implementation](cad-import-implementation.md) — available fixed-axis STEP workflow, native build and qualification limits.
 - [Multi-setup workflow](multi-setup-implementation.md) — independent machining sides, edge/model WCS selection, box stock, transactional right-column editors and separate NC output.
+
+- [Bore milling](bore-operation.md) — helical hole/boss milling, controls, CAD selection and current reference coverage.

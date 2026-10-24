@@ -8,7 +8,7 @@
 
 use cam_geo::Contour;
 
-use crate::Tool;
+use crate::{BoreOp, Tool};
 
 /// The document schema version. Bumped when the on-disk model format changes;
 /// present from the start so save-files are versioned before there is a loader.
@@ -82,7 +82,8 @@ use crate::Tool;
 /// v24: modeled chamfer-face boundaries and axial finishing bands. Older readers
 /// must refuse these operations rather than treating their projected face as an edge.
 /// v25: open chamfer chains; absent closed flags retain legacy closed rims.
-pub const SCHEMA_VERSION: u32 = 25;
+/// v26: helical Bore operations and cylindrical Bore geometry bindings.
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1379,6 +1380,8 @@ pub enum Operation {
     Chamfer(ChamferOp),
     /// A thread-milling operation.
     Thread(ThreadOp),
+    /// Helical milling of circular holes and bosses.
+    Bore(BoreOp),
     /// A V-carve engraving operation.
     Engrave(EngraveOp),
     /// A V-carving operation over a region.
@@ -1394,6 +1397,7 @@ impl Operation {
             Operation::Pocket(op) => op.id,
             Operation::Face(op) => op.id,
             Operation::Chamfer(op) => op.id,
+            Operation::Bore(op) => op.id,
             Operation::Thread(op) => op.id,
             Operation::Engrave(op) => op.id,
             Operation::Carve(op) => op.id,
@@ -1409,6 +1413,7 @@ impl Operation {
             Operation::Pocket(op) => op.tool,
             Operation::Face(op) => op.tool,
             Operation::Chamfer(op) => op.tool,
+            Operation::Bore(op) => op.tool,
             Operation::Thread(op) => op.tool,
             Operation::Engrave(op) => op.tool,
             Operation::Carve(op) => op.tool,
@@ -1442,6 +1447,7 @@ impl Operation {
             Operation::Pocket(op) => op.spindle_rpm,
             Operation::Face(op) => op.spindle_rpm,
             Operation::Chamfer(op) => op.spindle_rpm,
+            Operation::Bore(op) => op.spindle_rpm,
             Operation::Thread(op) => op.spindle_rpm,
             Operation::Engrave(op) => op.spindle_rpm,
             Operation::Carve(op) => op.spindle_rpm,
@@ -1456,6 +1462,7 @@ impl Operation {
             Operation::Pocket(op) => op.spindle_rpm = rpm,
             Operation::Face(op) => op.spindle_rpm = rpm,
             Operation::Chamfer(op) => op.spindle_rpm = rpm,
+            Operation::Bore(op) => op.spindle_rpm = rpm,
             Operation::Thread(op) => op.spindle_rpm = rpm,
             Operation::Engrave(op) => op.spindle_rpm = rpm,
             Operation::Carve(op) => op.spindle_rpm = rpm,
@@ -1472,6 +1479,7 @@ impl Operation {
             Operation::Pocket(op) => op.work_offset,
             Operation::Face(op) => op.work_offset,
             Operation::Chamfer(op) => op.work_offset,
+            Operation::Bore(op) => op.work_offset,
             Operation::Thread(op) => op.work_offset,
             Operation::Engrave(op) => op.work_offset,
             Operation::Carve(op) => op.work_offset,
@@ -1486,6 +1494,7 @@ impl Operation {
             Operation::Pocket(op) => op.work_offset = work_offset,
             Operation::Face(op) => op.work_offset = work_offset,
             Operation::Chamfer(op) => op.work_offset = work_offset,
+            Operation::Bore(op) => op.work_offset = work_offset,
             Operation::Thread(op) => op.work_offset = work_offset,
             Operation::Engrave(op) => op.work_offset = work_offset,
             Operation::Carve(op) => op.work_offset = work_offset,
@@ -1500,6 +1509,7 @@ impl Operation {
             Operation::Pocket(op) => op.id = id,
             Operation::Face(op) => op.id = id,
             Operation::Chamfer(op) => op.id = id,
+            Operation::Bore(op) => op.id = id,
             Operation::Thread(op) => op.id = id,
             Operation::Engrave(op) => op.id = id,
             Operation::Carve(op) => op.id = id,
@@ -1516,6 +1526,7 @@ impl Operation {
             Operation::Pocket(op) => op.tool = tool,
             Operation::Face(op) => op.tool = tool,
             Operation::Chamfer(op) => op.tool = tool,
+            Operation::Bore(op) => op.tool = tool,
             Operation::Thread(op) => op.tool = tool,
             Operation::Engrave(op) => op.tool = tool,
             Operation::Carve(op) => op.tool = tool,

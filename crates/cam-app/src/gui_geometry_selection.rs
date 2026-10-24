@@ -59,6 +59,9 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
         Operation::Drill(op) => (0..op.points.len())
             .map(|i| format!("Hole {}", i + 1))
             .collect(),
+        Operation::Bore(op) => (0..op.points.len())
+            .map(|i| format!("Bore centre {}", i + 1))
+            .collect(),
         Operation::Thread(op) => (0..op.points.len())
             .map(|i| format!("Thread centre {}", i + 1))
             .collect(),
@@ -95,6 +98,7 @@ pub(super) fn selection_icon(name: &str, size: f32) -> iced::widget::Svg<'static
         "all" => include_bytes!("../assets/icons/profile-selection/all.svg"),
         "outer" => include_bytes!("../assets/icons/profile-selection/outer.svg"),
         "inner" => include_bytes!("../assets/icons/profile-selection/inner.svg"),
+        "bore" => include_bytes!("../assets/icons/bore.svg"),
         "thread" => include_bytes!("../assets/icons/thread.svg"),
         "remove" => include_bytes!("../assets/icons/delete_operation.svg"),
         _ => include_bytes!("../assets/icons/profile-selection/settings.svg"),
@@ -185,8 +189,13 @@ impl App {
         if self.profile_geometry_active() {
             return self.profile_geometry_collection();
         }
-        if let Some(kind @ (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)) =
-            self.geometry_operation_kind()
+        if let Some(
+            kind @ (OpKind::Chamfer
+            | OpKind::Engrave
+            | OpKind::Carve
+            | OpKind::Bore
+            | OpKind::Thread),
+        ) = self.geometry_operation_kind()
         {
             return self.operation_geometry_collection(kind, labels);
         }

@@ -96,7 +96,7 @@ impl App {
     pub(super) fn sync_creation_geometry_heights(&mut self) {
         if !matches!(
             self.cad_pending_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread)
         ) {
             return;
         }
@@ -251,6 +251,13 @@ impl App {
                     op.islands = new.islands;
                     op.top = new.top;
                 }
+                (Operation::Bore(op), Operation::Bore(new)) => {
+                    op.points = new.points;
+                    op.internal = new.internal;
+                    op.diameter = new.diameter;
+                    op.z_top = new.z_top;
+                    op.z_bottom = new.z_bottom;
+                }
                 (Operation::Thread(op), Operation::Thread(new)) => {
                     op.points = new.points;
                     op.internal = new.internal;
@@ -280,6 +287,11 @@ impl App {
             )?;
             if let Operation::Profile(profile) = &mut operation {
                 self.apply_profile_side_overrides(profile);
+            }
+            if self.creation_edited_fields.contains(&Field::BoreDiameter) {
+                if let (Operation::Bore(op), Operation::Bore(edited)) = (&mut operation, &draft) {
+                    op.diameter = edited.diameter;
+                }
             }
             if self.creation_edited_fields.contains(&Field::MajorDia) {
                 if let (Operation::Thread(op), Operation::Thread(edited)) = (&mut operation, &draft)

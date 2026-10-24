@@ -1788,3 +1788,92 @@ fn external_thread_selects_a_boss_and_rejects_a_mismatched_operation_type() {
         outcome.diagnostics
     );
 }
+
+#[test]
+fn bore_cad_selection_regeneration_save_reopen_and_all_posts() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let bottom = fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    let bores = vec![
+        reference(fixture.bore([5., 10.], 3., top, bottom), EntityKind::Face),
+        reference(fixture.bore([15., 10.], 3., top, bottom), EntityKind::Face),
+    ];
+    let state = fixture.state();
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let tool = app.use_tool(Tool {
+        number: 30,
+        diameter: 3.,
+        flute_length: 12.,
+        length: 30.,
+        kind: ToolKind::EndMill,
+        ..Default::default()
+    });
+    let id = app
+        .create_cad_operation_with_tool(OpKind::Bore, bores.clone(), tool)
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Bore(op)) if op.points == vec![[5., 10.], [15., 10.]] && op.internal && op.diameter == 6. && op.z_top == 0. && op.z_bottom == -5.)
+    );
+    assert_eq!(
+        app.geometry_state().bindings[&id].recipe,
+        ExtractionRecipe::BoreCylinders { internal: true }
+    );
+    let mut operation = app.operation(id).unwrap().clone();
+    if let Operation::Bore(op) = &mut operation {
+        op.pitch = 0.8;
+        op.repeat_pass = true;
+        op.radial_stock = 0.1;
+    }
+    app.apply_operation_settings_with_geometry(
+        operation,
+        None,
+        vec![],
+        Some(vec![bores[1].clone()]),
+    )
+    .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Bore(op)) if op.points == vec![[15., 10.]] && op.pitch == 0.8 && op.repeat_pass)
+    );
+    assert!(app.undo());
+    assert!(matches!(app.operation(id), Some(Operation::Bore(op)) if op.points.len() == 2));
+    assert!(app.redo());
+    let path = std::env::temp_dir().join(format!("bore-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = controller();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.operation(id), app.operation(id));
+    for post in [
+        cam_post::PostKind::Grbl,
+        cam_post::PostKind::Fanuc,
+        cam_post::PostKind::Okuma,
+        cam_post::PostKind::Estlcam,
+    ] {
+        reopened.set_post_kind(post);
+        let result = reopened.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        let nc = reopened.export_nc().unwrap();
+        assert!(nc.contains("Bore"), "{post:?}: {nc}");
+        assert!(
+            nc.lines()
+                .any(|line| line.contains('Z') && line.contains('I')),
+            "missing helical interpolation: {nc}"
+        );
+    }
+    let mut invalid = reopened.operation(id).unwrap().clone();
+    if let Operation::Bore(op) = &mut invalid {
+        op.taper_angle = 2.;
+    }
+    assert!(reopened
+        .apply_operation_settings_with_geometry(invalid, None, vec![], None)
+        .is_err());
+}

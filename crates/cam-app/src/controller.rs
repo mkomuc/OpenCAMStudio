@@ -90,6 +90,7 @@ pub enum OpKind {
     Face,
     Chamfer,
     Thread,
+    Bore,
     Engrave,
     Carve,
 }
@@ -98,7 +99,7 @@ pub enum OpKind {
 /// Drilling and thread-milling target holes (the pick gives the centre, and for
 /// threads the diameter), so a rectangle or open edge is not a valid pick.
 pub fn op_selects_circles(kind: OpKind) -> bool {
-    matches!(kind, OpKind::Drill | OpKind::Thread)
+    matches!(kind, OpKind::Drill | OpKind::Bore | OpKind::Thread)
 }
 
 /// Which node of the document is currently selected — what the tree highlights
@@ -1036,7 +1037,7 @@ impl AppController {
         let mut preview = self.document().clone();
         let settings = if matches!(
             kind,
-            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread
+            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread
         ) {
             crate::cad_operations::selection_height_defaults(&preview, &op)
         } else {
@@ -1937,6 +1938,18 @@ impl AppController {
             Point::new(10., 10.),
             Point::new(0., 10.),
         ]);
+        let chain = if kind == OpKind::Bore {
+            Contour::new(
+                (0..64)
+                    .map(|i| {
+                        let a = std::f64::consts::TAU * i as f64 / 64.;
+                        Point::new(6. * a.cos(), 6. * a.sin())
+                    })
+                    .collect(),
+            )
+        } else {
+            chain
+        };
         self.build_op_shape(kind, chain, true, &[], tool, None, None)
             .unwrap()
     }
@@ -2109,6 +2122,20 @@ impl AppController {
                 lead_out: Lead::None,
                 lead_overlap: 0.0,
             }),
+            OpKind::Bore => {
+                let (center, radius) = fit_circle(chain.points())?;
+                Operation::Bore(cam_model::BoreOp {
+                    tool,
+                    points: vec![center],
+                    diameter: 2. * radius,
+                    z_top: p.top_of_stock,
+                    z_bottom: p.top_of_stock - p.depth,
+                    spindle_rpm,
+                    feed,
+                    plunge_feed,
+                    ..Default::default()
+                })
+            }
             OpKind::Thread => {
                 // Seed one thread at the picked loop's centre; a circular hole
                 // loop gives its diameter as the major diameter. Pitch/hand are
@@ -2385,6 +2412,7 @@ impl AppController {
                 };
                 match &mut op {
                     Operation::Drill(operation) => operation.points = points,
+                    Operation::Bore(operation) => operation.points = points,
                     Operation::Thread(operation) => operation.points = points,
                     _ => return false,
                 }
@@ -2965,6 +2993,7 @@ fn op_kind_of(op: &Operation) -> OpKind {
         Operation::Pocket(_) => OpKind::Pocket,
         Operation::Face(_) => OpKind::Face,
         Operation::Chamfer(_) => OpKind::Chamfer,
+        Operation::Bore(_) => OpKind::Bore,
         Operation::Thread(_) => OpKind::Thread,
         Operation::Engrave(_) => OpKind::Engrave,
         Operation::Carve(_) => OpKind::Carve,
@@ -3167,6 +3196,7 @@ mod tests {
             Operation::Pocket(o) => o.depth,
             Operation::Face(o) => o.depth,
             Operation::Drill(o) => o.depth,
+            Operation::Bore(o) => o.z_bottom,
             Operation::Thread(o) => o.z_bottom,
             Operation::Chamfer(o) => o.top,
             Operation::Engrave(o) => o.depth,

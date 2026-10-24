@@ -45,6 +45,7 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
             (CadFilter::Loop, "chain", "Add Chain. Select one closed boundary enclosing the carving region."),
         ],
         OpKind::Carve => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary; its holes remain uncut islands.")],
+        OpKind::Bore => vec![(CadFilter::Face, "bore", "Select cylindrical holes or bosses with equal diameter and heights, or circular drawing loops.")],
         OpKind::Thread => vec![(CadFilter::Face, "thread", "Add Thread Centres. Select cylindrical bores or bosses with the same diameter and cutting heights; for a drawing, select circular holes.")],
         _ => Vec::new(),
     }
@@ -88,7 +89,9 @@ impl App {
             .into_iter()
             .enumerate()
             .map(|(index, label)| GeometryRow {
-                icon: if kind == OpKind::Thread {
+                icon: if kind == OpKind::Bore {
+                    "bore"
+                } else if kind == OpKind::Thread {
                     "thread"
                 } else if sources
                     .get(index)
@@ -131,7 +134,9 @@ impl App {
             "Configure the selected geometry and its selection mode.",
         ));
         geometry_collection(
-            if kind == OpKind::Thread {
+            if kind == OpKind::Bore {
+                "Bore selection"
+            } else if kind == OpKind::Thread {
                 "Thread selection"
             } else {
                 "Contour selection"
@@ -240,6 +245,12 @@ impl App {
             })
             .chain((0..self.controller.open_paths().len()).map(LoopRef::open))
             .collect();
+        if let Operation::Bore(op) = operation {
+            return op.points.iter().map(|point| candidates.iter().copied().find(|reference| {
+                matches!(self.controller.operation_with_drawing_geometry(operation, &[*reference]), Ok(Operation::Bore(replacement))
+                    if replacement.points.iter().any(|p| (p[0] - point[0]).abs() < 1e-8 && (p[1] - point[1]).abs() < 1e-8))
+            })).collect::<Option<Vec<_>>>().unwrap_or_default();
+        }
         if let Operation::Thread(op) = operation {
             return op.points.iter().map(|point| candidates.iter().copied().find(|reference| {
                 matches!(self.controller.operation_with_drawing_geometry(operation, &[*reference]), Ok(Operation::Thread(replacement))
@@ -279,7 +290,11 @@ impl App {
                     return;
                 }
                 let Some(
-                    kind @ (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread),
+                    kind @ (OpKind::Chamfer
+                    | OpKind::Engrave
+                    | OpKind::Carve
+                    | OpKind::Bore
+                    | OpKind::Thread),
                 ) = self.geometry_operation_kind()
                 else {
                     return;
@@ -412,6 +427,7 @@ impl App {
             OpKind::Chamfer => "Chamfer",
             OpKind::Engrave => "Engrave",
             OpKind::Carve => "Carve",
+            OpKind::Bore => "Bore",
             OpKind::Thread => "Thread",
             _ => unreachable!(),
         };
@@ -503,6 +519,7 @@ impl App {
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes > Fase. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
+            OpKind::Bore => "Select cylindrical holes or bosses, or circular drawing loops. Selected features must share diameter and cutting heights.",
             OpKind::Thread => "Select cylindrical bores or bosses, or circular drawing holes. Selected features must share diameter and cutting heights.",
             _ => unreachable!(),
         };

@@ -248,6 +248,7 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
             Ok(())
         }
         24 => Ok(()), // Open chamfer chains default to the legacy closed rim behavior.
+        25 => Ok(()), // Bore is additive; older readers must refuse v26.
         _ => Err(MigrationError::MissingStep { from }),
     }
 }
