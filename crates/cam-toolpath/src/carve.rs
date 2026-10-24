@@ -2955,7 +2955,7 @@ mod tests {
     /// it leaves — so consecutive entries bound the travel between loops.
     ///
     /// Measuring the *first cutting move* instead is wrong and was tried first:
-    /// `cut_loop` emits its first move to the loop's **second** vertex, which on a
+    /// A closed-loop cut emits its first move to the loop's **second** vertex, which on a
     /// rectangular ring is a whole side away, and turns a well-ordered path into what
     /// looks like a 35 mm hop.
     fn floor_loops_of(r: &StrategyResult, floor_z: f64) -> Vec<((f64, f64), f64)> {

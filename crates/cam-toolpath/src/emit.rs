@@ -81,8 +81,8 @@ pub(crate) fn descend_to(
 
 /// Emit an open cutting polyline at height `z` exactly as given, converting runs
 /// of flattened segments back into `G2`/`G3` arcs where they fit. Assumes the tool
-/// is already positioned at `pts[0]` (a plunge precedes this call). Unlike
-/// [`cut_loop`] this does not auto-close — the caller supplies the full point list
+/// is already positioned at `pts[0]` (a plunge precedes this call). This does not
+/// auto-close — the caller supplies the full point list
 /// (e.g. a pre-closed loop, or a loop-plus-overlap from [`loop_with_overlap`]).
 pub(crate) fn cut_polyline(prog: &mut Program, pts: &[Point], feed: f64, tag: Tag, z: f64) {
     cut_polyline_tolerance(prog, pts, feed, tag, z, ARCFIT_TOL);
@@ -117,18 +117,6 @@ pub(crate) fn cut_polyline_tolerance(
     }
 }
 
-/// Emit a closed cutting loop at height `z`, converting runs of flattened
-/// segments back into `G2`/`G3` arcs where they fit. Assumes the tool is already
-/// positioned at `pts[0]` (a plunge precedes this call).
-pub(crate) fn cut_loop(prog: &mut Program, pts: &[Point], feed: f64, tag: Tag, z: f64) {
-    if pts.len() < 2 {
-        return;
-    }
-    let mut loop_pts = pts.to_vec();
-    loop_pts.push(pts[0]); // close the loop
-    cut_polyline(prog, &loop_pts, feed, tag, z);
-}
-
 /// Build the cut polyline for a closed loop plus a *closure overlap*: the loop
 /// `pts[0..n]` closed back to `pts[0]`, then continued along the contour
 /// (`pts[0]→pts[1]→…`, wrapping) for `overlap` mm to an overlap point `P`. Returns
@@ -137,7 +125,7 @@ pub(crate) fn cut_loop(prog: &mut Program, pts: &[Point], feed: f64, tag: Tag, z
 ///
 /// For `overlap <= 0` (or a degenerate loop) it returns the plain closed loop,
 /// `P = pts[0]`, and the arrival tangent at the start — so an overlap of zero is
-/// byte-for-byte identical to [`cut_loop`] plus a lead-off/retract at the start.
+/// byte-for-byte identical to a closed polyline plus a lead-off/retract at the start.
 /// The walk is capped at one full perimeter, so an overlap larger than the loop
 /// simply stops after a lap rather than running away.
 pub(crate) fn loop_with_overlap(pts: &[Point], overlap: f64) -> (Vec<Point>, Point, (f64, f64)) {
