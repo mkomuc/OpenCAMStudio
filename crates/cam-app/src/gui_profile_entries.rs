@@ -31,6 +31,7 @@ pub(super) struct EntryEditor {
     tolerance: String,
     previous: Option<Vec<ProfileGeometryEntry>>,
     previous_row: Option<usize>,
+    previous_filter_explicit: bool,
     error: Option<String>,
 }
 
@@ -224,6 +225,7 @@ impl App {
                     tolerance: "0.010".into(),
                     previous,
                     previous_row,
+                    previous_filter_explicit: self.cad_filter_explicit,
                     error: None,
                 });
                 self.operation_geometry = None;
@@ -258,6 +260,7 @@ impl App {
                         tolerance,
                         previous,
                         previous_row,
+                        previous_filter_explicit: self.cad_filter_explicit,
                         error: None,
                     });
                     self.operation_geometry = None;
@@ -330,6 +333,7 @@ impl App {
                         }
                     }
                 });
+                self.cad_filter_explicit = editor.previous_filter_explicit;
                 self.geometry_additive = false;
                 self.profile_side_overrides.clear();
                 self.sync_profile_entry_cache();
@@ -343,6 +347,7 @@ impl App {
                             p.selections = editor.previous;
                         }
                     });
+                    self.cad_filter_explicit = editor.previous_filter_explicit;
                 }
                 self.geometry_additive = false;
             }
@@ -395,6 +400,7 @@ impl App {
             };
             self.profile_chain_edges = editor.draft.kind == ProfileGeometryKind::Chain
                 && editor.draft.chain_mode == ProfileChainMode::Open;
+            self.cad_filter_explicit = true;
             self.profile_tab_picking = false;
             self.geometry_additive = true;
             self.status = format!(

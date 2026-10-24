@@ -1,10 +1,15 @@
 //! Fixed-axis feature extraction. Analytic operations use exact topology;
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
+mod adaptive;
+mod chamfer_faces;
 mod profile_contours;
 mod profile_entries;
 mod surface_geometry;
-mod chamfer_faces;
+pub use adaptive::{
+    adaptive_heights, resolve_adaptive, validate_adaptive_selection, AdaptiveGeometry,
+    AdaptiveLayer, AdaptiveResolveConfig,
+};
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
 pub use profile_contours::coplanar_faces as coplanar_profile_faces;
@@ -102,6 +107,17 @@ pub fn resolve_binding(
     }
     if heights.top < base.top - T {
         return Err("top override skips material above the geometry-certified entry plane".into());
+    }
+    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+        return Ok(ResolvedInput {
+            chamfers: Vec::new(),
+            profiles: Vec::new(),
+            regions,
+            holes,
+            heights,
+            fingerprint: state.binding_fingerprint(binding),
+            diagnostics: vec!["3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into()],
+        });
     }
     let view = View::new(state, &binding.selected)?;
     let mut exact = (*view.asset.topology).clone();
@@ -927,6 +943,13 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+        return Ok((
+            Vec::new(),
+            Vec::new(),
+            adaptive_heights(state, &binding.selected, stock_top)?,
+        ));
+    }
     if let ExtractionRecipe::ProfileEntries { entries } = &binding.recipe {
         let (profiles, heights) = profile_entries::extract(state, entries, stock_top)?;
         let regions = profiles
@@ -1216,6 +1239,7 @@ fn derive(
             unreachable!()
         }
         ExtractionRecipe::ProfileSilhouette => Err("Select one body for its silhouette".into()),
+        ExtractionRecipe::AdaptiveClearing => unreachable!(),
     }
 }
 fn derive_holes(
@@ -1696,6 +1720,124 @@ mod tests {
         assert_eq!(resolve_binding(&state, &b).unwrap(), input);
         state.assets[0].revision += 1;
         assert!(resolve_binding(&state, &b).is_err());
+    }
+
+    #[test]
+    fn supplied_project_rectangular_floor_resolves_as_inside_profile() {
+        let project: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../testfiles/3d_toolpath_calculation.ocam"
+        ))
+        .unwrap();
+        let state: GeometryState =
+            serde_json::from_value(project["document"]["geometry"].clone()).unwrap();
+        let mut entry =
+            ProfileGeometryEntry::new(ProfileGeometryKind::FaceContours, "Face Contours 1".into());
+        entry.source = ProfileGeometrySource::Cad(vec![reference(9, EntityKind::Face)]);
+        let (contours, heights) = profile_entry_contours(&state, &entry).unwrap();
+        assert_eq!(
+            heights,
+            Some(CuttingHeights {
+                top: 20.,
+                bottom: 15.
+            })
+        );
+        assert_eq!(contours.len(), 1);
+        assert_eq!(contours[0].side, Side::Inside);
+        assert!((contours[0].chain.area() - 600.).abs() < T);
+    }
+
+    #[test]
+    fn face_contours_accept_pocket_floor_and_preserve_island_sides() {
+        let (state, face) = pocket();
+        let binding =
+            resolve_selection(&state, &[face], ExtractionRecipe::ProfileContours, 0.).unwrap();
+        let input = resolve_binding(&state, &binding).unwrap();
+        assert_eq!(
+            input.heights,
+            CuttingHeights {
+                top: 0.,
+                bottom: -3.
+            }
+        );
+        assert_eq!(input.profiles.len(), 2);
+        assert_eq!(input.profiles[0].side, Side::Inside);
+        assert_eq!(input.profiles[1].side, Side::Outside);
+        assert_eq!(input.profiles[0].chain.area(), 256.);
+        assert_eq!(input.profiles[1].chain.area(), 16.);
+    }
+
+    #[test]
+    fn face_contours_reject_obstructed_or_sloped_pocket_floors() {
+        let (mut state, face) = pocket();
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        let wall = topology
+            .faces
+            .iter_mut()
+            .find(|f| matches!(f.surface, CadSurface::Plane { normal, .. } if normal[2] == 0.))
+            .unwrap();
+        wall.surface = CadSurface::Plane {
+            origin: [2., 2., -3.],
+            normal: [0., 0.6, 0.8],
+        };
+        assert!(resolve_selection(&state, &[face], ExtractionRecipe::ProfileContours, 0.).is_err());
+
+        let mut fixture = Fixture::new();
+        let floor = fixture.face(vec![square(2., 18., 2., 18., -3.)], [0., 0., 1.]);
+        fixture.walls(2., 18., 2., 18., -3., 0.);
+        fixture.face(
+            vec![square(0., 20., 0., 20., 0.), square(2., 18., 2., 18., 0.)],
+            [0., 0., 1.],
+        );
+        fixture.face(vec![square(2., 6., 2., 18., -1.)], [0., 0., -1.]);
+        assert!(resolve_selection(
+            &fixture.state(),
+            &[reference(floor, EntityKind::Face)],
+            ExtractionRecipe::ProfileContours,
+            0.,
+        )
+        .unwrap_err()
+        .contains("overhang"));
+    }
+    #[test]
+    fn selected_inner_loop_resolves_through_profile_contours_with_inside_side() {
+        let (state, face) = plate_with_hole();
+        let loop_id = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|wire| wire.face_id == face.id && !wire.is_outer)
+            .unwrap()
+            .id;
+        let selected = reference(loop_id, EntityKind::Loop);
+
+        let mut entry = ProfileGeometryEntry::new(
+            ProfileGeometryKind::Chain,
+            "Selected inner loop".into(),
+        );
+        entry.source = ProfileGeometrySource::Cad(vec![selected.clone()]);
+        let (entry_contours, heights) = profile_entry_contours(&state, &entry).unwrap();
+        assert_eq!(entry_contours.len(), 1);
+        assert_eq!(entry_contours[0].side, Side::Inside);
+        assert_eq!(entry_contours[0].chain.area(), 16.);
+        assert_eq!(
+            heights,
+            Some(CuttingHeights {
+                top: 0.,
+                bottom: -5.
+            })
+        );
+
+        let binding = resolve_selection(
+            &state,
+            &[selected],
+            ExtractionRecipe::ProfileContours,
+            0.,
+        )
+        .unwrap();
+        let direct = resolve_binding(&state, &binding).unwrap();
+        assert_eq!(direct.profiles.len(), 1);
+        assert_eq!(direct.profiles[0].side, Side::Inside);
+        assert_eq!(direct.profiles[0].chain.area(), 16.);
     }
 
     #[test]

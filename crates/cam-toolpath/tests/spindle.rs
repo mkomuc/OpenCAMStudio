@@ -42,6 +42,7 @@ fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -81,6 +82,7 @@ fn doc(ops: Vec<Operation>) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }

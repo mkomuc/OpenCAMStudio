@@ -2,19 +2,22 @@
 use super::*;
 use cam_model::Comp;
 use iced::widget::column;
+use iced::widget::svg;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum OperationTab {
     #[default]
     Tool,
+    MultiAxis,
     Geometry,
     Heights,
     Passes,
     Linking,
 }
 impl OperationTab {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::Tool,
+        Self::MultiAxis,
         Self::Geometry,
         Self::Heights,
         Self::Passes,
@@ -25,11 +28,36 @@ impl std::fmt::Display for OperationTab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Tool => "Tool",
+            Self::MultiAxis => "Multi-axis",
             Self::Geometry => "Geometry",
             Self::Heights => "Heights",
             Self::Passes => "Passes",
-            Self::Linking => "Linking",
+            Self::Linking => "Lead-in and lead-out moves",
         })
+    }
+}
+
+impl OperationTab {
+    fn hover_label(self) -> &'static str {
+        match self {
+            Self::Tool => "Tool",
+            Self::MultiAxis => "Multi-axis",
+            Self::Geometry => "Geometry",
+            Self::Heights => "Heights",
+            Self::Passes => "Passes",
+            Self::Linking => "Lead-in and lead-out moves",
+        }
+    }
+
+    fn icon(self) -> &'static [u8] {
+        match self {
+            Self::Tool => include_bytes!("../assets/icons/operation-tabs/tool.svg"),
+            Self::MultiAxis => include_bytes!("../assets/icons/operation-tabs/multi_axis.svg"),
+            Self::Geometry => include_bytes!("../assets/icons/operation-tabs/geometry.svg"),
+            Self::Heights => include_bytes!("../assets/icons/operation-tabs/heights.svg"),
+            Self::Passes => include_bytes!("../assets/icons/operation-tabs/passes.svg"),
+            Self::Linking => include_bytes!("../assets/icons/operation-tabs/linking.svg"),
+        }
     }
 }
 
@@ -45,9 +73,11 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::LeadOutFeed
         | Field::ClearFeed
         | Field::ClearPlungeFeed => OperationTab::Tool,
-        Field::MajorDia | Field::TabWidth | Field::TabHeight | Field::TabSpacing => {
-            OperationTab::Geometry
-        }
+        Field::MajorDia
+        | Field::TabWidth
+        | Field::TabHeight
+        | Field::TabSpacing
+        | Field::AdaptiveOffset => OperationTab::Geometry,
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -84,6 +114,7 @@ pub(super) fn operation_start(op: &Operation) -> Option<[f64; 2]> {
         Operation::Chamfer(o) if o.closed => o.start,
         Operation::Engrave(o) if o.closed => o.start,
         Operation::Carve(o) => o.start,
+        Operation::Adaptive(o) => o.params.start,
         _ => None,
     }
 }
@@ -94,6 +125,7 @@ pub(super) fn set_operation_start(op: &mut Operation, enabled: bool) {
         Operation::Chamfer(o) if o.closed => &mut o.start,
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
+        Operation::Adaptive(o) => &mut o.params.start,
         _ => return,
     };
     *start = if enabled {
@@ -112,6 +144,7 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
         Operation::Chamfer(o) if o.closed => &mut o.start,
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
+        Operation::Adaptive(o) => &mut o.params.start,
         _ => return,
     };
     if let Some(point) = start {
@@ -132,11 +165,22 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::ChamferWidth
         | Field::Feed
         | Field::PlungeFeed
+        | Field::AdaptiveTolerance
+        | Field::AdaptiveOptimalLoad
+        | Field::AdaptiveFineStepdown
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
+        Field::StockLeaveRadial | Field::StockLeaveAxial => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
-        Field::Stepdown if matches!(op, Operation::Profile(_) | Operation::Face(_)) => value <= 0.0,
+        Field::Stepdown
+            if matches!(
+                op,
+                Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_)
+            ) =>
+        {
+            value <= 0.0
+        }
         Field::ThreadPasses => value < 1.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::ThreadSpringPasses => value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::Overlap | Field::ClearOverlap => !(0.0..=99.0).contains(&value),
@@ -183,6 +227,51 @@ fn profile_climb_control(climb: bool, show_help: bool) -> Element<'static, Messa
     .spacing(8)
     .align_y(Alignment::Center);
     help_wrap(control, help::CLIMB, show_help)
+}
+
+fn stock_offset_row(
+    field: Field,
+    label: &'static str,
+    help: &'static str,
+    value: String,
+    enabled: bool,
+    show_help: bool,
+    invalid: bool,
+) -> Element<'static, Message> {
+    let mut input = inspector_input("", &value)
+        .align_x(iced::alignment::Horizontal::Right)
+        .on_input_maybe(enabled.then_some(move |value| Message::FieldChanged(field, value)))
+        .width(Length::Fixed(INSPECTOR_INPUT_W));
+    if invalid {
+        input = input.style(|theme, status| {
+            let mut style = inspector_input_style(theme, status);
+            style.border.color = palette::ERROR;
+            style.border.width = 1.5;
+            style.value = palette::ERROR;
+            style
+        });
+    }
+    row![label_help(label, help, show_help), input]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn stock_offset_fields(operation: &Operation) -> Vec<Field> {
+    let mut fields = Vec::with_capacity(2);
+    if matches!(
+        operation,
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_)
+    ) {
+        fields.push(Field::StockLeaveRadial);
+    }
+    if matches!(
+        operation,
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_)
+    ) {
+        fields.push(Field::StockLeaveAxial);
+    }
+    fields
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,28 +343,32 @@ impl App {
             format!("Operation {id} · {}", op_kind(op))
         };
         let mut list = column![inspector_heading(heading)].spacing(10).padding(14);
-        // Two rows keep every tab reachable in a narrow inspector. Navigation
-        // never reloads the shared numeric buffers or operation draft.
-        let tab_button = |value: OperationTab| {
-            inspector_button(value.to_string())
-                .padding([7, 4])
-                .width(Length::Fill)
-                .style(move |theme, status| inspector_tab(theme, status, tab == value))
-                .on_press(Message::OperationTabChanged(value))
+        // Compact buttons keep all six tabs in one row. Navigation never
+        // reloads the shared numeric buffers or operation draft.
+        let tab_button = |value: OperationTab| -> Element<'_, Message> {
+            let button = button(
+                svg(svg::Handle::from_memory(value.icon()))
+                    .width(20)
+                    .height(20),
+            )
+            .padding(3)
+            .width(Length::Fill)
+            .style(move |theme, status| inspector_tab(theme, status, tab == value))
+            .on_press(Message::OperationTabChanged(value));
+            delayed_tooltip(
+                button,
+                container(text(value.hover_label()).size(12))
+                    .padding(8)
+                    .style(popup_surface),
+                tooltip::Position::Top,
+            )
+            .into()
         };
         list = list.push(
-            column![
-                row(OperationTab::ALL[..3]
-                    .iter()
-                    .copied()
-                    .map(|value| tab_button(value).into()))
-                .spacing(3),
-                row(OperationTab::ALL[3..]
-                    .iter()
-                    .copied()
-                    .map(|value| tab_button(value).into()))
-                .spacing(3),
-            ]
+            row(OperationTab::ALL
+                .iter()
+                .copied()
+                .map(|value| tab_button(value).into()))
             .spacing(3),
         );
         let header = list;
@@ -287,6 +380,13 @@ impl App {
                 bottom: 16.0,
                 left: 14.0,
             });
+        if tab == OperationTab::MultiAxis {
+            list = list.push(
+                text("Multi-axis machining controls are not available yet.")
+                    .size(12)
+                    .color(INSPECTOR_MUTED),
+            );
+        }
         if tab == OperationTab::Tool {
             let tool = self
                 .operation_tools
@@ -354,6 +454,27 @@ impl App {
         if tab == OperationTab::Geometry && creating {
             list = list.push(self.creation_geometry_controls());
         }
+        if tab == OperationTab::Geometry {
+            if let Operation::Adaptive(adaptive) = op {
+                list = list.push(text("Tool containment").size(12));
+                list = list.push(
+                    pick_list(
+                        [
+                            cam_model::AdaptiveContainment::Inside,
+                            cam_model::AdaptiveContainment::Center,
+                            cam_model::AdaptiveContainment::Outside,
+                        ],
+                        Some(adaptive.params.containment),
+                        Message::AdaptiveContainmentChanged,
+                    )
+                    .placeholder("Choose containment")
+                    .text_size(12)
+                    .padding([7, 9])
+                    .style(inspector_picker)
+                    .width(Length::Fill),
+                );
+            }
+        }
         if tab == OperationTab::Geometry && !creating {
             let geometry = match op {
                 Operation::Profile(p) => format!(
@@ -389,6 +510,22 @@ impl App {
                 Operation::Face(_) => "Rectangular facing boundary".into(),
                 Operation::Drill(o) => format!("{} hole centres", o.points.len()),
                 Operation::Thread(o) => format!("{} thread centres", o.points.len()),
+                Operation::Adaptive(_) => linked.map_or_else(
+                    || "Selected geometry".into(),
+                    |binding| {
+                        let bodies = binding
+                            .selected
+                            .iter()
+                            .filter(|entity| entity.kind == EntityKind::Body)
+                            .count();
+                        let faces = binding
+                            .selected
+                            .iter()
+                            .filter(|entity| entity.kind == EntityKind::Face)
+                            .count();
+                        format!("{bodies} bodies · {faces} faces")
+                    },
+                ),
             };
             list = list.push(text(geometry).size(12));
             if let Some(binding) = linked {
@@ -402,15 +539,36 @@ impl App {
             list = list.push(self.reference_height_controls(id));
         }
         if tab == OperationTab::Linking {
+            let supports_start = matches!(
+                op,
+                Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_)
+            ) || matches!(op, Operation::Profile(o) if o.closed) || matches!(op, Operation::Engrave(o) if o.closed)
+                || matches!(op, Operation::Chamfer(o) if o.closed && o.faces.is_empty());
+            if supports_start {
+                list = list.push(self.operation_position_controls(op));
+                list = list.push(
+                    row![
+                        text("Preferred entry XY").size(12),
+                        checkbox(operation_start(op).is_some())
+                            .size(15)
+                            .on_toggle(Message::OperationStartEnabled)
+                    ]
+                    .spacing(8),
+                );
+            }
             match op {
                 Operation::Drill(_) => list = list.push(text("Approach and retract follow the drilling cycle and operation safety heights.").size(12)),
                 Operation::Face(_) => list = list.push(text("Facing links and turnaround arcs are determined by the strategy. Overshoot is on Passes.").size(12)),
                 Operation::Thread(_) => list = list.push(text("Helical entry and exit are determined by the threading strategy.").size(12)),
+                Operation::Adaptive(_) => list = list.push(text("3D Adaptive Clearing uses safe helical entries near the preferred entry. The exit follows the final connected cleared path before retracting; set Ramp feed on Tool to override the entry rate.").size(12)),
                 Operation::Engrave(o) if !o.closed => list = list.push(text("Open strokes start at their first vertex. Entry and exit are determined by the engraving strategy.").size(12)),
                 _ => {}
             }
         }
-        for field in operation_fields(op) {
+        for field in self.geometry_operation_fields(op) {
+            if matches!(field, Field::StockLeaveRadial | Field::StockLeaveAxial) {
+                continue; // These belong to the dedicated Stock to Leave section below.
+            }
             if tab == OperationTab::Heights && field != Field::ThreadBlindAllowance {
                 continue;
             }
@@ -772,6 +930,24 @@ impl App {
                     );
                 }
             }
+            Operation::Adaptive(adaptive) if tab == OperationTab::Passes => {
+                list = list.push(
+                    row![
+                        label_help("Cut direction", help::CLIMB, self.tooltips),
+                        checkbox(adaptive.params.climb)
+                            .size(15)
+                            .on_toggle(Message::AdaptiveClimbToggled)
+                    ]
+                    .spacing(8),
+                );
+                list = list.push(
+                    text(
+                        "Fine stepdown adds intermediate terrace levels after each roughing slab.",
+                    )
+                    .size(11)
+                    .color(palette::GROUP_LABEL),
+                );
+            }
             Operation::Engrave(o) if tab == OperationTab::Geometry => {
                 if linked.is_none() {
                     list = list.push(
@@ -946,29 +1122,50 @@ impl App {
         if tab == OperationTab::Linking {
             let supports_start = matches!(
                 op,
-                Operation::Profile(_) | Operation::Pocket(_) | Operation::Carve(_)
+                Operation::Profile(_) | Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_)
             ) || matches!(op, Operation::Engrave(o) if o.closed)
                 || matches!(op, Operation::Chamfer(o) if o.closed && o.faces.is_empty());
             if supports_start {
-                list = list.push(inspector_optional_section(
-                    "Preferred start XY",
-                    operation_start(op).is_some(),
-                    Some(Message::OperationStartEnabled),
-                ));
-                if operation_start(op).is_some() {
-                    for field in [Field::StartX, Field::StartY] {
-                        let value = self.fields.get(&field).cloned().unwrap_or_default();
-                        list = list.push(field_row_labeled(
-                            field,
-                            self.field_label(field),
-                            self.field_help(field),
-                            &value,
-                            self.tooltips,
-                            self.field_invalid(field),
-                        ));
-                    }
-                }
+                list = list.push(self.operation_position_controls(op));
             }
+        }
+        if tab == OperationTab::Passes && App::stock_to_leave_supported(op) {
+            let stock = self.stock_to_leave_value();
+            let enabled = self.stock_to_leave_enabled();
+            list = list.push(inspector_section("Stock to Leave"));
+            list = list.push(
+                checkbox(enabled)
+                    .label("Enable stock to leave")
+                    .on_toggle(Message::StockToLeaveToggled),
+            );
+            for field in stock_offset_fields(op) {
+                let fallback = match field {
+                    Field::StockLeaveRadial => stock.radial,
+                    _ => stock.axial,
+                };
+                let value = if enabled {
+                    self.fields
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| fmt_num(fallback))
+                } else {
+                    fmt_num(fallback)
+                };
+                list = list.push(stock_offset_row(
+                    field,
+                    self.field_label(field),
+                    self.field_help(field),
+                    value,
+                    enabled,
+                    self.tooltips,
+                    enabled && self.field_invalid(field),
+                ));
+            }
+            list = list.push(text(if matches!(op, Operation::Face(_)) {
+                "Axial allowance leaves material on the faced surface."
+            } else {
+                "Radial allowance remains on walls; axial allowance remains on floors for finishing."
+            }).size(11).color(palette::GROUP_LABEL));
         }
         let footer = inspector_footer(
             row![
@@ -1053,6 +1250,12 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut operation, &fields);
+        if matches!(operation, Operation::Adaptive(_)) {
+            cam_geometry3d::validate_adaptive_selection(
+                self.controller.geometry_state(),
+                &selected,
+            )?;
+        }
         let parse = |text: &str| -> Result<Option<f64>, String> {
             if text.trim().is_empty() {
                 Ok(None)
@@ -1116,6 +1319,89 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_adaptive_operation_accepts_replacement_cutter() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testfiles/mill_change.ocam"
+            ))
+            .unwrap();
+        app.setup_draft = None;
+        app.focus_ops.clear();
+        let _ = app.update(Message::ClickOp(0));
+        let before = app.controller.document().setup().clone();
+        let binding = app.controller.geometry_state().bindings[&0].clone();
+        let mut tool = before.tools[0].clone();
+        tool.flute_length = 25.0;
+        tool.length = 55.0;
+        app.library.tools = vec![tool];
+        let _ = app.update(Message::OperationToolPicked(0));
+        assert!(app.inspector_dirty(), "replacement cutter must enable Apply");
+        assert!(!app.any_field_invalid(), "{:?}", app.resolve_height_editor(0));
+        assert!(app.operation_height_overrides_valid());
+        let number = app.current_operation(0).unwrap().tool();
+        assert_ne!(
+            number,
+            before.operations[0].tool(),
+            "picker must stage the chosen cutter"
+        );
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller.operation(0).unwrap().tool(),
+            number,
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            app.controller
+                .document()
+                .setup()
+                .tools
+                .iter()
+                .find(|t| t.number == number)
+                .unwrap()
+                .flute_length,
+            25.0
+        );
+        let applied = &app.controller.geometry_state().bindings[&0];
+        assert_eq!(applied.heights, binding.heights);
+        assert_eq!(applied.overrides, binding.overrides);
+        assert!(!app.inspector_dirty());
+        let mut next_tool = app.library.tools[0].clone();
+        next_tool.diameter = 5.0;
+        app.library.tools.push(next_tool);
+        let _ = app.update(Message::OperationToolPicked(1));
+        assert_ne!(app.current_operation(0).unwrap().tool(), number);
+        assert!(app.inspector_dirty());
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.current_operation(0).unwrap().tool(), number);
+        assert!(!app.inspector_dirty());
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document().setup(), &before);
+    }
+
+    #[test]
+    fn stock_allowances_are_grouped_radial_then_axial_and_face_uses_axial_only() {
+        let operations = operations();
+        let profile = operations
+            .iter()
+            .find(|operation| matches!(operation, Operation::Profile(_)))
+            .unwrap();
+        let face = operations
+            .iter()
+            .find(|operation| matches!(operation, Operation::Face(_)))
+            .unwrap();
+
+        assert_eq!(
+            stock_offset_fields(profile),
+            [Field::StockLeaveRadial, Field::StockLeaveAxial]
+        );
+        assert_eq!(stock_offset_fields(face), [Field::StockLeaveAxial]);
+    }
 
     fn operations() -> Vec<Operation> {
         let mut controller = AppController::new(crate::default_machine());
@@ -1187,6 +1473,7 @@ mod tests {
                     | Operation::Chamfer(_)
                     | Operation::Engrave(_)
                     | Operation::Carve(_)
+                    | Operation::Adaptive(_)
             );
             set_operation_start(&mut operation, true);
             assert_eq!(operation_start(&operation).is_some(), supported);
@@ -1413,11 +1700,12 @@ mod tests {
                 "{}: edited feed must reach the motion program",
                 op_kind(&operation)
             );
-            assert!(job
-                .program
+            assert!(
+                job.program
                 .steps()
                 .iter()
-                .any(|step| matches!(step, Step::Spindle { rpm, .. } if *rpm == 9000.0)));
+                    .any(|step| matches!(step, Step::Spindle { rpm, .. } if *rpm == 9000.0))
+            );
         }
     }
 
@@ -1606,6 +1894,78 @@ mod tests {
     }
 
     #[test]
+    fn position_picks_are_independent_transactional_and_serialized() {
+        use operation_positions::PositionKind::{Entry, Exit};
+        let (mut app, face_id) = linked_face_app();
+        let reference = app.controller.geometry_state().bindings[&face_id].selected[0].clone();
+        let id = app.controller.create_cad_operation(OpKind::Adaptive, vec![reference]).unwrap();
+        app.begin_operation_draft(id);
+        let saved = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        for (kind, point) in [(Entry, [2.0, 3.0]), (Exit, [7.0, 8.0])] {
+            let _ = app.update(Message::OperationPositionPick(kind));
+            let _ = app.update(Message::OperationPositionPicked(point));
+            assert_eq!(app.operation_position_pick, None);
+        }
+        assert_eq!(app.fields[&Field::StartX], "2");
+        assert_eq!(app.fields[&Field::StartY], "3");
+        let draft = app.operation_draft.as_ref().unwrap();
+        assert_eq!(operation_start(draft), Some([2.0, 3.0]));
+        assert_eq!(operation_positions::operation_end(draft), Some([7.0, 8.0]));
+        assert_eq!(app.controller.operation(id), Some(&saved));
+        let _ = app.update(Message::Apply);
+        let committed = app.controller.operation(id).unwrap().clone();
+        let encoded = serde_json::to_value(&committed).unwrap();
+        let restored: Operation = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(restored, committed);
+        // Older projects have no entry/exit settings on adaptive parameters.
+        let mut legacy = encoded;
+        legacy["Adaptive"]["params"].as_object_mut().unwrap().remove("start");
+        legacy["Adaptive"]["params"].as_object_mut().unwrap().remove("end");
+        let restored: Operation = serde_json::from_value(legacy).unwrap();
+        assert_eq!(operation_start(&restored), None);
+        assert_eq!(operation_positions::operation_end(&restored), None);
+        let _ = app.update(Message::OperationPositionClear(Exit));
+        assert_eq!(operation_start(app.operation_draft.as_ref().unwrap()), Some([2.0, 3.0]));
+        assert_eq!(operation_positions::operation_end(app.operation_draft.as_ref().unwrap()), None);
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.controller.operation(id), Some(&committed));
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::OperationPositionPick(Entry));
+        let _ = app.update(Message::CadEscape);
+        assert_eq!(app.operation_position_pick, None);
+        let _ = app.update(Message::OperationPositionPicked([99., 99.]));
+        assert_eq!(operation_start(app.operation_draft.as_ref().unwrap()), Some([2., 3.]));
+    }
+
+    #[test]
+    fn model_position_pick_hits_surface_in_oblique_view_and_converts_setup_axes() {
+        for frame in [cam_model::SetupFrame::default(), cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()] {
+            let (mut app, _) = linked_face_app();
+            let mut setup = app.controller.document().setup().clone();
+            setup.frame = frame.clone();
+            app.controller.apply_setup_settings(setup).unwrap();
+            let mut geometry = app.controller.geometry_state().clone();
+            let topology = Arc::make_mut(&mut geometry.assets[0].topology);
+            topology.mesh = cam_model::CadMesh {
+                vertices: vec![[0., 0., -1.], [10., 0., -1.], [10., 10., -1.], [0., 10., -1.]],
+                triangles: vec![[0, 1, 2], [0, 2, 3]], triangle_faces: vec![2, 2],
+            };
+            let mut viewport = app.machining_viewport();
+            viewport.cad_scene = Arc::new(CadScene::from_geometry_in_setup(&geometry, &BTreeSet::new(), &frame));
+            viewport.setup_snaps.clear();
+            viewport.controls.yaw = 0.5;
+            viewport.controls.pitch = 0.6;
+            let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800., 600.));
+            let world = [3., 4., -1.];
+            let (screen, _) = picking_view::project(viewport.camera(), bounds, world).unwrap();
+            let point = viewport.operation_position_at(screen, bounds).unwrap();
+            let expected = frame.to_setup_vector(world);
+            assert!((point[0] - expected[0]).hypot(point[1] - expected[1]) < 1e-5, "{point:?} vs {expected:?}");
+        }
+    }
+
+    #[test]
     fn linked_height_overrides_and_other_tabs_commit_and_undo_atomically() {
         let (mut app, id) = linked_face_app();
         let before = app.controller.document().clone();
@@ -1776,6 +2136,41 @@ mod tests {
         assert!(app.setup_draft.is_none());
         assert!(app.pane_handle(Pane::Inspector).is_none());
     }
+    #[test]
+    fn adaptive_creation_retains_containment_before_first_apply() {
+        let (mut app, old_id) = linked_face_app();
+        app.setup_draft = None;
+        let reference = app.controller.geometry_state().bindings[&old_id].selected[0].clone();
+        let _ = app.update(Message::BeginOp(OpKind::Adaptive));
+        let _ = app.update(Message::CadSelect(reference));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        // Build the same inspector shown before the operation is committed.
+        let _ = app.operation_inspector(0);
+        let _ = app.update(Message::AdaptiveContainmentChanged(cam_model::AdaptiveContainment::Outside));
+        let _ = app.update(Message::FieldChanged(Field::AdaptiveOffset, "1.25".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::OperationPositionPick(operation_positions::PositionKind::Entry));
+        let _ = app.update(Message::OperationPositionPicked([4.0, 4.0]));
+        let _ = app.update(Message::OperationPositionPick(operation_positions::PositionKind::Exit));
+        let _ = app.update(Message::OperationPositionPicked([8.0, 8.0]));
+        let (preview, _) = app.creation_operation().unwrap();
+        assert!(matches!(preview, Operation::Adaptive(op)
+            if op.params.containment == cam_model::AdaptiveContainment::Outside
+                && op.params.additional_offset == 1.25
+                && op.params.start == Some([4.0, 4.0])
+                && op.params.end == Some([8.0, 8.0])));
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("new adaptive operation selected: {}", app.status);
+        };
+        assert!(matches!(app.controller.operation(id), Some(Operation::Adaptive(op))
+            if op.params.containment == cam_model::AdaptiveContainment::Outside
+                && op.params.additional_offset == 1.25
+                && op.params.start == Some([4.0, 4.0])
+                && op.params.end == Some([8.0, 8.0])));
+    }
+
     #[test]
     fn step_creation_uses_shared_cutting_controls_and_one_undo_transaction() {
         let (mut app, old_id) = linked_face_app();

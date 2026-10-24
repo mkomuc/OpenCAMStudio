@@ -3,6 +3,19 @@ use super::*;
 use iced::widget::text_editor;
 
 impl App {
+    fn timestamp() -> String {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            % 86_400;
+        format!(
+            "{:02}:{:02}:{:02} UTC",
+            seconds / 3_600,
+            (seconds / 60) % 60,
+            seconds % 60
+        )
+    }
     pub(super) fn output_context(&self) -> String {
         let setup = self.controller.document().setup();
         let operation =
@@ -83,29 +96,39 @@ impl App {
         } else {
             None
         };
-        let error =
-            error.map(|e| format!("[{}] Geometry validation error: {e}", self.output_context()));
-        if error != self.output_last_geometry_error {
+        let context = self.output_context();
+        let error_key = error.as_ref().map(|e| format!("{context} | {e}"));
+        if error_key != self.output_last_geometry_error {
             if let Some(error) = &error {
-                self.output_history.push_back(error.clone());
+                self.output_history.push_back(format!(
+                    "[{}] [{context}] Geometry validation error: {error}",
+                    Self::timestamp()
+                ));
+                self.output_cleared = false;
                 while self.output_history.len() > 500 {
                     self.output_history.pop_front();
                 }
                 self.set_pane_visible(Pane::Output, true);
             }
-            self.output_last_geometry_error = error;
+            self.output_last_geometry_error = error_key;
         }
     }
 
     pub(super) fn report_error(&mut self, error: String) {
         self.status = format!("Error: {error}");
+        self.output_cleared = false;
         self.set_pane_visible(Pane::Output, true);
     }
 
     pub(super) fn append_output(&mut self, context: &str, message: &str) {
-        let line = format!("[{context}] {message}");
-        if self.output_history.back() != Some(&line) {
+        let line = format!("[{}] [{context}] {message}", Self::timestamp());
+        if !self
+            .output_history
+            .back()
+            .is_some_and(|last| last.ends_with(&format!("[{context}] {message}")))
+        {
             self.output_history.push_back(line);
+            self.output_cleared = false;
             while self.output_history.len() > 500 {
                 self.output_history.pop_front();
             }
@@ -139,7 +162,10 @@ impl App {
                 ));
             }
         }
-        if let (Some(pattern), Some(instance)) = (diagnostic.source.pattern_id, diagnostic.source.instance_index) {
+        if let (Some(pattern), Some(instance)) = (
+            diagnostic.source.pattern_id,
+            diagnostic.source.instance_index,
+        ) {
             context.push(format!("Pattern #{pattern}, instance {instance}"));
         }
         format!(
@@ -156,6 +182,13 @@ impl App {
     }
 
     pub(super) fn sync_output(&mut self) {
+        if self.output_cleared {
+            if !self.output_snapshot.is_empty() || !self.output_content.text().is_empty() {
+                self.output_content = text_editor::Content::with_text("");
+                self.output_snapshot.clear();
+            }
+            return;
+        }
         let mut lines: Vec<String> = self.output_history.iter().cloned().collect();
         if lines.is_empty() {
             lines.push(self.status.clone());
@@ -167,7 +200,7 @@ impl App {
             ));
         }
         if let Some(outcome) = self.controller.outcome() {
-            lines.push("\nToolpath diagnostics:".into());
+            lines.push("Toolpath diagnostics:".into());
             if outcome.diagnostics.is_empty() {
                 lines.push("No diagnostics.".into());
             }
@@ -177,20 +210,20 @@ impl App {
             } else if outcome.collisions.is_empty() {
                 lines.push("Simulation: no collisions.".into());
             }
-            lines.extend(
-                outcome
-                    .collisions
-                    .iter()
-                    .map(|c| {
+            lines.extend(outcome.collisions.iter().map(|c| {
                         let owner = match (c.pattern_id, c.instance_index) {
-                            (Some(pattern), Some(instance)) => format!(" (pattern #{pattern}, instance {instance}, operation #{})", c.op_id.unwrap_or(0)),
-                            _ => c.op_id.map_or(String::new(), |op| format!(" (operation #{op})")),
+                    (Some(pattern), Some(instance)) => format!(
+                        " (pattern #{pattern}, instance {instance}, operation #{})",
+                        c.op_id.unwrap_or(0)
+                    ),
+                    _ => c
+                        .op_id
+                        .map_or(String::new(), |op| format!(" (operation #{op})")),
                         };
                         format!("Verification {:?}{}: {}", c.kind, owner, c.message)
-                    }),
-            );
+            }));
         }
-        let output = lines.join("\n\n");
+        let output = lines.join("\n");
         if output != self.output_snapshot && self.output_content.selection().is_none() {
             self.output_content = text_editor::Content::with_text(&output);
             self.output_snapshot = output;
@@ -235,10 +268,29 @@ mod tests {
         );
         app.output_action(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
         app.sync_output();
-        assert!(app
-            .output_content
+        assert!(
+            app.output_content
             .text()
-            .contains("Another message arrived while copying"));
+                .contains("Another message arrived while copying")
+        );
+    }
+
+    #[test]
+    fn output_clear_stays_empty_until_new_timestamped_output_arrives() {
+        let (mut app, _) = App::new();
+        app.append_output("Run", "first entry");
+        app.append_output("Run", "first entry");
+        app.sync_output();
+        let before = app.output_content.text();
+        assert!(before.contains(" UTC] [Run] first entry"));
+        assert!(!before.contains("\n\n"));
+        assert_eq!(before.matches("first entry").count(), 1);
+        let _ = app.update(Message::OutputClear);
+        app.sync_output();
+        assert!(app.output_content.text().is_empty());
+        app.append_output("Run", "second entry");
+        app.sync_output();
+        assert!(app.output_content.text().contains("second entry"));
     }
     #[cfg(feature = "occt")]
     #[test]

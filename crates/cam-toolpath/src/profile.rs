@@ -378,6 +378,7 @@ impl ProfileStrategy {
                 // ring sits at the tool radius.
                 let job = crate::clearing::ClearJob {
                     id: op.id,
+                    simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
                     radius,
                     // The finishing allowance is baked into the roughing island, so
                     // the tool-centre wall sits at the bare tool radius.
@@ -393,6 +394,7 @@ impl ProfileStrategy {
                     lead_in: Lead::None,
                     lead_out: Lead::None,
                     start: op.start,
+                    end: None,
                     guard: &[],
                     spindle: env.spindle,
                 };
@@ -887,6 +889,7 @@ fn emit_loop(
     if op.lead_in != Lead::None
         || op.lead_out != Lead::None
         || op.lead_overlap > 0.0
+        || op.end.is_some()
         || op.plunge != Plunge::Straight
     {
         emit_loop_rich(prog, pts, op, h, levels, comp, air_sign, tabs, cancel);
@@ -996,6 +999,7 @@ fn emit_loop_rich(
     tabs: Option<&TabLayout>,
     cancel: &CancelToken,
 ) {
+    let end = op.end.map(|point| tabs.map_or(point, |layout| layout.eligible_exit(pts, point, lead_extent(op.lead_out))));
     let start = pts[0];
     let tan_in = start_tangent(pts); // leaving start, into the cut
                                      // The cleared/air side the lead eases in from. For an outside profile that is
@@ -1024,7 +1028,7 @@ fn emit_loop_rich(
     // to a point `exit_on`, so the lead-off (and its junction) is re-machined. With
     // no overlap, `exit_on == start`, `tan_out` is the arrival tangent, and the cut
     // polyline is exactly the closed loop — byte-identical to the prior emission.
-    let (loop_pts, exit_on, tan_out) = crate::emit::loop_with_overlap(pts, op.lead_overlap);
+    let (loop_pts, exit_on, tan_out) = crate::emit::loop_with_exit(pts, op.lead_overlap, end);
     // The lead-off normal follows the *arrival* tangent, which differs from the
     // start's whenever the loop closes at a corner (a sharp inner offset) — reusing
     // the start normal there yields a degenerate lead. Mid-edge the two coincide, so
@@ -1099,7 +1103,7 @@ fn emit_loop_rich(
         // A full perimeter from there, so the ramped stretch is re-machined, plus the
         // operator's overlap.
         let (loop_pts, exit_on, tan_out) = if ramps {
-            let walked = walk_loop(pts, cut_from, perimeter + op.lead_overlap);
+            let walked = walk_loop(pts, cut_from, perimeter + exit_overlap(pts, cut_from, op.lead_overlap, end));
             let last = walked[walked.len() - 1];
             let prev = walked[walked.len().saturating_sub(2)];
             (walked, last, unit(last.x - prev.x, last.y - prev.y))
@@ -1241,6 +1245,26 @@ fn profile_loop_points(points: &[Point], op: &ProfileOp, spindle: SpindleDir) ->
     rotate_to_start(&points, op.start)
 }
 
+fn loop_length(points: &[Point]) -> f64 {
+    points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
+        .sum()
+}
+
+/// Additional travel after a complete contour, ending at the requested exit.
+/// Minimum overlap is preserved by adding whole laps when necessary.
+pub(crate) fn exit_overlap(points: &[Point], from: f64, minimum: f64, end: Option<[f64; 2]>) -> f64 {
+    let Some(end) = end.filter(|p| p.iter().all(|v| v.is_finite())) else { return minimum; };
+    let perimeter = loop_perimeter(points);
+    if perimeter <= 1e-12 { return minimum; }
+    let minimum = minimum.min(perimeter);
+    let mut extra = (nearest_on_loop(points, end).0 - from).rem_euclid(perimeter);
+    if extra + 1e-9 < minimum { extra += ((minimum - extra) / perimeter).ceil() * perimeter; }
+    extra
+}
+
 /// Arc length and squared distance of the nearest point on a closed loop.
 fn nearest_on_loop(points: &[Point], point: [f64; 2]) -> (f64, f64) {
     let mut walked = 0.0;
@@ -1313,6 +1337,7 @@ fn move_tab_seam(points: &mut Vec<Point>, op: &ProfileOp, diameter: f64) {
 /// by a cutter radius to retain the requested material width. Vertical moves at
 /// their boundaries make a rectangular bridge, including on intermediate passes.
 struct TabLayout {
+    perimeter: f64,
     spans: Vec<(f64, f64)>,
     top: f64,
 }
@@ -1398,6 +1423,7 @@ impl TabLayout {
             return None;
         }
         Some(Self {
+            perimeter,
             spans,
             top: -op.depth + op.tabs.height,
         })
@@ -1447,6 +1473,21 @@ impl TabLayout {
                 tag: Tag::new(op.id, MoveKind::Cutting),
             });
         }
+    /// Move an exit away from holding tabs and leave enough room for its lead.
+    fn eligible_exit(&self, pts: &[Point], point: [f64; 2], room: f64) -> [f64; 2] {
+        let desired = nearest_on_loop(pts, point).0;
+        let mut best = (0.0, f64::INFINITY);
+        for index in 0..=self.spans.len() {
+            let low = if index == 0 { 0.0 } else { self.spans[index - 1].1 + room + 1e-6 };
+            let high = if index == self.spans.len() { self.perimeter } else { self.spans[index].0 - room - 1e-6 };
+            if low > high { continue; }
+            let at = desired.clamp(low, high);
+            let delta = (desired - at).abs();
+            let distance = delta.min(self.perimeter - delta);
+            if distance < best.1 { best = (at, distance); }
+        }
+        let at = walk_loop(pts, best.0, 0.0)[0];
+        [at.x, at.y]
     }
 
     fn cut(&self, prog: &mut Program, pts: &[Point], op: &ProfileOp, z: f64) {
@@ -1480,9 +1521,10 @@ impl TabLayout {
                 continue;
             }
             let end = distance + length;
-            while span_index < self.spans.len() {
-                let span = self.spans[span_index];
-                let boundary = if raised { span.1 } else { span.0 };
+            while !self.spans.is_empty() {
+                let span = self.spans[span_index % self.spans.len()];
+                let lap = (span_index / self.spans.len()) as f64 * self.perimeter;
+                let boundary = lap + if raised { span.1 } else { span.0 };
                 if boundary > end + 1e-9 {
                     break;
                 }
@@ -2125,6 +2167,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn independent_exit_completes_the_contour_before_leading_out() {
+        for plunge in [Plunge::Straight, Plunge::Ramp { angle_deg: 10.0 }] {
+            let mut op = inner_op(40.0, 1.0, Some([3.0, 10.0]));
+            op.end = Some([37.0, 20.0]);
+            op.plunge = plunge;
+            op.lead_overlap = 2.0;
+            let result = run_inner(op);
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut previous = None;
+            let mut cut_length = 0.0;
+            let mut lead_out_at = None;
+            for step in result.program.steps() {
+                let (point, tag) = match step {
+                    Step::Linear { to, tag, .. } | Step::Rapid { to, tag } => (*to, *tag),
+                    Step::Arc { end, tag, .. } => (*end, *tag),
+                    _ => continue,
+                };
+                if let Some(p) = previous {
+                    let p: Point3 = p;
+                    if tag.kind == MoveKind::Cutting { cut_length += (point.x - p.x).hypot(point.y - p.y); }
+                    if tag.kind == MoveKind::LeadOut { lead_out_at = Some(p); }
+                }
+                previous = Some(point);
+            }
+            let exit = lead_out_at.expect("lead-out generated");
+            assert!((exit.x - 37.0).hypot(exit.y - 20.0) < 0.01, "{plunge:?}: {exit:?}");
+            assert!(cut_length >= 4.0 * 34.0 - 0.05, "complete contour before exit: {cut_length}");
+        }
+    }
+
+    #[test]
+    fn exit_preserves_minimum_overlap_even_when_it_requires_another_lap() {
+        let pts = vec![Point::new(0., 0.), Point::new(10., 0.), Point::new(10., 10.), Point::new(0., 10.)];
+        let (path, exit, _) = crate::emit::loop_with_exit(&pts, 5.0, Some([2.0, 0.0]));
+        assert_eq!(exit, Point::new(2.0, 0.0));
+        let length: f64 = path.windows(2).map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y)).sum();
+        assert!((length - 82.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn levels_step_down_to_depth() {
         assert_eq!(depth_levels(0.0, -3.0, 1.5), vec![-1.5, -3.0]);
         assert_eq!(depth_levels(0.0, -1.0, 1.5), vec![-1.0]);
@@ -2452,6 +2535,7 @@ mod tests {
             plunge_feed: 100.0,
             plunge: Plunge::Straight,
             start,
+            end: None,
             lead_in: Lead::Arc { radius: lead_r },
             lead_out: Lead::Arc { radius: lead_r },
             lead_overlap: 0.0,
@@ -2588,6 +2672,7 @@ mod tests {
             feed: 300.0,
             plunge_feed: 100.0,
             plunge: Plunge::Straight,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -2757,6 +2842,40 @@ mod tests {
             ..Default::default()
         };
         op
+    }
+
+    #[test]
+    fn selected_exit_keeps_tabs_on_the_repeated_contour_and_resolves_to_a_gap() {
+        let mut op = tabbed_op();
+        let preview = profile_tab_preview(&op, 6., SpindleDir::Cw);
+        op.end = Some(preview[0].position);
+        let result = run_outside_rough(op.clone());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let points = profile_loop_points(op.chain.points(), &op, SpindleDir::Cw);
+        let layout = TabLayout::new(&points, &op, 6.).unwrap();
+        let exit = layout.eligible_exit(&points, op.end.unwrap(), 0.);
+        assert_ne!(exit, op.end.unwrap());
+        let mut previous = None;
+        for step in result.program.steps() {
+            let point = match step {
+                Step::Linear { to, .. } | Step::Rapid { to, .. } => *to,
+                Step::Arc { end, .. } => *end,
+                _ => continue,
+            };
+            if let Some(a) = previous {
+                let a: Point3 = a;
+                for i in 0..=10 {
+                    let t = i as f64 / 10.;
+                    let p = [a.x + t * (point.x - a.x), a.y + t * (point.y - a.y)];
+                    let z = a.z + t * (point.z - a.z);
+                    let at = nearest_on_loop(&points, p).0;
+                    if layout.spans.iter().any(|(lo, hi)| at > lo + 1e-6 && at < hi - 1e-6) {
+                        assert!(z >= layout.top - 1e-6, "tab cut at {p:?} Z{z}");
+                    }
+                }
+            }
+            previous = Some(point);
+        }
     }
 
     #[test]

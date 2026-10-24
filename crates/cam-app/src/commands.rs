@@ -78,7 +78,7 @@ impl AppController {
                     let ids: BTreeSet<u32> = pattern.members.into_iter().collect();
                     setup.operations.retain(|o| !ids.contains(&o.id()));
                     setup.patterns.retain(|p| p.id != pattern_id);
-                    for id in &ids { setup.operation_heights.remove(id); setup.height_settings.remove(id); doc.excluded_operations.remove(id); doc.cad_linked_operations.remove(id); doc.geometry.bindings.remove(id); }
+                    for id in &ids { setup.operation_heights.remove(id); setup.height_settings.remove(id); setup.stock_to_leave.remove(id); doc.excluded_operations.remove(id); doc.cad_linked_operations.remove(id); doc.geometry.bindings.remove(id); }
                 }
             }
         });
@@ -102,6 +102,7 @@ impl AppController {
             setup.patterns.retain(|pattern| !pattern.members.is_empty());
             setup.operation_heights.remove(&id);
             setup.height_settings.remove(&id);
+            setup.stock_to_leave.remove(&id);
             doc.geometry.bindings.remove(&id);
             doc.excluded_operations.remove(&id);
             doc.cad_linked_operations.remove(&id);
@@ -151,6 +152,8 @@ impl AppController {
                         == self.setup().height_settings.get(&ops[j].id())
                     && self.setup().heights_for(ops[i].id())
                         == self.setup().heights_for(ops[j].id())
+                    && self.setup().stock_to_leave_for(ops[i].id())
+                        == self.setup().stock_to_leave_for(ops[j].id())
                 {
                     taken[j] = true;
                     group.push(ops[j].id());

@@ -194,13 +194,9 @@ pub(crate) fn recipe(
         OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette => {
             ExtractionRecipe::ProfileSilhouette
         }
-        OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Loop => {
-            ExtractionRecipe::ProfileLoop {
-                side: cam_geometry3d::profile_side(geometry, selected)?,
-            }
-        }
         OpKind::Profile => ExtractionRecipe::ProfileContours,
         OpKind::Face => ExtractionRecipe::FaceRegion,
+        OpKind::Adaptive => ExtractionRecipe::AdaptiveClearing,
     })
 }
 
@@ -316,6 +312,7 @@ pub(crate) fn operation_type(operation: &Operation) -> &'static str {
         Operation::Thread(_) => "Thread",
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
+        Operation::Adaptive(_) => "3D Adaptive Clearing",
     }
 }
 
@@ -410,7 +407,11 @@ pub(crate) fn create_operation(
     defaults: JobParams,
 ) -> Result<(Operation, GeometryBinding), String> {
     let geometry = geometry_for_setup(document)?;
-    validate_selection(&geometry, &selected)?;
+    if kind == OpKind::Adaptive {
+        cam_geometry3d::validate_adaptive_selection(&geometry, &selected)?;
+    } else {
+        validate_selection(&geometry, &selected)?;
+    }
     let mut binding = cam_geometry3d::resolve_selection(
         &geometry,
         &selected,
@@ -438,6 +439,7 @@ pub(crate) fn create_operation(
             boundary: boundary()?,
             islands: resolved.regions[0].holes().to_vec(),
             depth,
+            end: None,
             start: None,
             clear: ClearParams {
                 stepdown: defaults.stepdown,
@@ -485,6 +487,7 @@ pub(crate) fn create_operation(
             stepover: 0.0,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -557,6 +560,7 @@ pub(crate) fn create_operation(
             gradual: false,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -577,6 +581,7 @@ pub(crate) fn create_operation(
             stepdown: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
         }),
         OpKind::Carve => Operation::Carve(CarveOp {
@@ -597,6 +602,7 @@ pub(crate) fn create_operation(
             scallop: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             plunge: Plunge::Straight,
             stay_down: true,
@@ -631,6 +637,20 @@ pub(crate) fn create_operation(
             blind_allowance: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+        }),
+        OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            params: AdaptiveParams {
+                feed: defaults.feed,
+                plunge_feed: defaults.plunge_feed,
+                ..Default::default()
+            },
         }),
     };
     if surface_recipe(&binding.recipe) {
@@ -698,7 +718,10 @@ pub(crate) fn resolve_document_checked(
             if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
                 return Err(format!("Operation {id}: Needs reselection — {reason}"));
             }
-            if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
+            if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+                cam_geometry3d::validate_adaptive_selection(&resolved.geometry, &binding.selected)
+                    .map_err(|e| format!("Operation {id}: {e}"))?;
+            } else if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
                 validate_selection(&resolved.geometry, &binding.selected)
                     .map_err(|e| format!("Operation {id}: {e}"))?;
             }
@@ -792,6 +815,7 @@ pub(crate) fn resolve_document_checked(
                     p.closed = path.closed;
                     if !p.closed {
                         p.start = None;
+                    p.end = None;
                         p.lead_overlap = 0.;
                     }
                     p.top = input.heights.top;
@@ -804,6 +828,7 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                     if !p.closed {
                         p.start = None;
+                    p.end = None;
                     }
                 }
                 (Operation::Carve(p), ExtractionRecipe::CarveRegion) => {
@@ -858,6 +883,10 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                     p.start_offset = input.heights.top;
                 }
+                (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
+                    // Body heights and projected silhouette belong to the binding;
+                    // the adaptive planner resolves conservative CAD-derived layers.
+                }
                 _ => {
                     return Err(format!(
                         "Operation {id}: geometry recipe does not match the operation"
@@ -904,8 +933,15 @@ pub(crate) fn selection_height_defaults(
     document: &Document,
     operation: &Operation,
 ) -> OperationHeightSettings {
-    let cutting = document.operation_base_cutting_heights(operation);
     let mut settings = OperationHeightSettings::default();
+    if matches!(operation, Operation::Adaptive(_)) {
+        *settings.definition_mut(HeightPlaneKind::Top) =
+            HeightDefinition::new(HeightReference::StockTop, 0.);
+        *settings.definition_mut(HeightPlaneKind::Bottom) =
+            HeightDefinition::new(HeightReference::SelectedContours, 0.);
+        return settings;
+    }
+    let cutting = document.operation_base_cutting_heights(operation);
     *settings.definition_mut(HeightPlaneKind::Top) =
         HeightDefinition::new(HeightReference::SelectedContours, 0.);
     *settings.definition_mut(HeightPlaneKind::Bottom) = HeightDefinition::new(
@@ -932,6 +968,12 @@ pub(crate) fn capture_height_override(
     after: &Operation,
     heights: &Heights,
 ) {
+    // Adaptive operations have no legacy cutting-height fields. Their interval
+    // belongs to the binding and reference-height settings, so comparing it with
+    // legacy_cutting would turn an unrelated edit into a spurious height shift.
+    if matches!(after, Operation::Adaptive(_)) {
+        return;
+    }
     let Some(binding) = binding else {
         return;
     };
@@ -956,7 +998,7 @@ pub(crate) fn capture_height_override(
         Operation::Engrave(p) => (before.depth(), p.depth),
         Operation::Carve(p) => (before.depth(), p.depth),
         Operation::Thread(p) => (before.depth(), p.z_top - p.z_bottom),
-        Operation::Chamfer(_) => return,
+        Operation::Chamfer(_) | Operation::Adaptive(_) => return,
     };
     if after_depth != before_depth {
         binding.overrides.bottom = Some(binding.effective_heights().top - after_depth);

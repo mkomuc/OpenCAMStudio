@@ -107,6 +107,7 @@ impl Strategy for PocketStrategy {
         // stay-down inside-out rings, with the finishing wall leads.
         let job = crate::clearing::ClearJob {
             id: op.id,
+            simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: r,
             finish: op.clear.offset,
             first,
@@ -120,6 +121,7 @@ impl Strategy for PocketStrategy {
             lead_in: op.clear.lead_in,
             lead_out: op.clear.lead_out,
             start: op.start,
+            end: op.end,
             guard: &guard,
                     spindle: env.spindle,
         };
@@ -220,6 +222,7 @@ mod tests {
             boundary: square(40.0),
             islands: vec![],
             depth: 3.0,
+            end: None,
             start: None,
             clear: ClearParams {
                 clearing: cam_model::Clearing::default(),
@@ -264,6 +267,7 @@ mod tests {
             boundary: square(40.0),
             islands: vec![],
             depth: 3.0,
+            end: None,
             start: None,
             clear: ClearParams {
                 clearing: cam_model::Clearing::default(),
@@ -323,6 +327,7 @@ mod tests {
             boundary: square(10.0),
             islands: vec![],
             depth: 3.0,
+            end: None,
             start: None,
             clear: ClearParams {
                 clearing: cam_model::Clearing::default(),
@@ -379,6 +384,7 @@ mod tests {
                 boundary: square(40.0),
                 islands: vec![],
                 depth: 1.5,
+                end: None,
                 start: None,
                 clear: ClearParams {
                     clearing: cam_model::Clearing::default(),
@@ -424,6 +430,7 @@ mod tests {
                 boundary: square(40.0),
                 islands: vec![],
                 depth: 1.5,
+                end: None,
                 start: None,
                 clear: ClearParams {
                     clearing: cam_model::Clearing::default(),
@@ -488,6 +495,7 @@ mod tests {
             boundary: square(40.0),
             islands,
             depth: 1.5,
+            end: None,
             start: None,
             clear: ClearParams {
                 clearing: cam_model::Clearing::default(),
@@ -610,6 +618,7 @@ mod tests {
             boundary: square(40.0),
             islands: vec![],
             depth: 2.0,
+            end: None,
             start: None,
             clear: ClearParams {
                 clearing: Clearing { engagement: 2.0, climb: true },
@@ -745,6 +754,7 @@ mod tests {
             boundary: square(10.0),
             islands: vec![],
             depth: 1.5,
+            end: None,
             start: None,
             clear: ClearParams {
                 clearing: cam_model::Clearing::default(),

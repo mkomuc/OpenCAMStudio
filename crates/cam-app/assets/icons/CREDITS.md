@@ -49,6 +49,8 @@ showing what each operation does to it:
   running down to a cleared flat floor, with the bit standing off the boundary so its
   flank is on the wall. Deliberately distinct from `engrave.svg`, whose tool ploughs a
   single narrow groove with its tip and never leaves a floor)
+- `adaptive.svg` — Adaptive Clearing operation (a layered solid with a constant-engagement
+  path stepping through depth)
 
 The hole-making Operations use a **flat tool glyph** instead, so they read at a
 glance and stay visually distinct from each other:
@@ -66,6 +68,7 @@ The remaining originals are in the flat 24×24 style:
 - `machine.svg` — Machine / post-processor setup (a settings gear)
 - `undo.svg`, `redo.svg`, `run.svg` — edit / run actions
 - `toolpath.svg` — recompute toolpaths (connected cutting passes and direction arrow)
+- `toolpath_time.svg` — processing time (the toolpath with an hourglass badge)
 - `pattern.svg` — operation pattern (a source square repeated on a regular grid)
 - `pattern_circular.svg` — circular operation pattern (a source repeated around a center)
 - `new.svg`, `open.svg`, `save.svg` — project file actions

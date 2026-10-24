@@ -69,12 +69,20 @@ impl App {
         self.profile_contour_selection = 0;
         self.profile_side_overrides.clear();
         self.profile_entry_editor = None;
+        self.operation_position_pick = None;
         self.operation_tab = OperationTab::Tool;
         self.creation_edited_fields.clear();
         self.inspector_active = true;
         self.operation_binding_preview = None;
         self.operation_geometry = None;
         self.operation_draft = Some(self.controller.operation_template(kind, 0));
+        self.stock_to_leave_draft = Some(
+            self.controller
+                .pending_op()
+                .and_then(|pending| pending.replacing)
+                .map(|id| self.controller.document().setup().stock_to_leave_for(id))
+                .unwrap_or_default(),
+        );
         self.height_draft_id = Some(0);
         let settings = cam_model::OperationHeightSettings::default();
         self.height_offsets = cam_model::HeightPlaneKind::ALL
@@ -97,7 +105,7 @@ impl App {
     pub(super) fn sync_creation_geometry_heights(&mut self) {
         if !matches!(
             self.cad_pending_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive)
         ) {
             return;
         }
@@ -261,6 +269,7 @@ impl App {
                     op.z_top = new.z_top;
                     op.z_bottom = new.z_bottom;
                 }
+                (Operation::Adaptive(_), Operation::Adaptive(_)) => {}
                 _ => return Err("Geometry does not match operation".into()),
             }
             if crate::cad_operations::surface_recipe(&binding.recipe) {

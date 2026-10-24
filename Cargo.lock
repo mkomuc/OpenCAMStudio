@@ -475,6 +475,9 @@ dependencies = [
 [[package]]
 name = "cam-cldata"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cam-geo"
@@ -563,9 +566,12 @@ version = "0.1.0"
 dependencies = [
  "cam-cldata",
  "cam-geo",
+ "cam-geometry3d",
  "cam-model",
  "cam-post",
  "cam-sim",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

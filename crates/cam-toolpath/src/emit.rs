@@ -177,6 +177,24 @@ pub(crate) fn loop_with_overlap(pts: &[Point], overlap: f64) -> (Vec<Point>, Poi
     (out, from, arrival)
 }
 
+/// Complete the loop before proceeding to a separately selected exit point.
+pub(crate) fn loop_with_exit(
+    pts: &[Point],
+    overlap: f64,
+    end: Option<[f64; 2]>,
+) -> (Vec<Point>, Point, (f64, f64)) {
+    if end.is_none() {
+        return loop_with_overlap(pts, overlap);
+    }
+    let distance =
+        crate::profile::loop_perimeter(pts) + crate::profile::exit_overlap(pts, 0.0, overlap, end);
+    let path = crate::profile::walk_loop(pts, 0.0, distance);
+    let last = path[path.len() - 1];
+    let prev = path[path.len().saturating_sub(2)];
+    let tangent = crate::profile::unit(last.x - prev.x, last.y - prev.y);
+    (path, last, tangent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

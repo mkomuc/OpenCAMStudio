@@ -27,6 +27,7 @@ fn machine() -> Machine {
     Machine {
         name: "OCS-3018".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: cam_model::Envelope::new(
@@ -72,6 +73,7 @@ fn document() -> Document {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -101,6 +103,7 @@ fn document() -> Document {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -130,6 +133,7 @@ fn document() -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }
@@ -230,6 +234,7 @@ fn tool_too_large_for_hole_reports_error() {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -281,6 +286,7 @@ fn cancellation_stops_before_emitting() {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -340,6 +346,7 @@ fn lead_overlap_recuts_past_the_start() {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -427,6 +434,7 @@ fn offset_leaves_stock_on_the_wall() {
             stepover: 0.0,
             feed: 300.0,
             plunge_feed: 100.0,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -501,6 +509,7 @@ fn rough_op(side: Side, chain: Contour, stepover: f64) -> ProfileOp {
         stepover,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -762,6 +771,7 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::Arc { radius: 3.0 },
         lead_out: Lead::Arc { radius: 3.0 },
@@ -802,6 +812,7 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     });
 
@@ -884,6 +895,7 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
         plunge_feed: 100.0,
         plunge: cam_model::Plunge::Straight,
         stay_down: true,
+        end: None,
         start: None,
     };
     let mut operations = vec![Operation::Carve(carve)];
@@ -911,6 +923,7 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
             stepover: 0.0,
             feed: 300.0,
             plunge_feed: 100.0,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -941,6 +954,7 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }

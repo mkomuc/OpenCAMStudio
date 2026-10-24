@@ -160,11 +160,22 @@ impl OcamFile {
     }
 }
 
+/// Persisted cutting fragments and the input state they were last reviewed against.
+/// Missing on legacy projects; those operations start out of date.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredToolpaths {
+    pub cache: cam_toolpath::OperationCache,
+    /// Each value combines the local input hash and the ordered dependency hash.
+    pub fingerprints: std::collections::BTreeMap<u32, String>,
+}
+
 /// A saved OpenCAMStudio project: the editable document plus the imported geometry
 /// it was built from and the seed defaults. Self-contained — no references to
 /// external CAD files — so opening it needs nothing else on disk.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub toolpaths: StoredToolpaths,
     /// Schema version (mirrors [`cam_model::SCHEMA_VERSION`]).
     pub schema_version: u32,
     /// The editable document (setup, stock, tools, operations).
@@ -583,6 +594,31 @@ mod tests {
             panic!("expected a project");
         };
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn project_round_trip_preserves_operation_stock_to_leave() {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+            panic!("expected a project");
+        };
+        let operation_id = project.document.setups[0].operations[0].id();
+        let stock = cam_model::StockToLeave {
+            enabled: true,
+            radial: 0.35,
+            axial: 0.2,
+        };
+        project.document.setups[0]
+            .stock_to_leave
+            .insert(operation_id, stock);
+
+        let encoded = OcamFile::Project(project).to_json().unwrap();
+        let OcamFile::Project(reloaded) = OcamFile::from_json(&encoded).unwrap() else {
+            panic!("expected a project");
+        };
+        assert_eq!(
+            reloaded.document.setups[0].stock_to_leave_for(operation_id),
+            stock
+        );
     }
 
     #[test]

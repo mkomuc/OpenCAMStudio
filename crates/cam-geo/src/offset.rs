@@ -3,7 +3,7 @@
 use i_overlay::mesh::outline::offset::OutlineOffset;
 use i_overlay::mesh::style::{LineJoin, OutlineStyle};
 
-use crate::{polygon, GeoError, Polygon, GRID_SCALE};
+use crate::{polygon, GeoError, Polygon, GRID_MM, GRID_SCALE};
 
 /// How offset corners are treated where two edges meet.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,7 +56,31 @@ pub fn offset(
     if regions.is_empty() {
         return Ok(Vec::new());
     }
-    let shapes = polygon::to_shapes(regions);
+    // An inward offset cannot contain an area once its diameter exceeds the
+    // outer boundary's width on either axis. Avoid sending those collapsed
+    // contours to the outline engine: dense CAD circles can otherwise spend
+    // minutes intersecting their inverted offset edges after disappearing.
+    let shapes: Vec<_> = regions
+        .iter()
+        .filter(|region| {
+            if !distance.is_finite() || distance >= 0.0 {
+                return true;
+            }
+            let mut min = [f64::INFINITY; 2];
+            let mut max = [f64::NEG_INFINITY; 2];
+            for point in region.outer().points() {
+                min[0] = min[0].min(point.x);
+                min[1] = min[1].min(point.y);
+                max[0] = max[0].max(point.x);
+                max[1] = max[1].max(point.y);
+            }
+            -2.0 * distance <= (max[0] - min[0]).min(max[1] - min[1]) + 2.0 * GRID_MM
+        })
+        .map(Polygon::to_shape)
+        .collect();
+    if shapes.is_empty() {
+        return Ok(Vec::new());
+    }
     let style = OutlineStyle::new(distance).line_join(join.to_line_join());
     let result = shapes.outline_fixed_scale(&style, GRID_SCALE)?;
     Ok(polygon::from_shapes(result))

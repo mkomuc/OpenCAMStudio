@@ -17,3 +17,6 @@ __pycache__/
 /screenshots
 /testfiles/Tigerente.step
 .obsidian
+/docs/issues/
+/docs/features/
+/dist

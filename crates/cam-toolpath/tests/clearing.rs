@@ -32,6 +32,7 @@ fn machine() -> Machine {
     Machine {
         name: "OCS-3018".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: cam_model::Envelope::new(
@@ -88,6 +89,7 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }
@@ -192,6 +194,7 @@ fn pocket_doc() -> Document {
         boundary: rect(0.0, 0.0, 60.0, 40.0),
         islands: vec![rect(25.0, 15.0, 35.0, 25.0)],
         depth: 3.0,
+        end: None,
         start: None,
         clear: ClearParams {
             clearing: Clearing::default(),
@@ -234,6 +237,7 @@ fn roughing_doc() -> Document {
         stepover: 4.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -302,6 +306,7 @@ fn carve_doc() -> Document {
         plunge_feed: 100.0,
         plunge: cam_model::Plunge::Straight,
         stay_down: true,
+        end: None,
         start: None,
     };
     setup(vec![Operation::Carve(op)], vec![vbit, end_mill(2, 6.0)])

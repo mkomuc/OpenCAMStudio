@@ -22,6 +22,7 @@ pub(crate) struct Ring {
 }
 
 /// Why ring generation stopped without producing rings.
+#[derive(Debug)]
 pub(crate) enum RingsError {
     /// The job was cancelled mid-generation.
     Cancelled,
@@ -93,9 +94,10 @@ fn cut_ring(
     feed: f64,
     tag: Tag,
     lead_overlap: f64,
+    end: Option<[f64; 2]>,
     z: f64,
 ) -> Point {
-    let (loop_pts, exit, _tan) = crate::emit::loop_with_overlap(pts, lead_overlap);
+    let (loop_pts, exit, _tan) = crate::emit::loop_with_exit(pts, lead_overlap, end);
     crate::emit::cut_polyline(prog, &loop_pts, feed, tag, z);
     exit
 }
@@ -141,6 +143,7 @@ fn enter_with_plunge(
     id: u32,
     ring: &[Point],
     lead_path: Vec<Point>,
+    guard: &[Polygon],
 ) -> Option<f64> {
     // The ramp never travels through air to reach the material: its height is measured
     // from the top of stock, or from the floor the previous level left.
@@ -178,7 +181,7 @@ fn enter_with_plunge(
         out,
         from_z,
         z,
-        plunge,
+        crate::leads::guard_plunge(guard, p, out, plunge),
         plunge_feed,
         entry_feeds.ramp(feed),
         Tag::new(id, MoveKind::Plunge),
@@ -222,6 +225,7 @@ fn approach(
     link_threshold: f64,
     ring: &[Point],
     lead_path: Vec<Point>,
+    guard: &[Polygon],
 ) -> Option<f64> {
     let hop = (p.x - prev_end.x).hypot(p.y - prev_end.y);
     if hop <= link_threshold {
@@ -237,20 +241,7 @@ fn approach(
         tag: Tag::new(id, MoveKind::Link),
     });
     enter_with_plunge(
-        prog,
-        p,
-        tan,
-        out,
-        from_z,
-        z,
-        h,
-        plunge,
-        plunge_feed,
-        entry_feeds,
-        feed,
-        id,
-        ring,
-        lead_path,
+        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path, guard,
     )
 }
 
@@ -282,12 +273,13 @@ fn emit_wall_ring(
     h: &Heights,
     plunge: Plunge,
     link_threshold: f64,
+    end: Option<[f64; 2]>,
 ) -> Point {
     let ri = crate::profile::rotate_to_start(pts, Some([prev_end.x, prev_end.y]));
     let start = ri[0];
     let tan_in = crate::profile::start_tangent(&ri);
     let cin = cleared_normal(tan_in, reversed);
-    let (loop_pts, exit_on, tan_out) = crate::emit::loop_with_overlap(&ri, lead_overlap);
+    let (loop_pts, exit_on, tan_out) = crate::emit::loop_with_exit(&ri, lead_overlap, end);
     let cout = cleared_normal(tan_out, reversed);
 
     // Drop any lead that would swing past the far wall down to a plain pass.
@@ -318,6 +310,7 @@ fn emit_wall_ring(
         link_threshold,
         &ri,
         crate::profile::lead_in_path(start, entry, cin, eff_in),
+        guard,
     );
     match ramped {
         // It ramped: the lead was flown on the way down, and the cut must begin where
@@ -325,7 +318,7 @@ fn emit_wall_ring(
         // re-machined at depth.
         Some(on_ring) => {
             let perim = crate::profile::loop_perimeter(&ri);
-            let walked = crate::profile::walk_loop(&ri, on_ring, perim + lead_overlap);
+            let walked = crate::profile::walk_loop(&ri, on_ring, perim + crate::profile::exit_overlap(&ri, on_ring, lead_overlap, end));
             let last = walked[walked.len() - 1];
             let prev = walked[walked.len().saturating_sub(2)];
             let tan_out = crate::profile::unit(last.x - prev.x, last.y - prev.y);
@@ -396,6 +389,7 @@ pub(crate) fn emit_stay_down(
     prog: &mut Program,
     rings: &[Ring],
     start: Option<[f64; 2]>,
+    end: Option<[f64; 2]>,
     id: u32,
     feed: f64,
     plunge_feed: f64,
@@ -462,23 +456,26 @@ pub(crate) fn emit_stay_down(
                 let entry = crate::leads::lead_start_point(r0[0], tan, cin, eff);
                 crate::profile::lead_in_path(r0[0], entry, cin, eff)
             },
+            guard,
         );
         // A ramped entry begins its cut where the ramp ended, and goes a full perimeter
         // from there so the sloped stretch is re-machined at depth.
         let mut prev_end = match on_ring {
             Some(from) => {
                 let perim = crate::profile::loop_perimeter(&r0);
-                let walked = crate::profile::walk_loop(&r0, from, perim + lead_overlap);
+                let overlap = crate::profile::exit_overlap(&r0, from, lead_overlap, end.filter(|_| rings.len() == 1));
+                let walked = crate::profile::walk_loop(&r0, from, perim + overlap);
                 crate::emit::cut_polyline(prog, &walked, feed, cut, z);
                 walked[walked.len() - 1]
             }
-            None => cut_ring(prog, &r0, feed, cut, lead_overlap, z),
+            None => cut_ring(prog, &r0, feed, cut, lead_overlap, end.filter(|_| rings.len() == 1), z),
         };
 
-        for ring in &rings[1..] {
+        for (index, ring) in rings[1..].iter().enumerate() {
             if cancel.is_cancelled() {
                 return;
             }
+            let exit_preference = end.filter(|_| index + 2 == rings.len());
             if ring.is_wall && leaded {
                 prev_end = emit_wall_ring(
                     prog,
@@ -498,6 +495,7 @@ pub(crate) fn emit_stay_down(
                     h,
                     plunge,
                     link_threshold,
+                    exit_preference,
                 );
                 continue;
             }
@@ -529,6 +527,7 @@ pub(crate) fn emit_stay_down(
                 &ri,
                 // An interior clearing ring has no lead of its own.
                 Vec::new(),
+                guard,
             );
             // As at the level entry: a ramped approach starts its cut where the ramp
             // ended and travels a full perimeter, so it re-machines what it sloped. A
@@ -536,11 +535,11 @@ pub(crate) fn emit_stay_down(
             prev_end = match on_ring {
                 Some(from) => {
                     let perim = crate::profile::loop_perimeter(&ri);
-                    let walked = crate::profile::walk_loop(&ri, from, perim + lead_overlap);
+                    let walked = crate::profile::walk_loop(&ri, from, perim + crate::profile::exit_overlap(&ri, from, lead_overlap, exit_preference));
                     crate::emit::cut_polyline(prog, &walked, feed, cut, z);
                     walked[walked.len() - 1]
                 }
-                None => cut_ring(prog, &ri, feed, cut, lead_overlap, z),
+                None => cut_ring(prog, &ri, feed, cut, lead_overlap, exit_preference, z),
             };
         }
         // Retract; the next level re-enters at the interior start.

@@ -510,6 +510,35 @@ impl CadScene {
         candidates
     }
 
+    /// Pick across several semantic feature kinds, preserving their screen-depth
+    /// ordering so the caller can offer overlapping features as alternatives.
+    pub fn pick_any_candidates(
+        &self,
+        ray: Ray,
+        filters: &[EntityKind],
+        aperture: f64,
+        select_through: bool,
+    ) -> Vec<PickCandidate> {
+        let mut candidates = Vec::new();
+        for filter in filters {
+            candidates.extend(self.pick_candidates(ray, *filter, aperture, select_through));
+        }
+        candidates.sort_by(|a, b| {
+            a.depth
+                .total_cmp(&b.depth)
+                .then_with(|| {
+                    filters
+                        .iter()
+                        .position(|kind| *kind == a.entity.kind)
+                        .cmp(&filters.iter().position(|kind| *kind == b.entity.kind))
+                })
+                .then_with(|| a.entity.cmp(&b.entity))
+        });
+        let mut seen = BTreeSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.entity.clone()));
+        candidates
+    }
+
     /// Profile geometry uses an outer loop. A face-interior click identifies
     /// that loop when the perimeter is outside the screen catch aperture.
     pub fn pick_profile_candidates(
@@ -963,6 +992,36 @@ mod tests {
         let hits = scene.pick_candidates(down(), EntityKind::Face, 0.1, true);
         assert_eq!(hits.len(), 2);
         assert!(hits[1].occluded);
+    }
+    #[test]
+    fn mixed_pick_candidates_expose_each_supported_semantic_kind() {
+        let scene = CadScene::from_geometry(&geometry(), &BTreeSet::new());
+        let candidates = scene.pick_any_candidates(
+            down(),
+            &[
+                EntityKind::Face,
+                EntityKind::Edge,
+                EntityKind::Loop,
+                EntityKind::Vertex,
+                EntityKind::Body,
+            ],
+            0.1,
+            true,
+        );
+        let kinds: BTreeSet<_> = candidates.iter().map(|pick| pick.entity.kind).collect();
+        assert!(
+            [
+                EntityKind::Face,
+                EntityKind::Edge,
+                EntityKind::Loop,
+                EntityKind::Vertex,
+                EntityKind::Body,
+            ]
+            .into_iter()
+            .all(|kind| kinds.contains(&kind)),
+            "available kinds: {kinds:?}"
+        );
+        assert!(candidates.windows(2).all(|pair| pair[0].depth <= pair[1].depth));
     }
     #[test]
     fn profile_face_interior_selects_its_outer_loop_with_instance_identity() {

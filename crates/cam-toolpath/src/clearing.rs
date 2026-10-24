@@ -26,6 +26,8 @@ use crate::CancelToken;
 pub(crate) struct ClearJob<'a> {
     /// Operation id, stamped onto emitted tags.
     pub id: u32,
+    /// Frontier and corner-detection simplification tolerance, mm; 0 disables it.
+    pub simplification_tolerance: f64,
     /// Tool radius.
     pub radius: f64,
     /// Finishing allowance left on the walls.
@@ -54,7 +56,9 @@ pub(crate) struct ClearJob<'a> {
     pub lead_out: Lead,
     /// Preferred entry point (part XY) for the innermost ring.
     pub start: Option<[f64; 2]>,
-    /// Cleared region the wall leads must stay inside (empty ⇒ no lead guard).
+    pub end: Option<[f64; 2]>,
+    /// Cutter-centre region that bounds wall leads and entry helices
+    /// (empty ⇒ no containment guard).
     pub guard: &'a [Polygon],
 }
 
@@ -210,6 +214,7 @@ pub(crate) fn clear(
             job.finish,
             job.clearing.engagement,
             job.start,
+            job.simplification_tolerance,
         ) {
             emit_adaptive_moves(prog, &moves, &[], job, heights, levels);
             // One continuous certified path (not a ring count); `Ok(_)` ⇒ emitted.
@@ -252,6 +257,7 @@ pub(crate) fn clear(
         prog,
         &rings,
         job.start,
+        job.end,
         job.id,
         job.feed,
         job.plunge_feed,
@@ -334,7 +340,9 @@ fn emit_adaptive_moves(
                 crate::profile::emit_open_ramp(prog, &ramp, from_z, z, job.entry_feeds.ramp(job.feed), plunge_tag);
             }
             None => crate::profile::emit_plunge(
-                prog, start, tan, out, from_z, z, job.plunge, job.plunge_feed, job.entry_feeds.ramp(job.feed),
+                prog, start, tan, out, from_z, z,
+                crate::leads::guard_plunge(job.guard, start, out, job.plunge),
+                job.plunge_feed, job.entry_feeds.ramp(job.feed),
                 plunge_tag,
             ),
         }
@@ -430,7 +438,36 @@ fn emit_adaptive_moves(
                 });
             }
         }
-        let last = moves[moves.len() - 1].0;
+        let mut last = moves[moves.len() - 1].0;
+        if let Some(preferred) = job.end.filter(|p| p.iter().all(|v| v.is_finite())) {
+            // Retrace only the final connected run. Every segment has already been
+            // swept by the cutter at this depth; never shortcut across a protected
+            // island or a discontinuity that required a clearance move.
+            let first = moves.iter().rposition(|(_, cutting)| !cutting).unwrap_or(0);
+            let mut nearest = (moves.len() - 1, last, f64::INFINITY);
+            for i in first + 1..moves.len() {
+                let a = moves[i - 1].0;
+                let b = moves[i].0;
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let length2 = dx * dx + dy * dy;
+                if length2 <= 1e-24 { continue; }
+                let t = (((preferred[0] - a.x) * dx + (preferred[1] - a.y) * dy) / length2).clamp(0.0, 1.0);
+                let point = Point::new(a.x + t * dx, a.y + t * dy);
+                let distance = (point.x - preferred[0]).powi(2) + (point.y - preferred[1]).powi(2);
+                // Ties prefer the latest visit, keeping return travel short.
+                if distance <= nearest.2 { nearest = (i, point, distance); }
+            }
+            if nearest.2.is_finite() {
+                let tag = Tag::new(job.id, MoveKind::LeadOut);
+                for i in (nearest.0..moves.len() - 1).rev() {
+                    let p = moves[i].0;
+                    prog.push(Step::Linear { to: Point3::new(p.x, p.y, z), feed: job.entry_feeds.lead_out(job.feed), tag });
+                }
+                last = nearest.1;
+                prog.push(Step::Linear { to: Point3::new(last.x, last.y, z), feed: job.entry_feeds.lead_out(job.feed), tag });
+            }
+        }
         prog.push(Step::Rapid {
             to: Point3::new(last.x, last.y, h.clearance),
             tag: retract,
@@ -476,6 +513,7 @@ mod tests {
     fn frame_clearjob(clearing: Clearing) -> ClearJob<'static> {
         ClearJob {
             id: 7,
+            simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: 3.0,
             finish: 0.0,
             first: 3.0,
@@ -489,6 +527,7 @@ mod tests {
             lead_in: Lead::None,
             lead_out: Lead::None,
             start: None,
+            end: None,
             guard: &[],
             spindle: cam_cldata::SpindleDir::Cw,
         }
@@ -499,6 +538,56 @@ mod tests {
     /// re-entry descents were **468 mm at plunge feed — half the program's total time** —
     /// against 3.4 minutes of actual cutting. Above the stock surface there is nothing to
     /// hit, and below it the descent is through stock the seed search has already cleared.
+    #[test]
+    fn adaptive_exit_retraces_only_the_final_connected_cleared_run() {
+        let mut job = frame_clearjob(frame_job());
+        job.end = Some([10., 0.]);
+        let moves = vec![
+            (Point::new(0., 0.), false), (Point::new(10., 0.), true),
+            (Point::new(20., 20.), false), (Point::new(30., 20.), true),
+            (Point::new(30., 30.), true),
+        ];
+        let mut program = Program::new();
+        emit_adaptive_moves(&mut program, &moves, &[], &job, &Heights::new(5., 2., 0.), &[-1.]);
+        assert!(program.validate().is_ok());
+        let exits: Vec<_> = program.steps().iter().filter_map(|s| match s {
+            Step::Linear { to, tag, .. } if tag.kind == MoveKind::LeadOut => Some(*to),
+            _ => None,
+        }).collect();
+        assert_eq!(exits, vec![Point3::new(30., 20., -1.), Point3::new(20., 20., -1.)]);
+        assert!(matches!(program.steps().last(), Some(Step::Rapid { to, .. }) if *to == Point3::new(20., 20., 5.)));
+        assert_eq!(count(&program, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting)), 3);
+    }
+
+    #[test]
+    fn concentric_exit_is_independent_of_entry_and_keeps_wall_leads() {
+        let region = Polygon::new(Contour::new(vec![Point::new(0., 0.), Point::new(40., 0.), Point::new(40., 40.), Point::new(0., 40.)])).unwrap();
+        for plunge in [Plunge::Straight, Plunge::Ramp { angle_deg: 10.0 }] {
+            let mut job = frame_clearjob(Clearing::default());
+            job.start = Some([20., 10.]);
+            job.end = Some([37., 20.]);
+            job.plunge = plunge;
+            job.lead_in = Lead::Arc { radius: 0.5 };
+            job.lead_out = Lead::Arc { radius: 0.5 };
+            let mut program = Program::new();
+            clear(&mut program, &region, &job, &Heights::new(5., 2., 0.), &[-1.], &CancelToken::new()).unwrap();
+            assert!(program.validate().is_ok());
+            let mut previous = None;
+            let mut last_exit = None;
+            for step in program.steps() {
+                let (point, tag) = match step {
+                    Step::Linear { to, tag, .. } | Step::Rapid { to, tag } => (*to, *tag),
+                    Step::Arc { end, tag, .. } => (*end, *tag),
+                    _ => continue,
+                };
+                if tag.kind == MoveKind::LeadOut { last_exit = previous; }
+                previous = Some(point);
+            }
+            let exit: Point3 = last_exit.unwrap();
+            assert!((exit.x - 37.).hypot(exit.y - 20.) < 0.02, "{plunge:?}: {exit:?}");
+        }
+    }
+
     #[test]
     fn a_re_entry_descends_at_cutting_feed_from_the_stock_top() {
         let region = frame_region();

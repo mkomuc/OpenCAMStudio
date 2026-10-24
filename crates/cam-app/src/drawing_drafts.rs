@@ -11,6 +11,7 @@ impl AppController {
             Operation::Thread(_) => OpKind::Thread,
             Operation::Engrave(_) => OpKind::Engrave,
             Operation::Carve(_) => OpKind::Carve,
+            Operation::Adaptive(_) => OpKind::Adaptive,
         }
     }
     /// Resolve a drawing geometry field without committing or resetting cutting data.
@@ -67,6 +68,7 @@ impl AppController {
                 op.closed = new.closed;
                 if !op.closed {
                     op.start = None;
+                    op.end = None;
                     op.lead_overlap = 0.;
                 }
             }
@@ -79,11 +81,15 @@ impl AppController {
                 op.closed = new.closed;
                 if !op.closed {
                     op.start = None;
+                    op.end = None;
                 }
             }
             (Operation::Carve(op), Operation::Carve(new)) => {
                 op.boundary = new.boundary;
                 op.islands = new.islands;
+            }
+            (Operation::Adaptive(_), Operation::Adaptive(_)) => {
+                return Err("Adaptive Clearing requires a solid CAD body".into());
             }
             _ => return Err("Drawing geometry and operation kind do not match".into()),
         }
