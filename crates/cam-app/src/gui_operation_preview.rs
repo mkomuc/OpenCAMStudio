@@ -248,6 +248,26 @@ impl App {
                 );
             }
         }
+        if self.operation_tab == OperationTab::Linking {
+            let z = self.controller.document().setup().heights.top_of_stock;
+            for (point, color) in [
+                (operation_tabs::operation_start(&op), [0.15, 0.8, 1.0, 1.0]),
+                (operation_positions::operation_end(&op), [1.0, 0.6, 0.15, 1.0]),
+            ] {
+                if let Some(point) = point {
+                    for axis in 0..2 {
+                        let mut a = [point[0], point[1], z];
+                        let mut b = a;
+                        a[axis] -= 1.0;
+                        b[axis] += 1.0;
+                        scene.add_highlight(vec![
+                            frame.to_world_vector(a).map(|v| v as f32),
+                            frame.to_world_vector(b).map(|v| v as f32),
+                        ], color);
+                    }
+                }
+            }
+        }
         scene
     }
 

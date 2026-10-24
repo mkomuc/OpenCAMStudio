@@ -2051,6 +2051,7 @@ impl AppController {
                 feed,
                 plunge_feed,
                 start,
+                end: None,
                 lead_in: Lead::None,
                 lead_out: Lead::None,
                 lead_overlap: 0.0,
@@ -2073,6 +2074,7 @@ impl AppController {
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     start,
+                    end: None,
                     clear: ClearParams {
                         clearing: cam_model::Clearing::default(),
                         stepdown: p.stepdown,
@@ -2156,6 +2158,7 @@ impl AppController {
                 feed,
                 plunge_feed,
                 start,
+                end: None,
                 lead_in: Lead::None,
                 lead_out: Lead::None,
                 lead_overlap: 0.0,
@@ -2243,6 +2246,7 @@ impl AppController {
                     // verified before it is taken (the ones that would gouge still lift).
                     stay_down: true,
                     start,
+                    end: None,
                 })
             }
             OpKind::Engrave => Operation::Engrave(EngraveOp {
@@ -2264,6 +2268,7 @@ impl AppController {
                 feed,
                 plunge_feed,
                 start,
+                end: None,
             }),
             OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
                 id: 0,
@@ -2548,6 +2553,7 @@ impl AppController {
                     work_offset: 1,
                     feed: p.feed,
                     plunge_feed: p.plunge_feed,
+                    end: None,
                     start: None,
                     lead_in: Lead::None,
                     lead_out: Lead::None,
@@ -2600,6 +2606,7 @@ impl AppController {
                             cooling: Default::default(),
                             entry_feeds: Default::default(),
                             work_offset: 1,
+                            end: None,
                             start: None,
                             clear: ClearParams {
                                 clearing: cam_model::Clearing::default(),

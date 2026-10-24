@@ -68,6 +68,7 @@ impl AppController {
                 op.closed = new.closed;
                 if !op.closed {
                     op.start = None;
+                    op.end = None;
                     op.lead_overlap = 0.;
                 }
             }
@@ -80,6 +81,7 @@ impl AppController {
                 op.closed = new.closed;
                 if !op.closed {
                     op.start = None;
+                    op.end = None;
                 }
             }
             (Operation::Carve(op), Operation::Carve(new)) => {

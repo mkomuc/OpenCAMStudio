@@ -1101,9 +1101,7 @@ fn frontier_tuned(
     let to_clear = largest(offset(std::slice::from_ref(region), -finish, JoinStyle::Round).ok()?)?;
     let tc = largest(offset(std::slice::from_ref(region), -(r + finish), JoinStyle::Round).ok()?)?;
 
-    let entry = start
-        .map(|s| Point::new(s[0], s[1]))
-        .filter(|p| tc.contains(*p))
+    let entry = preferred_entry(&tc, start, e.min(r) * 0.5)
         .or_else(|| entry_point(&tc))?;
 
     let clear_slice = std::slice::from_ref(&to_clear);
@@ -1208,6 +1206,25 @@ fn frontier_tuned(
         return None;
     }
     Some(Frontier { entry, tc, to_clear, passes, split, simplification_tolerance })
+}
+
+/// Resolve a model-space preference onto an eligible cutter-centre region.
+pub(crate) fn preferred_entry(tc: &Polygon, start: Option<[f64; 2]>, margin: f64) -> Option<Point> {
+    let start = start.filter(|p| p.iter().all(|v| v.is_finite()))?;
+    let point = Point::new(start[0], start[1]);
+    if tc.contains(point) {
+        return Some(point);
+    }
+    let inset = offset(std::slice::from_ref(tc), -margin, JoinStyle::Round).ok()?;
+    inset
+        .iter()
+        .flat_map(|p| std::iter::once(p.outer()).chain(p.holes().iter()))
+        .map(|contour| crate::profile::rotate_to_start(contour.points(), Some(start))[0])
+        .filter(|p| tc.contains(*p))
+        .min_by(|a, b| {
+            ((a.x - point.x).powi(2) + (a.y - point.y).powi(2))
+                .total_cmp(&((b.x - point.x).powi(2) + (b.y - point.y).powi(2)))
+        })
 }
 
 #[cfg(test)]

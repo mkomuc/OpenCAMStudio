@@ -71,6 +71,9 @@ radius and CAD approximation margin. It checks entire segments and arc bulges.
 Unsafe motions or a clearance plane below a setup body reject the operation;
 their toolpath is not accepted for export. Frontier simplification receives its
 own model clearance allowance.
+Outside runout can remove extra stock beside a body below the height of its
+sloped face. A side view may project that stock over the model even though the
+cut is outside the body's side edge; rotate the view to distinguish them.
 For compatibility, selecting the only body in a one-body setup retains the
 original full-stock clearing area; containment and offset still apply to that
 stock boundary.

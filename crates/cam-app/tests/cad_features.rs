@@ -663,6 +663,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         boundary: contour(2., 18., 2., 18.),
         islands: vec![contour(8., 12., 8., 12.)],
         depth: 3.,
+        end: None,
         start: None,
         clear: ClearParams {
             stepdown: 2.,

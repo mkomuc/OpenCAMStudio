@@ -56,6 +56,7 @@ fn profile_op(id: u32, chain: cam_geo::Contour, side: Side, climb: bool) -> Oper
         work_offset: 1,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,

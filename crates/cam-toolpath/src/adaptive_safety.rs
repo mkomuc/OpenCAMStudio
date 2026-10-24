@@ -56,17 +56,22 @@ pub(super) fn certify_layer(
         let b = Point::new(end.x, end.y);
         let (points, margin) = match step {
             Step::Arc { center, dir, .. } => {
-                if ![center.x, center.y, center.z].into_iter().all(f64::is_finite) {
+                if ![center.x, center.y, center.z]
+                    .into_iter()
+                    .all(f64::is_finite)
+                {
                     return Err(reject("nonfinite arc centre"));
                 }
                 let r = a.distance(Point::new(center.x, center.y));
-                if !r.is_finite() || r <= 0.0
+                if !r.is_finite()
+                    || r <= 0.0
                     || (r - b.distance(Point::new(center.x, center.y))).abs() > ARC_ERROR
                 {
                     return Err(reject("inconsistent arc radius"));
                 }
                 let arc = Arc::new(
-                    Point::new(center.x, center.y), r,
+                    Point::new(center.x, center.y),
+                    r,
                     (a.y - center.y).atan2(a.x - center.x),
                     (b.y - center.y).atan2(b.x - center.x),
                     matches!(dir, ArcDir::Ccw),
@@ -97,12 +102,14 @@ fn segment_clear(a: Point, b: Point, protected: &[Polygon], radius: f64) -> bool
         if polygon.locate(a) != Containment::Outside || polygon.locate(b) != Containment::Outside {
             return false;
         }
-        std::iter::once(polygon.outer()).chain(polygon.holes()).all(|ring| {
-            let points = ring.points();
-            (0..points.len()).all(|i| {
-                segment_distance2(a, b, points[i], points[(i + 1) % points.len()]) >= r2
+        std::iter::once(polygon.outer())
+            .chain(polygon.holes())
+            .all(|ring| {
+                let points = ring.points();
+                (0..points.len()).all(|i| {
+                    segment_distance2(a, b, points[i], points[(i + 1) % points.len()]) >= r2
+                })
             })
-        })
     })
 }
 
@@ -145,16 +152,28 @@ mod tests {
 
     fn rectangle(x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon {
         Polygon::new(Contour::new(vec![
-            Point::new(x0, y0), Point::new(x1, y0),
-            Point::new(x1, y1), Point::new(x0, y1),
-        ])).unwrap()
+            Point::new(x0, y0),
+            Point::new(x1, y0),
+            Point::new(x1, y1),
+            Point::new(x0, y1),
+        ]))
+        .unwrap()
     }
 
     fn entry(x: f64, y: f64) -> Program {
-        Program { steps: vec![
-            Step::Rapid { to: Point3::new(x, y, 5.), tag: Tag::new(1, MoveKind::Link) },
-            Step::Linear { to: Point3::new(x, y, 0.), feed: 100., tag: Tag::new(1, MoveKind::Plunge) },
-        ] }
+        Program {
+            steps: vec![
+                Step::Rapid {
+                    to: Point3::new(x, y, 5.),
+                    tag: Tag::new(1, MoveKind::Link),
+                },
+                Step::Linear {
+                    to: Point3::new(x, y, 0.),
+                    feed: 100.,
+                    tag: Tag::new(1, MoveKind::Plunge),
+                },
+            ],
+        }
     }
 
     #[test]
@@ -164,10 +183,19 @@ mod tests {
             let mut program = entry(-2., 0.);
             let to = Point3::new(2., 0., 0.);
             let tag = Tag::new(1, MoveKind::Cutting);
-            program.push(if rapid { Step::Rapid { to, tag } }
-                else { Step::Linear { to, feed: 300., tag } });
-            assert!(matches!(certify_layer(&program, &protected, 0.5, 0., 5., &CancelToken::new()),
-                Err(SafetyFailure::Motion { index: 2, .. })));
+            program.push(if rapid {
+                Step::Rapid { to, tag }
+            } else {
+                Step::Linear {
+                    to,
+                    feed: 300.,
+                    tag,
+                }
+            });
+            assert!(matches!(
+                certify_layer(&program, &protected, 0.5, 0., 5., &CancelToken::new()),
+                Err(SafetyFailure::Motion { index: 2, .. })
+            ));
         }
     }
 
@@ -184,10 +212,16 @@ mod tests {
         for (dir, safe) in [(ArcDir::Cw, false), (ArcDir::Ccw, true)] {
             let mut program = entry(-2., 0.);
             program.push(Step::Arc {
-                end: Point3::new(2., 0., 0.), center: Point3::new(0., 0., 0.),
-                dir, feed: 300., tag: Tag::new(1, MoveKind::Cutting),
+                end: Point3::new(2., 0., 0.),
+                center: Point3::new(0., 0., 0.),
+                dir,
+                feed: 300.,
+                tag: Tag::new(1, MoveKind::Cutting),
             });
-            assert_eq!(certify_layer(&program, &protected, 0.2, 0., 5., &CancelToken::new()).is_ok(), safe);
+            assert_eq!(
+                certify_layer(&program, &protected, 0.2, 0., 5., &CancelToken::new()).is_ok(),
+                safe
+            );
         }
     }
 
@@ -196,9 +230,20 @@ mod tests {
         let protected = [Polygon::with_holes(
             rectangle(-5., -5., 5., 5.).outer().clone(),
             vec![rectangle(-2., -2., 2., 2.).outer().clone()],
-        ).unwrap()];
-        assert!(certify_layer(&entry(0., 0.), &protected, 0.5, 0., 5., &CancelToken::new()).is_ok());
-        assert!(certify_layer(&entry(1.75, 0.), &protected, 0.5, 0., 5., &CancelToken::new()).is_err());
+        )
+        .unwrap()];
+        assert!(
+            certify_layer(&entry(0., 0.), &protected, 0.5, 0., 5., &CancelToken::new()).is_ok()
+        );
+        assert!(certify_layer(
+            &entry(1.75, 0.),
+            &protected,
+            0.5,
+            0.,
+            5.,
+            &CancelToken::new()
+        )
+        .is_err());
     }
 
     #[test]
@@ -207,6 +252,9 @@ mod tests {
         assert!(certify_layer(&entry(f64::NAN, 0.), &[], 0.5, 0., 5., &token).is_err());
         assert!(certify_layer(&entry(0., 0.), &[], 0.5, 1., 5., &token).is_err());
         token.cancel();
-        assert!(matches!(certify_layer(&entry(0., 0.), &[], 0.5, 0., 5., &token), Err(SafetyFailure::Cancelled)));
+        assert!(matches!(
+            certify_layer(&entry(0., 0.), &[], 0.5, 0., 5., &token),
+            Err(SafetyFailure::Cancelled)
+        ));
     }
 }

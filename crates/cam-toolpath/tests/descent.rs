@@ -228,6 +228,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: lead,
         lead_out: lead,
@@ -248,6 +249,7 @@ fn pocket() -> Operation {
         boundary: rect(10.0, 10.0, 70.0, 50.0),
         islands: vec![],
         depth: 6.0,
+        end: None,
         start: None,
         clear: ClearParams {
             stepdown: 2.0,
@@ -288,6 +290,7 @@ fn chamfer() -> Operation {
         lead_out: Lead::None,
         lead_overlap: 0.0,
         gradual: false,
+        end: None,
         start: None,
     })
 }

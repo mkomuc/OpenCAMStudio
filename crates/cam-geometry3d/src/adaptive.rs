@@ -1144,6 +1144,20 @@ mod tests {
     }
 
     #[test]
+    fn unselected_tall_body_sets_the_clearance_limit() {
+        let (mut state, binding) = state(false);
+        let mut neighbor = state.instances[0].clone();
+        neighbor.id = 2;
+        neighbor.placement.translation = [15., 0., 25.];
+        state.instances.push(neighbor);
+        let result = resolve_adaptive(
+            &state, &binding, CuttingHeights { top: 10., bottom: 0. },
+            StockToLeave::default(), 4., 1., 0.02, || false,
+        ).unwrap();
+        assert!((result.model_top - 35.0025).abs() < 1e-9);
+    }
+
+    #[test]
     fn every_setup_instance_remains_an_obstacle_and_subset_body_is_local() {
         let (mut state, binding) = state(false);
         let one_instance_fingerprint = state.binding_fingerprint(&binding);

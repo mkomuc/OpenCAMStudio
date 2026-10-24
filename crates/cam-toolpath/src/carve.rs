@@ -445,6 +445,7 @@ impl Strategy for CarveStrategy {
                             lead_in: cp.lead_in,
                             lead_out: cp.lead_out,
                             start: op.start,
+                            end: op.end,
                             guard: &guards,
                                                     spindle: env.spindle,
                         };
@@ -950,14 +951,14 @@ fn emit_loop(
         // The cut begins where the ramp ended and runs a full perimeter from there.
         Some((_, on_loop, _)) => {
             let perim = crate::profile::loop_perimeter(&pts);
-            let walked = crate::profile::walk_loop(&pts, *on_loop, perim);
+            let walked = crate::profile::walk_loop(&pts, *on_loop, perim + crate::profile::exit_overlap(&pts, *on_loop, 0.0, op.end));
             crate::emit::cut_polyline(body, &walked, op.feed, tags.cut, z);
             st.at = Some((walked[walked.len() - 1], z));
         }
         None => {
-            crate::emit::cut_loop(body, &pts, op.feed, tags.cut, z);
-            // `cut_loop` closes back to the start, so that is where the tool is.
-            st.at = Some((start, z));
+            let (walked, end, _) = crate::emit::loop_with_exit(&pts, 0.0, op.end);
+            crate::emit::cut_polyline(body, &walked, op.feed, tags.cut, z);
+            st.at = Some((end, z));
         }
     }
     st.guard = guard_next.to_vec();
@@ -1410,6 +1411,7 @@ mod tests {
             plunge_feed: 100.0,
             plunge: Plunge::Straight,
             stay_down: false,
+            end: None,
             start: None,
         }
     }

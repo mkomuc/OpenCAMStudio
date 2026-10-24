@@ -19,3 +19,4 @@ __pycache__/
 .obsidian
 /docs/issues/
 /docs/features/
+/dist

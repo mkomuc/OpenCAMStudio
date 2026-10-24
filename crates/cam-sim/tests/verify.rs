@@ -47,6 +47,7 @@ fn profile_square(id: u32, chain: Contour) -> ProfileOp {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -124,6 +125,7 @@ fn a_pocket_clears_its_floor_without_collisions() {
         boundary: square(5.0, 5.0, 35.0, 35.0),
         islands: vec![],
         depth: 4.0,
+        end: None,
         start: None,
         clear: ClearParams {
             clearing: cam_model::Clearing::default(),
@@ -196,6 +198,7 @@ fn pocket_op() -> PocketOp {
         boundary: square(5.0, 5.0, 35.0, 35.0),
         islands: vec![],
         depth: 4.0,
+        end: None,
         start: None,
         clear: ClearParams {
             clearing: cam_model::Clearing::default(),

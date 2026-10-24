@@ -530,6 +530,9 @@ pub struct ProfileOp {
     /// the offset vertex nearest this point. `None` starts at the chain's first
     /// vertex (the default).
     pub start: Option<[f64; 2]>,
+    /// Preferred exit location in setup XY, reached along the completed toolpath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f64; 2]>,
     /// Lead-in onto the contour at the start point.
     pub lead_in: Lead,
     /// Lead-out off the contour after the cut.
@@ -807,6 +810,9 @@ pub struct PocketOp {
     /// *this* pocket's geometry, so it has no meaning for the derived region a carve
     /// clears.
     pub start: Option<[f64; 2]>,
+    /// Preferred exit location in setup XY, reached along the completed toolpath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f64; 2]>,
     /// How this pocket is cleared — stepdown, ring overlap, wall allowance, feeds,
     /// plunge style, leads, and the engagement cap.
     ///
@@ -848,6 +854,11 @@ pub struct AdaptiveOp {
 /// explicit; invalid or unsupported combinations stop generation with an error.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveParams {
+    /// Preferred entry and exit locations in setup XY.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f64; 2]>,
     /// Maximum geometric deviation accepted when deriving layer boundaries, mm.
     #[serde(default = "default_adaptive_tolerance")]
     pub tolerance: f64,
@@ -921,6 +932,8 @@ impl AdaptiveParams {
 impl Default for AdaptiveParams {
     fn default() -> Self {
         Self {
+            start: None,
+            end: None,
             tolerance: default_adaptive_tolerance(),
             optimal_load: default_adaptive_load(),
             stepdown: default_adaptive_stepdown(),
@@ -1351,6 +1364,9 @@ pub struct ChamferOp {
     /// nearest here (where the lead/entry lands). `None` starts at the chain's
     /// first vertex.
     pub start: Option<[f64; 2]>,
+    /// Preferred exit location in setup XY, reached along the completed toolpath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f64; 2]>,
     /// Lead-in onto the edge at the start point (eases the tool on, off the air
     /// side). `None` (the default) plunges directly onto the edge, as before.
     #[serde(default)]
@@ -1431,6 +1447,9 @@ pub struct EngraveOp {
     /// first vertex. `None` starts at the chain's first vertex.
     #[serde(default)]
     pub start: Option<[f64; 2]>,
+    /// Preferred exit location in setup XY, reached along the completed toolpath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f64; 2]>,
 }
 
 /// A **V-carving** operation: the boundary outlines an *area* to carve, and the V-bit's
@@ -1549,6 +1568,9 @@ pub struct CarveOp {
     /// `None` uses the strategy's default entry.
     #[serde(default)]
     pub start: Option<[f64; 2]>,
+    /// Preferred exit location in setup XY, reached along the completed toolpath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f64; 2]>,
 }
 
 /// An operation in a setup. An enum so a setup holds a heterogeneous, ordered
@@ -2205,6 +2227,7 @@ mod tests {
             stepover: 0.0,
             feed: 300.0,
             plunge_feed: 100.0,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -2320,6 +2343,7 @@ mod tests {
             plunge_feed: 100.0,
             plunge: Plunge::Straight,
             stay_down: false,
+            end: None,
             start: None,
         })
     }

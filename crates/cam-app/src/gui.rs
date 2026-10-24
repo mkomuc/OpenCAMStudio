@@ -94,6 +94,8 @@ mod profile_entries_view;
 mod profile_sides;
 #[path = "gui_profile_tabs.rs"]
 mod profile_tabs;
+#[path = "gui_operation_positions.rs"]
+mod operation_positions;
 #[path = "gui_wcs.rs"]
 mod wcs_view;
 use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
@@ -1934,6 +1936,7 @@ struct App {
     geometry_auto_pick: bool,
     geometry_editor: Option<operation_geometry::GeometryEditor>,
     profile_tab_picking: bool,
+    operation_position_pick: Option<operation_positions::PositionKind>,
     profile_tab_selection: Option<usize>,
     profile_contour_selection: usize,
     profile_side_overrides: Vec<cam_model::ProfileContour>,
@@ -2421,6 +2424,9 @@ enum Message {
     EngraveClosedChanged(bool),
     StockToLeaveToggled(bool),
     OperationStartEnabled(bool),
+    OperationPositionPick(operation_positions::PositionKind),
+    OperationPositionClear(operation_positions::PositionKind),
+    OperationPositionPicked([f64; 2]),
     OperationToolPicked(usize),
     EditDrawingGeometry(u32),
     UseDrawingGeometry,
@@ -2969,6 +2975,7 @@ impl App {
         self.profile_contour_selection = 0;
         self.profile_side_overrides.clear();
         self.profile_entry_editor = None;
+        self.operation_position_pick = None;
         self.profile_tab_picking = false;
         self.profile_tab_selection = None;
         self.model_view = None;
@@ -3268,6 +3275,7 @@ impl App {
             geometry_auto_pick: false,
             geometry_editor: None,
             profile_tab_picking: false,
+            operation_position_pick: None,
             profile_tab_selection: None,
             profile_contour_selection: 0,
             profile_side_overrides: Vec::new(),
@@ -3729,6 +3737,10 @@ impl App {
                 self.geometry_auto_pick = false;
             }
             self.geometry_row_selection = None;
+            if self.operation_position_pick.take().is_some() && matches!(message, Message::CadEscape) {
+                self.status = "Position selection cancelled.".into();
+                return iced::Task::none();
+            }
             if matches!(message, Message::CadEscape) && self.profile_tab_picking {
                 self.profile_tab_picking = false;
                 return iced::Task::none();
@@ -3803,6 +3815,7 @@ impl App {
             }
             Message::OperationTabChanged(tab) => {
                 self.operation_tab = tab;
+                self.operation_position_pick = None;
                 self.profile_tab_picking = false;
                 self.height_reference_pick = None;
                 self.focused_height = None;
@@ -3957,6 +3970,7 @@ impl App {
                         engrave.closed = closed;
                         if !closed {
                             engrave.start = None;
+                            engrave.end = None;
                         }
                     }
                 });
@@ -3968,7 +3982,11 @@ impl App {
                 self.stock_to_leave_draft = Some(stock);
                 self.refresh_operation_fields();
             }
+            Message::OperationPositionPick(kind) => self.begin_position_pick(kind),
+            Message::OperationPositionClear(kind) => self.clear_operation_position(kind),
+            Message::OperationPositionPicked(point) => self.pick_operation_position(point),
             Message::OperationStartEnabled(enabled) => {
+                self.operation_position_pick = None;
                 self.edit_operation_draft(|op| operation_tabs::set_operation_start(op, enabled));
                 self.refresh_operation_fields();
             }
@@ -11145,6 +11163,7 @@ impl std::fmt::Display for CadFilter {
 struct Viewport {
     setup_geometry: Arc<SetupPickGeometry>,
     setup_axis: bool,
+    operation_position_picking: bool,
     setup_hover: SetupHover,
     setup_snaps: Vec<SnapKind>,
     highlight_features: bool,
@@ -11508,6 +11527,7 @@ impl Viewport {
                 cad_hidden,
             )),
             setup_axis: false,
+            operation_position_picking: false,
             setup_hover: SetupHover::default(),
             setup_snaps: if prefs.snapping.enabled {
                 prefs.snapping.default_snaps.clone()
@@ -11581,6 +11601,22 @@ impl Viewport {
             0.5 * self.snap_catch_px,
         )
     }
+    fn operation_position_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Option<[f64; 2]> {
+        if bounds.width <= 0.0 || bounds.height <= 0.0 { return None; }
+        let camera = self.camera();
+        let ray = camera.pick_ray(
+            2.0 * (pos.x - bounds.x) / bounds.width - 1.0,
+            1.0 - 2.0 * (pos.y - bounds.y) / bounds.height,
+            bounds.width / bounds.height,
+        );
+        let world = self.setup_hover_at(pos, bounds).snap.map(|hit| hit.point)
+            .or_else(|| self.cad_scene.pick_candidates(ray, EntityKind::Face, 0.0, false)
+                .first().map(|hit| std::array::from_fn(|i| ray.origin[i] + hit.depth * ray.direction[i])))
+            .or_else(|| self.setup_geometry.fallback(ray))?;
+        let point = self.setup_geometry.to_setup(world);
+        Some([point[0], point[1]])
+    }
+
     fn origin_point_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Option<[f64; 3]> {
         if let Some(hit) = self.setup_hover_at(pos, bounds).snap {
             return Some(hit.point);
@@ -11903,6 +11939,13 @@ impl shader::Program<Message> for Viewport {
                         return Some(shader::Action::capture());
                     }
                 }
+                if matches!(button, Button::Left) && self.operation_position_picking {
+                    let point = self.operation_position_at(pos, bounds);
+                    return Some(match point {
+                        Some(point) => shader::Action::publish(Message::OperationPositionPicked(point)).and_capture(),
+                        None => shader::Action::capture(),
+                    });
+                }
                 if matches!(button, Button::Left) && self.set_origin {
                     return Some(match self.origin_point_at(pos, bounds) {
                         Some(point) => {
@@ -12201,7 +12244,7 @@ impl shader::Program<Message> for Viewport {
         cursor: iced::mouse::Cursor,
     ) -> iced::mouse::Interaction {
         let over = cursor.position_over(bounds).is_some();
-        if (self.picking || self.set_origin || self.setup_axis) && over {
+        if (self.picking || self.set_origin || self.setup_axis || self.operation_position_picking) && over {
             // Aiming a pick: a crosshair, but a plain arrow once a snap engages so
             // its marker reads on its own. Never the orbit "hand" while picking.
             if self.snap_engaged || self.setup_hover.snap.is_some() {
@@ -13169,6 +13212,7 @@ mod multi_setup_draft_tests {
                 plunge_feed: 100.0,
                 plunge: Plunge::Straight,
                 stay_down: false,
+                end: None,
                 start: None,
             }));
         let id = app.controller.document().setup().operations[0].id();
@@ -13826,6 +13870,7 @@ mod inspector_field_tests {
             work_offset: 1,
             feed: 200.0,
             plunge_feed: 100.0,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,

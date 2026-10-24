@@ -9,14 +9,15 @@ import subprocess
 import tarfile
 import xml.etree.ElementTree as ET
 
-SDK = Path('.local/occt').resolve()
-SOURCE = Path('.local/occt-source').resolve()
+SDK = Path(os.environ.get('OCCT_ROOT', '.local/occt')).resolve()
+SOURCE = Path(os.environ.get('OCCT_SOURCE', '.local/occt-source')).resolve()
+BUILD = Path(os.environ.get('OCCT_BUILD', '.local/occt-build')).resolve()
 NOTICE = '''Open CAM Studio uses Open CASCADE Technology (OCCT) 7.9.3.
 Copyright (c) Open CASCADE SAS and other contributors.
 OCCT is distributed under LGPL 2.1 with the Open CASCADE exception.
 The accompanying LICENSE_LGPL_21.txt and OCCT_LGPL_EXCEPTION.txt apply to OCCT.
-The unmodified corresponding source is provided beside these release packages as
-OpenCAMStudio-OCCT-7.9.3-source.tar.gz, built from:
+The corresponding source is available as OpenCAMStudio-OCCT-7.9.3-source.tar.gz
+in official releases, built from:
 https://github.com/Open-Cascade-SAS/OCCT/commit/a016080bf6738d6aeae020badee4e888ad1540a5
 Build instructions are in OpenCAMStudio's .github/scripts/build-occt.py.
 The shared libraries can be replaced by a compatible OCCT build.
@@ -33,6 +34,32 @@ def copy_matching(source, pattern, destination):
         shutil.copy2(item, destination / item.name)
 
 
+def copy_darwin_dependencies(executable, sdk_lib, destination):
+    """Copy the non-system dylib dependency closure used by the app."""
+    available = {path.name: path for path in sdk_lib.glob('*.dylib')}
+    pending = [executable]
+    copied = set()
+    destination.mkdir(parents=True, exist_ok=True)
+    while pending:
+        image = pending.pop()
+        if image in copied:
+            continue
+        copied.add(image)
+        output = subprocess.check_output(['otool', '-L', str(image)], text=True)
+        for line in output.splitlines()[1:]:
+            dependency = line.strip().split(' (compatibility')[0]
+            if dependency.startswith(('/System/Library/', '/usr/lib/')):
+                continue
+            name = Path(dependency).name
+            library = available.get(name)
+            if library is None:
+                raise RuntimeError(f'Cannot bundle {dependency}, required by {image}')
+            bundled = destination / name
+            if name not in {item.name for item in destination.iterdir()}:
+                shutil.copy2(library, bundled)
+            pending.append(bundled)
+
+
 def stage(destination, system):
     if system == 'Linux':
         libraries = destination / 'usr/lib'
@@ -43,7 +70,8 @@ def stage(destination, system):
         libraries = destination / 'Contents/Frameworks'
         resources = destination / 'Contents/Resources/occt'
         licenses = destination / 'Contents/Resources/licenses'
-        copy_matching(SDK / 'lib', 'libTK*.dylib', libraries)
+        copy_darwin_dependencies(destination / 'Contents/MacOS/opencamstudio',
+                                 SDK / 'lib', libraries)
         subprocess.run(['install_name_tool', '-add_rpath', '@executable_path/../Frameworks',
                         str(destination / 'Contents/MacOS/opencamstudio')], check=True)
     else:
@@ -53,10 +81,19 @@ def stage(destination, system):
         copy_matching(SDK / 'bin', 'TK*.dll', libraries)
         redist = Path(os.environ['VCToolsRedistDir']) / 'x64/Microsoft.VC143.CRT'
         copy_matching(redist, '*.dll', libraries)
-    shutil.copytree(SDK / 'share/occt/resources', resources, dirs_exist_ok=True)
+    resource_source = SDK / 'share/occt/resources'
+    if not resource_source.is_dir():
+        resource_source = SDK / 'share/opencascade/resources'
+    if not resource_source.is_dir():
+        raise FileNotFoundError(f'Missing OCCT resources below {SDK / "share"}')
+    shutil.copytree(resource_source, resources, dirs_exist_ok=True)
     licenses.mkdir(parents=True, exist_ok=True)
+    license_source = SOURCE if SOURCE.is_dir() else SDK / 'share/doc/opencascade'
     for name in ('LICENSE_LGPL_21.txt', 'OCCT_LGPL_EXCEPTION.txt'):
-        shutil.copy2(SOURCE / name, licenses / name)
+        path = license_source / name
+        if not path.is_file():
+            raise FileNotFoundError(f'Missing OCCT license {path}')
+        shutil.copy2(path, licenses / name)
     shutil.copy2('LICENSE', licenses / 'OpenCAMStudio-GPL-3.0.txt')
     (licenses / 'OCCT-NOTICE.txt').write_text(NOTICE, encoding='utf-8')
 
@@ -106,7 +143,8 @@ def verify(destination, smoke, system):
             subprocess.run(['codesign', '--force', '--sign', '-', str(binary)], check=True)
     env = {key: value for key, value in os.environ.items()
            if key not in ('LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'OCCT_ROOT',
-                          'OCCT_INCLUDE_DIR', 'OCCT_LIB_DIR') and not key.startswith('CSF_')}
+                          'OCCT_SOURCE', 'OCCT_BUILD', 'OCCT_INCLUDE_DIR',
+                          'OCCT_LIB_DIR') and not key.startswith('CSF_')}
     env['PATH'] = os.pathsep.join(p for p in env.get('PATH', '').split(os.pathsep)
                                   if str(SDK).lower() not in p.lower())
     if system == 'Linux':
@@ -114,7 +152,9 @@ def verify(destination, smoke, system):
     fixtures = Path('crates/cam-kernel/fixtures').resolve()
     hidden = []
     try:
-        for path in (SDK, SOURCE, Path('.local/occt-build').resolve()):
+        for path in (SDK, SOURCE, BUILD):
+            if not path.exists():
+                continue
             renamed = path.with_name(path.name + '-unavailable')
             path.rename(renamed)
             hidden.append((path, renamed))

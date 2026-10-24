@@ -147,6 +147,7 @@ cargo build --workspace                # headless: geometry, toolpaths, posts, s
 cargo test  --workspace                # the full test suite
 cargo run -p cam-app --features gui,occt    # the desktop GUI - occt for 3d STEP/IGES support
 cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam" # open setup directly
+OCCT_ROOT="$PWD/.local/occt" cargo build --release -p cam-app --features gui,occt
 ```
 
 Stable Rust, pinned in `rust-toolchain.toml`. GUI prerequisites and platform
@@ -159,6 +160,13 @@ cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam"
 ```
 
 Packaged builds accept the same `--setup <path.ocam>` option.
+
+build the distributiable app
+```bash
+OCCT_ROOT="$PWD/.local/occt" \
+DYLD_LIBRARY_PATH="$PWD/.local/occt/lib" \
+  cargo run -p cam-app --features gui,occt
+```
 
 ## Acknowledgements
 

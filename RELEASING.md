@@ -54,6 +54,20 @@ interactive graphics behavior. Packaging also starts the staged GUI executable i
 the app binary and its bundled OCCT runtime start together. A release still needs
 manual desktop testing.
 
+## Build the macOS app locally
+
+On an Apple silicon Mac with Rust, Xcode command line tools, and an OCCT 7.9.3
+SDK installed, run:
+
+```bash
+scripts/build-macos-app.sh
+```
+
+The self-contained `dist/Open CAM Studio.app` is built and verified locally; this
+does not use GitHub Actions. By default the script uses `.local/occt`. Set
+`OCCT_ROOT` for another SDK location or `OUTPUT_DIR` to choose a different output
+directory.
+
 ## First run in a fork
 
 1. Open **Actions** in the fork and enable workflows if GitHub has disabled them.

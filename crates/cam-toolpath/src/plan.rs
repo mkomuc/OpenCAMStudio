@@ -1099,6 +1099,7 @@ mod tests {
             work_offset: 1,
             feed: 300.0,
             plunge_feed: 100.0,
+            end: None,
             start: None,
             lead_in: cam_model::Lead::None,
             lead_out: cam_model::Lead::None,
@@ -1247,7 +1248,7 @@ mod tests {
         let pocket = Operation::Pocket(cam_model::PocketOp {
             id: 2, tool: 1, boundary: square(), islands: Vec::new(), depth: 2.0,
             spindle_rpm: 1000.0, tool_preset: None, cooling: Default::default(),
-            entry_feeds: Default::default(), work_offset: 1, start: None,
+            entry_feeds: Default::default(), work_offset: 1, start: None, end: None,
             clear: cam_model::ClearParams {
                 stepdown: 2.0, overlap: 0.5, offset: 0.2, feed: 300.0,
                 plunge_feed: 100.0, plunge: cam_model::Plunge::Straight,

@@ -191,6 +191,7 @@ fn pocket_doc() -> Document {
         boundary: rect(0.0, 0.0, 60.0, 40.0),
         islands: vec![rect(25.0, 15.0, 35.0, 25.0)],
         depth: 3.0,
+        end: None,
         start: None,
         clear: ClearParams {
             clearing: Clearing::default(),
@@ -232,6 +233,7 @@ fn roughing_doc() -> Document {
         stepover: 4.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -300,6 +302,7 @@ fn carve_doc() -> Document {
         plunge_feed: 100.0,
         plunge: cam_model::Plunge::Straight,
         stay_down: true,
+        end: None,
         start: None,
     };
     setup(vec![Operation::Carve(op)], vec![vbit, end_mill(2, 6.0)])

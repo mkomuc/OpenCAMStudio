@@ -114,6 +114,7 @@ pub(super) fn operation_start(op: &Operation) -> Option<[f64; 2]> {
         Operation::Chamfer(o) if o.closed => o.start,
         Operation::Engrave(o) if o.closed => o.start,
         Operation::Carve(o) => o.start,
+        Operation::Adaptive(o) => o.params.start,
         _ => None,
     }
 }
@@ -124,6 +125,7 @@ pub(super) fn set_operation_start(op: &mut Operation, enabled: bool) {
         Operation::Chamfer(o) if o.closed => &mut o.start,
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
+        Operation::Adaptive(o) => &mut o.params.start,
         _ => return,
     };
     *start = if enabled {
@@ -142,6 +144,7 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
         Operation::Chamfer(o) if o.closed => &mut o.start,
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
+        Operation::Adaptive(o) => &mut o.params.start,
         _ => return,
     };
     if let Some(point) = start {
@@ -553,13 +556,14 @@ impl App {
         if tab == OperationTab::Linking {
             let supports_start = matches!(
                 op,
-                Operation::Profile(_) | Operation::Pocket(_) | Operation::Carve(_)
-            ) || matches!(op, Operation::Engrave(o) if o.closed)
+                Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_)
+            ) || matches!(op, Operation::Profile(o) if o.closed) || matches!(op, Operation::Engrave(o) if o.closed)
                 || matches!(op, Operation::Chamfer(o) if o.closed && o.faces.is_empty());
             if supports_start {
+                list = list.push(self.operation_position_controls(op));
                 list = list.push(
                     row![
-                        text("Preferred start XY").size(12),
+                        text("Preferred entry XY").size(12),
                         checkbox(operation_start(op).is_some())
                             .size(15)
                             .on_toggle(Message::OperationStartEnabled)
@@ -571,7 +575,7 @@ impl App {
                 Operation::Drill(_) => list = list.push(text("Approach and retract follow the drilling cycle and operation safety heights.").size(12)),
                 Operation::Face(_) => list = list.push(text("Facing links and turnaround arcs are determined by the strategy. Overshoot is on Passes.").size(12)),
                 Operation::Thread(_) => list = list.push(text("Helical entry and exit are determined by the threading strategy.").size(12)),
-                Operation::Adaptive(_) => list = list.push(text("3D Adaptive Clearing uses generated helical entries and retracts between layers; set Ramp feed on Tool to override the entry rate.").size(12)),
+                Operation::Adaptive(_) => list = list.push(text("3D Adaptive Clearing uses safe helical entries near the preferred entry. The exit follows the final connected cleared path before retracting; set Ramp feed on Tool to override the entry rate.").size(12)),
                 Operation::Engrave(o) if !o.closed => list = list.push(text("Open strokes start at their first vertex. Entry and exit are determined by the engraving strategy.").size(12)),
                 _ => {}
             }
@@ -1439,6 +1443,7 @@ mod tests {
                     | Operation::Chamfer(_)
                     | Operation::Engrave(_)
                     | Operation::Carve(_)
+                    | Operation::Adaptive(_)
             );
             set_operation_start(&mut operation, true);
             assert_eq!(operation_start(&operation).is_some(), supported);
@@ -1859,6 +1864,78 @@ mod tests {
     }
 
     #[test]
+    fn position_picks_are_independent_transactional_and_serialized() {
+        use operation_positions::PositionKind::{Entry, Exit};
+        let (mut app, face_id) = linked_face_app();
+        let reference = app.controller.geometry_state().bindings[&face_id].selected[0].clone();
+        let id = app.controller.create_cad_operation(OpKind::Adaptive, vec![reference]).unwrap();
+        app.begin_operation_draft(id);
+        let saved = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        for (kind, point) in [(Entry, [2.0, 3.0]), (Exit, [7.0, 8.0])] {
+            let _ = app.update(Message::OperationPositionPick(kind));
+            let _ = app.update(Message::OperationPositionPicked(point));
+            assert_eq!(app.operation_position_pick, None);
+        }
+        assert_eq!(app.fields[&Field::StartX], "2");
+        assert_eq!(app.fields[&Field::StartY], "3");
+        let draft = app.operation_draft.as_ref().unwrap();
+        assert_eq!(operation_start(draft), Some([2.0, 3.0]));
+        assert_eq!(operation_positions::operation_end(draft), Some([7.0, 8.0]));
+        assert_eq!(app.controller.operation(id), Some(&saved));
+        let _ = app.update(Message::Apply);
+        let committed = app.controller.operation(id).unwrap().clone();
+        let encoded = serde_json::to_value(&committed).unwrap();
+        let restored: Operation = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(restored, committed);
+        // Older projects have no entry/exit settings on adaptive parameters.
+        let mut legacy = encoded;
+        legacy["Adaptive"]["params"].as_object_mut().unwrap().remove("start");
+        legacy["Adaptive"]["params"].as_object_mut().unwrap().remove("end");
+        let restored: Operation = serde_json::from_value(legacy).unwrap();
+        assert_eq!(operation_start(&restored), None);
+        assert_eq!(operation_positions::operation_end(&restored), None);
+        let _ = app.update(Message::OperationPositionClear(Exit));
+        assert_eq!(operation_start(app.operation_draft.as_ref().unwrap()), Some([2.0, 3.0]));
+        assert_eq!(operation_positions::operation_end(app.operation_draft.as_ref().unwrap()), None);
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.controller.operation(id), Some(&committed));
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::OperationPositionPick(Entry));
+        let _ = app.update(Message::CadEscape);
+        assert_eq!(app.operation_position_pick, None);
+        let _ = app.update(Message::OperationPositionPicked([99., 99.]));
+        assert_eq!(operation_start(app.operation_draft.as_ref().unwrap()), Some([2., 3.]));
+    }
+
+    #[test]
+    fn model_position_pick_hits_surface_in_oblique_view_and_converts_setup_axes() {
+        for frame in [cam_model::SetupFrame::default(), cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()] {
+            let (mut app, _) = linked_face_app();
+            let mut setup = app.controller.document().setup().clone();
+            setup.frame = frame.clone();
+            app.controller.apply_setup_settings(setup).unwrap();
+            let mut geometry = app.controller.geometry_state().clone();
+            let topology = Arc::make_mut(&mut geometry.assets[0].topology);
+            topology.mesh = cam_model::CadMesh {
+                vertices: vec![[0., 0., -1.], [10., 0., -1.], [10., 10., -1.], [0., 10., -1.]],
+                triangles: vec![[0, 1, 2], [0, 2, 3]], triangle_faces: vec![2, 2],
+            };
+            let mut viewport = app.machining_viewport();
+            viewport.cad_scene = Arc::new(CadScene::from_geometry_in_setup(&geometry, &BTreeSet::new(), &frame));
+            viewport.setup_snaps.clear();
+            viewport.controls.yaw = 0.5;
+            viewport.controls.pitch = 0.6;
+            let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800., 600.));
+            let world = [3., 4., -1.];
+            let (screen, _) = picking_view::project(viewport.camera(), bounds, world).unwrap();
+            let point = viewport.operation_position_at(screen, bounds).unwrap();
+            let expected = frame.to_setup_vector(world);
+            assert!((point[0] - expected[0]).hypot(point[1] - expected[1]) < 1e-5, "{point:?} vs {expected:?}");
+        }
+    }
+
+    #[test]
     fn linked_height_overrides_and_other_tabs_commit_and_undo_atomically() {
         let (mut app, id) = linked_face_app();
         let before = app.controller.document().clone();
@@ -2041,10 +2118,17 @@ mod tests {
         let _ = app.operation_inspector(0);
         let _ = app.update(Message::AdaptiveContainmentChanged(cam_model::AdaptiveContainment::Outside));
         let _ = app.update(Message::FieldChanged(Field::AdaptiveOffset, "1.25".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::OperationPositionPick(operation_positions::PositionKind::Entry));
+        let _ = app.update(Message::OperationPositionPicked([4.0, 4.0]));
+        let _ = app.update(Message::OperationPositionPick(operation_positions::PositionKind::Exit));
+        let _ = app.update(Message::OperationPositionPicked([8.0, 8.0]));
         let (preview, _) = app.creation_operation().unwrap();
         assert!(matches!(preview, Operation::Adaptive(op)
             if op.params.containment == cam_model::AdaptiveContainment::Outside
-                && op.params.additional_offset == 1.25));
+                && op.params.additional_offset == 1.25
+                && op.params.start == Some([4.0, 4.0])
+                && op.params.end == Some([8.0, 8.0])));
         let _ = app.update(Message::ConfirmOp);
         assert!(!app.creating_operation(), "{}", app.status);
         let Selection::Operation(id) = app.controller.selection() else {
@@ -2052,7 +2136,9 @@ mod tests {
         };
         assert!(matches!(app.controller.operation(id), Some(Operation::Adaptive(op))
             if op.params.containment == cam_model::AdaptiveContainment::Outside
-                && op.params.additional_offset == 1.25));
+                && op.params.additional_offset == 1.25
+                && op.params.start == Some([4.0, 4.0])
+                && op.params.end == Some([8.0, 8.0])));
     }
 
     #[test]

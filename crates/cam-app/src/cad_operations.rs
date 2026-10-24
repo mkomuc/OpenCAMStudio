@@ -439,6 +439,7 @@ pub(crate) fn create_operation(
             boundary: boundary()?,
             islands: resolved.regions[0].holes().to_vec(),
             depth,
+            end: None,
             start: None,
             clear: ClearParams {
                 stepdown: defaults.stepdown,
@@ -485,6 +486,7 @@ pub(crate) fn create_operation(
             stepover: 0.0,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -557,6 +559,7 @@ pub(crate) fn create_operation(
             gradual: false,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -577,6 +580,7 @@ pub(crate) fn create_operation(
             stepdown: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
         }),
         OpKind::Carve => Operation::Carve(CarveOp {
@@ -597,6 +601,7 @@ pub(crate) fn create_operation(
             scallop: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             plunge: Plunge::Straight,
             stay_down: true,
@@ -815,6 +820,7 @@ pub(crate) fn resolve_document_checked(
                     p.closed = path.closed;
                     if !p.closed {
                         p.start = None;
+                    p.end = None;
                         p.lead_overlap = 0.;
                     }
                     p.top = input.heights.top;
@@ -827,6 +833,7 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                     if !p.closed {
                         p.start = None;
+                    p.end = None;
                     }
                 }
                 (Operation::Carve(p), ExtractionRecipe::CarveRegion) => {

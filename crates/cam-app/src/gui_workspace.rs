@@ -520,6 +520,9 @@ impl App {
         viewport.show_gizmo = self.show_gizmo;
         viewport.gizmo_size = self.gizmo_size;
         viewport.setup_axis = self.setup_axis_pick.is_some();
+        viewport.operation_position_picking = self.operation_position_pick.is_some()
+            && self.operation_preview_active()
+            && self.operation_tab == OperationTab::Linking && !model_view;
         viewport.setup_hover = self.setup_hover.clone();
         viewport.setup_snaps = if self.settings.snapping.enabled {
             self.snaps.clone()

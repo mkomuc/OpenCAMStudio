@@ -69,6 +69,7 @@ impl App {
         self.profile_contour_selection = 0;
         self.profile_side_overrides.clear();
         self.profile_entry_editor = None;
+        self.operation_position_pick = None;
         self.operation_tab = OperationTab::Tool;
         self.creation_edited_fields.clear();
         self.inspector_active = true;

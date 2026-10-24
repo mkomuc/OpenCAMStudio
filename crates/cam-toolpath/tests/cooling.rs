@@ -38,6 +38,7 @@ fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,

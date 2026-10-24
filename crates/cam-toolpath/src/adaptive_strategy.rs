@@ -360,7 +360,8 @@ impl Strategy for AdaptiveStrategy {
                     lead_overlap: 0.0,
                     lead_in: Lead::None,
                     lead_out: Lead::None,
-                    start: None,
+                    start: op.params.start,
+                    end: op.params.end,
                     guard: &guard,
                 };
                 let mut layer_program = Program::new();
@@ -507,6 +508,34 @@ mod tests {
             ),
             tool,
         )
+    }
+
+    #[test]
+    fn selected_entry_and_exit_change_the_path_without_bypassing_layer_safety() {
+        let (mut strategy, tool) = fixture();
+        strategy.geometry.layers.truncate(1);
+        let env = JobEnv {
+            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 30.])), spindle: SpindleDir::Cw,
+        };
+        let baseline = strategy.compute(&env, &CancelToken::new());
+        assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+        // Pick on the model, so the preference must be resolved outside the
+        // protected island rather than used as a literal plunge coordinate.
+        strategy.op.params.start = Some([15., 12.]);
+        let entry_only = strategy.compute(&env, &CancelToken::new());
+        assert!(!entry_only.has_errors(), "{:?}", entry_only.diagnostics);
+        strategy.op.params.end = Some([5., 25.]);
+        let result = strategy.compute(&env, &CancelToken::new());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert_ne!(baseline.program, result.program);
+        assert!(result.program.validate().is_ok());
+        assert_ne!(entry_only.program, result.program);
+        let exit = result.program.steps().iter().rev().find_map(|s| match s {
+            Step::Rapid { to, .. } => Some(*to), _ => None,
+        }).unwrap();
+        assert!((exit.x - 5.).hypot(exit.y - 25.) < 3.0, "{exit:?}");
+        // compute() certifies the new exit as well as every other emitted move.
     }
 
     #[test]
