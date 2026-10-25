@@ -4731,6 +4731,11 @@ impl App {
                 self.operation_binding_preview = None;
                 if self.focus_ops.is_empty() {
                     self.model_view = Some(TreeNode::Models);
+                } else {
+                    // Selecting an operation leaves the model browser and returns
+                    // to its machining backplot. Keeping Models active hides every
+                    // operation, including the one the user just focused.
+                    self.model_view = None;
                 }
                 self.refresh_fields();
             }
