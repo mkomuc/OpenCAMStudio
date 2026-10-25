@@ -14,6 +14,7 @@ struct Config {
 struct State {
     field: Heightfield,
     tool: ToolProfile,
+    noncutting_tip_radius: Option<f64>,
     cur: Option<Point3>,
     collisions: Vec<Collision>,
 }
@@ -27,6 +28,7 @@ impl State {
                 config.max[2],
             ),
             tool: ToolProfile::flat(config.options.tool_radius),
+            noncutting_tip_radius: None,
             cur: None,
             collisions: Vec::new(),
         }
@@ -34,68 +36,26 @@ impl State {
     fn step(
         &mut self,
         step: &Step,
+        step_index: usize,
         tools: &[SimTool],
         default_tool: ToolProfile,
         cancelled: &dyn Fn() -> bool,
     ) -> bool {
         match step {
             Step::ToolChange { tool: number } => {
-                self.tool = tools
-                    .iter()
-                    .find(|t| t.number == *number)
-                    .map_or(default_tool, |t| t.profile);
+                let tool = tools.iter().find(|t| t.number == *number);
+                self.tool = tool.map_or(default_tool, |t| t.profile);
+                self.noncutting_tip_radius = tool.and_then(|t| t.noncutting_tip_radius);
             }
-            Step::Rapid { to, tag } => {
+            Step::Rapid { to, tag } | Step::Linear { to, tag, .. } => {
                 if let Some(a) = self.cur {
-                    // A vertical lift (no XY travel, moving up) is always safe: the tool
-                    // retreats straight up through the column it just cut, so it cannot
-                    // plow through stock. The tool-radius disc below would otherwise catch
-                    // a neighbouring ridge — e.g. the scallops a V/chamfer tool leaves
-                    // between face passes — and false-flag the retract. (A *downward*
-                    // in-place move is still checked: strategies plunge with a feed, not a
-                    // rapid, so a descending rapid into stock is a real fault.) A lateral
-                    // rapid sweeps the tool horizontally and is always checked.
-                    let lateral = (a.x - to.x).hypot(a.y - to.y) > 1e-9;
-                    let vertical_lift = !lateral && to.z >= a.z;
-                    if !vertical_lift && a.z.min(to.z) < f64::from(self.field.top()) {
-                        // Profile-aware: the tool is only as wide as its own shape at
-                        // the depth it sits, so a pointed tool descending into the
-                        // narrow groove it just cut is not stopped by the uncut
-                        // surface alongside it. For a flat tool `offset` is zero
-                        // everywhere, so this reduces exactly to the old radius test.
-                        let tip_z = a.z.min(to.z);
-                        if let Some((intrusion, stock)) = self.field.max_intrusion_along_controlled(
-                            [a.x, a.y],
-                            [to.x, to.y],
-                            tip_z,
-                            &self.tool,
-                            cancelled,
-                        ) {
-                            if intrusion > CLEARANCE_EPS {
-                                self.collisions.push(Collision {
-                                    kind: CollisionKind::RapidThroughStock,
-                                    at: [to.x, to.y, to.z],
-                                    message: format!(
-                                        "rapid at Z {:.3} passes through stock standing at Z {:.3}",
-                                        to.z, stock
-                                    ),
-                                    op_id: Some(tag.op_id),
-                                    pattern_id: tag.pattern_id,
-                                    instance_index: tag.instance_index,
-                                });
-                            }
-                        }
-                    }
-                }
-                self.cur = Some(*to);
-            }
-            Step::Linear { to, tag, .. } => {
-                if let Some(a) = self.cur {
-                    self.field.cut_segment_profile_controlled(
+                    self.segment(
                         [a.x, a.y, a.z],
                         [to.x, to.y, to.z],
-                        &self.tool,
-                        Some(tag.op_id),
+                        tag,
+                        matches!(step, Step::Rapid { .. }),
+                        step_index,
+                        (0., 1.),
                         cancelled,
                     );
                 }
@@ -110,17 +70,22 @@ impl State {
             } => {
                 if let Some(a) = self.cur {
                     let pts = arc_points(a, *end, *center, *dir, self.field.resolution());
-                    for w in pts.windows(2) {
+                    let count = (pts.len() - 1) as f64;
+                    for (index, w) in pts.windows(2).enumerate() {
                         if cancelled() {
                             return false;
                         }
-                        self.field.cut_segment_profile_controlled(
+                        if self.segment(
                             w[0],
                             w[1],
-                            &self.tool,
-                            Some(tag.op_id),
+                            tag,
+                            false,
+                            step_index,
+                            (index as f64 / count, (index + 1) as f64 / count),
                             cancelled,
-                        );
+                        ) {
+                            break;
+                        }
                     }
                 }
                 self.cur = Some(*end);
@@ -130,19 +95,122 @@ impl State {
                     if cancelled() {
                         return false;
                     }
-                    self.field.cut_segment_profile_controlled(
+                    let retract = [x, y, cycle.retract];
+                    let top = [x, y, cycle.z_top];
+                    let link = cam_cldata::Tag {
+                        kind: cam_cldata::MoveKind::Link,
+                        ..cycle.tag
+                    };
+                    if let Some(a) = self.cur {
+                        self.segment(
+                            [a.x, a.y, a.z],
+                            retract,
+                            &link,
+                            true,
+                            step_index,
+                            (0., 1.),
+                            cancelled,
+                        );
+                    }
+                    self.segment(retract, top, &link, true, step_index, (0., 1.), cancelled);
+                    self.segment(
+                        top,
                         [x, y, cycle.depth],
-                        [x, y, cycle.depth],
-                        &self.tool,
-                        Some(cycle.tag.op_id),
+                        &cam_cldata::Tag {
+                            kind: cam_cldata::MoveKind::Plunge,
+                            ..cycle.tag
+                        },
+                        false,
+                        step_index,
+                        (0., 1.),
                         cancelled,
                     );
+                    // Peck returns follow the already cut hole. Retain the
+                    // final retract pose so later links are checked as well.
+                    self.cur = Some(Point3::new(x, y, cycle.retract));
                 }
-                self.cur = None;
             }
             _ => {}
         }
         !cancelled()
+    }
+    /// Returns true on collision. Non-cutting motion never clears stock.
+    #[allow(clippy::too_many_arguments)]
+    fn segment(
+        &mut self,
+        a: [f64; 3],
+        b: [f64; 3],
+        tag: &cam_cldata::Tag,
+        rapid: bool,
+        index: usize,
+        range: (f64, f64),
+        cancelled: &dyn Fn() -> bool,
+    ) -> bool {
+        use cam_cldata::MoveKind;
+        let reposition = matches!(
+            tag.kind,
+            MoveKind::Link | MoveKind::Retract | MoveKind::Traverse
+        );
+        let axial = (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-9;
+        let lifting = axial && b[2] >= a[2];
+        let probe = if rapid || reposition {
+            (!lifting).then_some(self.tool)
+        } else if b[2] < a[2] - 1e-9 {
+            self.noncutting_tip_radius
+                .filter(|r| *r > 1e-9)
+                .map(|radius| {
+                    // A flat-envelope cutter without a cutting tip (thread mill)
+                    // needs clearance for its entire diameter on a straight plunge.
+                    // Checking only its neck would miss a core surrounding a small
+                    // pilot hole. Side-cutting helices still use the tip-only probe.
+                    if axial && matches!(self.tool.shape, ProfileShape::Flat) {
+                        self.tool
+                    } else {
+                        ToolProfile::flat(radius)
+                    }
+                })
+        } else {
+            None
+        };
+        if let Some(tool) = probe {
+            if let Some((fraction, at, stock)) =
+                collision::first_contact(&self.field, a, b, &tool, cancelled)
+            {
+                let kind = if rapid {
+                    CollisionKind::RapidThroughStock
+                } else {
+                    CollisionKind::NonCuttingThroughStock
+                };
+                let motion = if rapid {
+                    "rapid"
+                } else if reposition {
+                    "non-cutting feed"
+                } else if axial && matches!(self.tool.shape, ProfileShape::Flat) {
+                    "non-plunging cutter"
+                } else {
+                    "non-cutting tool tip"
+                };
+                self.collisions.push(Collision {
+                    kind,
+                    at,
+                    message: format!(
+                        "{motion} at Z {:.3} enters stock standing at Z {stock:.3}",
+                        at[2]
+                    ),
+                    op_id: Some(tag.op_id),
+                    pattern_id: tag.pattern_id,
+                    instance_index: tag.instance_index,
+                    step_index: Some(index),
+                    fraction: range.0 + fraction * (range.1 - range.0),
+                });
+                return true;
+            }
+        }
+        if !rapid && !reposition {
+            self.field
+                .cut_segment_profile_controlled(a, b, &self.tool, Some(tag.op_id), cancelled);
+        }
+        false
     }
 }
 
@@ -209,7 +277,7 @@ impl SimulationCache {
             if index % 128 == 0 {
                 progress(index, program.steps().len());
             }
-            if cancelled() || !state.step(step, tools, default_tool, cancelled) {
+            if cancelled() || !state.step(step, index, tools, default_tool, cancelled) {
                 // Earlier checkpoints are complete and can still be reused.
                 return None;
             }
@@ -238,7 +306,7 @@ impl SimulationCache {
         self.steps = program.steps()[..stable].to_vec();
         self.state = Some(state.clone());
         if let Some(step) = program.steps().last() {
-            if !state.step(step, tools, default_tool, cancelled) {
+            if !state.step(step, stable, tools, default_tool, cancelled) {
                 return None;
             }
         }
@@ -283,6 +351,7 @@ pub fn simulate_controlled(
         if cancelled()
             || !state.step(
                 step,
+                index,
                 tools,
                 ToolProfile::flat(options.tool_radius),
                 cancelled,

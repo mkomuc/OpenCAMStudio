@@ -34,6 +34,68 @@ fn project() -> (AppController, EntityRef) {
     (app, reference)
 }
 
+/// Explicit stock preparation: a flat, centre-cutting cutter clears the whole
+/// hole. CAD display and a wall-finishing Bore do not remove the solid core.
+fn prepare_thread_bore(app: &mut AppController) {
+    let tool = app.use_tool(cam_model::Tool {
+        number: 44,
+        diameter: 30.,
+        length: 62.,
+        flute_length: 32.,
+        kind: cam_model::ToolKind::EndMill,
+        ..Default::default()
+    });
+    app.add_operation(Operation::Drill(cam_model::DrillOp {
+        id: 0,
+        tool,
+        points: vec![[-30., 10.]],
+        depth: 22.,
+        start_offset: 0.,
+        peck: None,
+        dwell: None,
+        spindle_rpm: 1000.,
+        tool_preset: None,
+        cooling: Default::default(),
+        entry_feeds: Default::default(),
+        work_offset: 1,
+        feed: 100.,
+    }));
+    app.edit_setup(|setup| {
+        let id = setup.operations.last().unwrap().id();
+        let settings = setup.height_settings.get_mut(&id).unwrap();
+        *settings.definition_mut(cam_model::HeightPlaneKind::Bottom) =
+            cam_model::HeightDefinition::new(cam_model::HeightReference::Origin, -1.);
+    });
+}
+
+#[test]
+fn supplied_thread_project_detects_the_noncutting_tip_hitting_the_leftover_core() {
+    let mut app = AppController::new(default_machine());
+    app.open_project(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/thread.ocam"),
+    )
+    .unwrap();
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let collision = result
+        .collisions
+        .iter()
+        .find(|c| c.op_id == Some(2) && c.kind == cam_sim::CollisionKind::NonCuttingThroughStock)
+        .expect("the thread mill cannot plunge through the core left by Bore");
+    assert!((collision.at[0] + 30.).abs() < 1e-8);
+    assert!((collision.at[1] - 10.).abs() < 1e-8);
+    assert!((collision.at[2] - 21.).abs() < 0.01, "{collision:?}");
+    assert!(matches!(
+        app.export_nc(),
+        Err(cam_app::ExportError::NonCuttingThroughStock(_))
+    ));
+}
+
 #[test]
 fn supplied_project_bore_with_rounded_entrance_generates_and_posts() {
     let (mut app, face) = project();
@@ -65,14 +127,14 @@ fn supplied_project_bore_with_rounded_entrance_generates_and_posts() {
     assert!(app.export_nc().unwrap().contains("Bore"));
 }
 
-/// thread.ocam contains this same CAD cylinder/torus. Use the existing tracked
-/// source fixture so the regression does not depend on a local unsaved project.
+/// The same cylinder/torus with a deliberately prepared bore supports threading.
 #[test]
 fn rounded_bore_threads_regenerate_reopen_and_export_with_a_thread_mill() {
     use cam_model::{Tool, ToolKind};
     let (mut app, face) = project();
     let old_id = app.document().setup().operations[0].id();
     app.set_operation_excluded(old_id, true);
+    prepare_thread_bore(&mut app);
     let tool = app.use_tool(Tool {
         number: 43,
         diameter: 8.,
@@ -216,6 +278,9 @@ fn supplied_part_has_compatible_selections_and_tools_for_every_operation() {
             _ => {}
         }
         let tool = app.use_tool(cutter);
+        if kind == OpKind::Thread {
+            prepare_thread_bore(&mut app);
+        }
         if kind == OpKind::Carve {
             // The stock starts as a solid block. Expose the recessed carving
             // surface first, including stock over its sharp corners that a

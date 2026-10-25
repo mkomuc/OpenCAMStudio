@@ -8,20 +8,11 @@ the diameter, internal/external side, top and bottom; reselection refreshes thos
 dimensions without discarding cutting settings. Multiple selected features must
 share diameter, side and cutting heights.
 
-A cylindrical hole may have a rounded entrance when its exact topology proves
-a complete coaxial quarter-torus widening upward to an open planar rim. Bore
-machines only the cylinder beneath that entrance. For example, the Ø30 hole in
-`testfiles/3d_toolpath_calculation.ocam` has a 4 mm entrance radius above Z16;
-its Bore cutting interval is Z16 to Z0, while the opening reaches Z20. Capped,
-incomplete, noncoaxial or obstructed entrances and rounded bottoms are rejected.
-Drill and Thread use the same rounded-entrance qualification. Thread still
-requires a thread mill and an explicit thread specification; see the
-[operation compatibility review](operation-compatibility.md).
-
-The operation is based on the supplied Autodesk *Fusion Help — Bore reference*.
-It is implemented as a separate `BoreOp` / `BoreStrategy`, not a drill cycle or a
-thread-milling operation. Saved projects use schema v26; older projects migrate
-without changing their operations.
+CAD cylinders can have a qualified coaxial rounded entrance opening upward to a
+planar rim. Bore cuts only the straight cylindrical wall beneath the entrance.
+Capped, incomplete, obstructed entrances and rounded bottoms are rejected.
+Drill and Thread accept the same entrance types; Thread requires a thread mill
+and an explicit thread specification. See [operation compatibility](operation-compatibility.md).
 
 ## Cutting controls
 
@@ -55,9 +46,8 @@ and plunge feeds use the existing operation feed system.
 ## Current boundaries
 
 This is wall milling in an accessible feature, not clearing a hole from solid
-stock. The generator checks tool suitability, flute reach, orbit fit, finite
-dimensions, safety heights and path-size limits. Existing simulation and posting
-process the resulting controller-neutral motions.
+stock. Review cutter reach, fit and safety heights before generating, then inspect
+the toolpath and simulation before export.
 
 Compensation is calculated in CAM. Controller/wear compensation, automatic
 diameter-range or same-diameter searches, nested containment, independent

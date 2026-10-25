@@ -21,7 +21,7 @@ to export.*
 - **3D Adaptive Clearing** — roughing levels with upward fine-step refinement,
   optimal load and tolerance controls, using the independent CAD machining
   tessellation. Select the bodies or faces to machine while retaining other setup
-  bodies as protected obstacles. See the [design and geometry
+  bodies as protected obstacles. See the [workflow and geometry
   limits](docs/3d-adaptive-clearing.md).
 - **Stock to Leave** — shared radial and axial finishing allowances for Profile,
   Pocket and 3D Adaptive Clearing; axial allowance for Face. Disabled settings
@@ -51,7 +51,7 @@ to export.*
   links, height overrides and model replacement/reselection survive `.ocam` saves
   and undo. Included in release packages. Source builds require OCCT 7.9.3 and
   `--features gui,occt`; see the
-  [native build and qualification notes](docs/cad-import-implementation.md).
+  [CAD import guide](docs/cad-import.md).
 - **Tooling** — a cross-project tool library with every cutter kind fully
   characterised: square / ball-nose / rounded-edge end mills, drill, V-bit,
   chamfer mill, face mill (shell mill), and single-profile / full-form thread
@@ -64,10 +64,14 @@ to export.*
   can select another preset or override its cutting values.
 - **Setup** — workpiece origin (datum) + program start point; part-relative
   stock; first-class clearance/retract heights.
-- **Verify** — heightfield material-removal simulation with gouge and
-  rapid-through-stock detection, both **profile-aware**: a pointed tool is modelled
+- **Verify** — heightfield material-removal simulation with gouge,
+  rapid-through-stock and non-cutting feed/tip collision detection. Playback pauses
+  at stock contact with the cutter highlighted red. Checks are **profile-aware**:
+  a pointed tool is modelled
   as wide as its cone has actually opened at that depth, and the grid refines to
   resolve the narrowest cut (a sub-millimetre engraved groove is visible).
+  The [simulation menu](docs/simulation.md) configures tool and path visibility,
+  stock coloring, accuracy, transparency, rewind behavior and collision stopping.
 - **G-code out** — eight posts (grbl / FluidNC / grblHAL, LinuxCNC, Fanuc / Haas,
   Okuma OSP, Estlcam) from one controller-neutral IR, with canned cycles where
   supported and expanded where not. Estlcam includes configurable coolant/MMS
@@ -75,8 +79,9 @@ to export.*
 - **Shell** — a `wgpu` viewport (backplot, solid stock, orientation cube) in an
   `iced` desktop GUI.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and [ROADMAP.md](ROADMAP.md)
-for the phased plan toward an EdgeCAM-class north star.
+See the [user guides](docs/README.md) for workflows and limits,
+[ARCHITECTURE.md](ARCHITECTURE.md) for a brief overview and [ROADMAP.md](ROADMAP.md)
+for future direction.
 
 ## Install
 
@@ -153,8 +158,8 @@ OCCT_ROOT="$PWD/.local/occt" cargo build --release -p cam-app --features gui,occ
 Stable Rust, pinned in `rust-toolchain.toml`. GUI prerequisites and platform
 notes: [RUNNING.md](RUNNING.md).
 
-GUI contributions follow the [GUI style specification](docs/gui-style-spec.md)
-for shared controls, colors, typography, and configuration-section behavior.
+CI checks crate dependency boundaries with `python3 scripts/check_architecture.py`,
+alongside the Rust tests and Clippy.
 
 Load a saved setup/project at startup (useful for automated GUI tests):
 

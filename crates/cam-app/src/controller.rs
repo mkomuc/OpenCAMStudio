@@ -171,6 +171,8 @@ pub enum ExportError {
     /// machine-crash hazard, blocked by default. (A future preference could let
     /// the user downgrade this to a warning.)
     RapidThroughStock(usize),
+    /// Non-cutting feeds or cutter tips contact remaining stock.
+    NonCuttingThroughStock(usize),
     /// The post rejected the program.
     Post(PostError),
 }
@@ -201,6 +203,10 @@ impl std::fmt::Display for ExportError {
                 f,
                 "{n} rapid move{} would plow through material that has not been cut yet —                  a crash hazard, so the export is blocked.",
                 if *n == 1 { "" } else { "s" }
+            ),
+            ExportError::NonCuttingThroughStock(n) => write!(
+                f,
+                "{n} non-cutting move(s) or cutter tips contact remaining stock — a crash hazard, so the export is blocked."
             ),
             ExportError::Post(e) => write!(f, "{e}."),
         }

@@ -523,7 +523,11 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
         [-5.0, -5.0, TOP - 10.0],
         [65.0, 45.0, TOP],
         &SimOptions { resolution: 0.5, tool_radius: 3.0 },
-        &[SimTool { number: 1, profile: ToolProfile::flat(3.0) }],
+        &[SimTool {
+            number: 1,
+            profile: ToolProfile::flat(3.0),
+            noncutting_tip_radius: None,
+        }],
     );
     assert!(
         sim.is_clean(),

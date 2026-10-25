@@ -135,6 +135,25 @@ pub struct ViewPrefs {
 pub struct SimulationPrefs {
     /// Linear grid density relative to the default; cost grows approximately squared.
     pub accuracy: f32,
+    pub show_tool: bool,
+    pub tool_display: SimulationToolDisplay,
+    pub transparent_tool: bool,
+    pub programmed_point: bool,
+    pub show_toolpath: bool,
+    pub show_links: bool,
+    pub show_leads: bool,
+    pub show_cutting: bool,
+    pub show_points: bool,
+    pub toolpath_mode: SimulationToolpathMode,
+    pub show_stock: bool,
+    pub stock_coloring: SimulationStockColoring,
+    pub material: SimulationMaterial,
+    pub transparent_stock: bool,
+    pub regenerate_on_rewind: bool,
+    pub stop_on_collision: bool,
+    pub show_model: bool,
+    /// Comparison tolerance in millimetres, against the tessellated CAD solid.
+    pub comparison_tolerance: f32,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -143,8 +162,68 @@ impl Default for SimulationPrefs {
     fn default() -> Self {
         Self {
             accuracy: 1.0,
+            show_tool: true,
+            tool_display: SimulationToolDisplay::Shaft,
+            transparent_tool: false,
+            programmed_point: false,
+            show_toolpath: true,
+            show_links: true,
+            show_leads: true,
+            show_cutting: true,
+            show_points: false,
+            toolpath_mode: SimulationToolpathMode::Trailing,
+            show_stock: true,
+            stock_coloring: SimulationStockColoring::Operation,
+            material: SimulationMaterial::Metallic,
+            transparent_stock: false,
+            regenerate_on_rewind: true,
+            stop_on_collision: true,
+            show_model: true,
+            comparison_tolerance: 0.05,
             extra: Default::default(),
         }
+    }
+}
+
+macro_rules! simulation_choices {
+    ($name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum $name { $($variant),+ }
+        impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(match self { $(Self::$variant => $label),+ })
+            }
+        }
+    };
+}
+simulation_choices!(SimulationToolDisplay {
+    Cutter => "Cutter", Shaft => "Cutter and shaft", Holder => "Cutter and holder",
+});
+simulation_choices!(SimulationToolpathMode {
+    All => "All toolpaths", Trailing => "Trailing", Leading => "Leading",
+    Operation => "Current operation", Tail => "Tail",
+});
+simulation_choices!(SimulationStockColoring {
+    Material => "Material", Operation => "Operation", Tool => "Tool", Comparison => "Comparison",
+});
+simulation_choices!(SimulationMaterial {
+    Metallic => "Metallic", Aluminum => "Aluminum", Steel => "Steel",
+    Brass => "Brass", Wood => "Wood", Custom => "Stock color",
+});
+impl SimulationMaterial {
+    pub fn color(self, custom: [f32; 3]) -> [f32; 4] {
+        let [r, g, b] = match self {
+            Self::Metallic => [0.70, 0.68, 0.59],
+            Self::Aluminum => [0.78, 0.81, 0.85],
+            Self::Steel => [0.46, 0.50, 0.56],
+            Self::Brass => [0.75, 0.57, 0.22],
+            Self::Wood => [0.65, 0.43, 0.23],
+            Self::Custom => custom,
+        };
+        [r, g, b, 1.]
     }
 }
 
@@ -354,6 +433,8 @@ impl Settings {
     pub fn clamp_all(&mut self) {
         let d = Settings::default();
         self.simulation.accuracy = clamp_simulation_accuracy(self.simulation.accuracy);
+        self.simulation.comparison_tolerance =
+            clamp(self.simulation.comparison_tolerance, (0.001, 2.0), 0.05);
         let v = &mut self.view;
         for (channel, fallback) in v.stock_color.iter_mut().zip(d.view.stock_color) {
             *channel = clamp(*channel, (0.0, 1.0), fallback);
@@ -593,6 +674,44 @@ mod tests {
         settings.simulation.accuracy = f32::NAN;
         settings.clamp_all();
         assert_eq!(settings.simulation.accuracy, 1.0);
+    }
+
+    #[test]
+    fn simulation_display_settings_migrate_round_trip_and_normalize_tolerance() {
+        let old: Settings = serde_json::from_str(r#"{"simulation":{"accuracy":1.5}}"#).unwrap();
+        assert_eq!(old.simulation.accuracy, 1.5);
+        assert!(old.simulation.stop_on_collision);
+        assert!(old.simulation.regenerate_on_rewind);
+        assert_eq!(
+            old.simulation.toolpath_mode,
+            SimulationToolpathMode::Trailing
+        );
+        let mut settings = old;
+        settings.simulation.tool_display = SimulationToolDisplay::Holder;
+        settings.simulation.toolpath_mode = SimulationToolpathMode::Leading;
+        settings.simulation.stock_coloring = SimulationStockColoring::Tool;
+        settings.simulation.material = SimulationMaterial::Brass;
+        settings.simulation.transparent_tool = true;
+        settings.simulation.show_points = true;
+        settings.simulation.show_links = false;
+        settings.simulation.stop_on_collision = false;
+        settings.simulation.regenerate_on_rewind = false;
+        settings
+            .simulation
+            .extra
+            .insert("future_option".into(), true.into());
+        let scratch = Scratch::new("simulation-display");
+        let path = scratch.file("settings.json");
+        settings.save_to(&path).unwrap();
+        let (loaded, outcome) = load_from(&path);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(settings, loaded);
+        settings.simulation.comparison_tolerance = -1.;
+        settings.clamp_all();
+        assert_eq!(settings.simulation.comparison_tolerance, 0.001);
+        settings.simulation.comparison_tolerance = f32::NAN;
+        settings.clamp_all();
+        assert_eq!(settings.simulation.comparison_tolerance, 0.05);
     }
 
     #[test]

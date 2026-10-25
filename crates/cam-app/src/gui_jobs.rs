@@ -93,6 +93,7 @@ impl App {
     }
 
     fn rerun_with_review(&mut self, review_all: bool) {
+        self.controller.set_simulation_accuracy(self.settings.simulation.accuracy);
         self.pending_toolpath_export = None;
         self.pending_simulation = None;
         self.pending_processing_time = None;
@@ -188,6 +189,7 @@ impl App {
             .select(operation.map_or(Selection::Setup, Selection::Operation));
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
+        self.controller.set_simulation_accuracy(self.settings.simulation.accuracy);
         let run = if let Some(pattern_id) = pattern {
             self.controller
                 .start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)

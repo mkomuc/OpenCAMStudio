@@ -1088,9 +1088,11 @@ mod tests {
         drain_context_job(&mut app);
         assert!(app.simulation.is_some());
         assert!(app.show_stock);
+        assert!(app.pane_handle(Pane::Inspector).is_some(), "simulation exposes its menu");
         let frame_bounds = app.machining_viewport().frame_bounds;
         app.show_stock = false;
         app.settings.view.transparent_stock = true;
+        app.simulation.as_mut().unwrap().options.show_stock = false;
         let tool_only = app.machining_viewport();
         assert!(
             !tool_only.mesh_indices.is_empty(),
@@ -1102,6 +1104,18 @@ mod tests {
             tool_only.frame_bounds, frame_bounds,
             "the moving tool must not reframe the part"
         );
+        app.simulation.as_mut().unwrap().options.transparent_tool = true;
+        let transparent_tool = app.machining_viewport();
+        assert!(transparent_tool.mesh_indices.is_empty());
+        assert!(!transparent_tool.transparent_stock_indices.is_empty());
+        assert!(transparent_tool.transparent_stock_vertices.iter().all(|v| v.color[3] == 0.3));
+        app.simulation.as_mut().unwrap().options.show_tool = false;
+        let hidden = app.machining_viewport();
+        assert!(hidden.mesh_indices.is_empty());
+        assert!(hidden.transparent_stock_indices.is_empty());
+        app.simulation.as_mut().unwrap().options.show_tool = true;
+        app.simulation.as_mut().unwrap().options.show_stock = true;
+        app.simulation.as_mut().unwrap().options.transparent_tool = false;
         app.show_stock = true;
         assert!(app
             .controller

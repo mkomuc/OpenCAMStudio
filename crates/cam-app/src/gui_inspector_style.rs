@@ -1,5 +1,5 @@
 //! Shared visual language for inspector forms, navigation and actions.
-//! New GUI features must follow docs/gui-style-spec.md and reuse these helpers.
+//! Reuse these helpers for inspector controls, spacing, typography and optional sections.
 use super::*;
 use iced::widget::column;
 

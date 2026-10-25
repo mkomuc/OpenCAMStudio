@@ -9,6 +9,7 @@ __pycache__/
 /.cargo/config.toml
 
 # Backups / editor cruft
+.DS_Store
 **/*.rs.bk
 *.pdb
 

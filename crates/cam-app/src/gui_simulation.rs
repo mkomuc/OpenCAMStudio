@@ -2,9 +2,15 @@
 //! machining outcome remains intact for diagnostics and post processing.
 use super::*;
 use crate::jobs::{JobInputs, JobService};
+use crate::settings::{
+    SimulationPrefs, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathMode,
+};
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use iced::widget::column;
 use std::time::Instant;
+#[path = "gui_simulation_options.rs"]
+mod options;
+pub(super) use options::{SimulationOption, SimulationTab};
 
 struct TimedStep {
     step: Step,
@@ -56,7 +62,7 @@ impl Timeline {
                 for &[x, y] in &c.points {
                     let rapid = |z, kind| Step::Rapid {
                         to: Point3::new(x, y, z),
-                        tag: cam_cldata::Tag::new(c.tag.op_id, kind),
+                        tag: cam_cldata::Tag { kind, ..c.tag },
                     };
                     expanded.push(rapid(c.retract, cam_cldata::MoveKind::Link));
                     expanded.push(rapid(c.z_top, cam_cldata::MoveKind::Link));
@@ -73,7 +79,10 @@ impl Timeline {
                         expanded.push(Step::Linear {
                             to: Point3::new(x, y, target),
                             feed: c.feed,
-                            tag: cam_cldata::Tag::new(c.tag.op_id, cam_cldata::MoveKind::Plunge),
+                            tag: cam_cldata::Tag {
+                                kind: cam_cldata::MoveKind::Plunge,
+                                ..c.tag
+                            },
                         });
                         if target <= c.depth {
                             if let Some(seconds) = c.dwell {
@@ -187,30 +196,66 @@ pub(super) struct SimulationPlayer {
     pub playing: bool,
     pub speed: f64,
     error: Option<String>,
+    collision: Option<cam_sim::Collision>,
+    acknowledged_step: Option<usize>,
+    collision_floor: f64,
     last_tick: Instant,
+    pub options: SimulationPrefs,
+    pub tab: SimulationTab,
+    pub sections: [bool; 4],
+    stock_position: f64,
+    target: CadScene,
+    comparison_deviations: Vec<Option<f64>>,
+    custom_stock_color: [f32; 3],
 }
 
 impl SimulationPlayer {
-    pub fn new_for_operation(controller: &AppController, operation: Option<u32>) -> Result<Self, String> {
+    pub fn new_for_operation(
+        controller: &AppController,
+        operation: Option<u32>,
+    ) -> Result<Self, String> {
         let outcome = controller.outcome().ok_or("No toolpath to simulate.")?;
         let source = outcome
             .stamp
             .clone()
             .ok_or("Run the toolpath before playback.")?;
         let timeline = Timeline::new(&outcome.program, controller.machine().rapid_rate)?;
-        let position = operation.and_then(|id| timeline.steps.iter().find_map(|step| {
-            let tag = match &step.step {
-                Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(tag),
-                _ => None,
-            }?;
-            (tag.op_id == id).then_some(step.start)
-        })).unwrap_or(0.);
+        let position = operation
+            .and_then(|id| {
+                timeline.steps.iter().find_map(|step| {
+                    let tag = match &step.step {
+                        Step::Rapid { tag, .. }
+                        | Step::Linear { tag, .. }
+                        | Step::Arc { tag, .. } => Some(tag),
+                        _ => None,
+                    }?;
+                    (tag.op_id == id).then_some(step.start)
+                })
+            })
+            .unwrap_or(0.);
         let preview = crate::RunOutcome {
             program: timeline.prefix(position),
             ..Default::default()
         };
         let mut inputs = controller.job_inputs();
         inputs.preview_resolution = Some(inputs.stock_resolution(&outcome.program));
+        let mut geometry = controller.geometry_state().clone();
+        let setup = controller.document().setup();
+        for instance in &mut geometry.instances {
+            instance.visible &= setup.model_instances.contains(&instance.id)
+                && geometry
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == instance.asset_id)
+                    .is_some_and(|asset| {
+                        asset
+                            .topology
+                            .bodies
+                            .iter()
+                            .any(|body| body.id == instance.body_id && body.valid_solid)
+                    });
+        }
+        let target = CadScene::from_geometry(&geometry, &Default::default());
         let mut player = Self {
             source,
             inputs,
@@ -223,7 +268,17 @@ impl SimulationPlayer {
             playing: false,
             speed: 1.,
             error: None,
+            collision: None,
+            acknowledged_step: None,
+            collision_floor: position,
             last_tick: Instant::now(),
+            options: SimulationPrefs::default(),
+            tab: SimulationTab::Display,
+            sections: [true; 4],
+            stock_position: position,
+            target,
+            comparison_deviations: Vec::new(),
+            custom_stock_color: [0.2, 0.65, 0.3],
         };
         player.request_frame();
         Ok(player)
@@ -245,6 +300,9 @@ impl SimulationPlayer {
     }
     pub fn seek(&mut self, seconds: f64) {
         self.error = None;
+        self.collision = None;
+        self.acknowledged_step = None;
+        self.collision_floor = seconds.clamp(0., self.timeline.duration);
         self.playing = false;
         self.position = seconds.clamp(0., self.timeline.duration);
         self.last_tick = Instant::now();
@@ -258,14 +316,25 @@ impl SimulationPlayer {
             .timeline
             .steps
             .iter()
-            .filter(|step| matches!(&step.step, Step::Rapid { .. } | Step::Linear { .. } | Step::Arc { .. }))
+            .filter(|step| {
+                matches!(
+                    &step.step,
+                    Step::Rapid { .. } | Step::Linear { .. } | Step::Arc { .. }
+                )
+            })
             .map(|step| if forward { step.end } else { step.start })
             .collect();
         let target = if forward {
-            points.into_iter().find(|time| *time > self.position + 1e-6)
+            points
+                .into_iter()
+                .find(|time| *time > self.position + 1e-6)
                 .unwrap_or(self.timeline.duration)
         } else {
-            points.into_iter().rev().find(|time| *time < self.position - 1e-6).unwrap_or(0.)
+            points
+                .into_iter()
+                .rev()
+                .find(|time| *time < self.position - 1e-6)
+                .unwrap_or(0.)
         };
         self.seek(target);
     }
@@ -273,7 +342,9 @@ impl SimulationPlayer {
         let mut operations: Vec<(u32, f64)> = Vec::new();
         for step in &self.timeline.steps {
             let op_id = match &step.step {
-                Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(tag.op_id),
+                Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
+                    Some(tag.op_id)
+                }
                 _ => None,
             };
             if let Some(id) = op_id {
@@ -283,17 +354,27 @@ impl SimulationPlayer {
             }
         }
         let target = if forward {
-            operations.iter().find(|(_, time)| *time > self.position + 1e-6)
-                .map(|(_, time)| *time).unwrap_or(self.timeline.duration)
+            operations
+                .iter()
+                .find(|(_, time)| *time > self.position + 1e-6)
+                .map(|(_, time)| *time)
+                .unwrap_or(self.timeline.duration)
         } else {
-            operations.iter().rev().find(|(_, time)| *time < self.position - 1e-6)
-                .map(|(_, time)| *time).unwrap_or(0.)
+            operations
+                .iter()
+                .rev()
+                .find(|(_, time)| *time < self.position - 1e-6)
+                .map(|(_, time)| *time)
+                .unwrap_or(0.)
         };
         self.seek(target);
     }
     pub fn toggle(&mut self) {
         if self.position >= self.timeline.duration {
             self.seek(0.);
+        }
+        if let Some(collision) = self.collision.take() {
+            self.acknowledged_step = collision.step_index;
         }
         self.playing = !self.playing;
         self.last_tick = Instant::now();
@@ -304,8 +385,7 @@ impl SimulationPlayer {
         self.last_tick = now;
         if let Some(result) = self.jobs.poll(self.source.revision) {
             if result.outcome.completion == JobCompletion::Complete {
-                self.preview = result.outcome;
-                self.rendered = self.requested;
+                self.accept_frame(result.outcome);
             } else {
                 self.playing = false;
                 self.rendered = self.requested;
@@ -322,12 +402,64 @@ impl SimulationPlayer {
             self.request_frame();
         }
     }
+    fn accept_frame(&mut self, outcome: crate::RunOutcome) {
+        // The last motion may be only a fraction of the full timeline step.
+        // Its collision fraction belongs to that requested prefix.
+        let contact = outcome
+            .collisions
+            .iter()
+            .filter_map(|collision| {
+                let index = collision.step_index?;
+                if !collision.kind.is_stock_collision()
+                    || self.acknowledged_step.is_some_and(|ack| index <= ack)
+                {
+                    return None;
+                }
+                let step = self.timeline.steps.get(index)?;
+                let end = step.end.min(self.requested);
+                let time = step.start + collision.fraction * (end - step.start);
+                (time + 1e-6 >= self.collision_floor).then_some((time, collision))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(time, collision)| (time, collision.clone()));
+        if self.collision.is_none() && self.options.stop_on_collision {
+            if let Some((time, collision)) = contact {
+                self.collision = Some(collision.clone());
+                self.playing = false;
+                self.position = time;
+                // Retain the earlier stock until verification of the contact
+                // frame finishes; never publish material removed after contact.
+                self.preview.program = self.timeline.prefix(time);
+                self.request_frame();
+                return;
+            }
+        }
+        let mut outcome = outcome;
+        if !self.options.stop_on_collision {
+            self.collision = contact.map(|(_, collision)| collision.clone());
+        }
+        if !self.options.regenerate_on_rewind && self.requested < self.stock_position {
+            outcome.stock_vertices = std::mem::take(&mut self.preview.stock_vertices);
+            outcome.stock_indices = std::mem::take(&mut self.preview.stock_indices);
+            outcome.stock_machined = std::mem::take(&mut self.preview.stock_machined);
+            outcome.stock_operations = std::mem::take(&mut self.preview.stock_operations);
+        } else {
+            self.stock_position = self.requested;
+        }
+        self.preview = outcome;
+        self.comparison_deviations.clear();
+        self.rendered = self.requested;
+        self.refresh_display();
+    }
     pub fn needs_tick(&self) -> bool {
         self.playing || self.jobs.needs_poll()
     }
     /// Follow the rendered frame, including its active tool, when seeking in
     /// either direction. The tool and stock must describe the same instant.
     pub fn tool_mesh(&self) -> (Vec<MeshVertex>, Vec<u32>) {
+        if !self.options.show_tool {
+            return (vec![], vec![]);
+        }
         let program = &self.preview.program;
         let tip = program.steps.iter().rev().find_map(|step| match step {
             Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
@@ -343,8 +475,55 @@ impl SimulationPlayer {
         let (Some(tip), Some(tool)) = (tip, tool) else {
             return (vec![], vec![]);
         };
-        let (mut vertices, indices) = cam_render::tool_mesh(&tool.profile());
+        let mut profile = tool.profile();
+        if self.options.tool_display == SimulationToolDisplay::Cutter {
+            let last = profile.segs.iter().rposition(|segment| segment.cutting);
+            if let Some(last) = last {
+                profile.segs.truncate(last + 1);
+                let top = profile.segs[last].end.y;
+                profile.segs.push(cam_geo::ProfileSeg {
+                    shape: cam_geo::SegShape::Line,
+                    end: cam_geo::Point::new(0., top),
+                    cutting: true,
+                });
+            }
+        }
+        let (mut vertices, mut indices) = cam_render::tool_mesh(&profile);
+        if self.options.tool_display == SimulationToolDisplay::Holder {
+            // The project has no holder dimensions yet. Show a schematic holder,
+            // explicitly described in the panel, rather than invent collision data.
+            let radius = tool.shank_diameter.max(tool.diameter) * 1.25;
+            let z = tool.length;
+            let holder = cam_geo::Profile2D {
+                start: cam_geo::Point::new(0., z),
+                segs: [
+                    (radius * 0.65, z),
+                    (radius, z + radius * 0.5),
+                    (radius, z + radius * 2.),
+                    (0., z + radius * 2.),
+                ]
+                .map(|(r, z)| cam_geo::ProfileSeg {
+                    shape: cam_geo::SegShape::Line,
+                    end: cam_geo::Point::new(r, z),
+                    cutting: false,
+                })
+                .to_vec(),
+            };
+            let (mut holder_vertices, holder_indices) = cam_render::tool_mesh(&holder);
+            for vertex in &mut holder_vertices {
+                vertex.color = [0.15, 0.25, 0.32, 1.];
+            }
+            let offset = vertices.len() as u32;
+            vertices.extend(holder_vertices);
+            indices.extend(holder_indices.into_iter().map(|i| i + offset));
+        }
         for vertex in &mut vertices {
+            if self.collision.is_some() {
+                vertex.color = [1., 0.05, 0.05, 1.];
+            }
+            if self.options.transparent_tool {
+                vertex.color[3] = 0.3;
+            }
             vertex.position = setup
                 .frame
                 .to_world_vector([
@@ -363,6 +542,20 @@ impl SimulationPlayer {
     pub fn controls(&self) -> Element<'_, Message> {
         let duration = self.timeline.duration.max(0.001);
         let time = |s: f64| format!("{}:{:02}", s as u64 / 60, s as u64 % 60);
+        let collision_status = self.collision.as_ref().map_or_else(String::new, |c| {
+            format!(
+                "{}: {} — X {:.3}, Y {:.3}, Z {:.3}",
+                if self.options.stop_on_collision {
+                    "Paused"
+                } else {
+                    "Collision"
+                },
+                c.message,
+                c.at[0],
+                c.at[1],
+                c.at[2]
+            )
+        });
         container(
             column![
                 row![
@@ -374,6 +567,11 @@ impl SimulationPlayer {
                     inspector_button("Point ▶").on_press(Message::SimulationNextPoint),
                     inspector_button("Op |▶").on_press(Message::SimulationNextOperation),
                     inspector_button("⏭").on_press(Message::SimulationToolpathEnd),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .wrap(),
+                row![
                     text(format!(
                         "{} / {}",
                         time(self.position),
@@ -387,17 +585,20 @@ impl SimulationPlayer {
                         ""
                     }))
                     .size(12),
-                    Space::new().width(Length::Fill),
                     text(format!("Speed {:.2}×", self.speed)).size(12),
                     slider(0.25..=10., self.speed, Message::SimulationSpeed)
                         .step(0.25)
-                        .width(150),
+                        .width(110),
                     inspector_button("Close simulation").on_press(Message::SimulationClose),
                 ]
                 .spacing(10)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .wrap(),
                 slider(0.0..=duration, self.position, Message::SimulationSeek)
                     .step((duration / 10000.).max(0.001)),
+                text(collision_status)
+                    .size(12)
+                    .color(iced::Color::from_rgb(1., 0.2, 0.2)),
             ]
             .spacing(6),
         )
@@ -536,6 +737,123 @@ mod tests {
             player.tick();
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn collision_player() -> SimulationPlayer {
+        let mut controller = AppController::new(crate::default_machine());
+        controller.edit_setup(|setup| {
+            setup.tools = vec![cam_model::Tool {
+                number: 2,
+                diameter: 4.,
+                neck_diameter: 2.,
+                length: 30.,
+                flute_length: 10.,
+                kind: ToolKind::ThreadMill { pitch: None },
+                ..Default::default()
+            }];
+        });
+        let program = Program {
+            steps: vec![
+                Step::ToolChange { tool: 2 },
+                Step::Rapid {
+                    to: Point3::new(0., 0., 2.),
+                    tag: tag(),
+                },
+                Step::Linear {
+                    to: Point3::new(0., 0., -3.),
+                    feed: 60.,
+                    tag: Tag::new(7, MoveKind::Plunge),
+                },
+                Step::Linear {
+                    to: Point3::new(3., 0., -3.),
+                    feed: 60.,
+                    tag: tag(),
+                },
+                Step::Linear {
+                    to: Point3::new(3., 3., -3.),
+                    feed: 60.,
+                    tag: Tag::new(7, MoveKind::Link),
+                },
+            ],
+        };
+        let mut inputs = controller.job_inputs();
+        inputs.min = [-5., -5., -5.];
+        inputs.max = [5., 5., 0.];
+        inputs.preview_resolution = Some(0.2);
+        SimulationPlayer {
+            source: crate::JobStamp {
+                request_id: 1,
+                revision: 0,
+                input_fingerprint: String::new(),
+            },
+            inputs,
+            timeline: Timeline::new(&program, 2000.).unwrap(),
+            jobs: JobService::default(),
+            preview: Default::default(),
+            position: 0.,
+            requested: 0.,
+            rendered: 0.,
+            playing: false,
+            speed: 10.,
+            error: None,
+            collision: None,
+            acknowledged_step: None,
+            collision_floor: 0.,
+            last_tick: Instant::now(),
+            options: SimulationPrefs::default(),
+            tab: SimulationTab::Display,
+            sections: [true; 4],
+            stock_position: 0.,
+            target: Default::default(),
+            comparison_deviations: Vec::new(),
+            custom_stock_color: [0.2, 0.65, 0.3],
+        }
+    }
+    #[test]
+    fn playback_stops_at_first_contact_and_colors_the_cutter_red_even_for_large_frames() {
+        // A partial plunge and a frame spanning later cuts must stop at the
+        // same first contact and show no stock removed by those later cuts.
+        for requested in [3., 11.] {
+            let mut player = collision_player();
+            player.position = requested;
+            player.request_frame();
+            drain_player(&mut player);
+            assert!(!player.playing);
+            assert_eq!(player.collision.as_ref().unwrap().step_index, Some(2));
+            assert!(
+                (player.position - 2.001).abs() < 0.00002,
+                "{}",
+                player.position
+            );
+            assert!((last_position(&player.preview.program).z + 0.001).abs() < 0.00002);
+            assert!(player.preview.stock_machined.iter().all(|&cut| !cut));
+            let (vertices, _) = player.tool_mesh();
+            assert!(!vertices.is_empty());
+            assert!(vertices.iter().all(|v| v.color == [1., 0.05, 0.05, 1.]));
+
+            player.toggle();
+            assert!(player.collision.is_none());
+            // Advance at high speed past a second, independent collision.
+            player.last_tick = Instant::now() - Duration::from_secs(10);
+            player.tick();
+            drain_player(&mut player);
+            assert!(!player.playing);
+            assert_eq!(player.collision.as_ref().unwrap().step_index, Some(4));
+            assert!(player.position > 8. && player.position < 11.);
+
+            player.seek(0.);
+            drain_player(&mut player);
+            assert!(player.collision.is_none());
+            assert!(player
+                .tool_mesh()
+                .0
+                .iter()
+                .any(|v| v.color != [1., 0.05, 0.05, 1.]));
+            player.toggle();
+            player.last_tick = Instant::now() - Duration::from_secs(10);
+            player.tick();
+            drain_player(&mut player);
+            assert_eq!(player.collision.as_ref().unwrap().step_index, Some(2));
         }
     }
     #[test]
@@ -683,7 +1001,17 @@ mod tests {
             playing: false,
             speed: 1.,
             error: None,
+            collision: None,
+            acknowledged_step: None,
+            collision_floor: 0.,
             last_tick: Instant::now(),
+            options: SimulationPrefs::default(),
+            tab: SimulationTab::Display,
+            sections: [true; 4],
+            stock_position: 0.,
+            target: Default::default(),
+            comparison_deviations: Vec::new(),
+            custom_stock_color: [0.2, 0.65, 0.3],
         };
         let frame = &controller.document().setup().frame;
         for (time, tip, radius, length) in [
@@ -713,5 +1041,230 @@ mod tests {
                 assert!((max[axis] - expected_max).abs() < 1e-5);
             }
         }
+    }
+    fn display_player(time: f64) -> SimulationPlayer {
+        let mut player = collision_player();
+        player.timeline = Timeline::new(
+            &Program {
+                steps: vec![
+                    Step::ToolChange { tool: 2 },
+                    Step::Rapid {
+                        to: Point3::new(0., 0., 0.),
+                        tag: tag(),
+                    },
+                    Step::Linear {
+                        to: Point3::new(40., 0., 0.),
+                        feed: 60.,
+                        tag: tag(),
+                    },
+                    Step::Linear {
+                        to: Point3::new(40., 10., 0.),
+                        feed: 60.,
+                        tag: Tag::new(8, MoveKind::Cutting),
+                    },
+                    Step::Rapid {
+                        to: Point3::new(50., 10., 0.),
+                        tag: Tag::new(8, MoveKind::Link),
+                    },
+                    Step::Linear {
+                        to: Point3::new(50., 10., -5.),
+                        feed: 60.,
+                        tag: Tag::new(8, MoveKind::Plunge),
+                    },
+                    Step::Rapid {
+                        to: Point3::new(50., 10., 0.),
+                        tag: Tag::new(8, MoveKind::Retract),
+                    },
+                ],
+            },
+            60.,
+        )
+        .unwrap();
+        player.rendered = time;
+        player.position = time;
+        player.preview.program = player.timeline.prefix(time);
+        player
+    }
+    fn displayed_bounds(player: &SimulationPlayer, axis: usize) -> (f32, f32) {
+        player
+            .preview
+            .scene
+            .strips
+            .iter()
+            .filter(|s| s.op.is_some())
+            .flat_map(|s| s.points.iter().map(|p| p[axis]))
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v), hi.max(v))
+            })
+    }
+    #[test]
+    fn simulation_modes_clip_at_the_rendered_tip_and_show_complete_current_operation() {
+        let mut player = display_player(30.);
+        for (mode, expected) in [
+            (SimulationToolpathMode::All, (0., 50.)),
+            (SimulationToolpathMode::Trailing, (0., 30.)),
+            (SimulationToolpathMode::Leading, (30., 50.)),
+            (SimulationToolpathMode::Operation, (0., 40.)),
+            (SimulationToolpathMode::Tail, (10., 30.)),
+        ] {
+            player.options.toolpath_mode = mode;
+            player.refresh_display();
+            assert_eq!(displayed_bounds(&player, 0), expected, "{mode}");
+            if mode == SimulationToolpathMode::Operation {
+                assert!(player.preview.scene.strips.iter().all(|s| s.op == Some(7)));
+            }
+        }
+        player.rendered = 40.;
+        player.options.toolpath_mode = SimulationToolpathMode::Operation;
+        player.refresh_display();
+        assert!(player.preview.scene.strips.iter().all(|s| s.op == Some(8)));
+    }
+    #[test]
+    fn simulation_filters_keep_motion_classes_and_points_independent() {
+        let mut player = display_player(45.);
+        player.options.toolpath_mode = SimulationToolpathMode::All;
+        player.options.show_links = false;
+        player.options.show_leads = false;
+        player.refresh_display();
+        assert_eq!(displayed_bounds(&player, 0), (0., 40.));
+        assert!(player.preview.scene.path_cones.is_empty());
+        player.options.show_cutting = false;
+        player.refresh_display();
+        assert!(player.preview.scene.strips.is_empty());
+        player.options.show_leads = true;
+        player.refresh_display();
+        assert_eq!(displayed_bounds(&player, 2), (-5., 0.));
+        assert!(!player.preview.scene.path_cones.is_empty());
+        let count = player.preview.scene.strips.len();
+        player.options.show_points = true;
+        player.refresh_display();
+        assert!(player.preview.scene.strips.len() > count);
+        player.options.show_toolpath = false;
+        player.refresh_display();
+        assert!(player.preview.scene.strips.is_empty());
+    }
+    #[test]
+    fn leading_and_trailing_arc_paths_meet_at_the_helical_tip() {
+        let mut player = display_player(0.);
+        player.timeline = Timeline::new(
+            &Program {
+                steps: vec![
+                    Step::Rapid {
+                        to: Point3::new(1., 0., 0.),
+                        tag: tag(),
+                    },
+                    Step::Arc {
+                        end: Point3::new(1., 0., -2.),
+                        center: Point3::new(0., 0., 0.),
+                        dir: ArcDir::Ccw,
+                        feed: 60.,
+                        tag: tag(),
+                    },
+                ],
+            },
+            60.,
+        )
+        .unwrap();
+        player.rendered = player.timeline.duration / 2.;
+        let mut endpoints = Vec::new();
+        for mode in [
+            SimulationToolpathMode::Trailing,
+            SimulationToolpathMode::Leading,
+        ] {
+            player.options.toolpath_mode = mode;
+            player.refresh_display();
+            let strips = &player.preview.scene.strips;
+            let point = if mode == SimulationToolpathMode::Trailing {
+                *strips.last().unwrap().points.last().unwrap()
+            } else {
+                strips.first().unwrap().points[0]
+            };
+            endpoints.push(point);
+        }
+        assert_eq!(endpoints[0], endpoints[1]);
+        assert!((endpoints[0][0] + 1.).abs() < 1e-6);
+        assert!((endpoints[0][2] + 1.).abs() < 1e-6);
+    }
+    #[test]
+    fn tool_options_change_geometry_transparency_and_programmed_point() {
+        let mut player = display_player(30.);
+        player.options.tool_display = SimulationToolDisplay::Cutter;
+        let cutter_top = player
+            .tool_mesh()
+            .0
+            .iter()
+            .map(|v| v.position[2])
+            .fold(0., f32::max);
+        assert!(cutter_top > 0. && cutter_top < 10.);
+        player.options.tool_display = SimulationToolDisplay::Holder;
+        assert!(player.tool_mesh().0.iter().any(|v| v.position[2] > 30.));
+        player.options.transparent_tool = true;
+        assert!(player.tool_mesh().0.iter().all(|v| v.color[3] == 0.3));
+        player.options.show_toolpath = false;
+        player.options.programmed_point = true;
+        player.refresh_display();
+        assert_eq!(player.preview.scene.strips.len(), 3);
+        player.options.show_tool = false;
+        assert!(player.tool_mesh().0.is_empty());
+        player.refresh_display();
+        assert!(player.preview.scene.strips.is_empty());
+    }
+    #[test]
+    fn stock_coloring_tracks_operation_and_tool_identity_and_missing_comparison_target() {
+        let mut player = display_player(45.);
+        player.preview.stock_vertices = vec![
+            MeshVertex {
+                position: [0.; 3],
+                normal: [0., 0., 1.],
+                color: [0.; 4]
+            };
+            3
+        ];
+        player.preview.stock_operations = vec![Some(7), Some(8), None];
+        player.options.stock_coloring = SimulationStockColoring::Operation;
+        player.refresh_display();
+        assert_ne!(
+            player.preview.stock_vertices[0].color,
+            player.preview.stock_vertices[1].color
+        );
+        assert_eq!(
+            player.preview.stock_vertices[2].color,
+            player.options.material.color(player.custom_stock_color)
+        );
+        player.options.stock_coloring = SimulationStockColoring::Tool;
+        player.refresh_display();
+        assert_eq!(
+            player.preview.stock_vertices[0].color,
+            player.preview.stock_vertices[1].color
+        );
+        player.options.stock_coloring = SimulationStockColoring::Comparison;
+        player.refresh_display();
+        assert!(player
+            .preview
+            .stock_vertices
+            .iter()
+            .all(|v| v.color == [0.5, 0.5, 0.5, 1.]));
+    }
+    #[test]
+    fn collisions_can_be_passed_and_rewind_can_preserve_or_regenerate_stock() {
+        let mut player = collision_player();
+        player.options.stop_on_collision = false;
+        player.options.regenerate_on_rewind = false;
+        player.seek(11.);
+        drain_player(&mut player);
+        assert_eq!(player.position, 11.);
+        assert!(!player.preview.collisions.is_empty());
+        let cut = player.preview.stock_vertices.clone();
+        assert!(player.preview.stock_machined.iter().any(|v| *v));
+        player.seek(1.);
+        drain_player(&mut player);
+        assert_eq!(player.preview.stock_vertices, cut);
+        assert_eq!(last_position(&player.preview.program).z, 1.);
+        let mut prefs = player.options.clone();
+        prefs.regenerate_on_rewind = true;
+        player.configure(&prefs, player.custom_stock_color);
+        drain_player(&mut player);
+        assert!(player.preview.stock_machined.iter().all(|v| !v));
+        assert_ne!(player.preview.stock_vertices, cut);
     }
 }

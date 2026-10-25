@@ -84,4 +84,4 @@ A thread's helical cutting motion uses cutting feed; it is not a ramp entry.
 Engraving, facing and drilling keep their existing cutting/plunge or axial feeds.
 
 These settings change the feeds written into generated toolpaths and posted G-code;
-changes are included in the operation's save, undo and toolpath-cache state.
+changes are saved with the operation and can be undone.

@@ -40,9 +40,17 @@ impl JobInputs {
         // the program's tool-change numbers.
         let sim_tools: Vec<SimTool> = setup_tools
             .iter()
-            .map(|t| SimTool {
-                number: t.number,
-                profile: sim_profile(t),
+            .map(|t| {
+                let outline = t.profile();
+                SimTool {
+                    number: t.number,
+                    profile: sim_profile(t),
+                    noncutting_tip_radius: outline
+                        .segs
+                        .first()
+                        .filter(|s| !s.cutting && s.end.y.abs() < 1e-9)
+                        .map(|s| s.end.x),
+                }
             })
             .collect();
         let resolution = self

@@ -53,7 +53,7 @@ mod output_view;
 use jobs_view::ToolpathAction;
 #[path = "gui_simulation.rs"]
 mod simulation_view;
-use simulation_view::SimulationPlayer;
+use simulation_view::{SimulationOption, SimulationPlayer, SimulationTab};
 #[path = "gui_operation_metadata.rs"]
 mod operation_metadata;
 #[path = "gui_thread_parameters.rs"]
@@ -2871,6 +2871,11 @@ enum Message {
     SimulationSeek(f64),
     SimulationTick,
     SimulationClose,
+    SimulationOption(SimulationOption),
+    SimulationTab(SimulationTab),
+    SimulationSection(usize),
+    SimulationAccuracySettled,
+    SimulationSaveSettings,
     /// Move the context-menu's operation to the workpiece origin with this index —
     /// i.e. into that origin's group in the project tree, and so under its work offset
     /// at post time. Until this existed the only way across was delete-and-recreate.
@@ -3836,6 +3841,37 @@ impl App {
             self.profile_tab_selection = None;
         }
         match message {
+            Message::SimulationOption(option) => {
+                let continuous = matches!(option, SimulationOption::Tolerance(_));
+                option.apply(&mut self.settings.simulation);
+                if let Some(player) = &mut self.simulation {
+                    player.configure(&self.settings.simulation, self.settings.view.stock_color);
+                }
+                if !continuous {
+                    self.settings.save();
+                }
+            }
+            Message::SimulationTab(tab) => {
+                if let Some(player) = &mut self.simulation {
+                    player.tab = tab;
+                }
+            }
+            Message::SimulationSection(index) => {
+                if let Some(section) = self
+                    .simulation
+                    .as_mut()
+                    .and_then(|p| p.sections.get_mut(index))
+                {
+                    *section = !*section;
+                }
+            }
+            Message::SimulationAccuracySettled => {
+                if let Some(player) = &mut self.simulation {
+                    player.configure(&self.settings.simulation, self.settings.view.stock_color);
+                }
+                self.settings.save();
+            }
+            Message::SimulationSaveSettings => self.settings.save(),
             Message::SimulationPlayPause => {
                 if let Some(player) = &mut self.simulation {
                     player.toggle();
@@ -5041,7 +5077,8 @@ impl App {
                         let operation = (self.focus_ops.len() == 1)
                             .then(|| self.focus_ops.iter().next().copied()).flatten();
                         match SimulationPlayer::new_for_operation(&self.controller, operation) {
-                            Ok(player) => {
+                            Ok(mut player) => {
+                                player.configure(&self.settings.simulation, self.settings.view.stock_color);
                                 self.simulation = Some(player);
                                 self.status =
                                     "Simulation ready. Press Play or drag the timeline.".into();
@@ -6110,6 +6147,10 @@ impl App {
                 }
             }
             Message::ToggleStock => {
+                if let Some(player) = &self.simulation {
+                    let show = !player.options.show_stock;
+                    return self.update_message(Message::SimulationOption(SimulationOption::Stock(show)));
+                }
                 self.show_stock = !self.show_stock;
                 self.status = if self.show_stock {
                     "Showing stock material.".to_string()
@@ -6119,6 +6160,10 @@ impl App {
                 self.remember();
             }
             Message::ToggleTransparentStock => {
+                if let Some(player) = &self.simulation {
+                    let transparent = !player.options.transparent_stock;
+                    return self.update_message(Message::SimulationOption(SimulationOption::TransparentStock(transparent)));
+                }
                 self.settings.view.transparent_stock = !self.settings.view.transparent_stock;
                 self.status = if self.settings.view.transparent_stock {
                     "Stock material is transparent."
@@ -6250,6 +6295,9 @@ impl App {
             Message::SetSimulationAccuracy(value) => {
                 let (lo, hi) = crate::SIMULATION_ACCURACY_RANGE;
                 self.settings.simulation.accuracy = value.clamp(lo, hi);
+                if let Some(player) = &mut self.simulation {
+                    player.options.accuracy = self.settings.simulation.accuracy;
+                }
             }
             Message::SetStockColor(channel, value) => {
                 if let Some(component) = self.settings.view.stock_color.get_mut(channel) {
@@ -7008,7 +7056,8 @@ impl App {
     /// Close the pane itself so an idle inspector gives its space to the viewport.
     /// Creation and geometry picking belong to the active operation editor.
     fn sync_inspector_visibility(&mut self) {
-        let editing = self.pattern_draft.is_some()
+        let editing = self.simulation.is_some()
+            || self.pattern_draft.is_some()
             || self.library_mode()
             || (self.active_tab == RibbonTab::Machinery
                 && self.controller.selection() == Selection::Machine)
@@ -9370,7 +9419,9 @@ impl App {
             Pane::Library => self.library_pane(),
             Pane::Viewport => self.workspace_main(),
             Pane::Inspector => {
-                if self.library_mode() {
+                if let Some(player) = &self.simulation {
+                    player.menu()
+                } else if self.library_mode() {
                     self.tools_inspector()
                 } else {
                     self.inspector()
@@ -11531,13 +11582,17 @@ impl Viewport {
             }
         };
         scene.strips.retain(|strip| {
-            strip
-                .op
-                .is_none_or(|id| focus_ops.contains(&id) && !hidden_ops.contains(&id))
+            preview.is_some()
+                || strip
+                    .op
+                    .is_none_or(|id| focus_ops.contains(&id) && !hidden_ops.contains(&id))
         });
         scene
             .path_cones
-            .retain(|cone| focus_ops.contains(&cone.op) && !hidden_ops.contains(&cone.op));
+            .retain(|cone| {
+                preview.is_some()
+                    || (focus_ops.contains(&cone.op) && !hidden_ops.contains(&cone.op))
+            });
         // Drilling annotations from the backplot (peck rings + dwell bars), once a
         // run has produced a program. Anchors only — sized to the screen at draw.
         let drill_marks = outcome
@@ -11741,9 +11796,10 @@ impl Viewport {
         };
         let [r, g, b] = prefs.view.stock_color;
         for (index, vertex) in mesh_vertices.iter_mut().enumerate() {
-            if stock_outcome
-                .and_then(|outcome| outcome.stock_operations.get(index).copied().flatten())
-                .is_some_and(|op| focus_ops.contains(&op) && !hidden_ops.contains(&op))
+            if preview.is_none()
+                && stock_outcome
+                    .and_then(|outcome| outcome.stock_operations.get(index).copied().flatten())
+                    .is_some_and(|op| focus_ops.contains(&op) && !hidden_ops.contains(&op))
             {
                 vertex.color = [r, g, b, 1.0];
             }

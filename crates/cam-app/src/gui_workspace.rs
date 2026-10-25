@@ -330,7 +330,12 @@ impl App {
     }
 
     pub(super) fn machining_viewport(&self) -> Viewport {
-        let cad_hidden = self.viewport_hidden_instances();
+        let mut cad_hidden = self.viewport_hidden_instances();
+        if self.simulation.as_ref().is_some_and(|p| !p.options.show_model) {
+            cad_hidden.extend(
+                self.controller.geometry_state().instances.iter().map(|i| i.id),
+            );
+        }
         let model_view = self.model_view.is_some();
         let hidden: Vec<_> = self
             .controller
@@ -406,6 +411,10 @@ impl App {
             .and_then(|(previous, viewport)| {
                 (key.as_ref() == Some(previous)).then(|| viewport.clone())
             });
+        let mut viewport_settings = self.settings.clone();
+        if let Some(player) = &self.simulation {
+            viewport_settings.view.transparent_stock = player.options.transparent_stock;
+        }
         let mut viewport = cached.unwrap_or_else(|| {
             let mut viewport = Viewport::new(
                 &self.controller,
@@ -421,11 +430,14 @@ impl App {
                 self.cad_hover.as_ref(),
                 &cad_hidden,
                 self.cad_select_through,
-                (self.show_stock || self.controller.selection() == Selection::Setup) && !model_view,
+                self.simulation.as_ref().map_or(
+                    self.show_stock || self.controller.selection() == Selection::Setup,
+                    |p| p.options.show_stock,
+                ) && !model_view,
                 self.view,
                 self.show_gizmo,
                 self.gizmo_size,
-                &self.settings,
+                &viewport_settings,
                 &self.focus_ops.iter().copied().collect::<Vec<_>>(),
                 &hidden,
                 self.snap_hover.map(|hit| (hit, self.snap_aperture)),
@@ -448,10 +460,14 @@ impl App {
             );
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
                 let (vertices, indices) = player.tool_mesh();
-                let offset = viewport.mesh_vertices.len() as u32;
-                Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
-                Arc::make_mut(&mut viewport.mesh_indices)
-                    .extend(indices.into_iter().map(|i| i + offset));
+                let (target_vertices, target_indices) = if player.options.transparent_tool {
+                    (&mut viewport.transparent_stock_vertices, &mut viewport.transparent_stock_indices)
+                } else {
+                    (&mut viewport.mesh_vertices, &mut viewport.mesh_indices)
+                };
+                let offset = target_vertices.len() as u32;
+                Arc::make_mut(target_vertices).extend(vertices);
+                Arc::make_mut(target_indices).extend(indices.into_iter().map(|i| i + offset));
             }
             viewport.setup_geometry = Arc::new(SetupPickGeometry::new(
                 &self.controller,
@@ -594,6 +610,16 @@ impl App {
                 .on_press(message)
                 .style(move |_, status| snap_toggle_style(active, status))
         };
+        if let Some(player) = &self.simulation {
+            let p = &player.options;
+            return container(row![
+                toggle("Tool", p.show_tool, Message::SimulationOption(SimulationOption::Tool(!p.show_tool))),
+                toggle("Toolpath", p.show_toolpath, Message::SimulationOption(SimulationOption::Toolpath(!p.show_toolpath))),
+                toggle("Stock · F8", p.show_stock, Message::ToggleStock),
+                toggle("Transparent stock", p.transparent_stock, Message::ToggleTransparentStock),
+                toggle("Model", p.show_model, Message::SimulationOption(SimulationOption::Model(!p.show_model))),
+            ].spacing(6).wrap()).padding(6).width(Length::Fill).into();
+        }
         let hint = self
             .setup_hover
             .snap

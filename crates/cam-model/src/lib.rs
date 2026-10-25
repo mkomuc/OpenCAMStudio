@@ -1,8 +1,4 @@
-//! # cam-model — the document model (P2 slice)
-//!
-//! Eventually this crate holds the full save-file document
-//! (`Project → Setup → Stock → Operation → Tool`). The P2 slice is only what a
-//! post needs to query: the [`Machine`].
+//! # cam-model — saved projects, setups, operations, tools and machines
 //!
 //! ## Machine ≠ Post
 //!
@@ -10,8 +6,8 @@
 //! limits, work envelope, tool-change position, safe height. A **post** (in
 //! `cam-post`) is the *dialect* — how those get spelled as G-code. The post
 //! **queries** the machine, so one grbl post can drive many grbl machines just
-//! by swapping the [`Machine`] it is handed. Keeping them separate is a core
-//! design rule (see `ARCHITECTURE.md`).
+//! by swapping the [`Machine`] it is handed. Dependency isolation is enforced
+//! by `scripts/check_architecture.py`.
 
 mod bore;
 pub use bore::{BoreOp, BoreOrder};

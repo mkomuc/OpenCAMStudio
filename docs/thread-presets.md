@@ -33,10 +33,9 @@ metric coarse, metric fine, UNC, then UNF; alternatives remain selectable.
 Manually selecting a preset stops automatic replacement of that choice.
 
 The displayed source diameter comes from selected CAD geometry or drawing
-circles, independently of the operation's editable major diameter. The match
-budget is `clamp(0.15 × pitch, 0.025, 0.15)` mm. No close candidate means no
-parameter change and an explanatory message. Mixed source diameters and stale
-CAD references cannot provide a match. Geometry subdialog selections are not
+circles, independently of the operation's editable major diameter. If no close
+candidate is found, parameters stay unchanged and an explanatory message appears.
+Mixed source diameters and stale CAD references cannot provide a match. Geometry subdialog selections are not
 applied until confirmed; matching an unconfirmed replacement cannot change the
 operation's parameters.
 
@@ -59,29 +58,8 @@ envelope and a physically prepared bore are different matching inputs.
 British Whitworth/BSP, pipe/taper, trapezoidal and other thread forms are not
 included because the current thread strategy does not implement their geometry.
 
-Catalog references checked 2026-10-25:
+Catalog references:
 
 - [Guhring thread-milling technical catalog](https://guhring.com/Catalogs/CatalogPDF/cd2235c8-4be9-44e4-8570-cd952bd6b97a): metric coarse/fine size/pitch pairs and common preparation diameters.
 - [OSG cut-tap and pitch-diameter reference](https://res.cloudinary.com/osg-usa-inc/image/upload/v1717093846/Literature/03%20-%20Charts%20and%20Guides/OSG_-_Chart_-_Tap_Drill_Size_and_Pitch_Diameter_Limit_-_Vol_3_-_2024_-_IA.pdf): Unified UNC/UNF size/TPI pairs and cut-thread preparation formula.
 - [HEICO technical tables](https://heicobolting.com/technical-info/torque-charts/): large metric coarse diameter/pitch combinations.
-
-No document schema change is needed. Applied diameter/pitch values persist with
-the operation; reopening recognizes a catalog entry from those values. Sizing
-mode and series filtering are editor conveniences. Apply/Cancel and undo retain
-the existing operation transaction boundaries.
-
-## Verification
-
-- `cargo test -p cam-app --features gui --offline`: 466 passed, 6 ignored.
-- `cargo test -p cam-model --lib --offline`: 83 passed.
-- Final targeted GUI/preset and catalog tests passed after normalizing exact
-  decimal inch-to-mm diameters for readable input values.
-- `cargo clippy -p cam-app --features gui --all-targets --offline -- -D warnings`.
-- `cargo build -p cam-app --features gui --offline` and `git diff --check`.
-
-Native macOS preview checked: select the sample's circular bore, see an automatic
-standard selection, inspect nearby metric/Unified alternatives, choose an inch
-preset and verify major diameter/pitch update, switch to Passes and verify the
-same pitch and hand controls. Cancel discarded the draft; the temporary preview
-was closed without saving the sample. Automated tests also cover CAD diameter
-matching, manual overrides, geometry-subdialog staging, Apply, save/reopen and undo.

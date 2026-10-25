@@ -347,6 +347,8 @@ mod tests {
             op_id: None,
             pattern_id: None,
             instance_index: None,
+            step_index: None,
+            fraction: 0.,
         });
         let _ = app.queue_notice(job_notice(&outcome).unwrap());
         assert_eq!(app.notice_queue.len(), 1);
