@@ -31,7 +31,7 @@ impl SurfaceMesh {
             }
         }
     }
-    fn quad(&mut self, p: [[f32; 3]; 4], n: [[f32; 3]; 4], cut: bool, op: Option<u32>) {
+    pub(super) fn quad(&mut self, p: [[f32; 3]; 4], n: [[f32; 3]; 4], cut: bool, op: Option<u32>) {
         let base = self.positions.len() as u32;
         self.positions.extend(p);
         self.normals.extend(n);
@@ -72,7 +72,7 @@ impl Heightfield {
             Some(self.z[y as usize * self.nx + x as usize])
         }
     }
-    fn grid_xy(&self, x: usize, y: usize) -> [f32; 2] {
+    pub(super) fn grid_xy(&self, x: usize, y: usize) -> [f32; 2] {
         [
             (self.origin[0] + x as f64 * self.res).min(self.max[0]) as f32,
             (self.origin[1] + y as f64 * self.res).min(self.max[1]) as f32,
@@ -281,7 +281,8 @@ impl Heightfield {
             for x in 0..self.nx {
                 let z = self.z[y * self.nx + x];
                 flat[y * self.nx + x] = u8::from(
-                    z > f + 1e-4
+                    !self.detailed_column(x, y)
+                        && z > f + 1e-4
                         && (-1..=1).all(|dy| {
                             (-1..=1).all(|dx| {
                                 self.height(x as isize + dx, y as isize + dy)
@@ -366,6 +367,12 @@ impl Heightfield {
                 return None;
             }
             for x in 0..self.nx {
+                if self.detailed_column(x, y) {
+                    let xy = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)]
+                        .map(|(i, j)| corners[j * (self.nx + 1) + i].xy);
+                    self.mesh_column(x, y, f, xy, &mut mesh);
+                    continue;
+                }
                 let z = self.z[y * self.nx + x];
                 if z <= f + 1e-4 {
                     continue;

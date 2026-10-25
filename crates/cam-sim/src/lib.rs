@@ -68,6 +68,14 @@ pub enum ProfileShape {
         /// Radius of the rounded tip, mm (0 for a sharp point).
         tip_radius: f64,
     },
+    /// Finite, revolved thread teeth. Unlike bottom-cutting tools these remove
+    /// bounded Z intervals, retaining stock above and below each tooth.
+    Thread {
+        root_radius: f64,
+        tooth_height: f64,
+        pitch: f64,
+        tooth_count: u32,
+    },
 }
 
 /// The cutting profile of a tool: its radius and bottom shape. [`offset`] gives
@@ -147,6 +155,18 @@ impl ToolProfile {
                     rt - (rt * rt - d * d).max(0.0).sqrt()
                 } else {
                     rt * (1.0 - a.sin()) + (d - r_t) / t
+                }
+            }
+            ProfileShape::Thread {
+                root_radius,
+                tooth_height,
+                ..
+            } => {
+                let width = self.radius - root_radius;
+                if width <= 1e-9 {
+                    0.
+                } else {
+                    (d - root_radius).max(0.) / width * tooth_height * 0.5
                 }
             }
         }

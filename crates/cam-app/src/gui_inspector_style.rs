@@ -76,6 +76,55 @@ pub(super) fn inspector_section(label: &str) -> Element<'static, Message> {
     inspector_section_frame(inspector_section_label(label))
 }
 
+/// One disclosure header for operation sections and individual height planes.
+pub(super) fn inspector_disclosure_heading<'a>(
+    label: &str,
+    collapsed: bool,
+    on_press: Message,
+    trailing: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let arrow: &'static [u8] = if collapsed {
+        include_bytes!("../assets/icons/disclosure-right.svg")
+    } else {
+        include_bytes!("../assets/icons/disclosure-down.svg")
+    };
+    let arrow = iced::widget::svg(iced::widget::svg::Handle::from_memory(arrow))
+        .width(12)
+        .height(14);
+    let heading: Element<'a, Message> = if let Some(toggle) = trailing {
+        row![
+            button(arrow)
+                .padding(0)
+                .height(24)
+                .style(button::text)
+                .on_press(on_press.clone()),
+            toggle,
+            button(inspector_section_label(label))
+                .padding(0)
+                .height(24)
+                .width(Length::Fill)
+                .style(button::text)
+                .on_press(on_press),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        button(
+            row![arrow, inspector_section_label(label)]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        )
+        .padding(0)
+        .height(24)
+        .width(Length::Fill)
+        .style(button::text)
+        .on_press(on_press)
+        .into()
+    };
+    inspector_section_frame(heading)
+}
+
 pub(super) fn inspector_section_label(label: &str) -> iced::widget::Text<'static> {
     text(label.to_owned())
         .size(INSPECTOR_TEXT_SIZE)
@@ -98,18 +147,8 @@ pub(super) fn inspector_section_toggle(
         .on_toggle_maybe(on_toggle)
 }
 
-pub(super) fn inspector_optional_section(
-    label: &str,
-    enabled: bool,
-    on_toggle: Option<impl Fn(bool) -> Message + 'static>,
-) -> Element<'static, Message> {
-    inspector_section_frame(inspector_section_toggle(label, enabled, on_toggle))
-}
-
-fn inspector_section_frame(
-    content: impl Into<Element<'static, Message>>,
-) -> Element<'static, Message> {
-    let content: Element<'static, Message> = content.into();
+fn inspector_section_frame<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let content: Element<'a, Message> = content.into();
     container(
         column![
             iced::widget::rule::horizontal(1).style(|_| iced::widget::rule::Style {

@@ -275,6 +275,18 @@ impl Toggle {
             Self::RoughFinal => "Small bottom steps on rough passes",
         }
     }
+    pub(super) fn help(self) -> &'static str {
+        match self {
+            Self::Finishing => "Enable radial finishing cuts after roughing. Finish spacing, finishing feed and spring passes control how the final wall is cut.",
+            Self::FinishOnlyFinal => "Run radial finishing cuts only at the final depth instead of after every depth level.",
+            Self::Even => "Distribute the total cutting depth across equal increments no larger than the maximum stepdown.",
+            Self::Preserve => "Keep contours in their selected order instead of reordering them to reduce travel.",
+            Self::BothWays => "Alternate travel direction on successive passes of an open contour. The contour remains open.",
+            Self::FeedRetract => "Use the lead-out feed for the retract after leaving the contour.",
+            Self::SameLeadOut => "Use the entry lead style, size and arc sweep for the exit lead as well.",
+            Self::RoughFinal => "Use smaller bottom increments on every radial/roughing stage. When disabled, intermediate stages keep the regular maximum stepdown; the final wall and its spring passes retain the smaller increments.",
+        }
+    }
     fn get(self, p: &ProfileOp) -> bool {
         let p = &p.passes;
         match self {
@@ -404,8 +416,12 @@ impl App {
         p: &ProfileOp,
         tab: OperationTab,
         linked: bool,
-    ) -> Element<'_, Message> {
-        let mut list = iced::widget::Column::new().spacing(10);
+    ) -> operation_sections::Form<'_> {
+        let mut list = operation_sections::Form::new(self, tab, match tab {
+            OperationTab::Tool => Some("Cutting data"),
+            OperationTab::Passes => Some("Passes"),
+            _ => None,
+        });
         let number = |n: Number| {
             let field = Field::Profile(n);
             let value = self
@@ -424,7 +440,7 @@ impl App {
         };
         let toggle = |t: Toggle| -> Element<'_, Message> {
             row![
-                text(t.label()).size(12).width(Length::Fill),
+                label_help(t.label(), t.help(), self.tooltips),
                 checkbox(t.get(p))
                     .size(15)
                     .on_toggle(move |v| Message::ProfilePassToggle(t, v))
@@ -457,7 +473,7 @@ impl App {
                 list=list.push(row![label_help("Roughing boundary","Setup stock or a saved snapshot of a drawing outline. The boundary must contain the allowanced part. Reselect a snapshot after editing its source.",self.tooltips),pick_list(choices,Some(selected),Message::ProfileStockBoundary).text_size(12).padding([7,9]).style(inspector_picker).width(Length::Fill)].spacing(8).align_y(Alignment::Center));
             }
             list = list
-                .push(inspector_section("Depth and contour order"))
+                .section("Passes")
                 .push(toggle(Toggle::Even));
             for n in [
                 Number::FloorLeave,
@@ -467,7 +483,7 @@ impl App {
                 list = list.push(number(n));
             }
             if p.passes.finishing_depths > 0 {
-                list = list.push(help_wrap(toggle(Toggle::RoughFinal), "Use smaller bottom increments on every radial/roughing stage. When disabled, intermediate stages keep the regular maximum stepdown; the final wall and its spring passes retain the smaller increments.", self.tooltips));
+                list = list.push(toggle(Toggle::RoughFinal));
             }
             list = list.push(profile_picker(
                 "Cut order",
@@ -481,11 +497,10 @@ impl App {
             if p.contours().any(|c| !c.closed) {
                 list = list.push(toggle(Toggle::BothWays));
             }
-            list = list.push(inspector_optional_section(
-                "Finishing passes",
-                p.passes.finishing,
+            list = list.optional_section(
+                "Finishing passes", p.passes.finishing,
                 Some(|v| Message::ProfilePassToggle(Toggle::Finishing, v)),
-            ));
+            );
             if p.passes.finishing {
                 for n in [
                     Number::FinishCount,
@@ -498,7 +513,7 @@ impl App {
                 list = list.push(toggle(Toggle::FinishOnlyFinal));
             }
             list = list
-                .push(inspector_section("Path accuracy"))
+                .section("Passes")
                 .push(number(Number::Tolerance));
             list=list.push(profile_picker("Outer corners","Roll around the corner, or extend the offset edges to a sharp point. Very acute sharp joins are bevelled to bound the path.",self.tooltips,p.passes.outer_corner,&cam_model::ProfileCorner::ALL[..],Message::ProfileCorner));
             if (!linked && !p.tabs.enabled) || p.passes.taper_angle != 0. {
@@ -516,38 +531,18 @@ impl App {
             }
             list = list
                 .push(toggle(Toggle::SameLeadOut))
-                .push(toggle(Toggle::FeedRetract))
                 .push(number(Number::LeadEndDistance));
             if p.contours().any(|c| !c.closed) {
                 list = list
-                    .push(inspector_section("Open contour extensions"))
+                    .section("Open contour extensions")
                     .push(number(Number::StartExtension))
                     .push(number(Number::EndExtension));
             }
         }
+        list = list.plain();
         if let Some(error) = self.profile_parameter_error() {
             list = list.push(text(error).size(12).color(palette::ERROR));
         }
-        list = list.push(
-            inspector_button(if self.profile_help_open {
-                "Hide profile help"
-            } else {
-                "Profile help"
-            })
-            .on_press(Message::ProfileHelp),
-        );
-        if self.profile_help_open {
-            for explanation in [
-                help::SIDE,
-                Field::ProfileOffset.help(),
-                Field::Stepdown.help(),
-                Field::TabWidth.help(),
-                help::LEAD_IN,
-                help::PLUNGE,
-            ] {
-                list = list.push(illustrated_help::content(explanation));
-            }
-        }
-        list.into()
+        list
     }
 }

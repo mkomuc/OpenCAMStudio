@@ -290,8 +290,7 @@ impl App {
             .width(Length::Fill)
         };
         let mut body = column![
-            inspector_section("Thread"),
-            text("Sizing").size(12),
+            label_help("Sizing", "Prepared-bore matching uses the basic minor diameter or approximate cut-thread drill size. Nominal matching uses the major diameter. Nearby sizes are suggestions; review the intended specification.", self.tooltips),
             pick_list(ThreadMatchMode::ALL,Some(state.mode),|v| Message::ThreadParameters(ThreadMessage::Mode(v)))
                 .text_size(12).padding([7,9]).style(inspector_picker).width(Length::Fill),
             text("Thread series").size(12),
@@ -312,7 +311,6 @@ impl App {
             None => "Select equal-diameter bores or bosses to suggest a standard size.".into(),
         };
         body = body.push(text(hint).size(11).color(INSPECTOR_MUTED));
-        body = body.push(text("Prepared-bore matching uses the basic minor diameter or approximate cut-thread drill size. Nominal matching uses the major diameter. Nearby sizes are suggestions; review the intended specification.").size(11).color(INSPECTOR_MUTED));
         for (field, value) in [(Field::MajorDia, major_value), (Field::Pitch, pitch_value)] {
             body = body.push(field_row_labeled(
                 field,

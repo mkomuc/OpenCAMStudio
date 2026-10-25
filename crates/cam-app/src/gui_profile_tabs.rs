@@ -127,7 +127,7 @@ impl App {
         camera: OrbitCamera,
         browser_width: f32,
     ) -> Option<TabOverlay> {
-        if !self.inspector_active || !self.inspector_enabled {
+        if !self.inspector_active || !self.inspector_enabled || self.operation_position_pick.is_some() {
             return None;
         }
         let (op, z) = self.profile_tab_geometry()?;

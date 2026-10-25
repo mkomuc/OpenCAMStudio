@@ -71,6 +71,7 @@ impl App {
         self.profile_side_overrides.clear();
         self.profile_entry_editor = None;
         self.operation_position_pick = None;
+        self.operation_position_markers = [None; 2];
         self.operation_tab = OperationTab::Tool;
         self.creation_edited_fields.clear();
         self.inspector_active = true;

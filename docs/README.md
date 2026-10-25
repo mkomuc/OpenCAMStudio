@@ -16,5 +16,10 @@ For installation and a feature overview, start with the [project README](../READ
 - [Simulation](simulation.md): playback, display modes, stock coloring and collision behavior.
 - [Estlcam export](estlcam.md): controller setup and coolant outputs.
 
+Operation tabs group their parameters into collapsible sections. Click a section
+heading to fold or expand it; this preserves its values. Checkboxes beside
+optional sections enable or disable the feature independently. Hover over labels
+for help.
+
 [Release notes](release-notes/v0.1.0.md) describe the first public release;
 current capabilities and limits are described in the guides above.

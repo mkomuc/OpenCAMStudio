@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 type Point = [f64; 3];
 #[path = "comparison.rs"]
 mod comparison;
+pub use comparison::SurfaceClass;
 #[derive(Clone, Debug)]
 struct Triangle {
     points: [Point; 3],

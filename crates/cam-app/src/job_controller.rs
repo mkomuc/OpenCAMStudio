@@ -205,16 +205,23 @@ impl AppController {
     }
 
     pub fn toolpath_statuses(&self) -> BTreeMap<u32, bool> {
-        self.current_toolpath_fingerprints()
-            .into_iter()
+        self.toolpath_statuses_for(&self.current_toolpath_fingerprints())
+    }
+
+    pub(crate) fn toolpath_statuses_for(
+        &self,
+        fingerprints: &BTreeMap<u32, String>,
+    ) -> BTreeMap<u32, bool> {
+        fingerprints
+            .iter()
             .map(|(id, current)| {
-                let ready = self.toolpath_fingerprints.get(&id) == Some(&current);
-                (id, ready)
+                let ready = self.toolpath_fingerprints.get(id) == Some(current);
+                (*id, ready)
             })
             .collect()
     }
 
-    fn current_toolpath_fingerprints(&self) -> BTreeMap<u32, String> {
+    pub(crate) fn current_toolpath_fingerprints(&self) -> BTreeMap<u32, String> {
         let document = self.document();
         let mut result = BTreeMap::new();
         for setup in &document.setups {

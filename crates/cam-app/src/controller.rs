@@ -3057,8 +3057,15 @@ pub(crate) fn sim_profile(tool: &Tool) -> ToolProfile {
             half_angle_rad: included_angle_deg.to_radians() / 2.0,
             tip_radius: tip_radius.clamp(0.0, radius),
         },
-        // A thread mill's material removal is approximated by its footprint.
-        ToolKind::ThreadMill { .. } => ProfileShape::Flat,
+        ToolKind::ThreadMill { pitch } => {
+            let outline = tool.profile();
+            ProfileShape::Thread {
+                root_radius: outline.segs[0].end.x,
+                tooth_height: outline.segs[2].end.y,
+                pitch: pitch.unwrap_or(0.).max(0.),
+                tooth_count: (outline.segs.iter().filter(|s| s.cutting).count() / 2) as u32,
+            }
+        }
     };
     ToolProfile { radius, shape }
 }

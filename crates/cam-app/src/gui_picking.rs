@@ -302,6 +302,9 @@ impl SetupPickGeometry {
     pub fn to_setup(&self, point: Point3) -> Point3 {
         self.frame.to_setup_vector(point)
     }
+    pub fn to_world(&self, point: Point3) -> Point3 {
+        self.frame.to_world_vector(point)
+    }
     pub fn fallback(&self, ray: cam_render::Ray) -> Option<Point3> {
         let origin = self.frame.to_setup_vector(ray.origin);
         let direction = self.frame.to_setup_vector(ray.direction);

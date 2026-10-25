@@ -252,8 +252,12 @@ impl App {
             .filter(|d| d.severity == Severity::Error)
             .count();
         self.status = match outcome.completion {
+            JobCompletion::Complete if outcome.has_errors() || !outcome.collisions.is_empty() =>
+                "Toolpath verification errors — click a setup or operation status indicator for details.".into(),
+            JobCompletion::Complete if outcome.diagnostics.iter().any(|d| d.severity == Severity::Warning) =>
+                "Toolpath ready with warnings — click a setup or operation status indicator for details.".into(),
             JobCompletion::Complete => "Toolpath ready. Export when you like.".to_string(),
-            JobCompletion::Failed => format!("{errors} error(s) — see Output."),
+            JobCompletion::Failed => format!("{errors} error(s) — click a setup or operation status indicator for details."),
             JobCompletion::Cancelled => {
                 "Run cancelled. Run the job again before exporting.".to_string()
             }

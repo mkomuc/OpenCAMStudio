@@ -4,8 +4,9 @@ Use Profile to cut along a drawing contour or supported planar CAD boundary.
 Choose the cutter in **Tool**, the boundary and cutting side in **Geometry**,
 and review **Heights**, **Passes** and **Linking** before applying the operation.
 [Operation compatibility](operation-compatibility.md) describes supported CAD
-selections. **Profile help** provides diagrams for side, allowances, depths,
-tabs, leads and height planes without requiring hover tooltips.
+selections. Hover over the corresponding parameter labels for explanations and
+diagrams of cutting sides, allowances, depths, tabs, leads and height planes.
+Enable tooltips in the view preferences to show this help.
 
 ## Passes and entry
 

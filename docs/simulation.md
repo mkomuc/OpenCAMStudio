@@ -35,6 +35,19 @@ green indicates a surface within the chosen tolerance, and red indicates a gouge
 It compares stock vertices to the imported CAD tessellation, so its precision is
 limited by that tessellation and the simulation grid. Without a closed target
 solid, comparison surfaces are gray and the panel explains why.
+Comparison coloring updates in the background: **Comparing…** indicates that
+colors are still being calculated. Each stock frame appears together with its
+comparison colors and tool position; the previous complete frame stays visible
+until the next is ready. Playback, seeking and controls stay available;
+unchanged points reuse their results. Changing comparison tolerance updates the
+colors without rebuilding the stock.
+
+Thread mills remove the bounded volume swept by their single tooth or full-form
+teeth. The stock retains material between turns and shows both thread flanks as
+machined faces, with the thread operation/tool color. Accuracy and thread pitch
+control the sampled detail; this preview does not certify thread fit or class.
+While stock is visible, the CAD model is shown as reference edges so its nominal
+bore faces cannot hide the grooves. Hide stock to view the solid CAD model.
 
 The **Info** tab shows the rendered tool, operation, coordinates and collision
 message. **Statistics** shows duration, rendered time, motion count, stock triangle

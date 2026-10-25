@@ -50,8 +50,9 @@ the cutter red and shows the reason and coordinates. Press Play to acknowledge
 that contact and continue inspecting; rewinding allows it to be detected again.
 These collisions also block NC export until the machining sequence is corrected.
 
-Simulation uses a heightfield and
-cannot verify thread flank form, undercuts, holders, fixtures or a whole machine.
+Simulation combines a heightfield with bounded tooth cuts to display thread
+grooves and their machined flanks. It does not certify thread fit/class or support
+general undercut machining, holders, fixtures or whole-machine verification.
 Controller compensation also depends on the selected post; its backplot follows
 programmed coordinates. Patterned paths need their own destination clearance
 review; copying a path does not certify a new model feature.

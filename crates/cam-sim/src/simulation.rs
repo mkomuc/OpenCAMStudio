@@ -163,7 +163,12 @@ impl State {
                     // needs clearance for its entire diameter on a straight plunge.
                     // Checking only its neck would miss a core surrounding a small
                     // pilot hole. Side-cutting helices still use the tip-only probe.
-                    if axial && matches!(self.tool.shape, ProfileShape::Flat) {
+                    if axial
+                        && matches!(
+                            self.tool.shape,
+                            ProfileShape::Flat | ProfileShape::Thread { .. }
+                        )
+                    {
                         self.tool
                     } else {
                         ToolProfile::flat(radius)
@@ -185,7 +190,12 @@ impl State {
                     "rapid"
                 } else if reposition {
                     "non-cutting feed"
-                } else if axial && matches!(self.tool.shape, ProfileShape::Flat) {
+                } else if axial
+                    && matches!(
+                        self.tool.shape,
+                        ProfileShape::Flat | ProfileShape::Thread { .. }
+                    )
+                {
                     "non-plunging cutter"
                 } else {
                     "non-cutting tool tip"

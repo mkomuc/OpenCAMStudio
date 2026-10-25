@@ -19,6 +19,12 @@ reachable. Unchanged vertical walls retain the primary stepdown. Optimal Load is
 not a universal engagement guarantee in a full-width channel; generation can fall
 back to concentric clearing and reports that fallback.
 
+When a frontier fragments into repeated retract/re-entry cycles, generation
+compares it with concentric clearing and uses the fallback only if it passes the
+model safety check and needs fewer clearance lifts. Otherwise it retains the
+certified frontier. The fallback warning also applies here: concentric links and
+corners can exceed Optimal Load.
+
 Stock to Leave is also available in Profile and Pocket, and as an axial allowance
 in Face. Apply the edit before generating. Entry and exit preferences are described
 in [entry and exit positions](lead-positions.md).

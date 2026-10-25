@@ -77,7 +77,9 @@ to export.*
   supported and expanded where not. Estlcam includes configurable coolant/MMS
   outputs; see [Estlcam setup](docs/estlcam.md).
 - **Shell** — a `wgpu` viewport (backplot, solid stock, orientation cube) in an
-  `iced` desktop GUI.
+  `iced` desktop GUI. Hover over a setup or operation status indicator for its
+  current state; click an indicator with warnings or errors to read the details.
+  Toolpath diagnostics do not open dialogs automatically.
 
 See the [user guides](docs/README.md) for workflows and limits,
 [ARCHITECTURE.md](ARCHITECTURE.md) for a brief overview and [ROADMAP.md](ROADMAP.md)

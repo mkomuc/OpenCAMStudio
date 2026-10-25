@@ -1,7 +1,44 @@
 //! Tessellated-solid comparison, using the CAD scene's existing BVH.
 use super::*;
 
+/// Stock's relationship to a closed target solid at a chosen tolerance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceClass {
+    Excess,
+    WithinTolerance,
+    Gouge,
+}
+
 impl CadScene {
+    /// Classify a stock point without calculating an unused exact distance.
+    /// A tolerance-limited BVH query rejects distant faces immediately.
+    pub fn classify_surface(&self, point: [f64; 3], tolerance: f64) -> Option<SurfaceClass> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        if self.within_surface(point, 0, tolerance.max(0.).powi(2)) {
+            Some(SurfaceClass::WithinTolerance)
+        } else if self.inside_solid(point) {
+            Some(SurfaceClass::Gouge)
+        } else {
+            Some(SurfaceClass::Excess)
+        }
+    }
+
+    fn within_surface(&self, point: Point, id: usize, limit: f64) -> bool {
+        let node = &self.nodes[id];
+        if box_distance_squared(point, node.bounds) > limit {
+            return false;
+        }
+        if let Some((a, b)) = node.children {
+            self.within_surface(point, a, limit) || self.within_surface(point, b, limit)
+        } else {
+            node.triangles.iter().any(|&index| {
+                triangle_distance_squared(point, self.triangles[index].points) <= limit
+            })
+        }
+    }
+
     /// Distance to the nearest target face, negative inside any target solid:
     /// positive is excess stock, negative is a gouge. Requires closed solids.
     /// The result has the accuracy of the imported display tessellation.
@@ -14,6 +51,10 @@ impl CadScene {
         if nearest < 1e-18 {
             return Some(0.);
         }
+        Some(nearest.sqrt() * if self.inside_solid(point) { -1. } else { 1. })
+    }
+
+    fn inside_solid(&self, point: Point) -> bool {
         // An oblique ray avoids the grid-aligned edges of most milling models.
         let ray = Ray {
             origin: point,
@@ -29,12 +70,11 @@ impl CadScene {
                 .or_default()
                 .push(depth);
         }
-        let inside = bodies.values_mut().any(|depths| {
+        bodies.values_mut().any(|depths| {
             depths.sort_by(f64::total_cmp);
             depths.dedup_by(|a, b| (*a - *b).abs() < 1e-8);
             depths.len() % 2 == 1
-        });
-        Some(nearest.sqrt() * if inside { -1. } else { 1. })
+        })
     }
 
     fn nearest_surface(&self, point: Point, id: usize, nearest: &mut f64) {
@@ -104,8 +144,7 @@ fn triangle_distance_squared(point: Point, triangle: [Point; 3]) -> f64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn comparison_distinguishes_excess_contact_and_gouges_in_a_solid_union() {
+    fn solid_union() -> CadScene {
         let mut scene = CadScene::default();
         for instance in [1, 2] {
             let offset = (instance - 1) as f64 * 1.5;
@@ -140,10 +179,44 @@ mod tests {
             }
         }
         scene.build_node((0..scene.triangles.len()).collect());
+        scene
+    }
+
+    #[test]
+    fn comparison_distinguishes_excess_contact_and_gouges_in_a_solid_union() {
+        let scene = solid_union();
         assert_eq!(scene.surface_deviation([1., 1., 2.]), Some(0.));
         assert!((scene.surface_deviation([1., 1., 2.2]).unwrap() - 0.2).abs() < 1e-9);
         assert!(scene.surface_deviation([1., 1., 1.8]).unwrap() < 0.);
         assert!(scene.surface_deviation([1.75, 1., 1.]).unwrap() < 0.);
         assert_eq!(CadScene::default().surface_deviation([0.; 3]), None);
+    }
+
+    #[test]
+    fn fast_classification_matches_signed_distance_including_solid_overlaps() {
+        let scene = solid_union();
+        for tolerance in [0., 0.05, 0.2] {
+            for x in [-0.3, 0.03, 0.07, 1., 1.75, 2.7, 3.53, 3.8] {
+                for y in [-0.3, 0.03, 0.5, 1.3, 2.07] {
+                    for z in [-0.3, 0.03, 0.5, 1.3, 2.07] {
+                        let p = [x, y, z];
+                        let distance = scene.surface_deviation(p).unwrap();
+                        let expected = if distance > tolerance {
+                            SurfaceClass::Excess
+                        } else if distance < -tolerance {
+                            SurfaceClass::Gouge
+                        } else {
+                            SurfaceClass::WithinTolerance
+                        };
+                        assert_eq!(
+                            scene.classify_surface(p, tolerance),
+                            Some(expected),
+                            "{p:?}, {tolerance}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(CadScene::default().classify_surface([0.; 3], 0.05), None);
     }
 }

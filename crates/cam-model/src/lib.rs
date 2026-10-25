@@ -447,8 +447,8 @@ impl Tool {
     /// This tool's **2D revolve generatrix** (`TOOLING_PLAN.md` Phase 4): the built-in
     /// kinds mapped onto a kernel-neutral [`cam_geo::GeneratrixSpec`] and generated. The
     /// cutting-end shape comes from [`kind`](Self::kind); the flute/shank split from the
-    /// effective cutter dimensions. (`ThreadMill` uses a flat cylinder envelope for now —
-    /// the true tooth form is a later refinement; see the build log.)
+    /// effective cutter dimensions. Thread mills include their single tooth or
+    /// repeated full-form teeth, with the non-cutting tip, neck and shank tagged.
     pub fn profile(&self) -> cam_geo::Profile2D {
         use cam_geo::BottomShape;
         // Single-profile (single-point) thread mill: one 60° tooth at the tip, a sharply

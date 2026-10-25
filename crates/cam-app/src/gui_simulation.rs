@@ -184,6 +184,13 @@ impl Timeline {
     }
 }
 
+/// Geometry, tool position and comparison colors are published as one frame.
+struct StockFrame {
+    outcome: crate::RunOutcome,
+    position: f64,
+    stock_position: f64,
+}
+
 pub(super) struct SimulationPlayer {
     source: crate::JobStamp,
     inputs: JobInputs,
@@ -204,8 +211,10 @@ pub(super) struct SimulationPlayer {
     pub tab: SimulationTab,
     pub sections: [bool; 4],
     stock_position: f64,
-    target: CadScene,
-    comparison_deviations: Vec<Option<f64>>,
+    target: Arc<CadScene>,
+    comparison: crate::stock_comparison::StockComparison,
+    comparison_classes: Vec<Option<cam_render::SurfaceClass>>,
+    pending_frame: Option<StockFrame>,
     custom_stock_color: [f32; 3],
 }
 
@@ -255,7 +264,7 @@ impl SimulationPlayer {
                             .any(|body| body.id == instance.body_id && body.valid_solid)
                     });
         }
-        let target = CadScene::from_geometry(&geometry, &Default::default());
+        let target = Arc::new(CadScene::from_geometry(&geometry, &Default::default()));
         let mut player = Self {
             source,
             inputs,
@@ -277,7 +286,9 @@ impl SimulationPlayer {
             sections: [true; 4],
             stock_position: position,
             target,
-            comparison_deviations: Vec::new(),
+            comparison: Default::default(),
+            comparison_classes: Vec::new(),
+            pending_frame: None,
             custom_stock_color: [0.2, 0.65, 0.3],
         };
         player.request_frame();
@@ -288,6 +299,9 @@ impl SimulationPlayer {
             && controller.outcome().and_then(|o| o.stamp.as_ref()) == Some(&self.source)
     }
     fn request_frame(&mut self) {
+        if self.pending_frame.take().is_some() {
+            self.comparison.invalidate();
+        }
         let mut inputs = self.inputs.clone();
         inputs.preview_program = Some(self.timeline.prefix(self.position));
         self.requested = self.position;
@@ -392,13 +406,24 @@ impl SimulationPlayer {
                 self.error = Some("Simulation preview failed. Seek again to retry.".into());
             }
         }
+        if let Some(classes) = self.comparison.poll() {
+            self.comparison_classes = classes;
+            if let Some(frame) = self.pending_frame.take() {
+                self.publish_frame(frame);
+            } else {
+                self.refresh_display();
+            }
+        }
         if self.playing {
             self.position = (self.position + elapsed * self.speed).min(self.timeline.duration);
             if self.position >= self.timeline.duration {
                 self.playing = false;
             }
         }
-        if !self.jobs.pending() && (self.position - self.rendered).abs() > 1e-6 {
+        if !self.jobs.pending()
+            && self.pending_frame.is_none()
+            && (self.position - self.rendered).abs() > 1e-6
+        {
             self.request_frame();
         }
     }
@@ -438,21 +463,49 @@ impl SimulationPlayer {
         if !self.options.stop_on_collision {
             self.collision = contact.map(|(_, collision)| collision.clone());
         }
-        if !self.options.regenerate_on_rewind && self.requested < self.stock_position {
-            outcome.stock_vertices = std::mem::take(&mut self.preview.stock_vertices);
-            outcome.stock_indices = std::mem::take(&mut self.preview.stock_indices);
-            outcome.stock_machined = std::mem::take(&mut self.preview.stock_machined);
-            outcome.stock_operations = std::mem::take(&mut self.preview.stock_operations);
-        } else {
-            self.stock_position = self.requested;
+        let stock_position =
+            if !self.options.regenerate_on_rewind && self.requested < self.stock_position {
+                outcome.stock_vertices = self.preview.stock_vertices.clone();
+                outcome.stock_indices = self.preview.stock_indices.clone();
+                outcome.stock_machined = self.preview.stock_machined.clone();
+                outcome.stock_operations = self.preview.stock_operations.clone();
+                self.stock_position
+            } else {
+                self.requested
+            };
+        self.prepare_frame(StockFrame {
+            outcome,
+            position: self.requested,
+            stock_position,
+        });
+    }
+    fn prepare_frame(&mut self, frame: StockFrame) {
+        self.comparison.invalidate();
+        self.comparison_classes.clear();
+        if self.options.stock_coloring == SimulationStockColoring::Comparison {
+            if let Some(classes) = self.comparison.request(
+                &self.target,
+                &frame.outcome.stock_vertices,
+                f64::from(self.options.comparison_tolerance),
+            ) {
+                self.comparison_classes = classes;
+            } else {
+                // Keep the last complete frame visible. Publishing gray stock
+                // here would flash on every asynchronous comparison update.
+                self.pending_frame = Some(frame);
+                return;
+            }
         }
-        self.preview = outcome;
-        self.comparison_deviations.clear();
-        self.rendered = self.requested;
+        self.publish_frame(frame);
+    }
+    fn publish_frame(&mut self, frame: StockFrame) {
+        self.preview = frame.outcome;
+        self.rendered = frame.position;
+        self.stock_position = frame.stock_position;
         self.refresh_display();
     }
     pub fn needs_tick(&self) -> bool {
-        self.playing || self.jobs.needs_poll()
+        self.playing || self.jobs.needs_poll() || self.comparison.pending()
     }
     /// Follow the rendered frame, including its active tool, when seeking in
     /// either direction. The tool and stock must describe the same instant.
@@ -579,11 +632,7 @@ impl SimulationPlayer {
                     ))
                     .size(12),
                     text(format!("{:.0}%", self.position / duration * 100.)).size(12),
-                    text(self.error.as_deref().unwrap_or(if self.jobs.pending() {
-                        "Updating…"
-                    } else {
-                        ""
-                    }))
+                    text(self.error.as_deref().unwrap_or(""))
                     .size(12),
                     text(format!("Speed {:.2}×", self.speed)).size(12),
                     slider(0.25..=10., self.speed, Message::SimulationSpeed)
@@ -805,10 +854,122 @@ mod tests {
             sections: [true; 4],
             stock_position: 0.,
             target: Default::default(),
-            comparison_deviations: Vec::new(),
+            comparison: Default::default(),
+            comparison_classes: Vec::new(),
+            pending_frame: None,
             custom_stock_color: [0.2, 0.65, 0.3],
         }
     }
+    #[test]
+    fn thread_playback_exposes_and_colors_both_flanks_and_rewinds_them() {
+        let mut player = collision_player();
+        let setup = Arc::make_mut(&mut player.inputs.document).setup_mut();
+        setup.tools[0].diameter = 2.;
+        setup.tools[0].neck_diameter = 1.;
+        setup.tools.push(cam_model::Tool {
+            number: 1,
+            diameter: 8.,
+            length: 30.,
+            flute_length: 10.,
+            ..Default::default()
+        });
+        player.inputs.min = [-6., -6., 0.];
+        player.inputs.max = [6., 6., 5.];
+        player.inputs.preview_resolution = Some(0.125);
+        let mut program = Program {
+            steps: vec![
+                Step::ToolChange { tool: 1 },
+                Step::Rapid {
+                    to: Point3::new(0., 0., 7.),
+                    tag: Tag::new(1, MoveKind::Link),
+                },
+                Step::Linear {
+                    to: Point3::new(0., 0., 0.),
+                    feed: 600.,
+                    tag: Tag::new(1, MoveKind::Plunge),
+                },
+                Step::Rapid {
+                    to: Point3::new(0., 0., 7.),
+                    tag: Tag::new(1, MoveKind::Retract),
+                },
+                Step::ToolChange { tool: 2 },
+                Step::Linear {
+                    to: Point3::new(0., 0., 0.),
+                    feed: 600.,
+                    tag: Tag::new(2, MoveKind::Plunge),
+                },
+                Step::Linear {
+                    to: Point3::new(3.5, 0., 0.),
+                    feed: 600.,
+                    tag: Tag::new(2, MoveKind::LeadIn),
+                },
+            ],
+        };
+        for turn in 0..4 {
+            program.steps.push(Step::Arc {
+                end: Point3::new(3.5, 0., f64::from(turn + 1)),
+                center: Point3::new(0., 0., f64::from(turn)),
+                dir: ArcDir::Ccw,
+                feed: 600.,
+                tag: Tag::new(2, MoveKind::Cutting),
+            });
+        }
+        player.timeline = Timeline::new(&program, 2000.).unwrap();
+        player.seek_end(true);
+        drain_player(&mut player);
+        assert!(
+            player.preview.collisions.is_empty(),
+            "{:?}",
+            player.preview.collisions
+        );
+        for coloring in [
+            SimulationStockColoring::Operation,
+            SimulationStockColoring::Tool,
+        ] {
+            player.options.stock_coloring = coloring;
+            player.refresh_display();
+            let color = player
+                .preview
+                .stock_vertices
+                .iter()
+                .zip(&player.preview.stock_operations)
+                .find_map(|(vertex, owner)| (*owner == Some(2)).then_some(vertex.color))
+                .unwrap();
+            assert_ne!(
+                color,
+                player.options.material.color(player.custom_stock_color)
+            );
+            let mut up = 0;
+            let mut down = 0;
+            for ((vertex, owner), cut) in player
+                .preview
+                .stock_vertices
+                .iter()
+                .zip(&player.preview.stock_operations)
+                .zip(&player.preview.stock_machined)
+            {
+                if *owner == Some(2) {
+                    assert!(*cut);
+                    assert_eq!(vertex.color, color);
+                    up += usize::from(vertex.normal[2] > 0.5);
+                    down += usize::from(vertex.normal[2] < -0.5);
+                }
+            }
+            assert!(
+                up > 100 && down > 100,
+                "both thread flank colors must be visible"
+            );
+        }
+        let finished = player.preview.stock_vertices.clone();
+        player.seek(0.);
+        drain_player(&mut player);
+        assert!(player.preview.stock_operations.iter().all(Option::is_none));
+        assert!(player.preview.stock_machined.iter().all(|cut| !cut));
+        player.seek_end(true);
+        drain_player(&mut player);
+        assert_eq!(finished, player.preview.stock_vertices);
+    }
+
     #[test]
     fn playback_stops_at_first_contact_and_colors_the_cutter_red_even_for_large_frames() {
         // A partial plunge and a frame spanning later cuts must stop at the
@@ -1010,7 +1171,9 @@ mod tests {
             sections: [true; 4],
             stock_position: 0.,
             target: Default::default(),
-            comparison_deviations: Vec::new(),
+            comparison: Default::default(),
+            comparison_classes: Vec::new(),
+            pending_frame: None,
             custom_stock_color: [0.2, 0.65, 0.3],
         };
         let frame = &controller.document().setup().frame;
@@ -1209,6 +1372,179 @@ mod tests {
         player.refresh_display();
         assert!(player.preview.scene.strips.is_empty());
     }
+    fn comparison_player() -> SimulationPlayer {
+        let mut controller = AppController::new(crate::default_machine());
+        controller
+            .open_project(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testfiles/thread.ocam"
+            ))
+            .unwrap();
+        let mut player = collision_player();
+        player.target = Arc::new(CadScene::from_geometry(
+            controller.geometry_state(),
+            &Default::default(),
+        ));
+        player.preview.program = player.timeline.prefix(0.);
+        player.preview.stock_vertices = vec![
+            MeshVertex {
+                position: [0., 0., 20.2],
+                normal: [0., 0., 1.],
+                color: [0.; 4],
+            };
+            10_000
+        ];
+        player.options.stock_coloring = SimulationStockColoring::Comparison;
+        player.refresh_display();
+        assert!(
+            player.comparison.pending(),
+            "comparison is queued without blocking the UI"
+        );
+        assert!(player.comparison_classes.is_empty());
+        drain_player(&mut player);
+        assert!(player
+            .preview
+            .stock_vertices
+            .iter()
+            .all(|v| v.color == [0.2, 0.4, 1., 1.]));
+        player
+    }
+
+    #[test]
+    fn comparison_runs_in_the_background_and_reclassifies_when_tolerance_changes() {
+        let mut player = comparison_player();
+        let previous = player.preview.stock_vertices.clone();
+        let mut prefs = player.options.clone();
+        prefs.comparison_tolerance = 0.5;
+        player.configure(&prefs, player.custom_stock_color);
+        assert!(player.comparison.pending());
+        assert_eq!(player.preview.stock_vertices, previous);
+        drain_player(&mut player);
+        assert!(player
+            .preview
+            .stock_vertices
+            .iter()
+            .all(|v| v.color == [0.15, 0.85, 0.2, 1.]));
+    }
+
+    fn next_comparison_frame(player: &mut SimulationPlayer, position: f64, z: f32) {
+        let mut vertices = player.preview.stock_vertices.clone();
+        for vertex in &mut vertices {
+            vertex.position[2] = z;
+            vertex.color = [0.; 4];
+        }
+        player.position = position;
+        player.requested = position;
+        player.accept_frame(crate::RunOutcome {
+            program: player.timeline.prefix(position),
+            stock_vertices: vertices,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn comparison_publishes_stock_colors_and_tool_position_together_without_gray_frames() {
+        let mut player = comparison_player();
+        for (position, z, color) in [
+            (1., 20., [0.15, 0.85, 0.2, 1.]),
+            (2., 20.2, [0.2, 0.4, 1., 1.]),
+            (3., 20., [0.15, 0.85, 0.2, 1.]),
+        ] {
+            let previous = player.preview.stock_vertices.clone();
+            let previous_tip = last_position(&player.preview.program);
+            let previous_time = player.rendered;
+            let previous_stock_time = player.stock_position;
+            next_comparison_frame(&mut player, position, z);
+            assert!(player.pending_frame.is_some());
+            player.refresh_display();
+            assert_eq!(player.preview.stock_vertices, previous);
+            assert_eq!(last_position(&player.preview.program), previous_tip);
+            assert_eq!(player.rendered, previous_time);
+            assert_eq!(player.stock_position, previous_stock_time);
+            drain_player(&mut player);
+            assert!(player.pending_frame.is_none());
+            assert_eq!(player.rendered, position);
+            assert_eq!(player.stock_position, position);
+            assert_eq!(
+                last_position(&player.preview.program),
+                last_position(&player.timeline.prefix(position))
+            );
+            assert!(player
+                .preview
+                .stock_vertices
+                .iter()
+                .all(|vertex| { vertex.position[2] == z && vertex.color == color }));
+        }
+    }
+
+    #[test]
+    fn pending_comparison_tracks_tolerance_and_can_be_published_in_another_color_mode() {
+        let mut player = comparison_player();
+        let previous = player.preview.stock_vertices.clone();
+        next_comparison_frame(&mut player, 1., 21.);
+        let mut prefs = player.options.clone();
+        prefs.comparison_tolerance = 1.1;
+        player.configure(&prefs, player.custom_stock_color);
+        assert!(player.pending_frame.is_some());
+        assert_eq!(player.preview.stock_vertices, previous);
+        drain_player(&mut player);
+        assert!(player
+            .preview
+            .stock_vertices
+            .iter()
+            .all(|vertex| { vertex.position[2] == 21. && vertex.color == [0.15, 0.85, 0.2, 1.] }));
+
+        next_comparison_frame(&mut player, 2., 22.);
+        prefs.stock_coloring = SimulationStockColoring::Material;
+        player.configure(&prefs, player.custom_stock_color);
+        assert!(player.pending_frame.is_none());
+        assert!(!player.comparison.pending());
+        assert_eq!(player.rendered, 2.);
+        let material = player.options.material.color(player.custom_stock_color);
+        assert!(player
+            .preview
+            .stock_vertices
+            .iter()
+            .all(|vertex| { vertex.position[2] == 22. && vertex.color == material }));
+    }
+
+    #[test]
+    fn seeking_discards_a_pending_comparison_frame() {
+        let mut player = comparison_player();
+        next_comparison_frame(&mut player, 1., 21.);
+        assert!(player.pending_frame.is_some());
+        player.seek(0.);
+        assert!(player.pending_frame.is_none());
+        drain_player(&mut player);
+        assert_eq!(player.rendered, 0.);
+        assert_eq!(player.stock_position, 0.);
+        assert_eq!(
+            player.comparison_classes.len(),
+            player.preview.stock_vertices.len()
+        );
+        assert!(player
+            .preview
+            .stock_vertices
+            .iter()
+            .all(|vertex| vertex.position[2] <= 0.));
+    }
+
+    #[test]
+    fn comparison_keeps_stock_visible_when_rewinding_without_regeneration() {
+        let mut player = comparison_player();
+        player.stock_position = 2.;
+        player.rendered = 2.;
+        player.options.regenerate_on_rewind = false;
+        let previous = player.preview.stock_vertices.clone();
+        next_comparison_frame(&mut player, 1., 21.);
+        assert!(player.pending_frame.is_some());
+        assert_eq!(player.preview.stock_vertices, previous);
+        drain_player(&mut player);
+        assert_eq!(player.preview.stock_vertices, previous);
+        assert_eq!(player.rendered, 1.);
+        assert_eq!(player.stock_position, 2.);
+    }
+
     #[test]
     fn stock_coloring_tracks_operation_and_tool_identity_and_missing_comparison_target() {
         let mut player = display_player(45.);

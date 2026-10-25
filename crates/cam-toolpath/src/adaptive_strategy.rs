@@ -14,8 +14,8 @@ pub struct AdaptiveStrategy {
 }
 
 impl AdaptiveStrategy {
-    /// Invalidate persisted paths when machining domain or entry safety rules change.
-    pub const DOMAIN_REVISION: u32 = 4;
+    /// Invalidate persisted paths when machining domain, linking or safety rules change.
+    pub const DOMAIN_REVISION: u32 = 5;
 
     pub fn new(op: AdaptiveOp, stock_to_leave: StockToLeave, geometry: AdaptiveGeometry) -> Self {
         Self {
@@ -203,6 +203,7 @@ impl Strategy for AdaptiveStrategy {
         let mut cleared_levels = 0usize;
         let mut previous_z: Option<f64> = None;
         let mut cleared_slice = Vec::new();
+        let mut used_concentric = false;
         for layer in &self.geometry.layers {
             if cancel.is_cancelled() {
                 return StrategyResult {
@@ -372,24 +373,18 @@ impl Strategy for AdaptiveStrategy {
                     &env.heights,
                     &[layer.z],
                     cancel,
+                    true,
                     |candidate| {
-                        // A fragmented frontier in a hole-free region can turn
-                        // a simple bore into repeated retract/re-entry cycles.
-                        // Prefer the concentric fallback in that case; it still
-                        // has to pass the complete swept-cutter check below.
-                        let fragmented = region.holes().is_empty() && candidate.steps().iter()
-                            .filter(|step| matches!(step, cam_cldata::Step::Rapid { tag, .. }
-                                if tag.kind == cam_cldata::MoveKind::Retract))
-                            .take(2).count() > 1;
-                        !fragmented && crate::adaptive_safety::certify_layer(
+                        crate::adaptive_safety::certify_layer(
                             candidate, &layer.protected,
                             largest_radius + allowance + self.geometry.error_bound,
                             layer.z, env.heights.clearance, cancel,
                         ).is_ok()
                     },
                 ) {
-                    Ok(n) => {
-                        if n > 0 {
+                    Ok(result) => {
+                        if result.paths > 0 {
+                            used_concentric |= result.concentric;
                             // Validate the emitted moves independently of the
                             // clearing generator. Reserve the arc-refitting
                             // budget already included in the model envelope.
@@ -444,6 +439,12 @@ impl Strategy for AdaptiveStrategy {
                 "operation {}: no accessible stock was clearable in the selected machining region below the stock top",
                 op.id
             );
+        }
+        if used_concentric {
+            diagnostics.push(Diagnostic::warning(format!(
+                "operation {}: some 3D Adaptive regions use concentric clearing where the frontier fragments or cannot be certified; optimal load is not a maximum engagement guarantee in these regions",
+                op.id,
+            )).for_op(op.id));
         }
         StrategyResult {
             program,

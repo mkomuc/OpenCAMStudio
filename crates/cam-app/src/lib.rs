@@ -23,6 +23,8 @@ mod project;
 // Not GUI-gated, deliberately: `cam-app` builds and tests without the `gui` feature
 // by default, so preferences living in `gui.rs` would be untestable.
 mod settings;
+#[cfg(feature = "gui")]
+mod stock_comparison;
 // Not GUI-gated: the library type and the `.ocam` file union are plain serializable
 // data + config-dir I/O (only their *use* is GUI). Phase 3 (`TOOLING_PLAN.md`) lets
 // the ungated `project` module reference `ToolLibrary` for the `OcamFile` union.

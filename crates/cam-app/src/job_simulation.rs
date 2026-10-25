@@ -12,7 +12,20 @@ pub(super) struct StockSimulation {
 impl JobInputs {
     pub(crate) fn stock_resolution(&self, program: &Program) -> f64 {
         let span = (self.max[0] - self.min[0]).max(self.max[1] - self.min[1]);
-        let feature = narrowest_cut_width(program, &self.document.setup().tools, self.max[2]);
+        let setup = self.document.setup();
+        let mut feature = narrowest_cut_width(program, &setup.tools, self.max[2]);
+        for operation in &setup.operations {
+            if let cam_model::Operation::Thread(thread) = operation {
+                let included = program.steps().iter().any(|step| {
+                    matches!(step,
+                    cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
+                        if tag.op_id == thread.id)
+                });
+                if included {
+                    feature = feature.min(thread.pitch);
+                }
+            }
+        }
         simulation_resolution(span, feature, self.simulation_accuracy)
     }
 

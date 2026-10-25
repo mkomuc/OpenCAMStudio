@@ -60,6 +60,10 @@ mod operation_metadata;
 mod thread_parameters;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
+#[path = "gui_operation_sections.rs"]
+mod operation_sections;
+#[path = "gui_operation_linking.rs"]
+mod operation_linking;
 #[path = "gui_setup_editor.rs"]
 mod setup_editor_view;
 #[path = "gui_pattern_editor.rs"]
@@ -108,6 +112,9 @@ use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
 #[path = "gui_notices.rs"]
 mod notices;
 use notices::Notice;
+#[path = "gui_status.rs"]
+mod status_view;
+use status_view::{StatusMessages, StatusTarget};
 use operation_metadata::operation_fields;
 
 /// Ribbon palette and metrics, adopted from **OpenCADStudio**'s ribbon
@@ -1970,6 +1977,7 @@ struct App {
     cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
     notice: Option<Notice>,
     notice_queue: VecDeque<Notice>,
+    status_messages: StatusMessages,
     /// Shared transactional editor for setup, stock and postprocess settings. The
     /// draft survives tab changes; only the footer can commit or discard it.
     setup_draft: Option<cam_model::Setup>,
@@ -1989,8 +1997,8 @@ struct App {
     geometry_auto_pick: bool,
     geometry_editor: Option<operation_geometry::GeometryEditor>,
     profile_tab_picking: bool,
-    profile_help_open: bool,
     operation_position_pick: Option<operation_positions::PositionKind>,
+    operation_position_markers: [Option<[f64; 3]>; 2],
     profile_tab_selection: Option<usize>,
     profile_contour_selection: usize,
     profile_side_overrides: Vec<cam_model::ProfileContour>,
@@ -1998,6 +2006,7 @@ struct App {
     operation_binding_preview: Option<cam_model::GeometryBinding>,
     drawing_editing_op: Option<u32>,
     operation_tab: OperationTab,
+    collapsed_operation_sections: BTreeSet<operation_sections::Section>,
     focused_height: Option<String>,
     height_draft_id: Option<u32>,
     height_draft: Option<cam_model::OperationHeightSettings>,
@@ -2479,7 +2488,7 @@ enum Message {
     CancelToolDraft,
     RunJob,
     OperationTabChanged(OperationTab),
-    ProfileHelp,
+    OperationSectionToggled(operation_sections::Section),
     ProfileCompChanged(cam_model::Comp),
     ProfilePassToggle(profile_parameters::Toggle, bool),
     ProfileOrder(cam_model::ProfileOrder),
@@ -2495,15 +2504,15 @@ enum Message {
     ProfileTabsClear,
     EngraveClosedChanged(bool),
     StockToLeaveToggled(bool),
-    OperationStartEnabled(bool),
     OperationPositionPick(operation_positions::PositionKind),
     OperationPositionClear(operation_positions::PositionKind),
-    OperationPositionPicked([f64; 2]),
+    OperationPositionPicked([f64; 3]),
     OperationToolPicked(usize),
     EditDrawingGeometry(u32),
     UseDrawingGeometry,
     CancelDrawingGeometry,
     Tree(TreeMessage),
+    ShowStatus(StatusTarget),
     #[allow(dead_code)] // Retained legacy view command; M1a reorganizes its UI.
     Select(Selection),
     SelectSetup(u64),
@@ -3057,6 +3066,7 @@ impl App {
         self.profile_side_overrides.clear();
         self.profile_entry_editor = None;
         self.operation_position_pick = None;
+        self.operation_position_markers = [None; 2];
         self.profile_tab_picking = false;
         self.profile_tab_selection = None;
         self.model_view = None;
@@ -3340,6 +3350,7 @@ impl App {
             cad_scene_cache: Default::default(),
             notice: None,
             notice_queue: VecDeque::new(),
+            status_messages: StatusMessages::default(),
             setup_draft: None,
             pattern_draft: None,
             pattern_tab: pattern_editor_view::PatternTab::Placement,
@@ -3357,8 +3368,8 @@ impl App {
             geometry_auto_pick: false,
             geometry_editor: None,
             profile_tab_picking: false,
-            profile_help_open: false,
             operation_position_pick: None,
+            operation_position_markers: [None; 2],
             profile_tab_selection: None,
             profile_contour_selection: 0,
             profile_side_overrides: Vec::new(),
@@ -3366,6 +3377,7 @@ impl App {
             operation_binding_preview: None,
             drawing_editing_op: None,
             operation_tab: OperationTab::default(),
+            collapsed_operation_sections: BTreeSet::new(),
             focused_height: None,
             height_draft_id: None,
             height_draft: None,
@@ -3790,17 +3802,14 @@ impl App {
         }
         if matches!(
             &message,
-            Message::Select(_)
-                | Message::SelectSetup(_)
+            Message::SelectSetup(_)
                 | Message::EditSetup(_)
-                | Message::ClickOp(_)
                 | Message::BeginOp(_)
                 | Message::SetupNew
                 | Message::SetupDuplicate(_)
                 | Message::SetupDelete(_)
         ) {
             self.model_view = None;
-            self.simulation = None;
             self.pending_simulation = None;
             self.pending_processing_time = None;
         }
@@ -3910,7 +3919,10 @@ impl App {
                     player.tick();
                 }
             }
-            Message::SimulationClose => self.simulation = None,
+            Message::SimulationClose => {
+                self.simulation = None;
+                self.pending_simulation = None;
+            }
             Message::ToolpathCommand(node, action) => return self.toolpath_command(node, action),
             Message::ProcessingTimeFeedOverride(value) => {
                 self.processing_time_feed_override_changed(value);
@@ -3935,6 +3947,21 @@ impl App {
             Message::CancelToolDraft => {
                 self.reload_tool_edit();
                 self.status = "Tool changes cancelled.".into();
+            }
+            Message::OperationSectionToggled(section) => {
+                if !self.collapsed_operation_sections.remove(&section) {
+                    self.collapsed_operation_sections.insert(section);
+                    if section.tab == OperationTab::Linking && section.label == "Positions" {
+                        self.operation_position_pick = None;
+                    }
+                    if section.tab == OperationTab::Geometry && section.label == "Geometry" {
+                        self.geometry_auto_pick = false;
+                        self.geometry_additive = false;
+                    }
+                    if section.tab == OperationTab::Geometry && section.label == "Holding tabs" {
+                        self.profile_tab_picking = false;
+                    }
+                }
             }
             Message::OperationTabChanged(tab) => {
                 self.operation_tab = tab;
@@ -4077,9 +4104,6 @@ impl App {
                     }
                 });
             }
-            Message::ProfileHelp => {
-                self.profile_help_open = !self.profile_help_open;
-            }
             Message::ProfilePassToggle(toggle, value) => {
                 let parsed = self.fields.iter().filter_map(|(f, s)| {
                     s.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (*f, v))
@@ -4146,12 +4170,7 @@ impl App {
             }
             Message::OperationPositionPick(kind) => self.begin_position_pick(kind),
             Message::OperationPositionClear(kind) => self.clear_operation_position(kind),
-            Message::OperationPositionPicked(point) => self.pick_operation_position(point),
-            Message::OperationStartEnabled(enabled) => {
-                self.operation_position_pick = None;
-                self.edit_operation_draft(|op| operation_tabs::set_operation_start(op, enabled));
-                self.refresh_operation_fields();
-            }
+            Message::OperationPositionPicked(point) => self.pick_operation_surface_position(point),
             Message::OperationToolPicked(index) => {
                 if self.creating_operation() {
                     return self.update(Message::SetPendingLibraryTool(index));
@@ -4215,10 +4234,17 @@ impl App {
                 self.status = "Geometry selection cancelled; other draft edits retained.".into();
             }
             Message::Tree(message) => return self.update_tree(message),
+            Message::ShowStatus(target) => {
+                let fingerprints = self.controller.current_toolpath_fingerprints();
+                if let Some(notice) = self.status_notice(target, &fingerprints) {
+                    return self.queue_notice(notice);
+                }
+            }
             Message::OpenSample => {
                 self.pending_processing_time = None;
                 match self.controller.open_dxf(SAMPLE_DXF, "sample.dxf") {
                 Ok(n) => {
+                    self.status_messages = StatusMessages::default();
                     self.reset_model_browser();
                     self.planar_selection.clear();
                     self.focus_ops.clear();
@@ -4696,6 +4722,7 @@ impl App {
                 self.controller.select(sel);
                 self.end_setup_draft();
                 self.operation_draft = None;
+                self.operation_position_markers = [None; 2];
                 // Browser selection reads the selected operation's saved allowance.
                 // An editor draft from the previous operation must not follow it.
                 self.stock_to_leave_draft = None;
@@ -4752,6 +4779,10 @@ impl App {
             Message::HeightSectionToggle(plane) => {
                 if !self.collapsed_heights.remove(&plane) {
                     self.collapsed_heights.insert(plane);
+                    if self.height_reference_pick == Some(plane) {
+                        self.height_reference_pick = None;
+                    }
+                    self.focused_height = None;
                 }
             }
             Message::HeightPickToggle(plane) => {
@@ -4926,6 +4957,7 @@ impl App {
                 self.pending_processing_time = None;
                 self.processing_time_dialog = None;
                 self.controller.new_project();
+                self.status_messages = StatusMessages::default();
                 self.reset_model_browser();
                 self.focus_ops.clear();
                 self.controller.select(Selection::Setup);
@@ -5059,6 +5091,7 @@ impl App {
             }
             Message::PollRun => {
                 if self.controller.poll_run() {
+                    self.record_status_messages();
                     self.report_run();
                     if let Some(pending) = self.pending_processing_time.take() {
                         if self.controller.outcome().is_some_and(|outcome| {
@@ -5094,9 +5127,6 @@ impl App {
                     });
                     if export {
                         return self.update(Message::ExportNc);
-                    }
-                    if let Some(notice) = self.controller.outcome().and_then(notices::job_notice) {
-                        return self.queue_notice(notice);
                     }
                 }
             }
@@ -5243,6 +5273,9 @@ impl App {
                 }
             }
             Message::CadEscape => {
+                if self.simulation.take().is_some() {
+                    self.pending_simulation = None;
+                }
                 if self.geometry_editor.is_some() {
                     self.operation_geometry_message(GeometryMessage::Cancel);
                     return iced::Task::none();
@@ -6892,7 +6925,6 @@ impl App {
             }
             Message::RenumberConfirmed(false) => {}
             Message::OpMenu(id) => {
-                self.simulation = None;
                 self.pending_simulation = None;
                 self.pending_processing_time = None;
                 // Context-clicking a member of the current highlight set keeps the
@@ -8452,6 +8484,7 @@ impl App {
         self.pending_processing_time = None;
         self.processing_time_dialog = None;
         self.controller.open_project(path)?;
+        self.status_messages = StatusMessages::default();
         self.reset_model_browser();
         self.planar_selection.clear();
         // Matched project tools adopt the shop library's numbering.
@@ -11470,6 +11503,7 @@ struct Viewport {
     setup_geometry: Arc<SetupPickGeometry>,
     setup_axis: bool,
     operation_position_picking: bool,
+    operation_position_color: [f32; 4],
     setup_hover: SetupHover,
     setup_snaps: Vec<SnapKind>,
     highlight_features: bool,
@@ -11551,7 +11585,8 @@ impl Viewport {
         cached_cad_scene: Option<Arc<CadScene>>,
     ) -> Self {
         let cad_hover = cad_hover.filter(|reference| {
-            !cad_hidden.contains(&reference.instance_id)
+            preview.is_none()
+                && !cad_hidden.contains(&reference.instance_id)
                 && controller
                     .geometry_state()
                     .instance(reference.instance_id)
@@ -11631,7 +11666,11 @@ impl Viewport {
                 .or_else(|| scene.bounds()),
             cad_scene.bounds(),
         );
-        let mut cad_selected = if let Some(selected) = editor_geometry {
+        // Playback keeps the machining selection intact, but draws the model
+        // without selection colors or feature outlines over the simulated cut.
+        let mut cad_selected = if preview.is_some() {
+            Vec::new()
+        } else if let Some(selected) = editor_geometry {
             selected.to_vec()
         } else {
             let mut selected = controller.cad_selection().to_vec();
@@ -11816,10 +11855,15 @@ impl Viewport {
             } else {
                 (Vec::new(), Vec::new())
             };
-        let (cad_vertices, cad_indices) = cad_scene.mesh(&cad_selected, cad_hover);
-        let offset = mesh_vertices.len() as u32;
-        mesh_vertices.extend(cad_vertices);
-        mesh_indices.extend(cad_indices.into_iter().map(|i| i + offset));
+        // A nominal CAD bore would cover grooves cut into its wall. During
+        // stock playback keep the model's reference edges, and draw its solid
+        // faces when stock is hidden.
+        if preview.is_none() || !show_stock {
+            let (cad_vertices, cad_indices) = cad_scene.mesh(&cad_selected, cad_hover);
+            let offset = mesh_vertices.len() as u32;
+            mesh_vertices.extend(cad_vertices);
+            mesh_indices.extend(cad_indices.into_iter().map(|i| i + offset));
+        }
         // Frame on the stock (stable across parameter edits) so the part keeps a
         // constant on-screen size; fall back to the scene extent before any
         // geometry is loaded.
@@ -11839,6 +11883,7 @@ impl Viewport {
             )),
             setup_axis: false,
             operation_position_picking: false,
+            operation_position_color: operation_positions::PositionKind::Entry.color(),
             setup_hover: SetupHover::default(),
             setup_snaps: if prefs.snapping.enabled {
                 prefs.snapping.default_snaps.clone()
@@ -11912,7 +11957,7 @@ impl Viewport {
             0.5 * self.snap_catch_px,
         )
     }
-    fn operation_position_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Option<[f64; 2]> {
+    fn operation_position_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Option<[f64; 3]> {
         if bounds.width <= 0.0 || bounds.height <= 0.0 { return None; }
         let camera = self.camera();
         let ray = camera.pick_ray(
@@ -11924,8 +11969,7 @@ impl Viewport {
             .or_else(|| self.cad_scene.pick_candidates(ray, EntityKind::Face, 0.0, false)
                 .first().map(|hit| std::array::from_fn(|i| ray.origin[i] + hit.depth * ray.direction[i])))
             .or_else(|| self.setup_geometry.fallback(ray))?;
-        let point = self.setup_geometry.to_setup(world);
-        Some([point[0], point[1]])
+        Some(self.setup_geometry.to_setup(world))
     }
 
     fn origin_point_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Option<[f64; 3]> {
@@ -12382,7 +12426,7 @@ impl shader::Program<Message> for Viewport {
                     };
                     return Some(shader::Action::publish(message).and_capture());
                 }
-                if self.set_origin || self.setup_axis {
+                if self.set_origin || self.setup_axis || self.operation_position_picking {
                     let hover = if cursor.position_over(bounds).is_some() {
                         self.setup_hover_at(*position, bounds)
                     } else {
@@ -12471,7 +12515,7 @@ impl shader::Program<Message> for Viewport {
     fn draw(
         &self,
         _state: &Self::State,
-        _cursor: iced::mouse::Cursor,
+        cursor: iced::mouse::Cursor,
         bounds: iced::Rectangle,
     ) -> Self::Primitive {
         let aspect = if bounds.height > 0.0 {
@@ -12506,7 +12550,7 @@ impl shader::Program<Message> for Viewport {
                 );
             }
         }
-        if self.set_origin || self.setup_axis {
+        if self.set_origin || self.setup_axis || self.operation_position_picking {
             self.setup_geometry.overlays(
                 &mut setup_scene,
                 self.camera(),
@@ -12514,11 +12558,30 @@ impl shader::Program<Message> for Viewport {
                 &self.setup_hover,
                 &self.setup_snaps,
                 self.highlight_features,
-                self.set_origin,
+                self.set_origin || self.operation_position_picking,
                 self.snap_marker_scale,
                 &self.cad_scene,
                 self.cad_select_through,
             );
+        }
+        if self.operation_position_picking {
+            if let Some(point) = cursor.position_over(bounds)
+                .filter(|point| !browser_contains(*point, bounds, self.browser_overlay_width))
+                .and_then(|point| self.operation_position_at(point, bounds))
+            {
+                let point = self.setup_geometry.to_world(point);
+                let camera = self.camera();
+                let size = 7.0 * self.snap_marker_scale * camera.world_per_pixel(bounds.height)
+                    / aspect.min(1.0);
+                for direction in [camera.right(), camera.up()] {
+                    setup_scene.add_highlight(
+                        [-1.0, 1.0].into_iter().map(|sign| {
+                            std::array::from_fn(|i| point[i] as f32 + sign * size * direction[i])
+                        }).collect(),
+                        self.operation_position_color,
+                    );
+                }
+            }
         }
         overlays.extend(setup_scene.line_vertices());
         let (cone_vertices, cone_indices) = cam_render::path_cone_mesh(

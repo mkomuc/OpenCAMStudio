@@ -1,10 +1,19 @@
 # Selecting entry and exit positions
 
-Open an operation’s **Lead-in and lead-out moves** tab. Under **Positions**, use
+Open an operation’s **Lead-in and lead-out moves** tab. Its controls are grouped
+in collapsible **Linking moves**, **Leads and transitions**, **Ramping**, and
+**Positions** sections, as applicable to the strategy. Hover over a parameter or
+strategy label for help (when tooltips are enabled).
+
+Under **Positions**, use
 **Select** next to **Lead-in position** or **Lead-out position**, then click the
-model. Entry and exit are independent. Blue markers identify entry preferences;
-orange markers identify exit preferences. **Clear** restores automatic placement,
-and Escape cancels an active selection. **OK** saves the operation’s changes.
+model. The cursor snaps to enabled endpoints, midpoints, quadrants and nearest
+edge points using the same controls as workpiece-origin selection. A live cross
+previews the point; the selected marker stays on the clicked surface. Entry and
+exit are independent. Blue markers identify entry preferences;
+orange markers identify exit preferences. **×** clears the selected point and restores automatic placement,
+and Escape cancels an active selection. The button reads **Point** once a point
+is selected, and is highlighted while selecting. **Apply changes** saves the operation’s changes.
 
 Positions are stored in setup XY and remain preferences: tool radius, boundaries,
 islands and holding tabs determine the eligible toolpath point. Closed contours

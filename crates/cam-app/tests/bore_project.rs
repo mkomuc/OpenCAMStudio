@@ -89,7 +89,9 @@ fn supplied_thread_project_detects_the_noncutting_tip_hitting_the_leftover_core(
         .expect("the thread mill cannot plunge through the core left by Bore");
     assert!((collision.at[0] + 30.).abs() < 1e-8);
     assert!((collision.at[1] - 10.).abs() < 1e-8);
-    assert!((collision.at[2] - 21.).abs() < 0.01, "{collision:?}");
+    // Contact uses the lower tooth flank, above the non-cutting tip; the
+    // 8 mm pilot hole clears the neck but leaves stock beneath the tooth.
+    assert!((19.8..21.).contains(&collision.at[2]), "{collision:?}");
     assert!(matches!(
         app.export_nc(),
         Err(cam_app::ExportError::NonCuttingThroughStock(_))
@@ -166,6 +168,22 @@ fn rounded_bore_threads_regenerate_reopen_and_export_with_a_thread_mill() {
         JobCompletion::Complete,
         "{:?}",
         result.diagnostics
+    );
+    let thread_faces: Vec<_> = result
+        .stock_vertices
+        .iter()
+        .zip(&result.stock_operations)
+        .zip(&result.stock_machined)
+        .filter(|((_, owner), cut)| **owner == Some(id) && **cut)
+        .map(|((vertex, _), _)| vertex)
+        .collect();
+    assert!(
+        thread_faces.iter().any(|v| v.normal[2] > 0.5),
+        "upper flank cut faces"
+    );
+    assert!(
+        thread_faces.iter().any(|v| v.normal[2] < -0.5),
+        "lower flank cut faces"
     );
     let cuts: Vec<_> = result
         .program

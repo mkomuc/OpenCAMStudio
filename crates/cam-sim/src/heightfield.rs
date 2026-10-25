@@ -1,12 +1,16 @@
-//! A heightfield stock model for 2.5-D material-removal simulation.
+//! A heightfield stock model with sparse bounded intervals for thread teeth.
 //!
 //! The stock is a regular XY grid; each cell stores the Z of the top of the
 //! remaining material. A flat end mill of radius `r` moving along a segment
 //! lowers every cell within `r` of the swept path to the tool's bottom. It is
-//! the simplest model that captures 2.5-D removal faithfully — enough to verify
-//! that a program clears what it should and never plows a rapid through stock.
+//! Side-cutting thread teeth remove finite Z intervals instead, preserving the
+//! material above and below each groove without a full-volume voxel grid.
 
 use crate::{sweep::Sweep, ToolProfile};
+use std::collections::BTreeMap;
+#[path = "bounded.rs"]
+mod bounded;
+use bounded::RemovedSpan;
 
 #[path = "surface.rs"]
 mod surface;
@@ -88,6 +92,8 @@ pub struct Heightfield {
     cuts: Vec<Sweep>,
     previous_layers: Vec<u32>,
     layers: Vec<CutLayer>,
+    /// Sparse bounded removals for side-cutting teeth, keyed by XY sample.
+    bounded: BTreeMap<usize, Vec<RemovedSpan>>,
 }
 
 impl Heightfield {
@@ -108,6 +114,7 @@ impl Heightfield {
             cuts: Vec::new(),
             previous_layers: vec![u32::MAX; nx * ny],
             layers: Vec::new(),
+            bounded: BTreeMap::new(),
         }
     }
 
@@ -119,6 +126,11 @@ impl Heightfield {
         self.z.len() * 12
             + self.cuts.len() * std::mem::size_of::<Sweep>()
             + self.layers.len() * std::mem::size_of::<CutLayer>()
+            + self
+                .bounded
+                .values()
+                .map(|v| v.capacity() * std::mem::size_of::<RemovedSpan>() + 64)
+                .sum::<usize>()
     }
 
     /// Grid dimensions (columns, rows).
@@ -135,7 +147,7 @@ impl Heightfield {
     /// if outside the grid.
     pub fn sample(&self, x: f64, y: f64) -> f32 {
         match self.cell(x, y) {
-            Some((ix, iy)) => self.z[iy * self.nx + ix],
+            Some((ix, iy)) => self.remaining_top(iy * self.nx + ix),
             None => self.top,
         }
     }
@@ -165,6 +177,10 @@ impl Heightfield {
         operation: Option<u32>,
         cancelled: &dyn Fn() -> bool,
     ) {
+        if matches!(tool.shape, crate::ProfileShape::Thread { .. }) {
+            self.cut_thread_segment(a, b, tool, operation, cancelled);
+            return;
+        }
         let radius = tool.radius;
         if a[2].min(b[2]) >= f64::from(self.top)
             || a[0].max(b[0]) + radius < self.origin[0]
@@ -231,7 +247,7 @@ impl Heightfield {
             for ix in ix0..=ix1 {
                 let (cx, cy) = self.center(ix, iy);
                 if project(cx, cy, a, b).1 <= r2 {
-                    max = max.max(self.z[iy * self.nx + ix]);
+                    max = max.max(self.remaining_top(iy * self.nx + ix));
                 }
             }
         }
@@ -303,7 +319,7 @@ impl Heightfield {
                 if dist2 > r2 {
                     continue;
                 }
-                let height = self.z[iy * self.nx + ix];
+                let height = self.remaining_top(iy * self.nx + ix);
                 let tool_bottom = (tip_z + tool.offset(dist2.sqrt())) as f32;
                 let intrusion = height - tool_bottom;
                 if worst.is_none_or(|(w, _)| intrusion > w) {
@@ -320,7 +336,17 @@ impl Heightfield {
         self.z
             .iter()
             .map(|&z| (self.top - z).max(0.0) as f64 * cell)
-            .sum()
+            .sum::<f64>()
+            + self
+                .bounded
+                .iter()
+                .map(|(&id, spans)| {
+                    spans
+                        .iter()
+                        .map(|s| (s.upper.min(self.z[id]) - s.lower).max(0.) as f64 * cell)
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
     }
 
     /// Lower every cell whose centre lies in the XY rectangle `[min, max]` to

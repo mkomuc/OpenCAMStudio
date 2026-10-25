@@ -109,11 +109,19 @@ pub(crate) fn clear(
     levels: &[f64],
     cancel: &CancelToken,
 ) -> Result<usize, RingsError> {
-    clear_validated(prog, region, job, heights, levels, cancel, |_| true)
+    clear_validated(prog, region, job, heights, levels, cancel, false, |_| true)
+        .map(|result| result.paths)
+}
+
+pub(crate) struct ClearResult {
+    pub paths: usize,
+    pub concentric: bool,
 }
 
 /// Allow a caller with additional model constraints to reject a frontier path
-/// and use the concentric fallback. Validation never emits a rejected candidate.
+/// and use the concentric fallback. With `prefer_stay_down`, compare a fragmented
+/// frontier with the fallback and keep the safe path requiring fewer lifts.
+/// Validation never emits a rejected candidate, including the fallback.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn clear_validated(
     prog: &mut Program,
@@ -122,8 +130,10 @@ pub(crate) fn clear_validated(
     heights: &Heights,
     levels: &[f64],
     cancel: &CancelToken,
+    prefer_stay_down: bool,
     accept: impl Fn(&Program) -> bool,
-) -> Result<usize, RingsError> {
+) -> Result<ClearResult, RingsError> {
+    let mut adaptive_candidate = None;
     // **Adaptive dispatch: the front-advance clearer, behind the exact oracle.**
     //
     // When an engagement cap is set and the cut is climb, try [`crate::frontadvance`]: it
@@ -213,8 +223,14 @@ pub(crate) fn clear_validated(
             let mut candidate = Program::new();
             emit_adaptive_moves(&mut candidate, &moves, &air, job, heights, levels);
             if accept(&candidate) {
-                prog.extend(candidate);
-                return Ok(1);
+                if !prefer_stay_down || clearance_lifts(&candidate, heights) <= levels.len() {
+                    prog.extend(candidate);
+                    return Ok(ClearResult {
+                        paths: 1,
+                        concentric: false,
+                    });
+                }
+                adaptive_candidate = Some(candidate);
             }
         }
         // Uncertified — fall through to the proven concentric path below.
@@ -238,14 +254,82 @@ pub(crate) fn clear_validated(
             let mut candidate = Program::new();
             emit_adaptive_moves(&mut candidate, &moves, &[], job, heights, levels);
             if accept(&candidate) {
-                prog.extend(candidate);
-                // One certified path (not a ring count); `Ok(_)` ⇒ emitted.
-                return Ok(1);
+                if !prefer_stay_down || clearance_lifts(&candidate, heights) <= levels.len() {
+                    prog.extend(candidate);
+                    return Ok(ClearResult {
+                        paths: 1,
+                        concentric: false,
+                    });
+                }
+                adaptive_candidate = Some(candidate);
             }
         }
         // Uncertified — fall through to the proven concentric path below.
     }
 
+    let mut fallback = Program::new();
+    let result = clear_concentric(&mut fallback, region, job, heights, levels, cancel);
+    if cancel.is_cancelled() {
+        return Err(RingsError::Cancelled);
+    }
+    if let Some(candidate) = adaptive_candidate {
+        // Efficiency must not turn a valid operation into an unsafe one. Keep
+        // the certified frontier if rings fail validation or need as many lifts.
+        if !matches!(result, Ok(n) if n > 0)
+            || clearance_lifts(&fallback, heights) >= clearance_lifts(&candidate, heights)
+            || !accept(&fallback)
+        {
+            prog.extend(candidate);
+            return Ok(ClearResult {
+                paths: 1,
+                concentric: false,
+            });
+        }
+    } else if result.is_ok() && !fallback.steps().is_empty() && !accept(&fallback) {
+        return Err(RingsError::Limit(
+            "No clearing path passes the model safety check".into(),
+        ));
+    }
+    let paths = result?;
+    prog.extend(fallback);
+    Ok(ClearResult {
+        paths,
+        concentric: true,
+    })
+}
+
+/// Count actual lifts, including concentric links tagged `Link` rather than
+/// `Retract`. Comparing tags alone hides ring-to-ring clearance moves.
+fn clearance_lifts(program: &Program, heights: &Heights) -> usize {
+    let mut previous_z = None;
+    let mut count = 0;
+    for step in program.steps() {
+        let end = match step {
+            Step::Rapid { to, .. } => {
+                if to.z >= heights.clearance - cam_geo::GRID_MM
+                    && previous_z.is_some_and(|z| to.z > z + cam_geo::GRID_MM)
+                {
+                    count += 1;
+                }
+                to
+            }
+            Step::Linear { to, .. } => to,
+            Step::Arc { end, .. } => end,
+            _ => continue,
+        };
+        previous_z = Some(end.z);
+    }
+    count
+}
+
+fn clear_concentric(
+    prog: &mut Program,
+    region: &Polygon,
+    job: &ClearJob,
+    heights: &Heights,
+    levels: &[f64],
+    cancel: &CancelToken,
+) -> Result<usize, RingsError> {
     if cancel.is_cancelled() {
         return Err(RingsError::Cancelled);
     }
@@ -572,11 +656,10 @@ mod tests {
         let mut actual = Program::new();
         actual.push(Step::Comment("preceding region".into()));
         let rings = clear_validated(
-            &mut actual, &region, &job, &heights, &[-1.], &token,
+            &mut actual, &region, &job, &heights, &[-1.], &token, false,
             |candidate| {
                 assert!(!candidate.steps().is_empty());
-                checked.set(true);
-                false
+                checked.replace(true)
             },
         ).unwrap();
         assert!(checked.get(), "fixture must exercise frontier rejection");
@@ -586,8 +669,55 @@ mod tests {
         let mut expected = Program::new();
         expected.push(Step::Comment("preceding region".into()));
         let expected_rings = clear(&mut expected, &region, &job, &heights, &[-1.], &token).unwrap();
-        assert_eq!(rings, expected_rings);
+        assert_eq!(rings.paths, expected_rings);
+        assert!(rings.concentric);
         assert_eq!(actual, expected, "no rejected moves may leak into the output");
+    }
+
+    #[test]
+    fn stay_down_preference_requires_fewer_lifts_and_an_accepted_fallback() {
+        let region = frame_region();
+        let job = frame_clearjob(frame_job());
+        let heights = Heights::new(5., 2., 0.);
+        let token = CancelToken::new();
+        let mut original = Program::new();
+        clear(&mut original, &region, &job, &heights, &[-1.], &token).unwrap();
+        let original_lifts = clearance_lifts(&original, &heights);
+        assert!(original_lifts > 1, "fixture must have a fragmented frontier");
+
+        for accept_fallback in [true, false] {
+            let checked = std::cell::Cell::new(0);
+            let mut actual = Program::new();
+            let result = clear_validated(
+                &mut actual, &region, &job, &heights, &[-1.], &token, true,
+                |candidate| {
+                    checked.set(checked.get() + 1);
+                    accept_fallback || *candidate == original
+                },
+            ).unwrap();
+            assert_eq!(checked.get(), 2, "validate both frontier and fallback");
+            assert_eq!(result.concentric, accept_fallback);
+            if accept_fallback {
+                assert!(clearance_lifts(&actual, &heights) < original_lifts);
+            } else {
+                assert_eq!(actual, original, "a rejected fallback must preserve the safe frontier");
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_concentric_fallback_emits_no_motion() {
+        let region = frame_region();
+        let job = frame_clearjob(Clearing { engagement: 0., climb: true });
+        let heights = Heights::new(5., 2., 0.);
+        let mut program = Program::new();
+        program.push(Step::Comment("preceding region".into()));
+        let original = program.clone();
+        assert!(clear_validated(
+            &mut program, &region, &job, &heights, &[-1.], &CancelToken::new(), true,
+            |_| false,
+        ).is_err());
+        assert_eq!(program, original);
     }
 
     /// **A re-entry descends at cutting feed, and rapids down to the stock top.** Both

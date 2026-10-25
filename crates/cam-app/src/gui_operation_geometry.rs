@@ -34,7 +34,7 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
     match kind {
         OpKind::Chamfer if cad => vec![
             (CadFilter::Face, "face", "Add modeled Chamfer Faces. The upper and lower face boundaries define the bevel; small cutters finish it in multiple stepdowns."),
-            (CadFilter::Loop, "chain", "Add Chain. Select a rim or connected edges; set Chamfer width in Passes > Fase."),
+            (CadFilter::Loop, "chain", "Add Chain. Select a rim or connected edges; set Chamfer width in Passes."),
         ],
         OpKind::Chamfer | OpKind::Engrave => vec![(CadFilter::Loop, "chain", if kind == OpKind::Chamfer {
             "Add Chain. Select an open or closed chamfer path. Configure individual edge selection in settings."
@@ -557,7 +557,7 @@ impl App {
             body = body.push(controls);
         }
         let description = match kind {
-            OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes > Fase. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
+            OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
             OpKind::Bore => "Select cylindrical holes or bosses, or circular drawing loops. Selected features must share diameter and cutting heights.",

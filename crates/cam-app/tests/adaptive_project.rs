@@ -3,6 +3,46 @@ use cam_cldata::{MoveKind, Step};
 use cam_toolpath::{CancelToken, JobCompletion};
 
 #[test]
+fn test2_face_selection_avoids_excessive_adaptive_retracts() {
+    let mut app = AppController::new(default_machine());
+    // test2 uses the same CAD asset as the tracked fixture. Recreate its
+    // adaptive operation without depending on its large local toolpath cache.
+    app.open_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testfiles/3d_toolpath_calculation.ocam")).unwrap();
+    let mut face = app.geometry_state().bindings[&0].selected[0].clone();
+    face.kind = cam_model::EntityKind::Face;
+    let faces = [2, 10].map(|id| cam_model::EntityRef { id, ..face.clone() });
+    app.edit_cad_geometry(0, faces.to_vec()).unwrap();
+    app.edit_operation(0, |op| {
+        let cam_model::Operation::Adaptive(op) = op else { panic!("adaptive fixture") };
+        // The fixture already contains test2's 6 mm end mill as tool 37.
+        op.tool = 37;
+        op.params.containment = cam_model::AdaptiveContainment::Outside;
+    });
+    let result = app.run(&CancelToken::new());
+    assert_eq!(result.completion, JobCompletion::Complete, "{:?}", result.diagnostics);
+    assert!(result.program.validate().is_ok());
+    assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+    assert!(result.diagnostics.iter().any(|d| d.message.contains("concentric clearing")));
+    let mut previous_z = None;
+    let mut lifts = 0;
+    for step in result.program.steps() {
+        match step {
+            Step::Rapid { to, .. } => {
+                if previous_z.is_some_and(|z| to.z > z + 1e-6) { lifts += 1; }
+                previous_z = Some(to.z);
+            }
+            Step::Linear { to, .. } => previous_z = Some(to.z),
+            Step::Arc { end, .. } => previous_z = Some(end.z),
+            _ => {}
+        }
+    }
+    // Count upward rapid motion regardless of its tag: ring-to-ring lifts use
+    // Link, while frontier restarts use Retract. This operation formerly had 294.
+    assert!((1..=45).contains(&lifts), "excessive adaptive clearance lifts: {lifts}");
+}
+
+#[test]
 fn adaptive_tolerance_drives_simplification_and_survives_project_reopening() {
     let mut app = AppController::new(default_machine());
     app.open_project(

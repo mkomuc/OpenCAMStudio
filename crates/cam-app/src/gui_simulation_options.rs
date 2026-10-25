@@ -121,10 +121,19 @@ impl SimulationPlayer {
     pub(in crate::gui) fn configure(&mut self, prefs: &SimulationPrefs, custom: [f32; 3]) {
         let rebuild = prefs.accuracy != self.inputs.simulation_accuracy
             || (prefs.regenerate_on_rewind && !self.options.regenerate_on_rewind);
+        let comparison_changed = prefs.comparison_tolerance != self.options.comparison_tolerance
+            || prefs.stock_coloring != self.options.stock_coloring;
         if prefs.stop_on_collision != self.options.stop_on_collision {
             self.collision = None;
             self.acknowledged_step = None;
             self.collision_floor = self.rendered;
+        }
+        if prefs.comparison_tolerance != self.options.comparison_tolerance {
+            self.comparison.invalidate();
+            self.comparison_classes.clear();
+        }
+        if prefs.stock_coloring != SimulationStockColoring::Comparison {
+            self.comparison.invalidate();
         }
         self.options = prefs.clone();
         self.custom_stock_color = custom;
@@ -134,6 +143,10 @@ impl SimulationPlayer {
             self.inputs.preview_resolution = Some(self.inputs.stock_resolution(&full));
             self.stock_position = self.position;
             self.request_frame();
+        } else if comparison_changed {
+            if let Some(frame) = self.pending_frame.take() {
+                self.prepare_frame(frame);
+            }
         }
         self.refresh_display();
     }
@@ -289,17 +302,16 @@ impl SimulationPlayer {
         }
         self.preview.scene = scene;
         if self.options.stock_coloring == SimulationStockColoring::Comparison
-            && self.comparison_deviations.len() != self.preview.stock_vertices.len()
+            && self.pending_frame.is_none()
+            && self.comparison_classes.len() != self.preview.stock_vertices.len()
         {
-            self.comparison_deviations = self
-                .preview
-                .stock_vertices
-                .iter()
-                .map(|vertex| {
-                    self.target
-                        .surface_deviation(vertex.position.map(f64::from))
-                })
-                .collect();
+            if let Some(classes) = self.comparison.request(
+                &self.target,
+                &self.preview.stock_vertices,
+                f64::from(self.options.comparison_tolerance),
+            ) {
+                self.comparison_classes = classes;
+            }
         }
         let material = self.options.material.color(self.custom_stock_color);
         let mut tools = BTreeMap::new();
@@ -312,7 +324,16 @@ impl SimulationPlayer {
                 tools.insert(tag.op_id, tool);
             }
         }
+        // A pending comparison must not replace a complete frame with gray
+        // placeholders, including while changing the tolerance or display.
+        let retain_colors = self.options.stock_coloring == SimulationStockColoring::Comparison
+            && (self.pending_frame.is_some()
+                || (self.comparison.pending()
+                    && self.comparison_classes.len() != self.preview.stock_vertices.len()));
         for (index, vertex) in self.preview.stock_vertices.iter_mut().enumerate() {
+            if retain_colors {
+                continue;
+            }
             let owner = self.preview.stock_operations.get(index).copied().flatten();
             vertex.color = match self.options.stock_coloring {
                 SimulationStockColoring::Material => material,
@@ -322,16 +343,12 @@ impl SimulationPlayer {
                     .copied()
                     .map_or(material, identity_color),
                 SimulationStockColoring::Comparison => {
-                    self.comparison_deviations[index].map_or([0.5, 0.5, 0.5, 1.], |deviation| {
-                        let tol = f64::from(self.options.comparison_tolerance);
-                        if deviation > tol {
-                            [0.2, 0.4, 1., 1.]
-                        } else if deviation < -tol {
-                            [1., 0.1, 0.1, 1.]
-                        } else {
-                            [0.15, 0.85, 0.2, 1.]
-                        }
-                    })
+                    match self.comparison_classes.get(index).copied().flatten() {
+                        Some(cam_render::SurfaceClass::Excess) => [0.2, 0.4, 1., 1.],
+                        Some(cam_render::SurfaceClass::WithinTolerance) => [0.15, 0.85, 0.2, 1.],
+                        Some(cam_render::SurfaceClass::Gouge) => [1., 0.1, 0.1, 1.],
+                        None => [0.5, 0.5, 0.5, 1.],
+                    }
                 }
             };
         }
@@ -374,7 +391,13 @@ impl SimulationPlayer {
         column![
             inspector_heading("Simulation"),
             tabs,
-            scrollable(container(content).padding([4, 0])).height(Length::Fill),
+            scrollable(container(content).padding(Padding {
+                top: 4.0,
+                right: 18.0,
+                bottom: 4.0,
+                left: 0.0,
+            }))
+            .height(Length::Fill),
             inspector_button("Close simulation")
                 .on_press(Message::SimulationClose)
                 .width(Length::Fill),
@@ -416,14 +439,11 @@ impl SimulationPlayer {
                         p.programmed_point,
                         SimulationOption::ProgrammedPoint,
                     ));
-                if p.tool_display == SimulationToolDisplay::Holder {
-                    list = list.push(note(
-                        "Holder is schematic; holder collision checking is unavailable.",
-                    ));
-                }
             }
         }
-        list = list.push(section(1, "Toolpath"));
+        list = list
+            .push(popup_separator::<Message>())
+            .push(section(1, "Toolpath"));
         if self.sections[1] {
             list = list.push(check(
                 "Show toolpath",
@@ -453,19 +473,12 @@ impl SimulationPlayer {
                         SimulationToolpathMode::ALL,
                         p.toolpath_mode,
                         SimulationOption::Mode,
-                    ))
-                    .push(note(match p.toolpath_mode {
-                        SimulationToolpathMode::All => "All simulated operations.",
-                        SimulationToolpathMode::Trailing => {
-                            "The path already traveled by the tool."
-                        }
-                        SimulationToolpathMode::Leading => "The path still ahead of the tool.",
-                        SimulationToolpathMode::Operation => "The complete current operation.",
-                        SimulationToolpathMode::Tail => "The last 20 mm traveled behind the tool.",
-                    }));
+                    ));
             }
         }
-        list = list.push(section(2, "Stock"));
+        list = list
+            .push(popup_separator::<Message>())
+            .push(section(2, "Stock"));
         if self.sections[2] {
             list = list.push(check("Show stock", p.show_stock, SimulationOption::Stock));
             if p.show_stock {
@@ -498,12 +511,15 @@ impl SimulationPlayer {
                         SimulationOption::TransparentStock,
                     ));
                 if p.stock_coloring == SimulationStockColoring::Comparison {
-                    list = list.push(note(if self.target.bounds().is_none() {
-                        "Comparison needs a closed CAD solid in this setup. Gray means no target."
-                    } else { "Blue: excess · Green: within tolerance · Red: gouge. Compared to the CAD tessellation. Hide the model to inspect gouges." }))
+                    list = list
                         .push(text(format!("Tolerance  {:.3} mm", p.comparison_tolerance)).size(12))
-                        .push(slider(0.001..=2., p.comparison_tolerance, |v| Message::SimulationOption(SimulationOption::Tolerance(v)))
-                            .step(0.001_f32).on_release(Message::SimulationSaveSettings));
+                        .push(
+                            slider(0.001..=2., p.comparison_tolerance, |v| {
+                                Message::SimulationOption(SimulationOption::Tolerance(v))
+                            })
+                            .step(0.001_f32)
+                            .on_release(Message::SimulationSaveSettings),
+                        );
                 }
             }
             list = list
@@ -518,7 +534,9 @@ impl SimulationPlayer {
                     SimulationOption::StopOnCollision,
                 ));
         }
-        list = list.push(section(3, "Display"));
+        list = list
+            .push(popup_separator::<Message>())
+            .push(section(3, "Display"));
         if self.sections[3] {
             list = list.push(check("Show model", p.show_model, SimulationOption::Model));
         }
@@ -549,23 +567,20 @@ fn add_point(scene: &mut Scene, point: [f32; 3], op: Option<u32>, color: [f32; 4
         scene.add_strip_op(vec![a, b], color, op);
     }
 }
-fn note(label: &str) -> Element<'static, Message> {
-    text(label.to_owned())
-        .size(11)
-        .color(palette::GROUP_LABEL)
-        .into()
-}
 fn check(
     label: &str,
     value: bool,
     option: fn(bool) -> SimulationOption,
 ) -> Element<'static, Message> {
-    checkbox(value)
-        .label(label.to_owned())
-        .text_size(12)
-        .size(14)
-        .on_toggle(move |v| Message::SimulationOption(option(v)))
-        .into()
+    row![
+        text(label.to_owned()).size(12).width(Length::Fill),
+        checkbox(value)
+            .size(14)
+            .on_toggle(move |v| Message::SimulationOption(option(v))),
+    ]
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
+    .into()
 }
 fn picker<T: Clone + Copy + PartialEq + std::fmt::Display + 'static>(
     label: &str,

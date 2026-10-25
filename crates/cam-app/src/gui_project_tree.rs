@@ -28,6 +28,7 @@ pub(super) enum TreeMessage {
     Hover(TreeNode, bool),
     Leave(TreeNode),
     Open(TreeNode),
+    DoubleClick(TreeNode),
     Release,
     Command(Box<Message>),
     ShowPatternMenu,
@@ -36,7 +37,6 @@ pub(super) enum TreeMessage {
 
 impl App {
     pub(super) fn clear_browser_selection(&mut self) {
-        self.simulation = None;
         self.pending_simulation = None;
         self.pending_processing_time = None;
         self.cad_filter_explicit = false;
@@ -125,14 +125,12 @@ impl App {
                     self.controller.select(Selection::Setup);
                     self.model_view = None;
                     self.expanded_patterns.insert(*id);
-                    self.simulation = None;
                     self.pending_simulation = None;
                     self.pending_processing_time = None;
                 }
                 iced::Task::none()
             }
             _ => {
-                self.simulation = None;
                 self.pending_simulation = None;
                 self.pending_processing_time = None;
                 self.end_setup_draft();
@@ -208,6 +206,22 @@ impl App {
                 self.pattern_menu_y = None;
                 self.op_menu_pos = self.window_cursor;
                 self.tree_menu = Some(node);
+            }
+            TreeMessage::DoubleClick(node) => {
+                self.tree_drag = None;
+                self.tree_menu = None;
+                self.pattern_menu_y = None;
+                self.open_op_menu = None;
+                if self.tree_edit_blocked() {
+                    return iced::Task::none();
+                }
+                match node {
+                    TreeNode::Setup(id) => return self.update(Message::EditSetup(id)),
+                    TreeNode::Operation(id) => {
+                        return self.update(Message::Select(Selection::Operation(id)));
+                    }
+                    _ => return iced::Task::none(),
+                }
             }
             TreeMessage::ShowPatternMenu => {
                 if matches!(self.tree_menu, Some(TreeNode::Setup(_) | TreeNode::Operation(_))) {
@@ -336,6 +350,7 @@ impl App {
         let leave = node.clone();
         let press = node.clone();
         let open = node.clone();
+        let double_click = node.clone();
         mouse_area(
             container(content)
                 .width(Length::Fill)
@@ -356,6 +371,7 @@ impl App {
                 }),
         )
         .on_press(Message::Tree(TreeMessage::Press(press)))
+        .on_double_click(Message::Tree(TreeMessage::DoubleClick(double_click)))
         .on_right_press(Message::Tree(TreeMessage::Open(open)))
         .on_move(move |point| {
             Message::Tree(TreeMessage::Hover(
@@ -478,33 +494,11 @@ impl App {
             mouse_area(tree_header("Setups"))
                 .on_right_press(Message::Tree(TreeMessage::Open(TreeNode::Setups))),
         );
-        let toolpath_statuses = self.controller.toolpath_statuses();
+        let status_fingerprints = self.controller.current_toolpath_fingerprints();
+        let toolpath_statuses = self.controller.toolpath_statuses_for(&status_fingerprints);
         for setup in self.controller.setups() {
             let active = setup.id == self.controller.active_setup_id();
             let expanded = self.expanded_setups.contains(&setup.id);
-            let status = if !active {
-                "inactive"
-            } else if setup.operations.is_empty() {
-                "empty"
-            } else if self.controller.outcome().is_some_and(|outcome| {
-                setup
-                    .operations
-                    .iter()
-                    .filter(|op| !self.controller.is_operation_excluded(op.id()))
-                    .all(|op| {
-                        outcome
-                            .scene
-                            .strips
-                            .iter()
-                            .any(|strip| strip.op == Some(op.id()))
-                    })
-            }) {
-                "generated"
-            } else if self.controller.outcome().is_some() {
-                "needs run"
-            } else {
-                "pending"
-            };
             let setup_row = row![
                 button(text(if expanded { "▾" } else { "▸" }).size(11))
                     .padding(2)
@@ -513,7 +507,10 @@ impl App {
                 checkbox(!self.hidden_setups.contains(&setup.id))
                     .size(12)
                     .on_toggle(move |visible| Message::SetSetupVisible(setup.id, visible)),
-                text(format!("{} · {}", setup.name, status))
+                self.status_indicator(
+                    StatusTarget::Setup(setup.id), &toolpath_statuses, &status_fingerprints,
+                ),
+                text(&setup.name)
                     .size(11)
                     .width(Length::Fill)
             ]
@@ -531,6 +528,7 @@ impl App {
             // that same stable order so a row's position is its execution order.
             let origins = setup.origin_indices();
             let mut operations: Vec<_> = setup.operations.iter().collect();
+            let mut operation_counts = std::collections::BTreeMap::new();
             operations.sort_by_key(|op| {
                 origins
                     .iter()
@@ -539,6 +537,10 @@ impl App {
             });
             let mut group = None;
             for op in operations {
+                let kind = op_kind(op);
+                let count = operation_counts.entry(kind).or_insert(0usize);
+                *count += 1;
+                let operation_label = format!("[T{}] {kind} {count}", op.tool());
                 if origins.len() > 1 && group != Some(op.work_offset()) {
                     list = list.push(tree_note(&format!("    Work origin {}", op.work_offset())));
                     group = Some(op.work_offset());
@@ -553,15 +555,6 @@ impl App {
                 if let Some(pattern) = setup.patterns.iter().find(|p| p.members.contains(&id)) {
                     if !self.expanded_patterns.contains(&pattern.id) { continue; }
                 }
-                let excluded = self.controller.is_operation_excluded(id);
-                let generated = toolpath_statuses.get(&id).copied().unwrap_or(false);
-                let state = if excluded {
-                    "suppressed"
-                } else if generated {
-                    "ready"
-                } else {
-                    "out of date"
-                };
                 let expanded = self.expanded_operations.contains(&id);
                 let controls = row![
                     Space::new().width(Length::Fixed(if setup.patterns.iter().any(|p| p.members.contains(&id)) { 28.0 } else { 14.0 })),
@@ -572,12 +565,11 @@ impl App {
                     checkbox(!self.hidden_ops.contains(&id))
                         .size(12)
                         .on_toggle(move |visible| Message::SetOperationVisible(id, visible)),
-                    text("●").size(10).color(if generated {
-                        Color::from_rgb8(70, 175, 85)
-                    } else {
-                        Color::from_rgb8(230, 185, 40)
-                    }),
-                    text(format!("{} · {}", op_kind(op), state))
+                    self.status_indicator(
+                        StatusTarget::Operation(id), &toolpath_statuses, &status_fingerprints,
+                    ),
+                    icon_svg(operation_icon(op), 18.0),
+                    text(operation_label)
                         .size(11)
                         .width(Length::Fill)
                 ]
@@ -832,6 +824,21 @@ impl App {
                 bottom: 0.0,
             });
         Some(iced::widget::stack![main_menu, submenu].into())
+    }
+}
+
+fn operation_icon(op: &Operation) -> Icon {
+    match op {
+        Operation::Profile(_) => Icon::Profile,
+        Operation::Drill(_) => Icon::Drill,
+        Operation::Pocket(_) => Icon::Pocket,
+        Operation::Face(_) => Icon::Face,
+        Operation::Chamfer(_) => Icon::Chamfer,
+        Operation::Bore(_) => Icon::Bore,
+        Operation::Thread(_) => Icon::Thread,
+        Operation::Engrave(_) => Icon::Engrave,
+        Operation::Carve(_) => Icon::Carve,
+        Operation::Adaptive(_) => Icon::Adaptive,
     }
 }
 

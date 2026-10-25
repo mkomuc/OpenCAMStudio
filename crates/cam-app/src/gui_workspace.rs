@@ -130,6 +130,7 @@ struct EditorKey {
     height_id: Option<u32>,
     offsets: BTreeMap<cam_model::HeightPlaneKind, String>,
     tab_selection: Option<usize>,
+    position_markers: [Option<[f64; 3]>; 2],
     tab: OperationTab,
 }
 
@@ -224,7 +225,7 @@ impl App {
                     axes,
                     camera: viewport.camera(),
                     scale: self.settings.view.origin_marker_scale,
-                    interactive: !self.in_origin_pick(),
+                    interactive: !self.in_origin_pick() && self.operation_position_pick.is_none(),
                     browser_overlay_width: viewport.browser_overlay_width,
                 });
         let labels = grid_view::GridLabels {
@@ -401,6 +402,7 @@ impl App {
                 height_id: self.height_draft_id,
                 offsets: self.height_offsets.clone(),
                 tab_selection: self.profile_tab_selection,
+                position_markers: self.operation_position_markers,
                 tab: self.operation_tab,
             }),
         });
@@ -539,6 +541,8 @@ impl App {
         viewport.operation_position_picking = self.operation_position_pick.is_some()
             && self.operation_preview_active()
             && self.operation_tab == OperationTab::Linking && !model_view;
+        viewport.operation_position_color = self.operation_position_pick
+            .unwrap_or(operation_positions::PositionKind::Entry).color();
         viewport.setup_hover = self.setup_hover.clone();
         viewport.setup_snaps = if self.settings.snapping.enabled {
             self.snaps.clone()
@@ -600,7 +604,11 @@ impl App {
         } else {
             0.
         };
-        viewport.planar_features = self.planar_selection.clone();
+        viewport.planar_features = if self.simulation.is_some() {
+            Vec::new()
+        } else {
+            self.planar_selection.clone()
+        };
         viewport
     }
     fn viewport_pick_toolbar(&self) -> Element<'_, Message> {
@@ -1767,6 +1775,75 @@ mod performance_tests {
             &hovered.cad_scene,
             &app.machining_viewport().cad_scene
         ));
+    }
+
+    #[test]
+    fn simulation_draws_cad_without_selected_or_hovered_features_and_preserves_selection() {
+        let mut app = cad_app();
+        let geometry = app.controller.geometry_state();
+        let instance = &geometry.instances[0];
+        let asset = geometry.asset(instance.asset_id).unwrap();
+        let face = EntityRef {
+            asset_id: asset.id,
+            revision: asset.revision,
+            instance_id: instance.id,
+            body_id: instance.body_id,
+            kind: EntityKind::Face,
+            id: asset.topology.faces[0].id,
+        };
+        let focus: Vec<_> = geometry.bindings.keys().copied().collect();
+        assert!(!focus.is_empty(), "exercise operation-bound features too");
+        let build = |controller: &AppController,
+                     preview: Option<&crate::RunOutcome>,
+                     hover: Option<&EntityRef>,
+                     focus: &[u32], show_stock: bool| {
+            Viewport::new(
+                controller,
+                preview,
+                EntityKind::Face,
+                hover,
+                &BTreeSet::new(),
+                false,
+                show_stock,
+                ViewControls::default(),
+                false,
+                110.,
+                &crate::Settings::default(),
+                focus,
+                &[],
+                None,
+                None,
+                false,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let neutral = build(&app.controller, None, None, &[], false);
+        app.controller.set_cad_selection(vec![face.clone()]);
+        let selected = build(&app.controller, None, Some(&face), &focus, false);
+        assert_ne!(selected.mesh_vertices, neutral.mesh_vertices);
+        let preview = crate::RunOutcome::default();
+        let simulated = build(&app.controller, Some(&preview), Some(&face), &focus, false);
+        assert_eq!(simulated.mesh_vertices, neutral.mesh_vertices);
+        assert_eq!(simulated.cad_edges, neutral.cad_edges);
+        assert!(simulated.vertices.iter().all(|v| v.width <= 1.));
+        let stock = crate::RunOutcome {
+            stock_vertices: vec![MeshVertex { position: [0.; 3], normal: [0., 0., 1.], color: [1., 0., 0., 1.] }; 3],
+            stock_indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        let with_stock = build(&app.controller, Some(&stock), None, &[], true);
+        assert_eq!(*with_stock.mesh_vertices, stock.stock_vertices,
+            "nominal CAD faces must not hide thread cut faces");
+        assert_eq!(with_stock.cad_edges, neutral.cad_edges, "retain model reference edges");
+
+        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&face));
+        let restored = build(&app.controller, None, Some(&face), &focus, false);
+        assert_eq!(restored.mesh_vertices, selected.mesh_vertices);
+        assert_eq!(restored.vertices, selected.vertices);
     }
 
     #[test]
