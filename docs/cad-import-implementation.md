@@ -68,8 +68,11 @@ connected open chain, preserving its endpoints. Carve offers a face with islands
 (all inner boundaries remain uncut) or a single closed boundary loop.
 Thread accepts cylindrical bore or boss faces, including picks on their circular
 rims; multiple centres must share diameter and cutting heights. The selected
-cylinder seeds internal/external type and diameter; nominal thread diameter and
-pitch remain editable. These operations follow the selected feature's setup Z
+cylinder seeds internal/external type and diameter. Geometry also provides
+metric coarse/fine and UNC/UNF standard-size presets, optional prepared-bore or
+nominal-diameter matching, and shared pitch/hand controls with Passes. Nominal
+thread diameter and pitch remain editable; see [thread presets](thread-presets.md).
+These operations follow the selected feature's setup Z
 plane. Surface-operation depth is specified by the operator; thread geometry
 provides the cylindrical cutting interval. Clear, remove and reselect work during
 creation and editing, with all changes waiting for the operation's OK/Cancel.
@@ -105,7 +108,9 @@ to clear the selection and resume updates.
   selected walls, overhangs, ambiguous trims and bores through the selected floor
   are rejected conservatively. Unrelated curved surfaces elsewhere are allowed.
 - Drill: inward analytic cylinders aligned with machining Z, complete rims and
-  planar entry/termination. Split seam faces are merged. Bore diameter, entry and
+  planar termination. Entry may be planar or an analytically certified coaxial
+  outward-opening quarter-torus, using the same qualification as Bore and Thread.
+  Split seam faces are merged. Bore diameter, entry and
   depth must agree within a group; the tool diameter must match. Circular edges
   alone cannot establish a hole. Conical tips and breakthrough are not inferred.
 - Open Profile chains: connected line, circle, B-spline or Bezier edges on an

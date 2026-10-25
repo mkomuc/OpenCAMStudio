@@ -575,6 +575,9 @@ impl App {
             }
         }
         for field in self.geometry_operation_fields(op) {
+            if matches!(op, Operation::Thread(_)) && tab == OperationTab::Geometry && field == Field::MajorDia {
+                continue; // Grouped with pitch, hand and standard thread size.
+            }
             if matches!(field, Field::StockLeaveRadial | Field::StockLeaveAxial) {
                 continue; // These belong to the dedicated Stock to Leave section below.
             }
@@ -971,6 +974,7 @@ impl App {
                         &Bore::ALL[..],
                         |b| Message::ThreadInternalChanged(b == Bore::Internal),
                     ));
+                    list = list.push(self.thread_geometry_controls(t));
                 }
                 if tab == OperationTab::Passes {
                     list = list.push(profile_picker(

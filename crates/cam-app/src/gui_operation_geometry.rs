@@ -264,7 +264,7 @@ impl App {
         fields
     }
 
-    fn drawing_sources_for_operation(&self, operation: &Operation) -> Vec<LoopRef> {
+    pub(super) fn drawing_sources_for_operation(&self, operation: &Operation) -> Vec<LoopRef> {
         let candidates: Vec<_> = self
             .controller
             .regions()
@@ -561,7 +561,7 @@ impl App {
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
             OpKind::Bore => "Select cylindrical holes or bosses, or circular drawing loops. Selected features must share diameter and cutting heights.",
-            OpKind::Thread => "Select cylindrical bores or bosses, or circular drawing holes. Selected features must share diameter and cutting heights.",
+            OpKind::Thread => "Select cylindrical bores or bosses, or circular drawing holes. Selected features must share diameter and cutting heights. A verified rounded entrance is supported; only the cylinder is threaded. Choose a thread mill, then review the suggested standard size in Geometry > Thread or enter a custom major diameter and pitch.",
             OpKind::Adaptive => "Select whole solid bodies, individual faces, or both. Body selection includes all of its faces; face selection limits machining to the chosen face footprint.",
             _ => unreachable!(),
         };

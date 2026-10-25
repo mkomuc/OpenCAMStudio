@@ -14,6 +14,8 @@ The 2026-10-13 review is pinned to source revision `5c510b504fe39f4e40700ff3b1e3
 
 ## Existing project references
 
+- [Thread geometry and standard presets](thread-presets.md): Geometry/Passes controls, metric and Unified size/pitch presets, source-diameter matching and preparation/nominal interpretation.
+- [Operation compatibility and current limits](operation-compatibility.md): all ten operation families, required geometry/tool/features, the `thread.ocam` diagnosis and regression fixes.
 - [GUI style specification](gui-style-spec.md): shared typography, colors, buttons, form layout, optional-section behavior, and review requirements for new GUI features.
 - [Profile operation implementation status](profile-operation-implementation.md): implemented fixed-axis controls, illustrated hints, validation and compatibility behavior, plus explicit remaining backlog scope.
 - [Profile operation review and implementation plan](profile-operation-review-plan.md): 2026-10-23 comparison with Autodesk's 2D Contour reference, correctness findings, duplicate-function and naming consolidation, a prioritizable backlog, and illustrated hover-help requirements.

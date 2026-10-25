@@ -65,36 +65,224 @@ fn supplied_project_bore_with_rounded_entrance_generates_and_posts() {
     assert!(app.export_nc().unwrap().contains("Bore"));
 }
 
+/// thread.ocam contains this same CAD cylinder/torus. Use the existing tracked
+/// source fixture so the regression does not depend on a local unsaved project.
+#[test]
+fn rounded_bore_threads_regenerate_reopen_and_export_with_a_thread_mill() {
+    use cam_model::{Tool, ToolKind};
+    let (mut app, face) = project();
+    let old_id = app.document().setup().operations[0].id();
+    app.set_operation_excluded(old_id, true);
+    let tool = app.use_tool(Tool {
+        number: 43,
+        diameter: 8.,
+        neck_diameter: 4.,
+        flute_length: 32.,
+        length: 62.,
+        kind: ToolKind::ThreadMill { pitch: None },
+        ..Default::default()
+    });
+    let id = app
+        .create_cad_operation_with_tool(OpKind::Thread, vec![face], tool)
+        .unwrap();
+    let mut operation = app.operation(id).unwrap().clone();
+    let Operation::Thread(thread) = &mut operation else {
+        unreachable!()
+    };
+    assert_eq!(thread.points, vec![[-30., 10.]]);
+    assert_eq!((thread.z_top, thread.z_bottom), (16., 0.));
+    // A bore is not a nominal thread specification. Choose an illustrative
+    // 60-degree form whose basic minor diameter is the existing 30 mm hole.
+    thread.pitch = 1.25;
+    thread.major_dia = 30. + 1.082_53 * thread.pitch;
+    thread.passes = 3;
+    thread.spring_passes = 1;
+    app.apply_operation_settings(operation, None).unwrap();
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let cuts: Vec<_> = result
+        .program
+        .steps()
+        .iter()
+        .filter_map(|step| match step {
+            Step::Arc {
+                end, center, tag, ..
+            } if tag.op_id == id && tag.kind == MoveKind::Cutting => Some((*end, *center)),
+            _ => None,
+        })
+        .collect();
+    // Fractional 12.8-turn helices retain exactly 1.25 mm/revolution.
+    assert_eq!(cuts.len(), 26 * 4);
+    for pass in cuts.as_chunks::<26>().0 {
+        let mut previous_angle = 0.;
+        let mut previous_z = 0.;
+        for (end, center) in pass {
+            assert!((center.x + 30.).abs() < 1e-8 && (center.y - 10.).abs() < 1e-8);
+            let angle = (end.y - center.y).atan2(end.x - center.x);
+            let sweep = (angle - previous_angle).rem_euclid(std::f64::consts::TAU);
+            assert!(((end.z - previous_z) / sweep * std::f64::consts::TAU - 1.25).abs() < 1e-8);
+            assert!((0. ..=16.).contains(&end.z));
+            previous_angle = angle;
+            previous_z = end.z;
+        }
+        assert!((previous_z - 16.).abs() < 1e-8);
+    }
+    let path = std::env::temp_dir().join(format!("rounded-thread-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = AppController::new(default_machine());
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.operation(id), app.operation(id));
+    for post in cam_post::PostKind::ALL {
+        reopened.set_post_kind(post);
+        let result = reopened.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{post:?}: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            reopened.export_nc().unwrap().contains("Thread mill"),
+            "{post:?}"
+        );
+    }
+}
+
+#[test]
+fn supplied_part_has_compatible_selections_and_tools_for_every_operation() {
+    use cam_model::{Tool, ToolKind};
+    let (_, cylinder) = project();
+    let reference = |kind, id| EntityRef {
+        kind,
+        id,
+        ..cylinder.clone()
+    };
+    // Each operation gets its manufacturing feature, rather than the same
+    // arbitrary face. The rounded entrance itself is not a planar chamfer.
+    for (kind, feature) in [
+        (OpKind::Profile, reference(EntityKind::Silhouette, 1)),
+        (OpKind::Pocket, reference(EntityKind::Face, 9)),
+        (OpKind::Drill, cylinder.clone()),
+        (OpKind::Face, reference(EntityKind::Face, 4)),
+        (OpKind::Chamfer, reference(EntityKind::Face, 10)),
+        (OpKind::Bore, cylinder.clone()),
+        (OpKind::Thread, cylinder.clone()),
+        (OpKind::Engrave, reference(EntityKind::Edge, 18)),
+        (OpKind::Carve, reference(EntityKind::Face, 9)),
+        (OpKind::Adaptive, reference(EntityKind::Body, 1)),
+    ] {
+        let (mut app, _) = project();
+        app.preview_cad_operation(kind, std::slice::from_ref(&feature))
+            .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        let old_id = app.document().setup().operations[0].id();
+        app.set_operation_excluded(old_id, true);
+        let mut cutter = Tool {
+            number: 43,
+            diameter: 8.,
+            flute_length: 32.,
+            length: 62.,
+            kind: ToolKind::EndMill,
+            ..Default::default()
+        };
+        match kind {
+            OpKind::Drill => {
+                cutter.diameter = 30.;
+                cutter.kind = ToolKind::Drill {
+                    point_angle_deg: 118.,
+                };
+            }
+            OpKind::Thread => {
+                cutter.neck_diameter = 4.;
+                cutter.kind = ToolKind::ThreadMill { pitch: None };
+            }
+            OpKind::Chamfer => {
+                cutter.kind = ToolKind::ChamferMill {
+                    included_angle_deg: 90.,
+                    tip_diameter: 1.,
+                }
+            }
+            OpKind::Engrave | OpKind::Carve => {
+                cutter.kind = ToolKind::VBit {
+                    included_angle_deg: 60.,
+                    tip_radius: 0.,
+                }
+            }
+            _ => {}
+        }
+        let tool = app.use_tool(cutter);
+        if kind == OpKind::Carve {
+            // The stock starts as a solid block. Expose the recessed carving
+            // surface first, including stock over its sharp corners that a
+            // round pocket cutter cannot reach. CAD display does not remove stock.
+            app.create_cad_operation_with_tool(
+                OpKind::Face,
+                vec![reference(EntityKind::Face, 4)],
+                42,
+            )
+            .unwrap();
+            app.create_cad_operation_with_tool(OpKind::Pocket, vec![feature.clone()], 42)
+                .unwrap();
+        }
+        let id = app
+            .create_cad_operation_with_tool(kind, vec![feature], tool)
+            .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        if kind == OpKind::Thread {
+            let mut op = app.operation(id).unwrap().clone();
+            if let Operation::Thread(t) = &mut op {
+                t.major_dia = 31.082_53;
+            }
+            app.apply_operation_settings(op, None).unwrap();
+        }
+        let result = app.run(&CancelToken::new());
+        assert!(
+            result.collisions.is_empty(),
+            "{kind:?}: {:?}",
+            result.collisions
+        );
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{kind:?}: {:?}",
+            result.diagnostics
+        );
+        assert!(result.program.steps().iter().any(|step| matches!(step,
+            Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.op_id == id && tag.kind == MoveKind::Cutting
+        )) || kind == OpKind::Drill, "{kind:?}: no cutting motion");
+        app.export_nc().unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+    }
+}
+
 #[test]
 fn rounded_bore_access_is_analytic_and_rejects_caps_incomplete_rims_and_obstructions() {
     use cam_model::{CadCurve, CadFace, CadMesh, ExtractionRecipe};
     let (app, reference) = project();
     let original = app.geometry_state().clone();
-    let resolve = |geometry: &cam_model::GeometryState| {
-        cam_geometry3d::resolve_selection(
-            geometry,
-            std::slice::from_ref(&reference),
-            ExtractionRecipe::BoreCylinders { internal: true },
-            20.,
-        )
+    let resolve = |geometry: &cam_model::GeometryState, recipe| {
+        cam_geometry3d::resolve_selection(geometry, std::slice::from_ref(&reference), recipe, 20.)
     };
-    let expected = resolve(&original).unwrap();
-    let mut without_mesh = original.clone();
-    std::sync::Arc::make_mut(&mut without_mesh.assets[0].topology).mesh = CadMesh::default();
-    assert_eq!(resolve(&without_mesh).unwrap(), expected);
-
-    // Drill and Thread retain their existing stricter termination requirements.
-    for recipe in [
+    let recipes = [
+        ExtractionRecipe::BoreCylinders { internal: true },
         ExtractionRecipe::DrillHoles,
         ExtractionRecipe::ThreadCylinders { internal: true },
-    ] {
-        assert!(cam_geometry3d::resolve_selection(
-            &original,
-            std::slice::from_ref(&reference),
-            recipe,
-            20.
-        )
-        .is_err());
+    ];
+    let mut without_mesh = original.clone();
+    std::sync::Arc::make_mut(&mut without_mesh.assets[0].topology).mesh = CadMesh::default();
+    for recipe in &recipes {
+        let expected = resolve(&original, recipe.clone()).unwrap();
+        assert_eq!(
+            expected.heights,
+            cam_model::CuttingHeights {
+                top: 16.,
+                bottom: 0.
+            }
+        );
+        assert_eq!(resolve(&without_mesh, recipe.clone()).unwrap(), expected);
     }
     for case in [
         "noncoaxial",
@@ -178,12 +366,14 @@ fn rounded_bore_access_is_analytic_and_rejects_caps_incomplete_rims_and_obstruct
             }
             _ => unreachable!(),
         }
-        let error = resolve(&geometry).expect_err(case);
-        assert!(
-            error.contains("rounded entrance")
-                || error.contains("blocks vertical access")
-                || error.contains("terminations need explicit qualification"),
-            "{case}: {error}"
-        );
+        for recipe in &recipes {
+            let error = resolve(&geometry, recipe.clone()).expect_err(case);
+            assert!(
+                error.contains("rounded entrance")
+                    || error.contains("blocks vertical access")
+                    || error.contains("terminations need explicit qualification"),
+                "{recipe:?} / {case}: {error}"
+            );
+        }
     }
 }

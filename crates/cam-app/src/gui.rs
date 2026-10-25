@@ -56,6 +56,8 @@ mod simulation_view;
 use simulation_view::SimulationPlayer;
 #[path = "gui_operation_metadata.rs"]
 mod operation_metadata;
+#[path = "gui_thread_parameters.rs"]
+mod thread_parameters;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
 #[path = "gui_setup_editor.rs"]
@@ -1540,7 +1542,10 @@ impl Field {
             }
             Field::MajorDia => {
                 "Major (nominal) diameter of the thread — the crest diameter for an \
-                 external thread, the bore's tapped size for internal (mm)."
+                 external thread, the bore's tapped size for internal (mm). CAD selection \
+                 seeds this from the cylinder diameter; set the required thread size \
+                 explicitly. An existing internal bore must be smaller than the major \
+                 diameter for the thread mill to engage material."
             }
             Field::Pitch => {
                 "Thread pitch: the axial distance advanced per revolution (mm). One turn \
@@ -1976,6 +1981,7 @@ struct App {
     operation_draft: Option<Operation>,
     stock_to_leave_draft: Option<cam_model::StockToLeave>,
     creation_edited_fields: BTreeSet<Field>,
+    thread_parameters: thread_parameters::ThreadParameters,
     creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
     operation_geometry: Option<Vec<EntityRef>>,
     geometry_row_selection: Option<usize>,
@@ -2647,6 +2653,7 @@ enum Message {
     BoreOption(BoreOption),
     /// Change the selected thread's hand.
     ThreadHandChanged(Hand),
+    ThreadParameters(thread_parameters::ThreadMessage),
     /// Change the selected thread between climb and conventional milling.
     ThreadClimbChanged(bool),
     /// Toggle whether the selected carve links its rings without lifting.
@@ -3039,6 +3046,7 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.thread_parameters = Default::default();
         self.geometry_editor = None;
         self.profile_contour_selection = 0;
         self.profile_side_overrides.clear();
@@ -3336,6 +3344,7 @@ impl App {
             operation_draft: None,
             stock_to_leave_draft: None,
             creation_edited_fields: BTreeSet::new(),
+            thread_parameters: Default::default(),
             creation_geometry_height_defaults: None,
             operation_geometry: None,
             geometry_row_selection: None,
@@ -3544,9 +3553,17 @@ impl App {
             | Message::ProfileChainEdgesChanged(_) => true,
             _ => false,
         };
+        let sync_thread = matches!(&message,
+            Message::ThreadParameters(_) | Message::ThreadInternalChanged(_)
+                | Message::CadSelect(_) | Message::CadPicked(_) | Message::PickWorld(_, _)
+                | Message::OperationGeometry(_) | Message::GeometryRemove(_) | Message::GeometryClear
+                | Message::ConfirmCadOperation | Message::UseDrawingGeometry | Message::BeginOp(_)
+                | Message::OperationToolPicked(_)
+        );
         let previous_status = self.status.clone();
         let context = self.output_context();
         let task = self.update_message(message);
+        if sync_thread { self.sync_thread_standard(); }
         if self.status != previous_status {
             self.append_output(&context, &self.status.clone());
         }
@@ -4761,6 +4778,9 @@ impl App {
                 }
             }
             Message::FieldChanged(field, value) => {
+                if matches!(field, Field::MajorDia | Field::Pitch) {
+                    self.thread_parameters.mode = thread_parameters::ThreadMatchMode::Manual;
+                }
                 if matches!(field, Field::TabSpacing | Field::StartX | Field::StartY) { self.profile_tab_selection = None; }
                 if self.creating_operation() {
                     self.creation_edited_fields.insert(field);
@@ -6515,6 +6535,7 @@ impl App {
                     }
                 });
             }
+            Message::ThreadParameters(message) => self.thread_parameters_message(message),
             Message::ThreadClimbChanged(climb) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Thread(t) = op {

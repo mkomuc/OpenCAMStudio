@@ -10,7 +10,7 @@ pub(super) fn certify(
     cylinder_rim: &CadEdge,
 ) -> Result<(), String> {
     let invalid = || {
-        "Bore requires a complete coaxial rounded entrance that widens upward to an open planar rim"
+        "A cylindrical feature requires a complete coaxial rounded entrance that widens upward to an open planar rim"
             .to_string()
     };
     let CadSurface::Cylinder {

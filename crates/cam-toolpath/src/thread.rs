@@ -59,7 +59,10 @@ impl Strategy for ThreadStrategy {
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if let Err(reason) = op.entry_feeds.validate() {
-            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            };
         }
         let mut diagnostics = Vec::new();
 
@@ -81,6 +84,44 @@ impl Strategy for ThreadStrategy {
             bail!();
         };
         let tool_r = tool.radius();
+
+        if [
+            op.pitch,
+            op.major_dia,
+            op.z_top,
+            op.z_bottom,
+            op.feed,
+            op.plunge_feed,
+            op.drill_clearance,
+            op.blind_allowance,
+            tool.diameter,
+            tool.neck_dia(),
+            tool.flute_len(),
+            env.heights.clearance,
+            env.heights.retract,
+        ]
+        .iter()
+        .any(|v| !v.is_finite())
+            || op.points.iter().flatten().any(|v| !v.is_finite())
+        {
+            diagnostics.push(Diagnostic::error(format!(
+                "operation {}: thread dimensions, centres, heights and feeds must be finite",
+                op.id
+            )));
+            bail!();
+        }
+        if tool.diameter <= 0.
+            || tool.neck_dia() < 0.
+            || op.drill_clearance < 0.
+            || op.blind_allowance < 0.
+            || env.heights.retract < op.z_top
+            || env.heights.clearance < env.heights.retract
+        {
+            diagnostics.push(Diagnostic::error(format!(
+                "operation {}: thread tool diameter must be positive, neck and blind allowances nonnegative, and clearance/retract at or above thread top", op.id
+            )));
+            bail!();
+        }
 
         if op.points.is_empty() {
             diagnostics.push(Diagnostic::warning(format!(
@@ -210,9 +251,9 @@ impl Strategy for ThreadStrategy {
                 cut_r + tool_r
             }
         };
-        if orbit_of(cut_final) <= 0.0 {
+        if cut_final <= 0.0 || orbit_of(cut_final) <= 0.0 {
             diagnostics.push(Diagnostic::error(format!(
-                "operation {}: tool diameter {} is too large to mill a thread of major diameter {}",
+                "operation {}: tool diameter {} or thread depth does not fit a thread of major diameter {}",
                 op.id, tool.diameter, op.major_dia
             )));
             bail!();
@@ -220,15 +261,6 @@ impl Strategy for ThreadStrategy {
         // Radial infeed passes to full depth, then any spring passes at full depth. Each
         // entry is a tool-centre orbit radius; the emitter cuts a full helix at each,
         // deepest last.
-        let npass = op.passes.max(1);
-        let mut orbits: Vec<f64> = infeed_fractions(npass, op.gradual)
-            .into_iter()
-            .map(|f| orbit_of(cut_start + f * (cut_final - cut_start)))
-            .collect();
-        for _ in 0..op.spring_passes {
-            orbits.push(orbit_of(cut_final));
-        }
-
         // Orbit direction (climb vs conventional) and, from it, the Z sense that keeps
         // the thread hand correct. See the module docs.
         //
@@ -247,11 +279,12 @@ impl Strategy for ThreadStrategy {
         // pitch over the length. Same helix generator, different turn count.
         let full_profile = match tool.kind {
             ToolKind::ThreadMill { pitch: Some(p) } => {
-                if (p - op.pitch).abs() > 1e-6 {
-                    diagnostics.push(Diagnostic::warning(format!(
-                        "operation {}: full-profile tool pitch {:.3} differs from the thread pitch {:.3}",
+                if !p.is_finite() || p <= 0. || (p - op.pitch).abs() > 1e-6 {
+                    diagnostics.push(Diagnostic::error(format!(
+                        "operation {}: full-profile tool pitch {:.3} must match the thread pitch {:.3}",
                         op.id, p, op.pitch
                     )));
+                    bail!();
                 }
                 true
             }
@@ -259,15 +292,26 @@ impl Strategy for ThreadStrategy {
         };
 
         let length = op.z_top - op.z_bottom;
+        if full_profile && length < op.pitch {
+            diagnostics.push(Diagnostic::error(format!(
+                "operation {}: a full-profile thread needs at least one pitch of axial travel; use a single-form mill for this shorter interval", op.id
+            )));
+            bail!();
+        }
         // Turns of the helix, and the Z it climbs while cutting: the full length
         // for a single-form mill, exactly one pitch for a full-profile comb.
         let (turns, z_span) = if full_profile {
-            (1.0, op.pitch.min(length))
+            (1.0, op.pitch)
         } else {
             (length / op.pitch, length)
         };
         let (z_start, z_end) = if z_up {
             (op.z_bottom, op.z_bottom + z_span)
+        } else if full_profile {
+            // The comb extends upward from the tip. Reversing the cut must
+            // traverse the same bottom-anchored pitch, otherwise only the top
+            // of the requested thread is reached by the teeth.
+            (op.z_bottom + z_span, op.z_bottom)
         } else {
             (op.z_top, op.z_top - z_span)
         };
@@ -275,7 +319,26 @@ impl Strategy for ThreadStrategy {
         // Total angular sweep of the helix: `turns · 2π`. Emitted as arc segments
         // of at most a half-turn — universally supported and unambiguous.
         let sweep_total = turns * 2.0 * PI;
-        let nseg = ((turns * 2.0).ceil() as usize).max(1);
+        let segments = (turns * 2.0).ceil().max(1.);
+        let npass = op.passes.max(1);
+        let pass_count = u64::from(npass) + u64::from(op.spring_passes);
+        if !sweep_total.is_finite()
+            || (segments + 7.) * pass_count as f64 * op.points.len() as f64 > 1_000_000.
+        {
+            diagnostics.push(Diagnostic::error(format!(
+                "operation {}: thread pitch, passes or feature count produces too many motions; increase pitch or split the operation", op.id
+            )));
+            bail!();
+        }
+        let nseg = segments as usize;
+        // Allocate passes only after bounding the total motion count.
+        let mut orbits: Vec<f64> = infeed_fractions(npass, op.gradual)
+            .into_iter()
+            .map(|f| orbit_of(cut_start + f * (cut_final - cut_start)))
+            .collect();
+        for _ in 0..op.spring_passes {
+            orbits.push(orbit_of(cut_final));
+        }
 
         let mut program = Program::new();
         program.push(Step::Comment(format!(
@@ -632,7 +695,11 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 Step::Arc {
-                    end, center, dir, tag, ..
+                    end,
+                    center,
+                    dir,
+                    tag,
+                    ..
                 } if tag.kind == MoveKind::Cutting => Some((*end, *center, *dir)),
                 _ => None,
             })
@@ -670,7 +737,11 @@ mod tests {
         ];
         for (internal, hand, climb, exp_dir, up) in cases {
             let r = run(op(internal, hand, climb), tool(5.0));
-            assert!(!r.has_errors(), "{internal} {hand:?} {climb}: {:?}", r.diagnostics);
+            assert!(
+                !r.has_errors(),
+                "{internal} {hand:?} {climb}: {:?}",
+                r.diagnostics
+            );
             let arcs = cutting_arcs(&r.program);
             assert!(
                 arcs.iter().all(|(_, _, d)| *d == exp_dir),
@@ -679,9 +750,15 @@ mod tests {
             let first = arcs.first().unwrap().0.z;
             let last = arcs.last().unwrap().0.z;
             if up {
-                assert!(last > first, "expected +Z cut for {internal} {hand:?} climb={climb}");
+                assert!(
+                    last > first,
+                    "expected +Z cut for {internal} {hand:?} climb={climb}"
+                );
             } else {
-                assert!(last < first, "expected -Z cut for {internal} {hand:?} climb={climb}");
+                assert!(
+                    last < first,
+                    "expected -Z cut for {internal} {hand:?} climb={climb}"
+                );
             }
         }
     }
@@ -731,12 +808,76 @@ mod tests {
     }
 
     #[test]
-    fn full_profile_pitch_mismatch_warns() {
+    fn full_profile_both_z_senses_sweep_the_bottom_pitch() {
+        for internal in [false, true] {
+            for hand in [Hand::Left, Hand::Right] {
+                for climb in [false, true] {
+                    let r = run(op(internal, hand, climb), full_profile_tool(1.5));
+                    assert!(!r.has_errors(), "{:?}", r.diagnostics);
+                    let arcs = cutting_arcs(&r.program);
+                    assert_eq!(arcs.len(), 2);
+                    assert!(arcs.iter().all(|(p, _, _)| (-6. ..=-4.5).contains(&p.z)));
+                    // Includes the lead-in endpoint, the start of the helix.
+                    let mut zs: Vec<_> = r
+                        .program
+                        .steps
+                        .iter()
+                        .filter_map(|s| match s {
+                            Step::Arc { end, .. } => Some(end.z),
+                            _ => None,
+                        })
+                        .collect();
+                    zs.sort_by(f64::total_cmp);
+                    assert_eq!(*zs.first().unwrap(), -6.);
+                    assert_eq!(*zs.last().unwrap(), -4.5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_profile_pitch_mismatch_blocks_motion() {
         // Tool ground for 2.0 mm, thread wants 1.5 mm.
         let r = run(op(true, Hand::Right, true), full_profile_tool(2.0));
-        assert!(r.diagnostics.iter().any(
-            |d| d.severity == Severity::Warning && d.message.contains("pitch")
-        ));
+        assert!(r.has_errors());
+        assert!(r.program.is_empty());
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("must match")));
+    }
+
+    #[test]
+    fn full_profile_shorter_than_one_pitch_cannot_change_the_helix_pitch() {
+        let mut o = op(true, Hand::Right, true);
+        o.z_bottom = -0.75;
+        let r = run(o, full_profile_tool(1.5));
+        assert!(r.has_errors());
+        assert!(r.program.is_empty());
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("at least one pitch")));
+    }
+
+    #[test]
+    fn invalid_dimensions_and_excessive_paths_fail_before_allocating_motion() {
+        for case in 0..7 {
+            let mut o = op(true, Hand::Right, true);
+            match case {
+                0 => o.pitch = f64::NAN,
+                1 => o.points[0][0] = f64::INFINITY,
+                2 => o.drill_clearance = -1.,
+                3 => o.blind_allowance = -1.,
+                4 => o.passes = u32::MAX,
+                5 => o.spring_passes = u32::MAX,
+                6 => o.pitch = 1e-100,
+                _ => unreachable!(),
+            }
+            let r = run(o, tool(5.));
+            assert!(r.has_errors(), "case {case}: {:?}", r.diagnostics);
+            assert!(r.program.is_empty(), "case {case}");
+        }
     }
 
     /// Cutting stays on the tool-centre orbit about the hole centre, so the edge
@@ -758,7 +899,10 @@ mod tests {
         let s = &r.program.steps;
         assert!(matches!(s[0], Step::Comment(_)));
         for kind in [MoveKind::LeadIn, MoveKind::LeadOut] {
-            let leads = s.iter().filter(|st| matches!(st, Step::Arc { tag, .. } if tag.kind == kind)).count();
+            let leads = s
+                .iter()
+                .filter(|st| matches!(st, Step::Arc { tag, .. } if tag.kind == kind))
+                .count();
             assert_eq!(leads, 1, "one arc for {kind:?}");
         }
         let plunges = s
@@ -851,7 +995,10 @@ mod tests {
         shallow.drill_clearance = 1.0; // < 1.5
         let r = run(shallow, tool(5.0));
         assert!(r.has_errors());
-        assert!(r.diagnostics.iter().any(|d| d.message.contains("allowance")));
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("allowance")));
 
         let mut deep = op(true, Hand::Right, true);
         deep.drill_clearance = 2.0; // ≥ 1.5
@@ -966,8 +1113,15 @@ mod tests {
                 let r = run(o, tool(5.0));
                 assert!(!r.has_errors(), "{:?}", r.diagnostics);
                 let radii = pass_radii(&r.program);
-                assert_eq!(radii.len(), 1, "gradual={gradual} passes={passes}: {radii:?}");
-                assert!((radii[0] - (5.0 - 2.5)).abs() < 1e-9, "must reach full depth");
+                assert_eq!(
+                    radii.len(),
+                    1,
+                    "gradual={gradual} passes={passes}: {radii:?}"
+                );
+                assert!(
+                    (radii[0] - (5.0 - 2.5)).abs() < 1e-9,
+                    "must reach full depth"
+                );
             }
         }
     }
@@ -989,9 +1143,16 @@ mod tests {
         };
         let n_base = cutting_arcs(&base.program).len();
         let n_sprung = cutting_arcs(&sprung.program).len();
-        assert_eq!(n_sprung, n_base + 8, "one spring pass = one extra full helix");
+        assert_eq!(
+            n_sprung,
+            n_base + 8,
+            "one spring pass = one extra full helix"
+        );
         let radii = pass_radii(&sprung.program);
-        assert!((radii.last().unwrap() - (5.0 - 2.5)).abs() < 1e-9, "spring at full depth");
+        assert!(
+            (radii.last().unwrap() - (5.0 - 2.5)).abs() < 1e-9,
+            "spring at full depth"
+        );
     }
 
     /// The final external orbit places the crest at the thread root (major − radial),
@@ -1003,7 +1164,10 @@ mod tests {
         let radii = pass_radii(&r.program);
         let (major_r, tool_r) = (5.0, 2.5);
         let expect = (major_r - 0.613_435 * 1.5) + tool_r;
-        assert!((radii.last().unwrap() - expect).abs() < 1e-6, "got {radii:?}, want {expect}");
+        assert!(
+            (radii.last().unwrap() - expect).abs() < 1e-6,
+            "got {radii:?}, want {expect}"
+        );
         // Not the old grazing radius major_r + tool_r.
         assert!((radii.last().unwrap() - (major_r + tool_r)).abs() > 1e-3);
     }

@@ -64,6 +64,7 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.thread_parameters = thread_parameters::ThreadParameters::for_creation(kind);
         self.geometry_editor = None;
         self.creation_geometry_height_defaults = None;
         self.profile_contour_selection = 0;

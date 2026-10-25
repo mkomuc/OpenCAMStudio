@@ -1240,7 +1240,7 @@ fn derive(
             Ok((vec![region], vec![], heights))
         }
         ExtractionRecipe::DrillHoles => derive_holes(&view, refs, true),
-        ExtractionRecipe::BoreCylinders { internal } => derive_cylinders(&view, refs, internal, true),
+        ExtractionRecipe::BoreCylinders { internal } => derive_holes(&view, refs, internal),
         ExtractionRecipe::ThreadCylinders { internal } => derive_holes(&view, refs, internal),
         ExtractionRecipe::ChamferFaces
         | ExtractionRecipe::ChamferLoop
@@ -1258,21 +1258,12 @@ fn derive_holes(
     refs: &[EntityRef],
     internal: bool,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
-    derive_cylinders(view, refs, internal, false)
-}
-
-fn derive_cylinders(
-    view: &View<'_>,
-    refs: &[EntityRef],
-    internal: bool,
-    rounded_entries: bool,
-) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
     let mut holes: Vec<ResolvedHole> = vec![];
     let mut heights: Option<CuttingHeights> = None;
     for r in refs {
         if r.kind != EntityKind::Face {
             return Err(
-                "Drill requires cylindrical bore faces; circular edges do not establish a hole"
+                "Select cylindrical bore or boss faces; circular edges alone do not establish a hole"
                     .into(),
             );
         }
@@ -1284,7 +1275,7 @@ fn derive_cylinders(
             inward,
         } = f.surface
         else {
-            return Err("Drill requires cylindrical bore faces".into());
+            return Err("Select cylindrical bore or boss faces".into());
         };
         let center = view.point(origin);
         let a = view.vector(axis);
@@ -1367,7 +1358,7 @@ fn derive_cylinders(
                                 if matches!(adjacent.surface, CadSurface::Cylinder { .. }) {
                                     continue;
                                 }
-                                if rounded_entries && internal && (c[2] - hi).abs() < T
+                                if internal && (c[2] - hi).abs() < T
                                     && matches!(adjacent.surface, CadSurface::Torus { .. })
                                 {
                                     bore_entry::certify(view, adjacent, face, edge)?;

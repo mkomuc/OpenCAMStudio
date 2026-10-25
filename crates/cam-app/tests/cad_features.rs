@@ -1755,6 +1755,29 @@ fn thread_selection_resolves_multiple_centres_and_keeps_the_nominal_diameter_edi
         result.diagnostics
     );
     assert!(!result.has_errors(), "{:?}", result.diagnostics);
+
+    // Nominal size can be enlarged independently of the prepared hole. A mill
+    // fitting that nominal thread still has to enter the selected 6 mm bore.
+    let oversized = app.use_tool(Tool {
+        number: 31,
+        diameter: 7.,
+        neck_diameter: 3.,
+        flute_length: 12.,
+        length: 30.,
+        kind: ToolKind::ThreadMill { pitch: None },
+        ..Default::default()
+    });
+    let before = app.document().clone();
+    let mut invalid = app.operation(id).unwrap().clone();
+    if let Operation::Thread(op) = &mut invalid {
+        op.tool = oversized;
+        op.major_dia = 12.;
+    }
+    assert!(app
+        .apply_operation_settings(invalid, None)
+        .unwrap_err()
+        .contains("cannot enter the selected bore"));
+    assert_eq!(app.document(), &before);
 }
 
 #[test]

@@ -885,6 +885,23 @@ pub(crate) fn resolve_document_checked(
                     if p.internal != *internal {
                         return Err("Thread type must match the selected bore or boss".into());
                     }
+                    // The nominal thread diameter is independently editable.
+                    // Fitting its theoretical minor diameter does not prove that
+                    // the cutter can enter the actual selected/prepared bore.
+                    if p.internal {
+                        let tool = document
+                            .setup()
+                            .tools
+                            .iter()
+                            .find(|t| t.number == p.tool)
+                            .ok_or("Missing thread tool")?;
+                        if input.holes.iter().any(|hole| tool.diameter >= hole.diameter) {
+                            return Err(format!(
+                                "Thread tool diameter {:.3} cannot enter the selected bore; choose a smaller thread mill or prepare a larger bore",
+                                tool.diameter
+                            ));
+                        }
+                    }
                     p.points = input
                         .holes
                         .iter()
