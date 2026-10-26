@@ -82,7 +82,7 @@ impl Default for JobParams {
 
 /// Which kind of operation [`AppController::new_operation`] should create from the
 /// loaded geometry. The strategies already exist; this picks the default variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OpKind {
     Profile,
     Pocket,
@@ -105,7 +105,7 @@ pub fn op_selects_circles(kind: OpKind) -> bool {
 
 /// Which node of the document is currently selected — what the tree highlights
 /// and the inspector edits.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Selection {
     /// The setup itself (its heights).
     #[default]
@@ -266,7 +266,7 @@ pub struct AppController {
 }
 
 /// Which closed loop of an imported region a pick refers to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoopPart {
     /// The region's outer boundary.
     Outer,
@@ -280,7 +280,7 @@ pub enum LoopPart {
 }
 
 /// A reference to one closed loop (outer or a hole) of one region.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LoopRef {
     /// Index into the regions — or, when `part` is [`LoopPart::Open`], into the
     /// open paths.
@@ -332,7 +332,7 @@ pub fn op_takes_islands(kind: OpKind) -> bool {
 /// The spindle speed and feeds a new operation is created with — the wizard's
 /// editable cutting-data row, seeded from the tool's nominals (see
 /// [`Controller::seeded_cutting_for`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CuttingData {
     /// Spindle speed, rpm. `0` = unset (falls back to the job default at plan time).
     pub rpm: f64,
@@ -345,7 +345,7 @@ pub struct CuttingData {
 /// An operation being created via the pick wizard: the kind, the tool, the picked
 /// boundary/path loop (once chosen), and — for a pocket — the loops toggled as
 /// excluded islands.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingOp {
     pub kind: OpKind,
     /// The chosen tool, or `None` until one is picked. Nothing is committed until

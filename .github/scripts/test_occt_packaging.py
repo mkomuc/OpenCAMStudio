@@ -47,6 +47,7 @@ class PackagingTests(unittest.TestCase):
         with patch.dict(os.environ, VCToolsRedistDir=str(redist.parent.parent)):
             package.stage(destination, 'Windows')
         (destination / 'opencamstudio.exe').write_bytes(b'application')
+        (destination / 'opencamstudio-mcp.exe').write_bytes(b'MCP console server')
         fragment = self.root / 'runtime.wxs'
         package.wix_fragment(destination, fragment)
         xml = ET.parse(fragment)
@@ -55,6 +56,7 @@ class PackagingTests(unittest.TestCase):
         expected = {p.resolve() for p in destination.rglob('*')
                     if p.is_file() and p.name != 'opencamstudio.exe'}
         self.assertEqual({Path(f.attrib['Source']) for f in files}, expected)
+        self.assertIn((destination / 'opencamstudio-mcp.exe').resolve(), expected)
         self.assertTrue((destination / 'TKernel.dll').is_file())
         self.assertTrue((destination / 'vcruntime140.dll').is_file())
         self.assertTrue((destination / 'occt-resources/StdResource/Plugin').is_file())
@@ -71,6 +73,21 @@ class PackagingTests(unittest.TestCase):
     def test_missing_runtime_fails(self):
         with self.assertRaisesRegex(RuntimeError, 'No runtime files'):
             package.stage(self.root / 'empty', 'Darwin')
+
+    def test_darwin_stages_and_sets_rpath_for_both_executables(self):
+        (self.sdk / 'lib/libTKernel.dylib').write_bytes(b'OCCT')
+        destination = self.root / 'Open CAM Studio.app'
+        binaries = destination / 'Contents/MacOS'
+        binaries.mkdir(parents=True)
+        for name in ('opencamstudio', 'opencamstudio-mcp'):
+            (binaries / name).write_bytes(b'executable')
+        with patch.object(package, 'copy_darwin_dependencies') as copy, \
+                patch.object(package.subprocess, 'run') as run:
+            package.stage(destination, 'Darwin')
+        self.assertEqual({call.args[0].name for call in copy.call_args_list},
+                         {'opencamstudio', 'opencamstudio-mcp'})
+        self.assertEqual({Path(call.args[0][-1]).name for call in run.call_args_list},
+                         {'opencamstudio', 'opencamstudio-mcp'})
 
     def test_corresponding_source_contains_license_and_excludes_git(self):
         (self.source / '.git').mkdir()

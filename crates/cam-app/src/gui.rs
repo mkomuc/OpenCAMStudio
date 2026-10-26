@@ -14,6 +14,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[path = "gui_mcp.rs"]
+mod mcp;
+
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
     button, canvas, checkbox, column, container, mouse_area, pick_list, row, scrollable, shader,
@@ -426,6 +429,18 @@ pub fn run_with_setup(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let initial = App::new_with_setup(path)
         .map_err(|error| format!("Could not load setup {}: {error}", path.display()))?;
     let initial = std::cell::RefCell::new(Some(initial));
+    run_app(move || initial.borrow_mut().take().expect("application boots once"))?;
+    Ok(())
+}
+
+/// Launch a desktop session controlled by the MCP client through stdio.
+pub fn run_with_mcp(path: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut app, task) = match path {
+        Some(path) => App::new_with_setup(path)?,
+        None => App::new(),
+    };
+    app.mcp = Some(mcp::start());
+    let initial = std::cell::RefCell::new(Some((app, task)));
     run_app(move || initial.borrow_mut().take().expect("application boots once"))?;
     Ok(())
 }
@@ -1382,7 +1397,8 @@ impl Field {
                  Clearance for speed, but still above any uncut material."
             }
             Field::ToolChangeHeight => {
-                "Z the tool lifts to before a tool change (M6) or a manual reorientation \
+                "Z relative to the base workpiece origin that the tool lifts to before \
+                 a tool change (M6) or a manual reorientation \
                  (M00) — above the Clearance plane, so the changer or your hands have room. \
                  Defaults to the top of the machine's Z travel; set it lower only if you \
                  have a reason."
@@ -1973,6 +1989,7 @@ struct PatternDraft {
 
 struct App {
     controller: AppController,
+    mcp: Option<std::sync::mpsc::Receiver<mcp::Request>>,
     viewport_cache: std::cell::RefCell<Option<(workspace_view::ViewportKey, Viewport)>>,
     cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
     notice: Option<Notice>,
@@ -2481,6 +2498,7 @@ enum BoreOption {
 
 #[derive(Debug, Clone)]
 enum Message {
+    PollMcp,
     OutputAction(iced::widget::text_editor::Action),
     OutputCopy,
     OutputClear,
@@ -3346,6 +3364,7 @@ impl App {
         let active_machine = active.name().to_string();
         let mut app = Self {
             controller: AppController::new(active.machine.clone()),
+            mcp: None,
             viewport_cache: Default::default(),
             cad_scene_cache: Default::default(),
             notice: None,
@@ -3524,6 +3543,9 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
+        if matches!(message, Message::PollMcp) {
+            return self.poll_mcp();
+        }
         if self.pattern_draft.is_some()
             && matches!(
                 &message,
@@ -3850,6 +3872,7 @@ impl App {
             self.profile_tab_selection = None;
         }
         match message {
+            Message::PollMcp => return self.poll_mcp(),
             Message::SimulationOption(option) => {
                 let continuous = matches!(option, SimulationOption::Tolerance(_));
                 option.apply(&mut self.settings.simulation);
@@ -6994,6 +7017,11 @@ impl App {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::batch([
+            if self.mcp.is_some() {
+                iced::time::every(std::time::Duration::from_millis(25)).map(|_| Message::PollMcp)
+            } else {
+                iced::Subscription::none()
+            },
             if self
                 .simulation
                 .as_ref()
@@ -8138,7 +8166,10 @@ impl App {
             // Shows the *effective* height: the explicit value if set, else the
             // machine-Z-travel default the planner would resolve.
             Field::ToolChangeHeight => {
-                Some(setup.resolved_tool_change_height(self.controller.machine().envelope.max.z))
+                Some(
+                    setup.resolved_tool_change_height(self.controller.machine().envelope.max.z)
+                        - setup.origin[2],
+                )
             }
             Field::OriginX => Some(
                 self.controller
@@ -8403,7 +8434,7 @@ impl App {
         match self.controller.selection() {
             Selection::Setup => self.controller.edit_setup(|s| {
                 if let Some(&v) = parsed.get(&Field::ToolChangeHeight) {
-                    s.tool_change_height = Some(v);
+                    s.tool_change_height = Some(v + s.origin[2]);
                 }
             }),
             Selection::Machine => self.controller.edit_machine(|m| {

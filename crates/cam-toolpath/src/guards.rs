@@ -35,6 +35,10 @@ use cam_model::{Tool, ToolKind};
 
 use crate::Diagnostic;
 
+// CAD bounding boxes carry small tolerance padding (typically 1e-7 mm).
+// Allow one nanometre of numerical noise at an otherwise exact reach limit.
+const REACH_TOLERANCE: f64 = 1e-6;
+
 /// Guard a **side-milling** operation (profile walls, pocket walls): the tool must
 /// have a cylindrical cutting flank, and the cut must stay on it.
 ///
@@ -86,7 +90,7 @@ pub(crate) fn check_side_milling(
         )));
         return false;
     }
-    if depth > flank + 1e-9 {
+    if depth > flank + REACH_TOLERANCE {
         diagnostics.push(Diagnostic::error(format!(
             "operation {op_id} ({op}): depth {depth:.3} mm exceeds tool {}'s {flank:.3} mm \
              length of cut — below that the non-cutting shank would rub against the wall. \
@@ -169,7 +173,7 @@ pub(crate) fn check_axial_reach(
     } else {
         cutting_end_height(&profile)
     };
-    if depth > reach + 1e-9 {
+    if depth > reach + REACH_TOLERANCE {
         diagnostics.push(Diagnostic::error(format!(
             "operation {op_id} ({op}): depth {depth:.3} mm exceeds tool {}'s {reach:.3} mm \
              of cutting edge — deeper, the non-cutting shank would be in the hole.",
@@ -232,6 +236,23 @@ mod tests {
             .filter(|x| x.severity == Severity::Warning)
             .map(|x| x.message.clone())
             .collect()
+    }
+
+    #[test]
+    fn reach_limits_allow_cad_padding_but_reject_real_overreach() {
+        let tool = tool(ToolKind::EndMill);
+        for extra in [0., 1e-7, 2e-7, 1e-4] {
+            let mut diagnostics = Vec::new();
+            assert_eq!(
+                check_side_milling(0, "profile", &tool, 12. + extra, &mut diagnostics),
+                extra < REACH_TOLERANCE
+            );
+            diagnostics.clear();
+            assert_eq!(
+                check_axial_reach(0, "bore", &tool, 12. + extra, &mut diagnostics),
+                extra < REACH_TOLERANCE
+            );
+        }
     }
 
     #[test]

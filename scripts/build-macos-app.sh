@@ -50,7 +50,7 @@ done
 
 echo "Building Open CAM Studio with gui,occt..."
 cargo build --locked --release --target "$TARGET" \
-  -p cam-app --features gui,occt --bin opencamstudio
+  -p cam-app --features gui,occt --bin opencamstudio --bin opencamstudio-mcp
 cargo build --locked --release --target "$TARGET" \
   -p cam-kernel --features occt --example occt_smoke
 
@@ -69,6 +69,7 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/opencamstudio"
+cp "$ROOT/target/$TARGET/release/opencamstudio-mcp" "$APP/Contents/MacOS/opencamstudio-mcp"
 
 python3 .github/scripts/package-occt.py stage "$APP"
 

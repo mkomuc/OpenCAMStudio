@@ -18,6 +18,7 @@ mod cad_operations;
 // Where per-user files live. One resolver, shared by the tool library and the
 // settings file — two copies of a platform convention drift silently.
 mod machines;
+pub mod mcp;
 mod paths;
 mod project;
 // Not GUI-gated, deliberately: `cam-app` builds and tests without the `gui` feature

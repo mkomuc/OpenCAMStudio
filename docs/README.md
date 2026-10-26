@@ -15,6 +15,7 @@ For installation and a feature overview, start with the [project README](../READ
 - [Processing time](processing-time.md): estimates and their assumptions.
 - [Simulation](simulation.md): playback, display modes, stock coloring and collision behavior.
 - [Estlcam export](estlcam.md): controller setup and coolant outputs.
+- [MCP automation](mcp.md): application commands in a headless or visible desktop session.
 
 Operation tabs group their parameters into collapsible sections. Click a section
 heading to fold or expand it; this preserves its values. Checkboxes beside

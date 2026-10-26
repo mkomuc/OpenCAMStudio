@@ -1880,12 +1880,13 @@ pub struct Setup {
     /// `1` by default; editable and swappable like an extra origin's index.
     #[serde(default = "default_origin_index")]
     pub origin_index: u32,
-    /// Optional **tool-change height** (absolute Z, mm): the plane the planner lifts to
+    /// Optional **tool-change height** (absolute setup Z, mm): the plane the planner lifts to
     /// before a tool change (`M6`) or a manual reorientation (`M00`), then descends from
     /// once the next operation takes over. It sits **above** the toolpath
     /// [`clearance`](Heights::clearance) plane — a tool change wants maximum clearance
     /// (an ATC swing, an operator's hands during a re-fixture), not the cutting-traverse
-    /// height. `None` (the default) resolves to the machine's max Z travel at plan time
+    /// height. The editor presents this relative to the base workpiece origin.
+    /// `None` (the default) resolves to the machine's max WCS Z at plan time
     /// via [`resolved_tool_change_height`](Self::resolved_tool_change_height).
     #[serde(default)]
     pub tool_change_height: Option<f64>,
@@ -1970,10 +1971,11 @@ impl Setup {
 
     /// The tool-change height to plan with: the explicit
     /// [`tool_change_height`](Self::tool_change_height) if set, else `machine_max_z`
-    /// (the top of the machine's Z envelope). The caller supplies `machine_max_z`
-    /// because the setup does not carry the machine.
+    /// (the top of the machine's Z envelope, relative to the base work datum).
+    /// The result is in setup coordinates, like the planner's clearance planes.
+    /// Explicit heights are already stored in setup coordinates.
     pub fn resolved_tool_change_height(&self, machine_max_z: f64) -> f64 {
-        self.tool_change_height.unwrap_or(machine_max_z)
+        self.tool_change_height.unwrap_or(machine_max_z + self.origin[2])
     }
 
     /// The part-space position of the origin with the given `index`: the base

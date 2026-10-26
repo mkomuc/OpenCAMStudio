@@ -70,10 +70,17 @@ def stage(destination, system):
         libraries = destination / 'Contents/Frameworks'
         resources = destination / 'Contents/Resources/occt'
         licenses = destination / 'Contents/Resources/licenses'
-        copy_darwin_dependencies(destination / 'Contents/MacOS/opencamstudio',
-                                 SDK / 'lib', libraries)
-        subprocess.run(['install_name_tool', '-add_rpath', '@executable_path/../Frameworks',
-                        str(destination / 'Contents/MacOS/opencamstudio')], check=True)
+        if not any((SDK / 'lib').glob('*.dylib')):
+            raise RuntimeError(f'No runtime files matching {SDK / "lib/*.dylib"}')
+        for name in ('opencamstudio', 'opencamstudio-mcp'):
+            executable = destination / 'Contents/MacOS' / name
+            if not executable.is_file():
+                if name == 'opencamstudio':
+                    raise FileNotFoundError(executable)
+                continue
+            copy_darwin_dependencies(executable, SDK / 'lib', libraries)
+            subprocess.run(['install_name_tool', '-add_rpath', '@executable_path/../Frameworks',
+                            str(executable)], check=True)
     else:
         libraries = destination
         resources = destination / 'occt-resources'
@@ -165,6 +172,11 @@ def verify(destination, smoke, system):
         # and proves its complete OCCT runtime dependency chain is relocatable.
         subprocess.run([str(app_executable), '--help'], env=env,
                        cwd=destination, check=True)
+        mcp_executable = executable_dir / ('opencamstudio-mcp.exe' if system == 'Windows'
+                                           else 'opencamstudio-mcp')
+        if mcp_executable.is_file():
+            subprocess.run([str(mcp_executable), '--help'], env=env,
+                           cwd=destination, check=True)
     finally:
         for original, renamed in reversed(hidden):
             renamed.rename(original)

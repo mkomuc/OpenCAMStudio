@@ -51,15 +51,22 @@ pub fn profile_side(state: &GeometryState, selected: &[EntityRef]) -> Result<Sid
         );
     }
     let wire = view.wire(selected[0].id)?;
+    // A concave cylindrical segment can also be part of an exterior scallop.
+    // Only an entirely cylindrical boundary suggests a bore; extraction still
+    // certifies the complete feature before accepting an inside cut.
+    let mut bore_boundary = !wire.edge_uses.is_empty();
     for usage in &wire.edge_uses {
+        let mut inward_wall = false;
         for id in &view.edge(usage.edge_id)?.face_ids {
-            if matches!(
+            inward_wall |= matches!(
                 view.face(*id)?.surface,
                 CadSurface::Cylinder { inward: true, .. }
-            ) {
-                return Ok(Side::Inside);
-            }
+            );
         }
+        bore_boundary &= inward_wall;
+    }
+    if bore_boundary {
+        return Ok(Side::Inside);
     }
     Ok(Side::Outside)
 }
@@ -1176,13 +1183,18 @@ fn derive(
             let (c, z) = view.contour(w)?;
             let region = Polygon::new(c).map_err(|e| e.to_string())?;
             let mut bottom: Option<f64> = None;
+            let mut top: Option<f64> = None;
             let walls = view.walls(w)?;
             for wall in &walls {
                 let (lo, hi) = view.extent(wall)?;
-                if (hi - z).abs() > T || lo >= z - T {
-                    return Err("profile loop must be the top of a vertical exterior wall".into());
+                if ((hi - z).abs() > T && (lo - z).abs() > T) || lo >= hi - T {
+                    return Err("profile loop must be an upper or lower rim of a vertical exterior wall".into());
                 }
                 view.certify_wall(wall, lo, hi)?;
+                if top.is_some_and(|v| (hi - v).abs() > T) {
+                    return Err("profile walls have different entry heights".into());
+                }
+                top = Some(hi);
                 if let Some(v) = bottom {
                     if (lo - v).abs() > T {
                         return Err("profile walls have different depths".into());
@@ -1233,7 +1245,7 @@ fn derive(
                 return Err(format!("material on face {} outside the selected silhouette prevents safe side certification", face.id));
             }
             let heights = CuttingHeights {
-                top: z,
+                top: top.ok_or("no profile walls")?,
                 bottom: bottom.ok_or("no profile walls")?,
             };
             heights.validate()?;
@@ -1714,6 +1726,92 @@ mod tests {
         f.walls(8., 12., 8., 12., -5., 0.);
         f.face(rings(-5.), [0., 0., -1.]);
         (f.state(), reference(top, EntityKind::Face))
+    }
+
+    #[test]
+    fn lower_exterior_loop_uses_the_full_certified_wall_interval() {
+        let (state, _) = plate_with_hole();
+        let wire = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|wire| {
+                wire.is_outer
+                    && state.assets[0].topology.faces.iter().any(|face| {
+                        face.id == wire.face_id
+                            && matches!(
+                                face.surface,
+                                CadSurface::Plane {
+                                    normal: [0., 0., -1.],
+                                    ..
+                                }
+                            )
+                    })
+            })
+            .unwrap();
+        let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Lower rim".into());
+        entry.source = ProfileGeometrySource::Cad(vec![reference(wire.id, EntityKind::Loop)]);
+        let (contours, heights) = profile_entry_contours(&state, &entry).unwrap();
+        assert_eq!(contours.len(), 1);
+        assert!(contours[0].closed);
+        assert_eq!(contours[0].side, Side::Outside);
+        assert_eq!(
+            heights,
+            Some(CuttingHeights {
+                top: 0.,
+                bottom: -5.
+            })
+        );
+
+        // Lower rims retain the exterior material check.
+        let mut blocked = state.clone();
+        std::sync::Arc::make_mut(&mut blocked.assets[0].topology)
+            .faces
+            .push(CadFace {
+                id: 999,
+                body_id: 1,
+                surface: CadSurface::Unsupported {
+                    description: "exterior overhang".into(),
+                },
+                loop_ids: vec![],
+                bounds: [[19., 0., -2.], [22., 20., -1.]],
+            });
+        assert!(profile_entry_contours(&blocked, &entry).is_err());
+    }
+
+    #[test]
+    fn one_concave_wall_does_not_classify_an_exterior_loop_as_a_bore() {
+        let (mut state, face) = plate_with_hole();
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        let wire = topology
+            .loops
+            .iter()
+            .find(|w| w.face_id == face.id && w.is_outer)
+            .unwrap();
+        let selected = reference(wire.id, EntityKind::Loop);
+        let edge = topology
+            .edges
+            .iter()
+            .find(|e| e.id == wire.edge_uses[0].edge_id)
+            .unwrap();
+        let wall = edge
+            .face_ids
+            .iter()
+            .copied()
+            .find(|id| *id != face.id)
+            .unwrap();
+        topology
+            .faces
+            .iter_mut()
+            .find(|f| f.id == wall)
+            .unwrap()
+            .surface = CadSurface::Cylinder {
+            origin: [10., -10., 0.],
+            axis: [0., 0., 1.],
+            radius: 10.,
+            inward: true,
+        };
+        assert_eq!(profile_side(&state, &[selected]).unwrap(), Side::Outside);
     }
 
     #[test]

@@ -11,9 +11,18 @@ pub(super) fn plane_input_id(plane: Plane) -> String {
 }
 
 impl App {
-    /// Keep explicitly entered decimal places, including trailing zeros. Only
-    /// display rounding is applied; editor buffers and machining values stay exact.
-    pub(super) fn height_display_value(&self, plane: Plane, value: f64) -> String {
+    /// Show Z relative to this operation's workpiece datum, matching NC output.
+    /// Keep entered precision; model-space plane positions and offsets stay exact.
+    pub(super) fn height_display_value(&self, id: u32, plane: Plane, value: f64) -> String {
+        let work_offset = self
+            .current_operation(id)
+            .map_or(self.controller.active_origin(), Operation::work_offset);
+        let value = value
+            - self
+                .controller
+                .document()
+                .setup()
+                .origin_position(work_offset)[2];
         fn precision(text: &str) -> usize {
             let (mantissa, exponent) = text
                 .trim()
@@ -398,7 +407,7 @@ impl App {
                     if let Ok(heights) = resolved {
                         if let Some(z) = heights.plane(plane) {
                             section = section.push(
-                                text(format!("Z {} mm", self.height_display_value(plane, z)))
+                                text(format!("WCS Z {} mm", self.height_display_value(id, plane, z)))
                                     .size(11)
                                     .color(INSPECTOR_MUTED),
                             );
@@ -418,6 +427,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_change_height_uses_wcs_values_in_the_setup_inspector() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.edit_setup(|setup| setup.origin[2] = 54.);
+        app.controller.select(Selection::Setup);
+        app.refresh_fields();
+        assert_eq!(app.field_value(Field::ToolChangeHeight), Some(50.));
+        assert_eq!(
+            app.controller.document().setup().resolved_tool_change_height(50.),
+            104.
+        );
+        app.fields.insert(Field::ToolChangeHeight, "40".into());
+        app.apply_inspector();
+        assert_eq!(app.controller.document().setup().tool_change_height, Some(94.));
+        assert_eq!(app.field_value(Field::ToolChangeHeight), Some(40.));
+        // An explicit stored plane must not receive the datum offset twice.
+        assert_eq!(
+            app.controller.document().setup().resolved_tool_change_height(50.),
+            94.
+        );
+    }
 
     #[test]
     fn feed_toggle_preserves_reference_and_offsets_without_committing() {

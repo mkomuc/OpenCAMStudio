@@ -188,11 +188,13 @@ fn build_job_with_compute(
         })
         .fold(setup.heights.clearance, f64::max);
     let tool_change_height = if tool_change_height < max_clearance {
+        let origin_z = setup.origin[2];
         diagnostics.push(Diagnostic::warning(format!(
-            "tool-change height {tool_change_height:.3} mm is below the clearance plane \
-             {:.3} mm; using the clearance plane instead — a tool change or re-fixture \
+            "tool-change height {:.3} mm is below the clearance plane \
+             {:.3} mm (base WCS Z); using the clearance plane instead — a tool change or re-fixture \
              must not bring the tool down.",
-            max_clearance
+            tool_change_height - origin_z,
+            max_clearance - origin_z
         )));
         max_clearance
     } else {
