@@ -708,9 +708,7 @@ pub(crate) fn steer_region(
     cancel: &CancelToken,
 ) -> Option<SteerRun> {
     let tc = largest(offset(std::slice::from_ref(region), -(r + finish), JoinStyle::Round).ok()?)?;
-    let entry = start
-        .map(|s| Point::new(s[0], s[1]))
-        .filter(|p| tc.contains(*p))
+    let entry = crate::frontadvance::preferred_entry(&tc, start, e.min(r) * 0.5)
         .or_else(|| crate::frontadvance::entry_point(&tc))?;
     let open_r = opening_radius(&tc, entry, e);
     steer_path(

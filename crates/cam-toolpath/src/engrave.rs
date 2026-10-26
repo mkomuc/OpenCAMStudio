@@ -171,7 +171,7 @@ impl Strategy for EngraveStrategy {
         // keep its own endpoints, so it is used as given.
         let pts: Vec<cam_geo::Point> = if op.closed {
             let mut v = crate::profile::rotate_to_start(op.chain.points(), op.start);
-            v.push(v[0]); // close the loop
+            v = crate::emit::loop_with_exit(&v, 0.0, op.end).0;
             v
         } else {
             op.chain.points().to_vec()
@@ -314,6 +314,7 @@ mod tests {
             stepdown: 0.0,
             feed: 200.0,
             plunge_feed: 100.0,
+            end: None,
             start: None,
         }
     }

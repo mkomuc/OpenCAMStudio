@@ -49,7 +49,24 @@ macOS also validates and mounts the final DMG. Linux measures the glibc floor
 across the binary and bundled shared libraries.
 
 These checks qualify the checked-in fixtures, not every STEP/IGES exporter or
-interactive graphics behavior. A release still needs manual desktop testing.
+interactive graphics behavior. Packaging also starts the staged GUI executable in
+`--help` mode with the OCCT SDK and loader-path environment hidden, checking that
+the app binary and its bundled OCCT runtime start together. A release still needs
+manual desktop testing.
+
+## Build the macOS app locally
+
+On an Apple silicon Mac with Rust, Xcode command line tools, and an OCCT 7.9.3
+SDK installed, run:
+
+```bash
+scripts/build-macos-app.sh
+```
+
+The self-contained `dist/Open CAM Studio.app` is built and verified locally; this
+does not use GitHub Actions. By default the script uses `.local/occt`. Set
+`OCCT_ROOT` for another SDK location or `OUTPUT_DIR` to choose a different output
+directory.
 
 ## First run in a fork
 

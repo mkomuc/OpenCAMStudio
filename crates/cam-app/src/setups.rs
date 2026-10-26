@@ -3,6 +3,40 @@
 use super::*;
 use cam_model::{EntityRef, FrameAxisReference, SetupFrame};
 
+pub(crate) fn validate_stock_to_leave(
+    document: &Document,
+    operation: &Operation,
+    stock: cam_model::StockToLeave,
+) -> Result<(), String> {
+    if !stock.radial.is_finite() || !stock.axial.is_finite() || stock.radial < 0.0 || stock.axial < 0.0 {
+        return Err("Stock to Leave values must be finite and nonnegative.".into());
+    }
+    if !stock.enabled {
+        return Ok(());
+    }
+    let depth = match operation {
+        Operation::Profile(op) => op.depth,
+        Operation::Pocket(op) => op.depth,
+        Operation::Face(op) => {
+            if stock.radial > 0.0 {
+                return Err("Radial stock to leave is not supported for Face; set it to 0 mm.".into());
+            }
+            op.depth
+        }
+        Operation::Adaptive(_) => document
+            .geometry
+            .bindings
+            .get(&operation.id())
+            .map(|binding| binding.effective_heights().depth())
+            .ok_or("Adaptive Clearing requires linked solid geometry")?,
+        _ => return Err("Stock to Leave is supported for Profile, Pocket, Face and Adaptive Clearing.".into()),
+    };
+    if stock.axial > 0.0 && stock.axial >= depth {
+        return Err(format!("Axial stock to leave ({:.3} mm) must be less than the operation depth ({depth:.3} mm).", stock.axial));
+    }
+    Ok(())
+}
+
 impl AppController {
     pub fn active_setup_id(&self) -> u64 {
         self.active_setup_id
@@ -49,6 +83,7 @@ impl AppController {
         setup.patterns.clear();
         setup.operation_heights.clear();
         setup.height_settings.clear();
+        setup.stock_to_leave.clear();
         setup.stock = default_stock(self.defaults.top_of_stock, self.defaults.depth);
         setup.extra_origins.clear();
         let id = setup.id;
@@ -73,6 +108,7 @@ impl AppController {
         let mut operation_ids = std::collections::HashMap::new();
         let old_heights = std::mem::take(&mut copy.operation_heights);
         let old_settings = std::mem::take(&mut copy.height_settings);
+        let old_stock_to_leave = std::mem::take(&mut copy.stock_to_leave);
         for op in &mut copy.operations {
             let old_id = op.id();
             if let Some(settings) = old_settings.get(&op.id()) {
@@ -80,6 +116,9 @@ impl AppController {
             }
             if let Some(heights) = old_heights.get(&op.id()) {
                 copy.operation_heights.insert(next_id, *heights);
+            }
+            if let Some(stock) = old_stock_to_leave.get(&op.id()) {
+                copy.stock_to_leave.insert(next_id, *stock);
             }
             if self.document().cad_linked_operations.contains(&op.id()) {
                 linked.push(next_id);
@@ -370,6 +409,7 @@ impl AppController {
         }
         let heights = source.heights_for(id);
         let settings = source.height_settings.get(&id).cloned();
+        let stock_to_leave = source.stock_to_leave_for(id);
         let mut operation = definition.operations.remove(0);
         let new_id = if copy { self.next_op_id() } else { id };
         operation.set_id(new_id);
@@ -415,6 +455,14 @@ impl AppController {
         }
         document.active_setup_id = destination;
         let target = document.setup_mut();
+        if !copy {
+            target.stock_to_leave.remove(&id);
+        }
+        if stock_to_leave.enabled {
+            target.stock_to_leave.insert(new_id, stock_to_leave);
+        } else {
+            target.stock_to_leave.remove(&new_id);
+        }
         for tool in definition.tools {
             if !target
                 .tools
@@ -490,6 +538,35 @@ impl AppController {
         Ok(())
     }
 
+    /// Commit operation fields, safety heights, and Stock to Leave in one undo step.
+    pub fn apply_operation_settings_with_heights_and_stock(
+        &mut self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
+        heights: Option<Heights>,
+        stock_to_leave: cam_model::StockToLeave,
+    ) -> Result<(), String> {
+        let id = operation.id();
+        let mut document =
+            self.prepare_operation_settings(operation, overrides, tools, geometry, heights)?;
+        if stock_to_leave.enabled {
+            let operation = document.setup().operations.iter().find(|op| op.id() == id).unwrap();
+            validate_stock_to_leave(&document, operation, stock_to_leave)?;
+        }
+        if stock_to_leave.enabled {
+            document.setup_mut().stock_to_leave.insert(id, stock_to_leave);
+        } else {
+            document.setup_mut().stock_to_leave.remove(&id);
+        }
+        if document != *self.document() {
+            self.edit_document(move |current| *current = document);
+            self.invalidate();
+        }
+        Ok(())
+    }
+
     /// Commit references, offsets, geometry and cutting parameters atomically.
     pub fn apply_operation_height_settings(
         &mut self,
@@ -513,6 +590,39 @@ impl AppController {
                 .unwrap(),
         )?;
         document.setup_mut().height_settings.insert(id, settings);
+        if document != *self.document() {
+            self.edit_document(move |current| *current = document);
+            self.invalidate();
+        }
+        Ok(())
+    }
+
+    /// Commit references, offsets, geometry, heights, cutting parameters and allowance atomically.
+    pub fn apply_operation_height_settings_and_stock(
+        &mut self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
+        mut settings: cam_model::OperationHeightSettings,
+        stock_to_leave: cam_model::StockToLeave,
+    ) -> Result<(), String> {
+        settings.resolved = None;
+        let id = operation.id();
+        let mut document =
+            self.prepare_operation_settings(operation, overrides, tools, geometry, None)?;
+        settings.resolve(
+            &document,
+            document.setup().operations.iter().find(|o| o.id() == id).unwrap(),
+        )?;
+        document.setup_mut().height_settings.insert(id, settings);
+        if stock_to_leave.enabled {
+            let operation = document.setup().operations.iter().find(|op| op.id() == id).unwrap();
+            validate_stock_to_leave(&document, operation, stock_to_leave)?;
+            document.setup_mut().stock_to_leave.insert(id, stock_to_leave);
+        } else {
+            document.setup_mut().stock_to_leave.remove(&id);
+        }
         if document != *self.document() {
             self.edit_document(move |current| *current = document);
             self.invalidate();
@@ -581,7 +691,11 @@ impl AppController {
         let geometry = geometry
             .filter(|_| !matches!(&operation,Operation::Profile(p) if p.selections.is_some()));
         if let Some(selected) = &geometry {
-            crate::cad_operations::validate_selection(&document.geometry, selected)?;
+            if matches!(operation, Operation::Adaptive(_)) {
+                cam_geometry3d::validate_adaptive_selection(&document.geometry, selected)?;
+            } else {
+                crate::cad_operations::validate_selection(&document.geometry, selected)?;
+            }
             let profile_recipe = if matches!(operation, Operation::Profile(_)) {
                 let geometry = crate::cad_operations::geometry_for_setup(&document)?;
                 let recipe = if let Some(binding) = document

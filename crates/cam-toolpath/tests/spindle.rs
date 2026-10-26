@@ -20,6 +20,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -41,6 +42,7 @@ fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -80,6 +82,7 @@ fn doc(ops: Vec<Operation>) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }
@@ -128,4 +131,14 @@ fn an_unset_rpm_falls_back_to_the_job_default() {
         0.0,
     )]);
     assert_eq!(spindle_rpms(&d), vec![1000.0]);
+}
+
+#[test]
+fn ramp_spindle_restoration_keeps_the_next_operations_modal_speed_correct() {
+    let mut first = profile(0, rect(10., 10., 70., 50.), Side::Outside, 4000.);
+    let Operation::Profile(p) = &mut first else { unreachable!() };
+    p.plunge = Plunge::Helix { radius: 1., pitch: 1. };
+    p.passes.ramp_rpm = 2000.;
+    let d = doc(vec![first, profile(1, rect(35., 25., 45., 35.), Side::Inside, 4000.)]);
+    assert_eq!(spindle_rpms(&d), vec![4000., 2000., 4000., 2000., 4000.]);
 }

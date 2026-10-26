@@ -85,7 +85,7 @@ impl App {
         let Some(draft) = &self.setup_draft else {
             return column![
                 inspector_heading("Setup"),
-                text("Right-click a setup and choose Edit setup to edit its settings.").size(12)
+                text("Double-click a setup, or right-click it and choose Edit setup, to edit its settings.").size(12)
             ]
             .spacing(8)
             .padding(14)

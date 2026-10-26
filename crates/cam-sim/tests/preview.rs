@@ -93,10 +93,12 @@ fn options() -> SimOptions {
 fn tools() -> [SimTool; 2] {
     [
         SimTool {
+            noncutting_tip_radius: None,
             number: 1,
             profile: ToolProfile::flat(1.),
         },
         SimTool {
+            noncutting_tip_radius: None,
             number: 2,
             profile: ToolProfile {
                 radius: 1.5,
@@ -159,6 +161,7 @@ fn incremental_playback_rewind_and_edited_prefix_match_fresh_simulation() {
         &source,
         &options(),
         &[SimTool {
+            noncutting_tip_radius: None,
             number: 1,
             profile: ToolProfile::flat(2.),
         }],

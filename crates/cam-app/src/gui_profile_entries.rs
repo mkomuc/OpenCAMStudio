@@ -31,6 +31,7 @@ pub(super) struct EntryEditor {
     tolerance: String,
     previous: Option<Vec<ProfileGeometryEntry>>,
     previous_row: Option<usize>,
+    previous_filter_explicit: bool,
     error: Option<String>,
 }
 
@@ -224,6 +225,7 @@ impl App {
                     tolerance: "0.010".into(),
                     previous,
                     previous_row,
+                    previous_filter_explicit: self.cad_filter_explicit,
                     error: None,
                 });
                 self.operation_geometry = None;
@@ -258,6 +260,7 @@ impl App {
                         tolerance,
                         previous,
                         previous_row,
+                        previous_filter_explicit: self.cad_filter_explicit,
                         error: None,
                     });
                     self.operation_geometry = None;
@@ -330,6 +333,7 @@ impl App {
                         }
                     }
                 });
+                self.cad_filter_explicit = editor.previous_filter_explicit;
                 self.geometry_additive = false;
                 self.profile_side_overrides.clear();
                 self.sync_profile_entry_cache();
@@ -343,6 +347,7 @@ impl App {
                             p.selections = editor.previous;
                         }
                     });
+                    self.cad_filter_explicit = editor.previous_filter_explicit;
                 }
                 self.geometry_additive = false;
             }
@@ -395,6 +400,7 @@ impl App {
             };
             self.profile_chain_edges = editor.draft.kind == ProfileGeometryKind::Chain
                 && editor.draft.chain_mode == ProfileChainMode::Open;
+            self.cad_filter_explicit = true;
             self.profile_tab_picking = false;
             self.geometry_additive = true;
             self.status = format!(
@@ -539,8 +545,7 @@ impl App {
                     .padding(4)
                     .style(inspector_secondary)
                     .on_press_maybe(available.then_some(Message::ProfileEntry(EntryMessage::Add(kind)))),
-                format!("Add {}. {description}", kind_name(kind)),
-            ));
+                format!("Add {}. {description}", kind_name(kind)), self.tooltips));
         }
         toolbar = toolbar.push(hint(
             button(icon("remove", 28.))
@@ -550,8 +555,7 @@ impl App {
                     (!editing && selected.is_some())
                         .then_some(Message::ProfileEntry(EntryMessage::RemoveSelected)),
                 ),
-            "Delete the selected geometry entry.",
-        ));
+            "Delete the selected geometry entry.", self.tooltips));
         toolbar = toolbar.push(hint(
             button(icon("settings", 28.))
                 .padding(4)
@@ -560,8 +564,7 @@ impl App {
                     (!editing && selected.is_some())
                         .then_some(Message::ProfileEntry(EntryMessage::EditSelected)),
                 ),
-            "Configure the selected geometry entry.",
-        ));
+            "Configure the selected geometry entry.", self.tooltips));
         geometry_collection(
             "Contour selection",
             rows,
@@ -633,8 +636,7 @@ impl App {
                     .size(15)
                     .text_size(12)
                     .on_toggle(|v| Message::ProfileEntry(EntryMessage::Coplanar(v))),
-                "Include upward planar faces on the same plane in each selected body.",
-            ));
+                "Include upward planar faces on the same plane in each selected body.", self.tooltips));
         }
         if entry.kind == ProfileGeometryKind::Chain {
             let mut modes = row![text("Mode").size(12).width(90)]
@@ -652,13 +654,12 @@ impl App {
                         .padding(4)
                         .style(move |theme, status| inspector_tab(theme, status, active))
                         .on_press(Message::ProfileEntry(EntryMessage::ChainMode(mode))),
-                    label,
-                ));
+                    label, self.tooltips));
             }
-            body=body.push(modes).push(hint(checkbox(entry.reversed).label("Reverse direction").size(15).text_size(12).on_toggle(|v|Message::ProfileEntry(EntryMessage::Reverse(v))),"Reverse this chain's selected direction. Open-chain left and right follow that direction."));
+            body=body.push(modes).push(hint(checkbox(entry.reversed).label("Reverse direction").size(15).text_size(12).on_toggle(|v|Message::ProfileEntry(EntryMessage::Reverse(v))),"Reverse this chain's selected direction. Open-chain left and right follow that direction.", self.tooltips));
         } else {
             if entry.kind == ProfileGeometryKind::Silhouette {
-                body=body.push(hint(checkbox(entry.use_setup_models).label("Use setup models").size(15).text_size(12).on_toggle(|v|Message::ProfileEntry(EntryMessage::SetupModels(v))),"Use the bodies currently included in the active setup. Select bodies manually to customize the collection."));
+                body=body.push(hint(checkbox(entry.use_setup_models).label("Use setup models").size(15).text_size(12).on_toggle(|v|Message::ProfileEntry(EntryMessage::SetupModels(v))),"Use the bodies currently included in the active setup. Select bodies manually to customize the collection.", self.tooltips));
                 body = body.push(
                     row![
                         text("Tolerance (mm)").size(12).width(90),
@@ -685,8 +686,7 @@ impl App {
                         .padding(4)
                         .style(move |theme, status| inspector_tab(theme, status, active))
                         .on_press(Message::ProfileEntry(EntryMessage::Curves(value))),
-                    label,
-                ));
+                    label, self.tooltips));
             }
             body = body.push(filters);
         }
@@ -697,7 +697,7 @@ impl App {
             ProfileSideRule::AlwaysInside,
             ProfileSideRule::On,
         ];
-        body=body.push(profile_picker("Side","Start outside/inside alternates the cutter side for outer and inner boundaries. Always outside/inside uses the same side for every contour in this entry. On follows each contour with the cutter centre.",true,entry.side_rule,&SIDES,|v|Message::ProfileEntry(EntryMessage::Side(v))));
+        body=body.push(profile_picker("Side",illustrated_help::PROFILE_ENTRY_SIDES,self.tooltips,entry.side_rule,&SIDES,|v|Message::ProfileEntry(EntryMessage::Side(v))));
         if let Some(error) = &editor.error {
             body = body.push(text(error).size(11).color(palette::WARN));
         }

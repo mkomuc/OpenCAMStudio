@@ -7,20 +7,108 @@ pub(super) enum ToolpathAction {
     Recompute,
     Simulate,
     Export,
+    ProcessingTime,
 }
 
 impl App {
+    /// Keep calculation feedback visible independently of the docked Output pane.
+    pub(super) fn calculation_progress(&self) -> Option<Element<'_, Message>> {
+        use crate::JobPhase;
+        use iced::widget::progress_bar;
+
+        let progress = self.controller.run_progress()?;
+        let label = match progress.phase {
+            JobPhase::Queued => "Waiting to calculate…".into(),
+            JobPhase::GeometryResolution => "Resolving machining geometry…".into(),
+            JobPhase::Generation => {
+                let operation = progress
+                    .operation
+                    .map_or(String::new(), |id| format!(" · operation #{id}"));
+                format!(
+                    "Calculating toolpaths{operation} · {} / {} operations complete",
+                    progress.completed, progress.total
+                )
+            }
+            JobPhase::Verification if progress.total > 0 => format!(
+                "Verifying toolpaths · {:.0}%",
+                (progress.completed as f64 / progress.total as f64).clamp(0.0, 1.0) * 100.0
+            ),
+            JobPhase::Verification => "Verifying toolpaths…".into(),
+            JobPhase::RenderPreparation => "Preparing preview…".into(),
+        };
+        let bar: Element<'_, Message> =
+            if progress.phase == JobPhase::Verification && progress.total > 0 {
+                progress_bar(
+                    0.0..=1.0,
+                    (progress.completed as f32 / progress.total as f32).clamp(0.0, 1.0),
+                )
+                .girth(6)
+                .into()
+            } else {
+                // Generation reports operation boundaries, not progress within a long
+                // operation. Animate a moving segment instead of inventing a percentage.
+                // The existing 50 ms worker polling subscription also redraws this bar.
+                let tick = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    % 2_000;
+                let position = if tick < 1_000 { tick } else { 2_000 - tick };
+                let left = 1 + (position / 10) as u16;
+                row![
+                    Space::new().width(Length::FillPortion(left)),
+                    progress_bar(0.0..=1.0, 1.0)
+                        .length(Length::FillPortion(30))
+                        .girth(6),
+                    Space::new().width(Length::FillPortion(102 - left)),
+                ]
+                .into()
+            };
+        Some(
+            container(
+                column![
+                    row![
+                        text(label).size(12).width(Length::Fill),
+                        inspector_button("Cancel").on_press(Message::CancelRun),
+                    ]
+                    .align_y(Alignment::Center)
+                    .spacing(12),
+                    bar,
+                ]
+                .spacing(6),
+            )
+            .padding([8, 12])
+            .width(Length::Fill)
+            .into(),
+        )
+    }
+
     /// Submit a snapshot; the event loop never runs machining services inline.
     pub(super) fn rerun(&mut self) {
+        self.rerun_with_review(false);
+    }
+
+    pub(super) fn rerun_all(&mut self) {
+        self.rerun_with_review(true);
+    }
+
+    fn rerun_with_review(&mut self, review_all: bool) {
+        self.controller.set_simulation_accuracy(self.settings.simulation.accuracy);
         self.pending_toolpath_export = None;
         self.pending_simulation = None;
+        self.pending_processing_time = None;
+        self.processing_time_dialog = None;
         self.simulation = None;
         if self.controller.document().setup().operations.is_empty() {
             self.controller.cancel_run();
             self.status = "No operations to run.".into();
             return;
         }
-        self.controller.start_run();
+        if review_all {
+            self.controller.start_run();
+        } else {
+            self.controller.start_automatic_run();
+        }
         self.status = "Generating toolpaths…".into();
     }
 
@@ -45,7 +133,12 @@ impl App {
         let (setup, operation, pattern) = match node {
             TreeNode::Setup(id) => (id, None, None),
             TreeNode::Pattern(id) => {
-                let Some(setup) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == id)) else {
+                let Some(setup) = self
+                    .controller
+                    .setups()
+                    .iter()
+                    .find(|s| s.patterns.iter().any(|p| p.id == id))
+                else {
                     self.status = "Pattern no longer exists.".into();
                     return iced::Task::none();
                 };
@@ -71,6 +164,8 @@ impl App {
         }
         self.pending_toolpath_export = None;
         self.pending_simulation = None;
+        self.pending_processing_time = None;
+        self.processing_time_dialog = None;
         self.simulation = None;
         self.tree_menu = None;
         self.open_op_menu = None;
@@ -79,7 +174,14 @@ impl App {
         self.focus_ops.clear();
         self.focus_ops.extend(operation);
         if let Some(pattern_id) = pattern {
-            if let Some(pattern) = self.controller.setups().iter().find_map(|s| s.patterns.iter().find(|p| p.id == pattern_id)) { self.focus_ops.extend(pattern.members.iter().copied()); }
+            if let Some(pattern) = self
+                .controller
+                .setups()
+                .iter()
+                .find_map(|s| s.patterns.iter().find(|p| p.id == pattern_id))
+            {
+                self.focus_ops.extend(pattern.members.iter().copied());
+            }
         }
         self.end_setup_draft();
         self.operation_draft = None;
@@ -87,10 +189,16 @@ impl App {
             .select(operation.map_or(Selection::Setup, Selection::Operation));
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
+        self.controller.set_simulation_accuracy(self.settings.simulation.accuracy);
         let run = if let Some(pattern_id) = pattern {
-            self.controller.start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)
+            self.controller
+                .start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)
         } else {
-            self.controller.start_toolpath_run(operation, action == ToolpathAction::Recompute)
+            self.controller.start_toolpath_run_with_predecessors(
+                operation,
+                action == ToolpathAction::Recompute,
+                action == ToolpathAction::Simulate && operation.is_some(),
+            )
         };
         match run {
             Ok(stamp) => {
@@ -98,14 +206,35 @@ impl App {
                     self.pending_toolpath_export = Some(stamp.clone());
                 }
                 if action == ToolpathAction::Simulate {
-                    self.pending_simulation = Some(stamp);
+                    self.pending_simulation = Some(stamp.clone());
                     self.show_stock = true;
                     self.set_pane_visible(Pane::Output, true);
+                }
+                if action == ToolpathAction::ProcessingTime {
+                    self.pending_processing_time = Some(
+                        super::processing_time_view::PendingProcessingTime {
+                            stamp: stamp.clone(),
+                            label: match node {
+                                TreeNode::Setup(id) => self
+                                    .controller
+                                    .setups()
+                                    .iter()
+                                    .find(|setup| setup.id == id)
+                                    .map(|setup| format!("{} · setup #{id}", setup.name))
+                                    .unwrap_or_else(|| format!("Setup #{id}")),
+                                TreeNode::Operation(id) => format!("Operation #{id}"),
+                                TreeNode::Pattern(id) => format!("Pattern #{id}"),
+                                _ => "Program".to_string(),
+                            },
+                            feed_override: "100".to_string(),
+                        },
+                    );
                 }
                 self.status = match action {
                     ToolpathAction::Recompute => "Recomputing toolpaths…",
                     ToolpathAction::Simulate => "Simulating toolpaths…",
                     ToolpathAction::Export => "Preparing toolpaths for post processing…",
+                    ToolpathAction::ProcessingTime => "Calculating processing time…",
                 }
                 .into();
             }
@@ -123,8 +252,12 @@ impl App {
             .filter(|d| d.severity == Severity::Error)
             .count();
         self.status = match outcome.completion {
+            JobCompletion::Complete if outcome.has_errors() || !outcome.collisions.is_empty() =>
+                "Toolpath verification errors — click a setup or operation status indicator for details.".into(),
+            JobCompletion::Complete if outcome.diagnostics.iter().any(|d| d.severity == Severity::Warning) =>
+                "Toolpath ready with warnings — click a setup or operation status indicator for details.".into(),
             JobCompletion::Complete => "Toolpath ready. Export when you like.".to_string(),
-            JobCompletion::Failed => format!("{errors} error(s) — see Output."),
+            JobCompletion::Failed => format!("{errors} error(s) — click a setup or operation status indicator for details."),
             JobCompletion::Cancelled => {
                 "Run cancelled. Run the job again before exporting.".to_string()
             }
@@ -141,7 +274,8 @@ impl App {
             } else {
                 "Copy output"
             })
-            .on_press(Message::OutputCopy)
+            .on_press(Message::OutputCopy),
+            inspector_button("Clear").on_press(Message::OutputClear)
         ]
         .spacing(8);
         if self.output_content.selection().is_some() {
@@ -167,5 +301,55 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn opening_saved_paths_reuses_them_and_legacy_projects_wait_for_a_user_run() {
+        let mut source = AppController::new(crate::default_machine());
+        source.open_dxf(SAMPLE_DXF, "saved-paths.dxf").unwrap();
+        assert_eq!(
+            source.run(&cam_toolpath::CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
+        let path =
+            std::env::temp_dir().join(format!("gui-saved-paths-{}.ocam", std::process::id()));
+        source.save_project(&path).unwrap();
+        let (mut app, _) = App::new();
+        app.library.tools.clear();
+        app.open_project(&path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.controller.run_needs_poll() {
+            app.controller.poll_run();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(app.controller.cache_stats().computed, 0);
+        assert_eq!(
+            app.controller.cache_stats().reused,
+            source.document().setup().operations.len()
+        );
+        assert!(app.controller.outcome().is_some());
+
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("toolpaths");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        app.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            !app.controller.run_needs_poll(),
+            "opening cannot calculate missing paths"
+        );
+        assert!(app
+            .controller
+            .toolpath_statuses()
+            .values()
+            .all(|ready| !ready));
     }
 }

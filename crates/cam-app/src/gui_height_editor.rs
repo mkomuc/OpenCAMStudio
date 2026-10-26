@@ -9,6 +9,7 @@ use iced::widget::column;
 pub(super) fn plane_input_id(plane: Plane) -> String {
     format!("plane-offset-{plane:?}")
 }
+
 impl App {
     /// Keep explicitly entered decimal places, including trailing zeros. Only
     /// display rounding is applied; editor buffers and machining values stay exact.
@@ -70,6 +71,7 @@ impl App {
 
     pub(super) fn seed_height_editor(&mut self, id: u32) {
         self.height_draft_id = Some(id);
+        self.height_disabled_feed_reference = None;
         self.height_reference_pick = None;
         let Some(op) = self.controller.operation(id) else {
             return;
@@ -181,12 +183,18 @@ impl App {
     pub(super) fn height_reference_selected(&mut self, plane: Plane, reference: Reference) {
         if let Some(settings) = &mut self.height_draft {
             let d = settings.definition_mut(plane);
+            if plane == Plane::Feed
+                && reference == Reference::Disabled
+                && d.reference != Reference::Disabled
+            {
+                self.height_disabled_feed_reference = Some(d.reference);
+            }
             d.reference = reference;
             if matches!(reference, Reference::Highest | Reference::Lowest) && d.sources.is_empty() {
                 d.sources = vec![Reference::StockTop, Reference::ModelTop];
             }
         }
-        self.focused_height = Some(plane_input_id(plane));
+        self.focused_height = (reference != Reference::Disabled).then(|| plane_input_id(plane));
         self.height_reference_pick = None;
     }
     pub(super) fn height_geometry_selected(&mut self, entity: EntityRef) {
@@ -210,31 +218,32 @@ impl App {
         let resolved = self.resolve_height_editor(id);
         let mut controls = column![
             row![
-                text("Reference planes and offsets")
-                    .size(12)
-                    .width(Length::Fill),
+                help_wrap(
+                    inspector_section_label("Reference planes and offsets").width(Length::Fill),
+                    "Offsets are in mm along setup Z. Planes are shown while Heights is selected.",
+                    self.tooltips,
+                ),
                 inspector_button("Use defaults").on_press(Message::HeightDefaults),
             ]
             .spacing(8),
-            text("Offsets are in mm along setup Z. Planes are shown while Heights is selected.")
-                .size(11)
-                .color(INSPECTOR_MUTED)
         ]
         .spacing(10);
         for plane in Plane::ALL {
             let d = settings.definition(plane);
-            let collapsed = self.collapsed_heights.contains(&plane);
-            let mut section =
-                column![
-                    inspector_button(format!("{} {plane}", if collapsed { "▸" } else { "▾" }))
-                        .width(Length::Fill)
-                        .on_press(Message::HeightSectionToggle(plane))
-                ]
-                .spacing(7);
+            let enabled = d.reference != Reference::Disabled;
+            let collapsed = !enabled || self.collapsed_heights.contains(&plane);
+            let toggle = (plane == Plane::Feed).then(|| {
+                Element::from(checkbox(enabled).size(14).on_toggle(Message::HeightFeedEnabled))
+            });
+            let heading = inspector_disclosure_heading(
+                &plane.to_string(), collapsed, Message::HeightSectionToggle(plane), toggle,
+            );
+            let heading = help_wrap(heading, illustrated_help::height_help(plane), self.tooltips);
+            let mut section = column![heading].spacing(10);
             if !collapsed {
                 section = section.push(
                     row![
-                        text("From").size(12).width(50),
+                        help_wrap(text("From").size(12).width(50), illustrated_help::height_help(plane), self.tooltips),
                         super::height_reference::picker(plane, d.reference)
                     ]
                     .spacing(8)
@@ -253,7 +262,7 @@ impl App {
                         .is_none_or(|v| !v.is_finite());
                     section = section.push(
                         row![
-                            text("Offset").size(12).width(50),
+                            help_wrap(text("Offset").size(12).width(50), illustrated_help::height_help(plane), self.tooltips),
                             inspector_input("0", &value)
                                 .id(plane_input_id(plane))
                                 .on_input(move |v| Message::HeightOffsetChanged(plane, v))
@@ -397,11 +406,66 @@ impl App {
                     }
                 }
             }
-            controls = controls.push(container(section).padding([9, 0]).width(Length::Fill));
+            controls = controls.push(section.width(Length::Fill));
         }
         if let Err(reason) = resolved {
             controls = controls.push(text(reason).size(11).color(palette::ERROR));
         }
         controls.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feed_toggle_preserves_reference_and_offsets_without_committing() {
+        let (mut app, _) = App::new();
+        app.height_draft = Some(OperationHeightSettings::default());
+        app.height_offsets = Plane::ALL
+            .into_iter()
+            .map(|plane| (plane, "0".to_string()))
+            .collect();
+        app.height_reference_selected(Plane::Feed, Reference::Highest);
+        let before = app.height_draft.clone().unwrap();
+        app.height_reference_pick = Some(Plane::Feed);
+        app.collapsed_heights.insert(Plane::Feed);
+        // A hidden invalid offset must not block applying the remaining heights.
+        app.height_offsets.insert(Plane::Feed, "unfinished".into());
+
+        let _ = app.update(Message::HeightFeedEnabled(false));
+        assert_eq!(
+            app.height_draft.as_ref().unwrap().definition(Plane::Feed).reference,
+            Reference::Disabled
+        );
+        assert!(app.height_reference_pick.is_none());
+        assert!(app.focused_height.is_none());
+        assert!(app.edited_height_settings().is_ok());
+
+        let _ = app.update(Message::HeightFeedEnabled(true));
+        assert_eq!(app.height_draft.as_ref(), Some(&before));
+        assert!(!app.collapsed_heights.contains(&Plane::Feed));
+        assert_eq!(app.height_offsets[&Plane::Feed], "unfinished");
+        assert!(app.edited_height_settings().is_err());
+        assert!(app.controller.document().setup().height_settings.is_empty());
+    }
+
+    #[test]
+    fn saved_disabled_feed_enables_from_top_and_defaults_clear_cached_reference() {
+        let (mut app, _) = App::new();
+        let mut settings = OperationHeightSettings::default();
+        settings.definition_mut(Plane::Feed).reference = Reference::Disabled;
+        app.height_draft = Some(settings);
+        let _ = app.update(Message::HeightFeedEnabled(true));
+        assert_eq!(
+            app.height_draft.as_ref().unwrap().definition(Plane::Feed).reference,
+            Reference::Plane(Plane::Top)
+        );
+        app.height_reference_selected(Plane::Feed, Reference::ModelTop);
+        let _ = app.update(Message::HeightFeedEnabled(false));
+        let _ = app.update(Message::HeightDefaults);
+        assert!(app.height_disabled_feed_reference.is_none());
+        assert_eq!(app.height_draft, Some(OperationHeightSettings::default()));
     }
 }

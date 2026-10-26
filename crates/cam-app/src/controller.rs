@@ -6,7 +6,7 @@
 //! and export G-code. The iced shell is a thin view over this — so the app's
 //! logic is unit-tested exactly like the rest of the pipeline.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cam_geo::{Contour, Point, Polygon, Polyline};
@@ -16,7 +16,7 @@ use crate::project::{OcamFile, Project};
 use cam_model::{
     reconcile_tool_numbers, Axis, CarveOp, ChamferOp, ClearParams, Comp, Document, DrillOp,
     EngraveOp, FaceOp, Hand, Heights, History, Lead, Machine, Operation, Origin, Plunge, PocketOp,
-    ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
+    AdaptiveOp, AdaptiveParams, ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
 };
 use cam_post::{PostError, PostKind, PostOptions};
 use cam_render::{MeshVertex, Scene};
@@ -90,15 +90,17 @@ pub enum OpKind {
     Face,
     Chamfer,
     Thread,
+    Bore,
     Engrave,
     Carve,
+    Adaptive,
 }
 
 /// Whether an operation kind restricts geometry selection to **circular** loops.
 /// Drilling and thread-milling target holes (the pick gives the centre, and for
 /// threads the diameter), so a rectangle or open edge is not a valid pick.
 pub fn op_selects_circles(kind: OpKind) -> bool {
-    matches!(kind, OpKind::Drill | OpKind::Thread)
+    matches!(kind, OpKind::Drill | OpKind::Bore | OpKind::Thread)
 }
 
 /// Which node of the document is currently selected — what the tree highlights
@@ -169,6 +171,8 @@ pub enum ExportError {
     /// machine-crash hazard, blocked by default. (A future preference could let
     /// the user downgrade this to a warning.)
     RapidThroughStock(usize),
+    /// Non-cutting feeds or cutter tips contact remaining stock.
+    NonCuttingThroughStock(usize),
     /// The post rejected the program.
     Post(PostError),
 }
@@ -199,6 +203,10 @@ impl std::fmt::Display for ExportError {
                 f,
                 "{n} rapid move{} would plow through material that has not been cut yet —                  a crash hazard, so the export is blocked.",
                 if *n == 1 { "" } else { "s" }
+            ),
+            ExportError::NonCuttingThroughStock(n) => write!(
+                f,
+                "{n} non-cutting move(s) or cutter tips contact remaining stock — a crash hazard, so the export is blocked."
             ),
             ExportError::Post(e) => write!(f, "{e}."),
         }
@@ -247,6 +255,8 @@ pub struct AppController {
     import_replacement: Option<u64>,
     jobs: crate::jobs::JobService,
     operation_cache: cam_toolpath::OperationCache,
+    toolpath_fingerprints: BTreeMap<u32, String>,
+    automatic_toolpath_run: bool,
     simulation_accuracy: f32,
     operation_id_floor: u32,
     setup_id_floor: u64,
@@ -545,6 +555,8 @@ impl AppController {
             import_replacement: None,
             jobs: Default::default(),
             operation_cache: Default::default(),
+            toolpath_fingerprints: Default::default(),
+            automatic_toolpath_run: false,
             simulation_accuracy: 1.0,
             operation_id_floor: 0,
             setup_id_floor: 1,
@@ -747,6 +759,17 @@ impl AppController {
         self.cad_selection = entities;
         Ok(())
     }
+    /// Adaptive selections may combine faces and bodies across setup instances.
+    pub fn try_set_adaptive_cad_selection(
+        &mut self,
+        entities: Vec<cam_model::EntityRef>,
+    ) -> Result<(), String> {
+        if !entities.is_empty() {
+            cam_geometry3d::validate_adaptive_selection(self.geometry_state(), &entities)?;
+        }
+        self.cad_selection = entities;
+        Ok(())
+    }
     /// Apply a viewport/tree pick, with Ctrl/Command allowing homogeneous
     /// multi-selection. Rejected additions preserve the previous selection.
     pub fn toggle_cad_selection(
@@ -765,6 +788,19 @@ impl AppController {
             selected.push(entity);
         }
         self.try_set_cad_selection(selected)
+    }
+    pub fn toggle_adaptive_cad_selection(
+        &mut self,
+        entity: cam_model::EntityRef,
+        additive: bool,
+    ) -> Result<(), String> {
+        let mut selected = if additive { self.cad_selection.clone() } else { Vec::new() };
+        if let Some(index) = selected.iter().position(|reference| *reference == entity) {
+            selected.remove(index);
+        } else {
+            selected.push(entity);
+        }
+        self.try_set_adaptive_cad_selection(selected)
     }
     pub fn start_cad_import(&mut self, path: PathBuf) -> u64 {
         self.import_preview = None;
@@ -904,7 +940,11 @@ impl AppController {
         entities: &[cam_model::EntityRef],
     ) -> Result<cam_geometry3d::ResolvedInput, String> {
         let geometry = self.setup_geometry_state()?;
-        crate::cad_operations::validate_selection(&geometry, entities)?;
+        if kind == OpKind::Adaptive {
+            cam_geometry3d::validate_adaptive_selection(&geometry, entities)?;
+        } else {
+            crate::cad_operations::validate_selection(&geometry, entities)?;
+        }
         let binding = cam_geometry3d::resolve_selection(
             &geometry,
             entities,
@@ -1034,9 +1074,11 @@ impl AppController {
             op.apply_tool_preset(preset)?;
         }
         let mut preview = self.document().clone();
+        preview.geometry.bindings.insert(id, binding.clone());
         let settings = if matches!(
             kind,
-            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread
+            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive
+                | OpKind::Bore
         ) {
             crate::cad_operations::selection_height_defaults(&preview, &op)
         } else {
@@ -1044,7 +1086,6 @@ impl AppController {
         };
         preview.setup_mut().height_settings.insert(id, settings);
         preview.setup_mut().operations.push(op);
-        preview.geometry.bindings.insert(id, binding);
         preview.cad_linked_operations.insert(id);
         crate::cad_operations::validate_binding_edit(&mut preview, id)?;
         self.edit_document(move |doc| *doc = preview);
@@ -1057,8 +1098,12 @@ impl AppController {
         id: u32,
         entities: Vec<cam_model::EntityRef>,
     ) -> Result<(), String> {
-        crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
         let mut doc = self.document().clone();
+        if matches!(self.operation(id), Some(Operation::Adaptive(_))) {
+            cam_geometry3d::validate_adaptive_selection(self.geometry_state(), &entities)?;
+        } else {
+            crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
+        }
         let binding = doc
             .geometry
             .bindings
@@ -1219,6 +1264,8 @@ impl AppController {
         let mut document = self.generate_document(seed_ops);
         document.geometry.drawing_regions = self.regions.clone();
         document.geometry.drawing_paths = self.open_paths.clone();
+        self.operation_cache = Default::default();
+        self.toolpath_fingerprints.clear();
         self.document = History::new(document);
         self.active_setup_id = self.document.current().setup().id;
         self.cad_selection.clear();
@@ -1243,6 +1290,8 @@ impl AppController {
         self.provenance = Provenance::default();
         self.regions.clear();
         self.open_paths.clear();
+        self.operation_cache = Default::default();
+        self.toolpath_fingerprints.clear();
         self.document = History::new(empty_document(&self.defaults));
         self.active_setup_id = self.document.current().setup().id;
         self.active_origin = self.document.current().setup().origin_index;
@@ -1285,6 +1334,10 @@ impl AppController {
             doc.pattern_id_floor = doc.pattern_id_floor.max(pattern_floor);
         });
         let project = Project {
+            toolpaths: crate::project::StoredToolpaths {
+                cache: self.operation_cache.clone(),
+                fingerprints: self.toolpath_fingerprints.clone(),
+            },
             schema_version: cam_model::SCHEMA_VERSION,
             document: self.document.current().clone(),
             regions: self.regions.clone(),
@@ -1362,6 +1415,8 @@ impl AppController {
             machine: project.machine,
             post: project.post,
         };
+        self.operation_cache = project.toolpaths.cache;
+        self.toolpath_fingerprints = project.toolpaths.fingerprints;
         self.document = History::new(project.document);
         self.active_setup_id = self.document.current().setup().id;
         self.active_origin = self.document.current().setup().origin_index;
@@ -1833,6 +1888,10 @@ impl AppController {
             if doc.cad_linked_operations.contains(&sel) {
                 doc.cad_linked_operations.insert(new_id);
             }
+            let stock = doc.setup().stock_to_leave_for(sel);
+            if stock.enabled {
+                doc.setup_mut().stock_to_leave.insert(new_id, stock);
+            }
             doc.setup_mut().operations.insert(insert_after, copy);
         });
         self.selection = Selection::Operation(new_id);
@@ -1937,6 +1996,18 @@ impl AppController {
             Point::new(10., 10.),
             Point::new(0., 10.),
         ]);
+        let chain = if kind == OpKind::Bore {
+            Contour::new(
+                (0..64)
+                    .map(|i| {
+                        let a = std::f64::consts::TAU * i as f64 / 64.;
+                        Point::new(6. * a.cos(), 6. * a.sin())
+                    })
+                    .collect(),
+            )
+        } else {
+            chain
+        };
         self.build_op_shape(kind, chain, true, &[], tool, None, None)
             .unwrap()
     }
@@ -1964,6 +2035,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                passes: Default::default(),
                 selections: None,
                 closed,
                 additional_chains: islands
@@ -2000,6 +2072,7 @@ impl AppController {
                 feed,
                 plunge_feed,
                 start,
+                end: None,
                 lead_in: Lead::None,
                 lead_out: Lead::None,
                 lead_overlap: 0.0,
@@ -2022,6 +2095,7 @@ impl AppController {
                     entry_feeds: Default::default(),
                     work_offset: 1,
                     start,
+                    end: None,
                     clear: ClearParams {
                         clearing: cam_model::Clearing::default(),
                         stepdown: p.stepdown,
@@ -2105,10 +2179,25 @@ impl AppController {
                 feed,
                 plunge_feed,
                 start,
+                end: None,
                 lead_in: Lead::None,
                 lead_out: Lead::None,
                 lead_overlap: 0.0,
             }),
+            OpKind::Bore => {
+                let (center, radius) = fit_circle(chain.points())?;
+                Operation::Bore(cam_model::BoreOp {
+                    tool,
+                    points: vec![center],
+                    diameter: 2. * radius,
+                    z_top: p.top_of_stock,
+                    z_bottom: p.top_of_stock - p.depth,
+                    spindle_rpm,
+                    feed,
+                    plunge_feed,
+                    ..Default::default()
+                })
+            }
             OpKind::Thread => {
                 // Seed one thread at the picked loop's centre; a circular hole
                 // loop gives its diameter as the major diameter. Pitch/hand are
@@ -2192,6 +2281,7 @@ impl AppController {
                     // verified before it is taken (the ones that would gouge still lift).
                     stay_down: true,
                     start,
+                    end: None,
                 })
             }
             OpKind::Engrave => Operation::Engrave(EngraveOp {
@@ -2213,6 +2303,17 @@ impl AppController {
                 feed,
                 plunge_feed,
                 start,
+                end: None,
+            }),
+            OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+                id: 0,
+                tool,
+                spindle_rpm,
+                tool_preset: None,
+                cooling: Default::default(),
+                entry_feeds: Default::default(),
+                work_offset: 1,
+                params: AdaptiveParams::default(),
             }),
         };
         if let Some(cooling) = self
@@ -2385,6 +2486,7 @@ impl AppController {
                 };
                 match &mut op {
                     Operation::Drill(operation) => operation.points = points,
+                    Operation::Bore(operation) => operation.points = points,
                     Operation::Thread(operation) => operation.points = points,
                     _ => return false,
                 }
@@ -2423,6 +2525,7 @@ impl AppController {
     /// Run synchronously for CLI/tests, through the same services as GUI workers.
     pub fn run(&mut self, cancel: &CancelToken) -> &RunOutcome {
         self.cancel_run();
+        self.automatic_toolpath_run = false;
         let inputs = self.job_inputs();
         let mut cache = std::mem::take(&mut self.operation_cache);
         let result = inputs.execute(
@@ -2433,6 +2536,7 @@ impl AppController {
         );
         self.operation_cache = cache;
         self.outcome = Some(result);
+        self.record_toolpath_fingerprints();
         self.nc = None;
         self.outcome.as_ref().unwrap()
     }
@@ -2464,6 +2568,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    passes: Default::default(),
                     selections: None,
                     closed: true,
                     additional_chains: Vec::new(),
@@ -2485,6 +2590,7 @@ impl AppController {
                     work_offset: 1,
                     feed: p.feed,
                     plunge_feed: p.plunge_feed,
+                    end: None,
                     start: None,
                     lead_in: Lead::None,
                     lead_out: Lead::None,
@@ -2537,6 +2643,7 @@ impl AppController {
                             cooling: Default::default(),
                             entry_feeds: Default::default(),
                             work_offset: 1,
+                            end: None,
                             start: None,
                             clear: ClearParams {
                                 clearing: cam_model::Clearing::default(),
@@ -2575,6 +2682,7 @@ impl AppController {
             origin_index: 1,
             operation_heights: Default::default(),
             height_settings: Default::default(),
+            stock_to_leave: Default::default(),
             tool_change_height: None,
         })
     }
@@ -2949,8 +3057,15 @@ pub(crate) fn sim_profile(tool: &Tool) -> ToolProfile {
             half_angle_rad: included_angle_deg.to_radians() / 2.0,
             tip_radius: tip_radius.clamp(0.0, radius),
         },
-        // A thread mill's material removal is approximated by its footprint.
-        ToolKind::ThreadMill { .. } => ProfileShape::Flat,
+        ToolKind::ThreadMill { pitch } => {
+            let outline = tool.profile();
+            ProfileShape::Thread {
+                root_radius: outline.segs[0].end.x,
+                tooth_height: outline.segs[2].end.y,
+                pitch: pitch.unwrap_or(0.).max(0.),
+                tooth_count: (outline.segs.iter().filter(|s| s.cutting).count() / 2) as u32,
+            }
+        }
     };
     ToolProfile { radius, shape }
 }
@@ -2965,9 +3080,11 @@ fn op_kind_of(op: &Operation) -> OpKind {
         Operation::Pocket(_) => OpKind::Pocket,
         Operation::Face(_) => OpKind::Face,
         Operation::Chamfer(_) => OpKind::Chamfer,
+        Operation::Bore(_) => OpKind::Bore,
         Operation::Thread(_) => OpKind::Thread,
         Operation::Engrave(_) => OpKind::Engrave,
         Operation::Carve(_) => OpKind::Carve,
+        Operation::Adaptive(_) => OpKind::Adaptive,
     }
 }
 
@@ -3022,6 +3139,7 @@ fn empty_document(p: &JobParams) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }
@@ -3056,6 +3174,7 @@ mod tests {
         Machine {
             name: "test".into(),
             rapid_rate: 2000.0,
+            tool_change_seconds: 0.0,
             max_spindle_rpm: 10_000.0,
             max_feed: 800.0,
             envelope: Envelope::new(
@@ -3167,10 +3286,12 @@ mod tests {
             Operation::Pocket(o) => o.depth,
             Operation::Face(o) => o.depth,
             Operation::Drill(o) => o.depth,
+            Operation::Bore(o) => o.z_bottom,
             Operation::Thread(o) => o.z_bottom,
             Operation::Chamfer(o) => o.top,
             Operation::Engrave(o) => o.depth,
             Operation::Carve(o) => o.depth,
+            Operation::Adaptive(o) => o.params.stepdown,
         }
     }
 
@@ -3806,6 +3927,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_WITH_STROKE_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -3827,6 +3949,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -4239,27 +4362,15 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_heights_surface_a_rapid_collision() {
+    fn unsafe_heights_are_rejected_before_profile_motion() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        // A clean run has no collisions.
         assert!(app.run(&CancelToken::new()).collisions.is_empty());
-        // Clearance/retract below the stock top force lateral rapids through the
-        // stock — the simulator must catch what a green backplot would hide.
-        app.edit_heights(|h| {
-            h.clearance = -1.0;
-            h.retract = -1.0;
-        });
+        app.edit_heights(|h| { h.clearance = -1.; h.retract = -1.; });
         let outcome = app.run(&CancelToken::new());
-        assert!(
-            !outcome.collisions.is_empty(),
-            "a rapid through stock must be flagged"
-        );
-        // ...and it blocks export (a machine-crash hazard).
-        assert!(
-            matches!(app.export_nc(), Err(ExportError::RapidThroughStock(_))),
-            "a rapid through stock must block export"
-        );
+        assert!(outcome.has_errors(), "Invalid safety planes must prevent generation");
+        assert_ne!(outcome.completion, JobCompletion::Complete);
+        assert!(app.export_nc().is_err(), "Invalid safety planes must block export");
     }
 
     #[test]
@@ -4409,6 +4520,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -4522,6 +4634,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),
@@ -4560,6 +4673,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
             regions: app.regions().to_vec(),

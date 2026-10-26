@@ -30,6 +30,7 @@ fn machine() -> Machine {
     Machine {
         name: "test".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),
@@ -206,6 +207,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -227,6 +229,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: lead,
         lead_out: lead,
@@ -247,6 +250,7 @@ fn pocket() -> Operation {
         boundary: rect(10.0, 10.0, 70.0, 50.0),
         islands: vec![],
         depth: 6.0,
+        end: None,
         start: None,
         clear: ClearParams {
             stepdown: 2.0,
@@ -287,6 +291,7 @@ fn chamfer() -> Operation {
         lead_out: Lead::None,
         lead_overlap: 0.0,
         gradual: false,
+        end: None,
         start: None,
     })
 }
@@ -326,6 +331,7 @@ fn doc(ops: Vec<Operation>) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }

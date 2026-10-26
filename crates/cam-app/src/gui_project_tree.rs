@@ -28,6 +28,7 @@ pub(super) enum TreeMessage {
     Hover(TreeNode, bool),
     Leave(TreeNode),
     Open(TreeNode),
+    DoubleClick(TreeNode),
     Release,
     Command(Box<Message>),
     ShowPatternMenu,
@@ -36,10 +37,14 @@ pub(super) enum TreeMessage {
 
 impl App {
     pub(super) fn clear_browser_selection(&mut self) {
-        self.simulation = None;
         self.pending_simulation = None;
+        self.pending_processing_time = None;
+        self.cad_filter_explicit = false;
+        self.geometry_additive = false;
+        self.geometry_auto_pick = false;
         self.end_setup_draft();
         self.operation_draft = None;
+        self.stock_to_leave_draft = None;
         self.operation_tools.clear();
         self.operation_geometry = None;
         self.operation_binding_preview = None;
@@ -120,16 +125,17 @@ impl App {
                     self.controller.select(Selection::Setup);
                     self.model_view = None;
                     self.expanded_patterns.insert(*id);
-                    self.simulation = None;
                     self.pending_simulation = None;
+                    self.pending_processing_time = None;
                 }
                 iced::Task::none()
             }
             _ => {
-                self.simulation = None;
                 self.pending_simulation = None;
+                self.pending_processing_time = None;
                 self.end_setup_draft();
                 self.operation_draft = None;
+                self.stock_to_leave_draft = None;
                 self.controller.select(Selection::Setup);
                 self.controller.set_cad_selection(vec![]);
                 self.cad_hover = None;
@@ -200,6 +206,22 @@ impl App {
                 self.pattern_menu_y = None;
                 self.op_menu_pos = self.window_cursor;
                 self.tree_menu = Some(node);
+            }
+            TreeMessage::DoubleClick(node) => {
+                self.tree_drag = None;
+                self.tree_menu = None;
+                self.pattern_menu_y = None;
+                self.open_op_menu = None;
+                if self.tree_edit_blocked() {
+                    return iced::Task::none();
+                }
+                match node {
+                    TreeNode::Setup(id) => return self.update(Message::EditSetup(id)),
+                    TreeNode::Operation(id) => {
+                        return self.update(Message::Select(Selection::Operation(id)));
+                    }
+                    _ => return iced::Task::none(),
+                }
             }
             TreeMessage::ShowPatternMenu => {
                 if matches!(self.tree_menu, Some(TreeNode::Setup(_) | TreeNode::Operation(_))) {
@@ -328,6 +350,7 @@ impl App {
         let leave = node.clone();
         let press = node.clone();
         let open = node.clone();
+        let double_click = node.clone();
         mouse_area(
             container(content)
                 .width(Length::Fill)
@@ -348,6 +371,7 @@ impl App {
                 }),
         )
         .on_press(Message::Tree(TreeMessage::Press(press)))
+        .on_double_click(Message::Tree(TreeMessage::DoubleClick(double_click)))
         .on_right_press(Message::Tree(TreeMessage::Open(open)))
         .on_move(move |point| {
             Message::Tree(TreeMessage::Hover(
@@ -470,32 +494,11 @@ impl App {
             mouse_area(tree_header("Setups"))
                 .on_right_press(Message::Tree(TreeMessage::Open(TreeNode::Setups))),
         );
+        let status_fingerprints = self.controller.current_toolpath_fingerprints();
+        let toolpath_statuses = self.controller.toolpath_statuses_for(&status_fingerprints);
         for setup in self.controller.setups() {
             let active = setup.id == self.controller.active_setup_id();
             let expanded = self.expanded_setups.contains(&setup.id);
-            let status = if !active {
-                "inactive"
-            } else if setup.operations.is_empty() {
-                "empty"
-            } else if self.controller.outcome().is_some_and(|outcome| {
-                setup
-                    .operations
-                    .iter()
-                    .filter(|op| !self.controller.is_operation_excluded(op.id()))
-                    .all(|op| {
-                        outcome
-                            .scene
-                            .strips
-                            .iter()
-                            .any(|strip| strip.op == Some(op.id()))
-                    })
-            }) {
-                "generated"
-            } else if self.controller.outcome().is_some() {
-                "needs run"
-            } else {
-                "pending"
-            };
             let setup_row = row![
                 button(text(if expanded { "▾" } else { "▸" }).size(11))
                     .padding(2)
@@ -504,7 +507,10 @@ impl App {
                 checkbox(!self.hidden_setups.contains(&setup.id))
                     .size(12)
                     .on_toggle(move |visible| Message::SetSetupVisible(setup.id, visible)),
-                text(format!("{} · {}", setup.name, status))
+                self.status_indicator(
+                    StatusTarget::Setup(setup.id), &toolpath_statuses, &status_fingerprints,
+                ),
+                text(&setup.name)
                     .size(11)
                     .width(Length::Fill)
             ]
@@ -522,6 +528,7 @@ impl App {
             // that same stable order so a row's position is its execution order.
             let origins = setup.origin_indices();
             let mut operations: Vec<_> = setup.operations.iter().collect();
+            let mut operation_counts = std::collections::BTreeMap::new();
             operations.sort_by_key(|op| {
                 origins
                     .iter()
@@ -530,6 +537,10 @@ impl App {
             });
             let mut group = None;
             for op in operations {
+                let kind = op_kind(op);
+                let count = operation_counts.entry(kind).or_insert(0usize);
+                *count += 1;
+                let operation_label = format!("[T{}] {kind} {count}", op.tool());
                 if origins.len() > 1 && group != Some(op.work_offset()) {
                     list = list.push(tree_note(&format!("    Work origin {}", op.work_offset())));
                     group = Some(op.work_offset());
@@ -544,24 +555,6 @@ impl App {
                 if let Some(pattern) = setup.patterns.iter().find(|p| p.members.contains(&id)) {
                     if !self.expanded_patterns.contains(&pattern.id) { continue; }
                 }
-                let excluded = self.controller.is_operation_excluded(id);
-                let generated = active
-                    && self.controller.outcome().is_some_and(|outcome| {
-                        outcome
-                            .scene
-                            .strips
-                            .iter()
-                            .any(|strip| strip.op == Some(id))
-                    });
-                let state = if excluded {
-                    "suppressed"
-                } else if !active {
-                    "inactive"
-                } else if generated {
-                    "ready"
-                } else {
-                    "pending"
-                };
                 let expanded = self.expanded_operations.contains(&id);
                 let controls = row![
                     Space::new().width(Length::Fixed(if setup.patterns.iter().any(|p| p.members.contains(&id)) { 28.0 } else { 14.0 })),
@@ -572,7 +565,11 @@ impl App {
                     checkbox(!self.hidden_ops.contains(&id))
                         .size(12)
                         .on_toggle(move |visible| Message::SetOperationVisible(id, visible)),
-                    text(format!("{} · {}", op_kind(op), state))
+                    self.status_indicator(
+                        StatusTarget::Operation(id), &toolpath_statuses, &status_fingerprints,
+                    ),
+                    icon_svg(operation_icon(op), 18.0),
+                    text(operation_label)
                         .size(11)
                         .width(Length::Fill)
                 ]
@@ -616,6 +613,7 @@ impl App {
                 Message::ToolpathCommand(_, ToolpathAction::Recompute) => Some(Icon::Toolpath),
                 Message::ToolpathCommand(_, ToolpathAction::Simulate) => Some(Icon::Run),
                 Message::ToolpathCommand(_, ToolpathAction::Export) => Some(Icon::Export),
+                Message::ToolpathCommand(_, ToolpathAction::ProcessingTime) => Some(Icon::ToolpathTime),
                 Message::DuplicateOp | Message::SetupDuplicate(_) => Some(Icon::Duplicate),
                 Message::BeginPattern(true) => Some(Icon::CircularPattern),
                 Message::BeginPattern(false) => Some(Icon::Pattern),
@@ -673,6 +671,7 @@ impl App {
                 ("Recompute toolpath", ToolpathAction::Recompute),
                 ("Simulate toolpath", ToolpathAction::Simulate),
                 ("Post process and export…", ToolpathAction::Export),
+                ("Calculate processing time…", ToolpathAction::ProcessingTime),
             ] {
                 items = items.push(item(
                     label.into(),
@@ -740,7 +739,7 @@ impl App {
                     items = items.push(item("Dissolve pattern".into(), Message::PatternDissolve(*id)));
                     items = items.push(item(format!("Delete pattern and {} source operation(s)", pattern.members.len()), Message::PatternDelete(*id)));
                     items = items.push(popup_separator());
-                    for (label, action) in [("Recompute toolpath", ToolpathAction::Recompute), ("Simulate toolpath", ToolpathAction::Simulate), ("Post process and export…", ToolpathAction::Export)] {
+                    for (label, action) in [("Recompute toolpath", ToolpathAction::Recompute), ("Simulate toolpath", ToolpathAction::Simulate), ("Post process and export…", ToolpathAction::Export), ("Calculate processing time…", ToolpathAction::ProcessingTime)] {
                         items = items.push(item(label.into(), Message::ToolpathCommand(node.clone(), action)));
                     }
                 }
@@ -825,6 +824,21 @@ impl App {
                 bottom: 0.0,
             });
         Some(iced::widget::stack![main_menu, submenu].into())
+    }
+}
+
+fn operation_icon(op: &Operation) -> Icon {
+    match op {
+        Operation::Profile(_) => Icon::Profile,
+        Operation::Drill(_) => Icon::Drill,
+        Operation::Pocket(_) => Icon::Pocket,
+        Operation::Face(_) => Icon::Face,
+        Operation::Chamfer(_) => Icon::Chamfer,
+        Operation::Bore(_) => Icon::Bore,
+        Operation::Thread(_) => Icon::Thread,
+        Operation::Engrave(_) => Icon::Engrave,
+        Operation::Carve(_) => Icon::Carve,
+        Operation::Adaptive(_) => Icon::Adaptive,
     }
 }
 
@@ -1081,9 +1095,11 @@ mod tests {
         drain_context_job(&mut app);
         assert!(app.simulation.is_some());
         assert!(app.show_stock);
+        assert!(app.pane_handle(Pane::Inspector).is_some(), "simulation exposes its menu");
         let frame_bounds = app.machining_viewport().frame_bounds;
         app.show_stock = false;
         app.settings.view.transparent_stock = true;
+        app.simulation.as_mut().unwrap().options.show_stock = false;
         let tool_only = app.machining_viewport();
         assert!(
             !tool_only.mesh_indices.is_empty(),
@@ -1095,6 +1111,18 @@ mod tests {
             tool_only.frame_bounds, frame_bounds,
             "the moving tool must not reframe the part"
         );
+        app.simulation.as_mut().unwrap().options.transparent_tool = true;
+        let transparent_tool = app.machining_viewport();
+        assert!(transparent_tool.mesh_indices.is_empty());
+        assert!(!transparent_tool.transparent_stock_indices.is_empty());
+        assert!(transparent_tool.transparent_stock_vertices.iter().all(|v| v.color[3] == 0.3));
+        app.simulation.as_mut().unwrap().options.show_tool = false;
+        let hidden = app.machining_viewport();
+        assert!(hidden.mesh_indices.is_empty());
+        assert!(hidden.transparent_stock_indices.is_empty());
+        app.simulation.as_mut().unwrap().options.show_tool = true;
+        app.simulation.as_mut().unwrap().options.show_stock = true;
+        app.simulation.as_mut().unwrap().options.transparent_tool = false;
         app.show_stock = true;
         assert!(app
             .controller
@@ -1104,7 +1132,9 @@ mod tests {
             .strips
             .iter()
             .filter_map(|strip| strip.op)
-            .all(|id| id == ids[1]));
+            .all(|id| id == ids[0] || id == ids[1]));
+        assert!(app.simulation.as_ref().unwrap().position > 0.,
+            "operation playback opens at the selected operation after its predecessors");
         send(&mut app, Message::SimulationSpeed(4.));
         send(&mut app, Message::SimulationPlayPause);
         assert!(app.simulation.as_ref().unwrap().playing);
@@ -1150,6 +1180,81 @@ mod tests {
         );
         assert!(app.status.contains("no longer exists"));
         assert!(!app.controller.run_pending());
+    }
+
+    #[test]
+    fn processing_time_is_scoped_to_the_requested_operation_and_cancelled_runs_show_nothing() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.refresh_fields();
+        send(
+            &mut app,
+            Message::ToolpathCommand(
+                TreeNode::Operation(ids[1]),
+                ToolpathAction::ProcessingTime,
+            ),
+        );
+        assert_eq!(app.focus_ops, BTreeSet::from([ids[1]]));
+        assert!(app.pending_processing_time.is_some());
+        drain_context_job(&mut app);
+        assert!(app.pending_processing_time.is_none());
+        assert!(app.processing_time_dialog.is_some());
+        let selected_index = ids.iter().position(|id| *id == ids[1]).unwrap() as u32;
+        let motion_ops: BTreeSet<_> = app
+            .controller
+            .outcome()
+            .unwrap()
+            .program
+            .steps()
+            .iter()
+            .filter_map(cam_cldata::Step::tag)
+            .map(|tag| tag.op_id)
+            .collect();
+        assert_eq!(motion_ops, BTreeSet::from([selected_index]));
+        send(&mut app, Message::ProcessingTimeFeedOverride("0".into()));
+        assert!(app
+            .processing_time_dialog
+            .as_ref()
+            .unwrap()
+            .estimate
+            .is_err());
+        send(&mut app, Message::ProcessingTimeClose);
+        assert!(app.processing_time_dialog.is_none());
+
+        let setup_id = app.controller.active_setup_id();
+        send(
+            &mut app,
+            Message::ToolpathCommand(
+                TreeNode::Setup(setup_id),
+                ToolpathAction::ProcessingTime,
+            ),
+        );
+        assert!(app.pending_processing_time.is_some());
+        send(&mut app, Message::CancelRun);
+        assert!(app.pending_processing_time.is_none());
+        assert!(app.processing_time_dialog.is_none());
+
+        let setup_id = app.controller.active_setup_id();
+        send(
+            &mut app,
+            Message::ToolpathCommand(
+                TreeNode::Setup(setup_id),
+                ToolpathAction::ProcessingTime,
+            ),
+        );
+        drain_context_job(&mut app);
+        assert!(app.processing_time_dialog.is_some());
+        let setup_motion_ops: BTreeSet<_> = app
+            .controller
+            .outcome()
+            .unwrap()
+            .program
+            .steps()
+            .iter()
+            .filter_map(cam_cldata::Step::tag)
+            .map(|tag| tag.op_id)
+            .collect();
+        assert_eq!(setup_motion_ops, BTreeSet::from([0, 1, 2]));
     }
 
     #[test]

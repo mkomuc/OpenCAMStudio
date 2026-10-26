@@ -77,7 +77,7 @@ pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, 
         vertices.extend(quad.map(|corner| MeshVertex {
             position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
             normal: frame.to_world_vector(normal).map(|v| v as f32),
-            color: [0.55, 0.58, 0.63, 1.],
+            color: [0.72, 0.66, 0.22, 1.],
         }));
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -130,6 +130,7 @@ struct EditorKey {
     height_id: Option<u32>,
     offsets: BTreeMap<cam_model::HeightPlaneKind, String>,
     tab_selection: Option<usize>,
+    position_markers: [Option<[f64; 3]>; 2],
     tab: OperationTab,
 }
 
@@ -224,7 +225,7 @@ impl App {
                     axes,
                     camera: viewport.camera(),
                     scale: self.settings.view.origin_marker_scale,
-                    interactive: !self.in_origin_pick(),
+                    interactive: !self.in_origin_pick() && self.operation_position_pick.is_none(),
                     browser_overlay_width: viewport.browser_overlay_width,
                 });
         let labels = grid_view::GridLabels {
@@ -330,7 +331,12 @@ impl App {
     }
 
     pub(super) fn machining_viewport(&self) -> Viewport {
-        let cad_hidden = self.viewport_hidden_instances();
+        let mut cad_hidden = self.viewport_hidden_instances();
+        if self.simulation.as_ref().is_some_and(|p| !p.options.show_model) {
+            cad_hidden.extend(
+                self.controller.geometry_state().instances.iter().map(|i| i.id),
+            );
+        }
         let model_view = self.model_view.is_some();
         let hidden: Vec<_> = self
             .controller
@@ -396,6 +402,7 @@ impl App {
                 height_id: self.height_draft_id,
                 offsets: self.height_offsets.clone(),
                 tab_selection: self.profile_tab_selection,
+                position_markers: self.operation_position_markers,
                 tab: self.operation_tab,
             }),
         });
@@ -406,6 +413,10 @@ impl App {
             .and_then(|(previous, viewport)| {
                 (key.as_ref() == Some(previous)).then(|| viewport.clone())
             });
+        let mut viewport_settings = self.settings.clone();
+        if let Some(player) = &self.simulation {
+            viewport_settings.view.transparent_stock = player.options.transparent_stock;
+        }
         let mut viewport = cached.unwrap_or_else(|| {
             let mut viewport = Viewport::new(
                 &self.controller,
@@ -421,11 +432,14 @@ impl App {
                 self.cad_hover.as_ref(),
                 &cad_hidden,
                 self.cad_select_through,
-                (self.show_stock || self.controller.selection() == Selection::Setup) && !model_view,
+                self.simulation.as_ref().map_or(
+                    self.show_stock || self.controller.selection() == Selection::Setup,
+                    |p| p.options.show_stock,
+                ) && !model_view,
                 self.view,
                 self.show_gizmo,
                 self.gizmo_size,
-                &self.settings,
+                &viewport_settings,
                 &self.focus_ops.iter().copied().collect::<Vec<_>>(),
                 &hidden,
                 self.snap_hover.map(|hit| (hit, self.snap_aperture)),
@@ -448,10 +462,14 @@ impl App {
             );
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
                 let (vertices, indices) = player.tool_mesh();
-                let offset = viewport.mesh_vertices.len() as u32;
-                Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
-                Arc::make_mut(&mut viewport.mesh_indices)
-                    .extend(indices.into_iter().map(|i| i + offset));
+                let (target_vertices, target_indices) = if player.options.transparent_tool {
+                    (&mut viewport.transparent_stock_vertices, &mut viewport.transparent_stock_indices)
+                } else {
+                    (&mut viewport.mesh_vertices, &mut viewport.mesh_indices)
+                };
+                let offset = target_vertices.len() as u32;
+                Arc::make_mut(target_vertices).extend(vertices);
+                Arc::make_mut(target_indices).extend(indices.into_iter().map(|i| i + offset));
             }
             viewport.setup_geometry = Arc::new(SetupPickGeometry::new(
                 &self.controller,
@@ -510,11 +528,21 @@ impl App {
         } else {
             self.cad_filter.kind()
         };
+        viewport.cad_filter_explicit = self.cad_filter_explicit
+            || self.setup_model_pick
+            || self.height_reference_pick.is_some();
+        viewport.geometry_pick_active = (self.geometry_additive || self.geometry_auto_pick)
+            && self.operation_tab == OperationTab::Geometry;
         viewport.cad_select_through = self.cad_select_through;
         viewport.controls = self.view;
         viewport.show_gizmo = self.show_gizmo;
         viewport.gizmo_size = self.gizmo_size;
         viewport.setup_axis = self.setup_axis_pick.is_some();
+        viewport.operation_position_picking = self.operation_position_pick.is_some()
+            && self.operation_preview_active()
+            && self.operation_tab == OperationTab::Linking && !model_view;
+        viewport.operation_position_color = self.operation_position_pick
+            .unwrap_or(operation_positions::PositionKind::Entry).color();
         viewport.setup_hover = self.setup_hover.clone();
         viewport.setup_snaps = if self.settings.snapping.enabled {
             self.snaps.clone()
@@ -537,6 +565,10 @@ impl App {
                 self.current_operation(id)
                     .map(AppController::operation_kind)
             })
+        }).or_else(|| {
+            (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
+                .then(|| self.geometry_operation_kind())
+                .flatten()
         });
         if self
             .profile_entry_editor
@@ -555,12 +587,12 @@ impl App {
                 ProfileSelectionMode::Chain if self.profile_chain_edges => EntityKind::Edge,
                 _ => EntityKind::Loop,
             };
-            viewport.cad_silhouette |=
-                self.profile_selection_mode == ProfileSelectionMode::Silhouette;
+            viewport.cad_silhouette |= self.cad_filter_explicit
+                && self.profile_selection_mode == ProfileSelectionMode::Silhouette;
         }
         if matches!(
             viewport.cad_operation_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread)
         ) {
             viewport.cad_silhouette = false;
         }
@@ -572,7 +604,11 @@ impl App {
         } else {
             0.
         };
-        viewport.planar_features = self.planar_selection.clone();
+        viewport.planar_features = if self.simulation.is_some() {
+            Vec::new()
+        } else {
+            self.planar_selection.clone()
+        };
         viewport
     }
     fn viewport_pick_toolbar(&self) -> Element<'_, Message> {
@@ -582,6 +618,16 @@ impl App {
                 .on_press(message)
                 .style(move |_, status| snap_toggle_style(active, status))
         };
+        if let Some(player) = &self.simulation {
+            let p = &player.options;
+            return container(row![
+                toggle("Tool", p.show_tool, Message::SimulationOption(SimulationOption::Tool(!p.show_tool))),
+                toggle("Toolpath", p.show_toolpath, Message::SimulationOption(SimulationOption::Toolpath(!p.show_toolpath))),
+                toggle("Stock · F8", p.show_stock, Message::ToggleStock),
+                toggle("Transparent stock", p.transparent_stock, Message::ToggleTransparentStock),
+                toggle("Model", p.show_model, Message::SimulationOption(SimulationOption::Model(!p.show_model))),
+            ].spacing(6).wrap()).padding(6).width(Length::Fill).into();
+        }
         let hint = self
             .setup_hover
             .snap
@@ -912,7 +958,7 @@ mod tests {
         assert!(opaque
             .mesh_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 1.0]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 1.0]));
         let frame_bounds = opaque.frame_bounds;
         let drawing = opaque.vertices.clone();
 
@@ -924,7 +970,7 @@ mod tests {
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 0.25]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 0.25]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -979,7 +1025,7 @@ mod tests {
             let expected = if *owner == Some(id) {
                 [0.8, 0.3, 0.1, 0.25]
             } else {
-                [0.55, 0.58, 0.63, 0.25]
+                [0.72, 0.66, 0.22, 0.25]
             };
             assert_eq!(vertex.color, expected);
         }
@@ -990,7 +1036,7 @@ mod tests {
             let expected = if *owner == Some(id) {
                 [0.2, 0.65, 0.3, 1.0]
             } else {
-                [0.55, 0.58, 0.63, 1.0]
+                [0.72, 0.66, 0.22, 1.0]
             };
             assert_eq!(vertex.color, expected);
         }
@@ -1051,7 +1097,7 @@ mod tests {
                 let expected = if *owner == Some(selected) {
                     [0.1, 0.9, 0.2, 1.]
                 } else {
-                    [0.55, 0.58, 0.63, 1.]
+                    [0.72, 0.66, 0.22, 1.]
                 };
                 assert_eq!(vertex.color, expected);
             }
@@ -1072,7 +1118,7 @@ mod tests {
         assert!(hidden
             .mesh_vertices
             .iter()
-            .all(|v| v.color == [0.55, 0.58, 0.63, 1.]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 1.]));
     }
 
     #[test]
@@ -1650,7 +1696,7 @@ mod tests {
         app.controller = controller;
         app.modifiers = iced::keyboard::Modifiers::CTRL;
         let _ = app.update(Message::CadPicked(candidates.clone()));
-        assert_eq!(app.controller.cad_selection(), &[selected.clone()]);
+        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&selected));
         assert!(
             app.machining_viewport()
                 .vertices
@@ -1729,6 +1775,75 @@ mod performance_tests {
             &hovered.cad_scene,
             &app.machining_viewport().cad_scene
         ));
+    }
+
+    #[test]
+    fn simulation_draws_cad_without_selected_or_hovered_features_and_preserves_selection() {
+        let mut app = cad_app();
+        let geometry = app.controller.geometry_state();
+        let instance = &geometry.instances[0];
+        let asset = geometry.asset(instance.asset_id).unwrap();
+        let face = EntityRef {
+            asset_id: asset.id,
+            revision: asset.revision,
+            instance_id: instance.id,
+            body_id: instance.body_id,
+            kind: EntityKind::Face,
+            id: asset.topology.faces[0].id,
+        };
+        let focus: Vec<_> = geometry.bindings.keys().copied().collect();
+        assert!(!focus.is_empty(), "exercise operation-bound features too");
+        let build = |controller: &AppController,
+                     preview: Option<&crate::RunOutcome>,
+                     hover: Option<&EntityRef>,
+                     focus: &[u32], show_stock: bool| {
+            Viewport::new(
+                controller,
+                preview,
+                EntityKind::Face,
+                hover,
+                &BTreeSet::new(),
+                false,
+                show_stock,
+                ViewControls::default(),
+                false,
+                110.,
+                &crate::Settings::default(),
+                focus,
+                &[],
+                None,
+                None,
+                false,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let neutral = build(&app.controller, None, None, &[], false);
+        app.controller.set_cad_selection(vec![face.clone()]);
+        let selected = build(&app.controller, None, Some(&face), &focus, false);
+        assert_ne!(selected.mesh_vertices, neutral.mesh_vertices);
+        let preview = crate::RunOutcome::default();
+        let simulated = build(&app.controller, Some(&preview), Some(&face), &focus, false);
+        assert_eq!(simulated.mesh_vertices, neutral.mesh_vertices);
+        assert_eq!(simulated.cad_edges, neutral.cad_edges);
+        assert!(simulated.vertices.iter().all(|v| v.width <= 1.));
+        let stock = crate::RunOutcome {
+            stock_vertices: vec![MeshVertex { position: [0.; 3], normal: [0., 0., 1.], color: [1., 0., 0., 1.] }; 3],
+            stock_indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        let with_stock = build(&app.controller, Some(&stock), None, &[], true);
+        assert_eq!(*with_stock.mesh_vertices, stock.stock_vertices,
+            "nominal CAD faces must not hide thread cut faces");
+        assert_eq!(with_stock.cad_edges, neutral.cad_edges, "retain model reference edges");
+
+        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&face));
+        let restored = build(&app.controller, None, Some(&face), &focus, false);
+        assert_eq!(restored.mesh_vertices, selected.mesh_vertices);
+        assert_eq!(restored.vertices, selected.vertices);
     }
 
     #[test]

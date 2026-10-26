@@ -23,6 +23,14 @@ impl AppController {
         if rapids > 0 {
             return Err(ExportError::RapidThroughStock(rapids));
         }
+        let noncutting = outcome
+            .collisions
+            .iter()
+            .filter(|c| c.kind == CollisionKind::NonCuttingThroughStock)
+            .count();
+        if noncutting > 0 {
+            return Err(ExportError::NonCuttingThroughStock(noncutting));
+        }
         let options = self.post_options();
         // Re-reference each group to its own workpiece origin (datum): shift every
         // coordinate by −origin so that group's chosen part point becomes G-code
@@ -40,7 +48,7 @@ impl AppController {
     }
 
     /// Export the current toolpath as G-code to `path`. Runs the same gating as
-    /// [`AppController::export_nc`] (a rapid through stock blocks the write).
+    /// [`AppController::export_nc`] (non-cutting stock collisions block the write).
     pub fn export_nc_to(&mut self, path: impl AsRef<Path>) -> Result<(), ExportToError> {
         let nc = self.export_nc().map_err(ExportToError::Export)?.to_string();
         std::fs::write(path.as_ref(), nc).map_err(|e| ExportToError::Io(e.to_string()))?;

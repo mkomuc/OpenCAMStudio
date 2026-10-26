@@ -34,6 +34,7 @@ pub fn default_machine() -> Machine {
     Machine {
         name: "desktop".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: cam_model::Envelope::new(

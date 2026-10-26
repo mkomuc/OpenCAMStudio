@@ -8,6 +8,7 @@ fn machine() -> Machine {
     Machine {
         name: "test".into(),
         rapid_rate: 1000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10000.0,
         max_feed: 500.0,
         envelope: Envelope::new(

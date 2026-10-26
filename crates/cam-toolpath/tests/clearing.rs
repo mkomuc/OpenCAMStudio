@@ -32,6 +32,7 @@ fn machine() -> Machine {
     Machine {
         name: "OCS-3018".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: cam_model::Envelope::new(
@@ -88,16 +89,20 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }
 
 fn post(doc: &Document, name: &str) -> (Program, String) {
+    // A roughing fixture must provide real stock rather than exercising the old
+    // silent single-pass fallback. Other strategies do not consume these bounds.
+    let stock=doc.setup().operations.iter().any(|op|matches!(op,Operation::Profile(p) if p.stepover>0.)).then_some(([0.,0.],[60.,50.]));
     let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
         doc,
         1000.0,
         SpindleDir::Cw,
-        None,
+        stock,
         machine().envelope.max.z,
         &CancelToken::new(),
     );
@@ -189,6 +194,7 @@ fn pocket_doc() -> Document {
         boundary: rect(0.0, 0.0, 60.0, 40.0),
         islands: vec![rect(25.0, 15.0, 35.0, 25.0)],
         depth: 3.0,
+        end: None,
         start: None,
         clear: ClearParams {
             clearing: Clearing::default(),
@@ -209,6 +215,7 @@ fn pocket_doc() -> Document {
 /// An outside profile with radial roughing — the *other* caller of the clearing engine.
 fn roughing_doc() -> Document {
     let op = ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -230,6 +237,7 @@ fn roughing_doc() -> Document {
         stepover: 4.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -298,6 +306,7 @@ fn carve_doc() -> Document {
         plunge_feed: 100.0,
         plunge: cam_model::Plunge::Straight,
         stay_down: true,
+        end: None,
         start: None,
     };
     setup(vec![Operation::Carve(op)], vec![vbit, end_mill(2, 6.0)])
@@ -514,7 +523,11 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
         [-5.0, -5.0, TOP - 10.0],
         [65.0, 45.0, TOP],
         &SimOptions { resolution: 0.5, tool_radius: 3.0 },
-        &[SimTool { number: 1, profile: ToolProfile::flat(3.0) }],
+        &[SimTool {
+            number: 1,
+            profile: ToolProfile::flat(3.0),
+            noncutting_tip_radius: None,
+        }],
     );
     assert!(
         sim.is_clean(),

@@ -40,3 +40,8 @@ debug = false
 # development builds as in releases; retain debug information for our code.
 [profile.dev.package.cam-sim]
 opt-level = 3
+
+# Comparison coloring walks the CAD BVH for each distinct stock point. Keep
+# those geometry queries interactive in development builds as well.
+[profile.dev.package.cam-render]
+opt-level = 3

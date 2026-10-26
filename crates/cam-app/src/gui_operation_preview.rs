@@ -161,6 +161,7 @@ impl App {
                     } else if matches!(
                         op,
                         Operation::Drill(_)
+                            | Operation::Bore(_)
                             | Operation::Thread(_)
                             | Operation::Chamfer(_)
                             | Operation::Engrave(_)
@@ -217,8 +218,9 @@ impl App {
                 Operation::Chamfer(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
                 Operation::Engrave(p) => outlines.push((p.chain.points().to_vec(), p.closed)),
                 Operation::Drill(p) => centers.extend(p.points.iter().copied()),
+                Operation::Bore(p) => centers.extend(p.points.iter().copied()),
                 Operation::Thread(p) => centers.extend(p.points.iter().copied()),
-                Operation::Profile(_) => {}
+                Operation::Profile(_) | Operation::Adaptive(_) => {}
             }
         }
         for (points, closed) in outlines {
@@ -246,6 +248,30 @@ impl App {
                     ],
                     PICK_BOUNDARY,
                 );
+            }
+        }
+        if self.operation_tab == OperationTab::Linking {
+            use operation_positions::PositionKind::{Entry, Exit};
+            let z = binding.as_ref().map_or(
+                self.controller.document().setup().heights.top_of_stock,
+                |binding| binding.heights.top,
+            );
+            for (kind, point) in [
+                (Entry, operation_tabs::operation_start(&op)),
+                (Exit, operation_positions::operation_end(&op)),
+            ] {
+                if let Some(point) = point {
+                    for axis in 0..2 {
+                        let mut a = self.operation_position_marker(kind, point, z);
+                        let mut b = a;
+                        a[axis] -= 1.0;
+                        b[axis] += 1.0;
+                        scene.add_highlight(vec![
+                            frame.to_world_vector(a).map(|v| v as f32),
+                            frame.to_world_vector(b).map(|v| v as f32),
+                        ], kind.color());
+                    }
+                }
             }
         }
         scene
@@ -321,7 +347,9 @@ impl App {
                 [0.86, 0.86, 0.65, 1.]
             };
             let corners: [[f64; 3]; 8] = std::array::from_fn(|corner| {
-                let along = if corner & 1 == 0 {
+                let along = if op.tabs.shape == cam_model::TabShape::Triangular && corner & 4 != 0 {
+                    0.
+                } else if corner & 1 == 0 {
                     -op.tabs.width * 0.5
                 } else {
                     op.tabs.width * 0.5
@@ -345,6 +373,13 @@ impl App {
                 ([0, 2, 3, 1], [0., 0., -1.]),
                 ([4, 5, 7, 6], [0., 0., 1.]),
             ] {
+                let normal = if op.tabs.shape==cam_model::TabShape::Triangular {
+                    let a=corners[quad[0]]; let b=corners[quad[1]]; let c=corners[quad[2]];
+                    let ab=[b[0]-a[0],b[1]-a[1],b[2]-a[2]]; let ac=[c[0]-a[0],c[1]-a[1],c[2]-a[2]];
+                    let cross=[ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0]];
+                    let length=cross.iter().map(|v|v*v).sum::<f64>().sqrt();
+                    if length>1e-12 {cross.map(|v|v/length)} else {normal}
+                } else {normal};
                 let base = vertices.len() as u32;
                 vertices.extend(quad.map(|corner| MeshVertex {
                     position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
@@ -355,6 +390,30 @@ impl App {
             }
         }
         (vertices, indices)
+    }
+}
+
+fn add_chamfer_faces(
+    scene: &mut Scene,
+    faces: &[cam_model::ChamferFace],
+    frame: &cam_model::SetupFrame,
+) {
+    for face in faces {
+        let upper = face.upper.map(|p| {
+            frame
+                .to_world_vector([p[0], p[1], face.top])
+                .map(|v| v as f32)
+        });
+        let lower = face.lower.map(|p| {
+            frame
+                .to_world_vector([p[0], p[1], face.bottom])
+                .map(|v| v as f32)
+        });
+        scene.add_highlight(upper.to_vec(), PICK_BOUNDARY);
+        scene.add_highlight(lower.to_vec(), PICK_BOUNDARY);
+        for end in 0..2 {
+            scene.add_highlight(vec![upper[end], lower[end]], PICK_BOUNDARY);
+        }
     }
 }
 
@@ -550,29 +609,5 @@ mod tests {
             .iter()
             .any(|v| v.color == cam_render::CUT));
         assert_eq!(app.controller.outcome().unwrap().program, generated);
-    }
-}
-
-fn add_chamfer_faces(
-    scene: &mut Scene,
-    faces: &[cam_model::ChamferFace],
-    frame: &cam_model::SetupFrame,
-) {
-    for face in faces {
-        let upper = face.upper.map(|p| {
-            frame
-                .to_world_vector([p[0], p[1], face.top])
-                .map(|v| v as f32)
-        });
-        let lower = face.lower.map(|p| {
-            frame
-                .to_world_vector([p[0], p[1], face.bottom])
-                .map(|v| v as f32)
-        });
-        scene.add_highlight(upper.to_vec(), PICK_BOUNDARY);
-        scene.add_highlight(lower.to_vec(), PICK_BOUNDARY);
-        for end in 0..2 {
-            scene.add_highlight(vec![upper[end], lower[end]], PICK_BOUNDARY);
-        }
     }
 }

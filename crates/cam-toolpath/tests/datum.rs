@@ -20,6 +20,7 @@ fn machine() -> Machine {
     Machine {
         name: "test".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),
@@ -307,6 +308,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile(id: u32, chain: Contour, side: Side, tool: u32, work_offset: u32) -> Operation {
     Operation::Profile(ProfileOp {
+        passes: Default::default(),
         selections: None,
         closed: true,
         additional_chains: Vec::new(),
@@ -328,6 +330,7 @@ fn profile(id: u32, chain: Contour, side: Side, tool: u32, work_offset: u32) -> 
         stepover: 0.0,
         feed: 300.0,
         plunge_feed: 100.0,
+        end: None,
         start: None,
         lead_in: Lead::None,
         lead_out: Lead::None,
@@ -371,6 +374,7 @@ fn doc(ops: Vec<Operation>) -> Document {
         origin_index: 1,
         operation_heights: Default::default(),
         height_settings: Default::default(),
+        stock_to_leave: Default::default(),
         tool_change_height: None,
     })
 }

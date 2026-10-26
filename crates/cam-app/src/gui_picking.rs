@@ -298,6 +298,13 @@ impl SetupPickGeometry {
             .find(|e| &e.source == source && e.straight)?;
         Some(std::array::from_fn(|i| e.points[1][i] - e.points[0][i]))
     }
+    /// Convert a displayed world point into the operation’s setup coordinates.
+    pub fn to_setup(&self, point: Point3) -> Point3 {
+        self.frame.to_setup_vector(point)
+    }
+    pub fn to_world(&self, point: Point3) -> Point3 {
+        self.frame.to_world_vector(point)
+    }
     pub fn fallback(&self, ray: cam_render::Ray) -> Option<Point3> {
         let origin = self.frame.to_setup_vector(ray.origin);
         let direction = self.frame.to_setup_vector(ray.direction);

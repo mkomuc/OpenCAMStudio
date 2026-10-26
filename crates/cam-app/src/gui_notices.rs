@@ -1,4 +1,4 @@
-//! Import completion and serialized warning/error dialogs.
+//! Import completion and explicitly opened warning/error dialogs.
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn run_errors_are_reported_once_and_not_on_every_poll() {
+    fn run_errors_wait_for_a_status_indicator_click() {
         let mut app = app();
         app.controller
             .add_operation(Operation::Drill(cam_model::DrillOp {
@@ -317,11 +317,18 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
+        assert!(app.notice.is_none(), "run errors must not interrupt work");
+        let target = StatusTarget::Setup(app.controller.active_setup_id());
+        assert!(app.status_notice(target, &app.controller.current_toolpath_fingerprints())
+            .is_some_and(|notice| notice.error));
+        let _ = app.update(Message::ShowStatus(target));
         assert!(app.notice.as_ref().is_some_and(|notice| notice.error));
+        let _ = app.update(Message::NoticeDismissed);
         for _ in 0..3 {
             let _ = app.update(Message::PollRun);
         }
         assert!(app.notice_queue.is_empty());
+        assert!(app.notice.is_none());
     }
 
     #[test]
@@ -347,6 +354,8 @@ mod tests {
             op_id: None,
             pattern_id: None,
             instance_index: None,
+            step_index: None,
+            fraction: 0.,
         });
         let _ = app.queue_notice(job_notice(&outcome).unwrap());
         assert_eq!(app.notice_queue.len(), 1);

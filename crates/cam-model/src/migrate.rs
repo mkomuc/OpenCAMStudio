@@ -248,6 +248,14 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
             Ok(())
         }
         24 => Ok(()), // Open chamfer chains default to the legacy closed rim behavior.
+        // v25 adds setup-scoped stock-to-leave maps. Missing maps mean zero allowance.
+        25 => Ok(()),
+        // v27 introduced adaptive simplification; legacy values are now ignored
+        // because simplification is derived from the operation tolerance.
+        26 => Ok(()),
+        // v28 adds profile pass controls; control aliases preserve milling direction.
+        27 => Ok(()),
+        28 => Ok(()), // Additive Bore operations and cylindrical geometry bindings.
         _ => Err(MigrationError::MissingStep { from }),
     }
 }

@@ -126,7 +126,12 @@ impl JobInputs {
             }
             let job = match resolved {
                 Ok(document) => {
-                    let total = document.setup().operations.len();
+                    let total = document
+                        .setup()
+                        .operations
+                        .iter()
+                        .filter(|op| document.operation_is_included(setup_id, op.id()))
+                        .count();
                     let mut completed = 0;
                     progress.set(JobPhase::Generation, 0, total, None);
                     let job = build_job_cached(

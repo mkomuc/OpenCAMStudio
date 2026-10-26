@@ -26,6 +26,8 @@ use crate::CancelToken;
 pub(crate) struct ClearJob<'a> {
     /// Operation id, stamped onto emitted tags.
     pub id: u32,
+    /// Frontier and corner-detection simplification tolerance, mm; 0 disables it.
+    pub simplification_tolerance: f64,
     /// Tool radius.
     pub radius: f64,
     /// Finishing allowance left on the walls.
@@ -54,7 +56,9 @@ pub(crate) struct ClearJob<'a> {
     pub lead_out: Lead,
     /// Preferred entry point (part XY) for the innermost ring.
     pub start: Option<[f64; 2]>,
-    /// Cleared region the wall leads must stay inside (empty ⇒ no lead guard).
+    pub end: Option<[f64; 2]>,
+    /// Cutter-centre region that bounds wall leads and entry helices
+    /// (empty ⇒ no containment guard).
     pub guard: &'a [Polygon],
 }
 
@@ -105,6 +109,31 @@ pub(crate) fn clear(
     levels: &[f64],
     cancel: &CancelToken,
 ) -> Result<usize, RingsError> {
+    clear_validated(prog, region, job, heights, levels, cancel, false, |_| true)
+        .map(|result| result.paths)
+}
+
+pub(crate) struct ClearResult {
+    pub paths: usize,
+    pub concentric: bool,
+}
+
+/// Allow a caller with additional model constraints to reject a frontier path
+/// and use the concentric fallback. With `prefer_stay_down`, compare a fragmented
+/// frontier with the fallback and keep the safe path requiring fewer lifts.
+/// Validation never emits a rejected candidate, including the fallback.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clear_validated(
+    prog: &mut Program,
+    region: &Polygon,
+    job: &ClearJob,
+    heights: &Heights,
+    levels: &[f64],
+    cancel: &CancelToken,
+    prefer_stay_down: bool,
+    accept: impl Fn(&Program) -> bool,
+) -> Result<ClearResult, RingsError> {
+    let mut adaptive_candidate = None;
     // **Adaptive dispatch: the front-advance clearer, behind the exact oracle.**
     //
     // When an engagement cap is set and the cut is climb, try [`crate::frontadvance`]: it
@@ -167,6 +196,7 @@ pub(crate) fn clear(
     // clearer. Front-advance kills the *slots* (the machine-and-tool hazard); the benign
     // floor is a per-loop feedrate matter. See [`crate::frontadvance::CERT_ENGAGEMENT_SLACK`].
     if job.clearing.engagement > 0.0
+        && !matches!(job.plunge, Plunge::Ramp { .. })
         && job.adaptive_may_run()
         && job.lead_in == Lead::None
         && job.lead_out == Lead::None
@@ -190,13 +220,24 @@ pub(crate) fn clear(
             job.start,
             cancel,
         ) {
-            emit_adaptive_moves(prog, &moves, &air, job, heights, levels);
-            return Ok(1);
+            let mut candidate = Program::new();
+            emit_adaptive_moves(&mut candidate, &moves, &air, job, heights, levels);
+            if accept(&candidate) {
+                if !prefer_stay_down || clearance_lifts(&candidate, heights) <= levels.len() {
+                    prog.extend(candidate);
+                    return Ok(ClearResult {
+                        paths: 1,
+                        concentric: false,
+                    });
+                }
+                adaptive_candidate = Some(candidate);
+            }
         }
         // Uncertified — fall through to the proven concentric path below.
     }
 
     if job.clearing.engagement > 0.0
+        && !matches!(job.plunge, Plunge::Ramp { .. })
         && job.adaptive_may_run()
         && region.holes().is_empty()
         && job.lead_in == Lead::None
@@ -208,20 +249,107 @@ pub(crate) fn clear(
             job.finish,
             job.clearing.engagement,
             job.start,
+            job.simplification_tolerance,
         ) {
-            emit_adaptive_moves(prog, &moves, &[], job, heights, levels);
-            // One continuous certified path (not a ring count); `Ok(_)` ⇒ emitted.
-            return Ok(1);
+            let mut candidate = Program::new();
+            emit_adaptive_moves(&mut candidate, &moves, &[], job, heights, levels);
+            if accept(&candidate) {
+                if !prefer_stay_down || clearance_lifts(&candidate, heights) <= levels.len() {
+                    prog.extend(candidate);
+                    return Ok(ClearResult {
+                        paths: 1,
+                        concentric: false,
+                    });
+                }
+                adaptive_candidate = Some(candidate);
+            }
         }
         // Uncertified — fall through to the proven concentric path below.
     }
 
+    let mut fallback = Program::new();
+    let result = clear_concentric(&mut fallback, region, job, heights, levels, cancel);
+    if cancel.is_cancelled() {
+        return Err(RingsError::Cancelled);
+    }
+    if let Some(candidate) = adaptive_candidate {
+        // Efficiency must not turn a valid operation into an unsafe one. Keep
+        // the certified frontier if rings fail validation or need as many lifts.
+        if !matches!(result, Ok(n) if n > 0)
+            || clearance_lifts(&fallback, heights) >= clearance_lifts(&candidate, heights)
+            || !accept(&fallback)
+        {
+            prog.extend(candidate);
+            return Ok(ClearResult {
+                paths: 1,
+                concentric: false,
+            });
+        }
+    } else if result.is_ok() && !fallback.steps().is_empty() && !accept(&fallback) {
+        return Err(RingsError::Limit(
+            "No clearing path passes the model safety check".into(),
+        ));
+    }
+    let paths = result?;
+    prog.extend(fallback);
+    Ok(ClearResult {
+        paths,
+        concentric: true,
+    })
+}
+
+/// Count actual lifts, including concentric links tagged `Link` rather than
+/// `Retract`. Comparing tags alone hides ring-to-ring clearance moves.
+fn clearance_lifts(program: &Program, heights: &Heights) -> usize {
+    let mut previous_z = None;
+    let mut count = 0;
+    for step in program.steps() {
+        let end = match step {
+            Step::Rapid { to, .. } => {
+                if to.z >= heights.clearance - cam_geo::GRID_MM
+                    && previous_z.is_some_and(|z| to.z > z + cam_geo::GRID_MM)
+                {
+                    count += 1;
+                }
+                to
+            }
+            Step::Linear { to, .. } => to,
+            Step::Arc { end, .. } => end,
+            _ => continue,
+        };
+        previous_z = Some(end.z);
+    }
+    count
+}
+
+fn clear_concentric(
+    prog: &mut Program,
+    region: &Polygon,
+    job: &ClearJob,
+    heights: &Heights,
+    levels: &[f64],
+    cancel: &CancelToken,
+) -> Result<usize, RingsError> {
+    if cancel.is_cancelled() {
+        return Err(RingsError::Cancelled);
+    }
     let spacing = job.effective_spacing();
     let mut rings = concentric_rings(region, job.first, spacing, cancel)?;
     if rings.is_empty() {
         return Ok(0);
     }
     let n = rings.len();
+    let vertices: usize = rings.iter().map(|r|r.pts.len()).sum();
+    if vertices.saturating_mul(levels.len()).saturating_mul(34) > cam_model::MAX_PROFILE_MOVES {
+        return Err(RingsError::Limit("Clearing motion budget exceeded; increase stepover/stepdown".into()));
+    }
+    for ring in &rings {
+        let mut previous=heights.top_of_stock;
+        for &z in levels {
+            crate::profile::validate_ramp_travel(job.plunge,previous-z,crate::profile::loop_perimeter(&ring.pts)).map_err(RingsError::Limit)?;
+            previous=z;
+        }
+    }
 
     // Conventional milling reverses every loop's travel; the wall-lead geometry is
     // told via `reversed` so the leads still sit on the cleared side. Which winding
@@ -239,6 +367,7 @@ pub(crate) fn clear(
         prog,
         &rings,
         job.start,
+        job.end,
         job.id,
         job.feed,
         job.plunge_feed,
@@ -252,7 +381,9 @@ pub(crate) fn clear(
         heights,
         levels,
         1.5 * spacing,
+        cancel,
     );
+    if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
     Ok(n)
 }
 
@@ -319,7 +450,9 @@ fn emit_adaptive_moves(
                 crate::profile::emit_open_ramp(prog, &ramp, from_z, z, job.entry_feeds.ramp(job.feed), plunge_tag);
             }
             None => crate::profile::emit_plunge(
-                prog, start, tan, out, from_z, z, job.plunge, job.plunge_feed, job.entry_feeds.ramp(job.feed),
+                prog, start, tan, out, from_z, z,
+                crate::leads::guard_plunge(job.guard, start, out, job.plunge),
+                job.plunge_feed, job.entry_feeds.ramp(job.feed),
                 plunge_tag,
             ),
         }
@@ -415,7 +548,36 @@ fn emit_adaptive_moves(
                 });
             }
         }
-        let last = moves[moves.len() - 1].0;
+        let mut last = moves[moves.len() - 1].0;
+        if let Some(preferred) = job.end.filter(|p| p.iter().all(|v| v.is_finite())) {
+            // Retrace only the final connected run. Every segment has already been
+            // swept by the cutter at this depth; never shortcut across a protected
+            // island or a discontinuity that required a clearance move.
+            let first = moves.iter().rposition(|(_, cutting)| !cutting).unwrap_or(0);
+            let mut nearest = (moves.len() - 1, last, f64::INFINITY);
+            for i in first + 1..moves.len() {
+                let a = moves[i - 1].0;
+                let b = moves[i].0;
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let length2 = dx * dx + dy * dy;
+                if length2 <= 1e-24 { continue; }
+                let t = (((preferred[0] - a.x) * dx + (preferred[1] - a.y) * dy) / length2).clamp(0.0, 1.0);
+                let point = Point::new(a.x + t * dx, a.y + t * dy);
+                let distance = (point.x - preferred[0]).powi(2) + (point.y - preferred[1]).powi(2);
+                // Ties prefer the latest visit, keeping return travel short.
+                if distance <= nearest.2 { nearest = (i, point, distance); }
+            }
+            if nearest.2.is_finite() {
+                let tag = Tag::new(job.id, MoveKind::LeadOut);
+                for i in (nearest.0..moves.len() - 1).rev() {
+                    let p = moves[i].0;
+                    prog.push(Step::Linear { to: Point3::new(p.x, p.y, z), feed: job.entry_feeds.lead_out(job.feed), tag });
+                }
+                last = nearest.1;
+                prog.push(Step::Linear { to: Point3::new(last.x, last.y, z), feed: job.entry_feeds.lead_out(job.feed), tag });
+            }
+        }
         prog.push(Step::Rapid {
             to: Point3::new(last.x, last.y, h.clearance),
             tag: retract,
@@ -461,6 +623,7 @@ mod tests {
     fn frame_clearjob(clearing: Clearing) -> ClearJob<'static> {
         ClearJob {
             id: 7,
+            simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: 3.0,
             finish: 0.0,
             first: 3.0,
@@ -474,9 +637,87 @@ mod tests {
             lead_in: Lead::None,
             lead_out: Lead::None,
             start: None,
+            end: None,
             guard: &[],
             spindle: cam_cldata::SpindleDir::Cw,
         }
+    }
+
+    #[test]
+    fn rejected_frontier_is_discarded_before_concentric_fallback() {
+        let region = Polygon::new(Contour::new(vec![
+            Point::new(0., 0.), Point::new(40., 0.),
+            Point::new(40., 40.), Point::new(0., 40.),
+        ])).unwrap();
+        let mut job = frame_clearjob(frame_job());
+        let heights = Heights { clearance: 5., retract: 2., top_of_stock: 0. };
+        let token = CancelToken::new();
+        let checked = std::cell::Cell::new(false);
+        let mut actual = Program::new();
+        actual.push(Step::Comment("preceding region".into()));
+        let rings = clear_validated(
+            &mut actual, &region, &job, &heights, &[-1.], &token, false,
+            |candidate| {
+                assert!(!candidate.steps().is_empty());
+                checked.replace(true)
+            },
+        ).unwrap();
+        assert!(checked.get(), "fixture must exercise frontier rejection");
+        // Disable frontier dispatch while preserving the same ring spacing.
+        job.spacing = job.effective_spacing();
+        job.clearing.engagement = 0.;
+        let mut expected = Program::new();
+        expected.push(Step::Comment("preceding region".into()));
+        let expected_rings = clear(&mut expected, &region, &job, &heights, &[-1.], &token).unwrap();
+        assert_eq!(rings.paths, expected_rings);
+        assert!(rings.concentric);
+        assert_eq!(actual, expected, "no rejected moves may leak into the output");
+    }
+
+    #[test]
+    fn stay_down_preference_requires_fewer_lifts_and_an_accepted_fallback() {
+        let region = frame_region();
+        let job = frame_clearjob(frame_job());
+        let heights = Heights::new(5., 2., 0.);
+        let token = CancelToken::new();
+        let mut original = Program::new();
+        clear(&mut original, &region, &job, &heights, &[-1.], &token).unwrap();
+        let original_lifts = clearance_lifts(&original, &heights);
+        assert!(original_lifts > 1, "fixture must have a fragmented frontier");
+
+        for accept_fallback in [true, false] {
+            let checked = std::cell::Cell::new(0);
+            let mut actual = Program::new();
+            let result = clear_validated(
+                &mut actual, &region, &job, &heights, &[-1.], &token, true,
+                |candidate| {
+                    checked.set(checked.get() + 1);
+                    accept_fallback || *candidate == original
+                },
+            ).unwrap();
+            assert_eq!(checked.get(), 2, "validate both frontier and fallback");
+            assert_eq!(result.concentric, accept_fallback);
+            if accept_fallback {
+                assert!(clearance_lifts(&actual, &heights) < original_lifts);
+            } else {
+                assert_eq!(actual, original, "a rejected fallback must preserve the safe frontier");
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_concentric_fallback_emits_no_motion() {
+        let region = frame_region();
+        let job = frame_clearjob(Clearing { engagement: 0., climb: true });
+        let heights = Heights::new(5., 2., 0.);
+        let mut program = Program::new();
+        program.push(Step::Comment("preceding region".into()));
+        let original = program.clone();
+        assert!(clear_validated(
+            &mut program, &region, &job, &heights, &[-1.], &CancelToken::new(), true,
+            |_| false,
+        ).is_err());
+        assert_eq!(program, original);
     }
 
     /// **A re-entry descends at cutting feed, and rapids down to the stock top.** Both
@@ -484,6 +725,56 @@ mod tests {
     /// re-entry descents were **468 mm at plunge feed — half the program's total time** —
     /// against 3.4 minutes of actual cutting. Above the stock surface there is nothing to
     /// hit, and below it the descent is through stock the seed search has already cleared.
+    #[test]
+    fn adaptive_exit_retraces_only_the_final_connected_cleared_run() {
+        let mut job = frame_clearjob(frame_job());
+        job.end = Some([10., 0.]);
+        let moves = vec![
+            (Point::new(0., 0.), false), (Point::new(10., 0.), true),
+            (Point::new(20., 20.), false), (Point::new(30., 20.), true),
+            (Point::new(30., 30.), true),
+        ];
+        let mut program = Program::new();
+        emit_adaptive_moves(&mut program, &moves, &[], &job, &Heights::new(5., 2., 0.), &[-1.]);
+        assert!(program.validate().is_ok());
+        let exits: Vec<_> = program.steps().iter().filter_map(|s| match s {
+            Step::Linear { to, tag, .. } if tag.kind == MoveKind::LeadOut => Some(*to),
+            _ => None,
+        }).collect();
+        assert_eq!(exits, vec![Point3::new(30., 20., -1.), Point3::new(20., 20., -1.)]);
+        assert!(matches!(program.steps().last(), Some(Step::Rapid { to, .. }) if *to == Point3::new(20., 20., 5.)));
+        assert_eq!(count(&program, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting)), 3);
+    }
+
+    #[test]
+    fn concentric_exit_is_independent_of_entry_and_keeps_wall_leads() {
+        let region = Polygon::new(Contour::new(vec![Point::new(0., 0.), Point::new(40., 0.), Point::new(40., 40.), Point::new(0., 40.)])).unwrap();
+        for plunge in [Plunge::Straight, Plunge::Ramp { angle_deg: 10.0 }] {
+            let mut job = frame_clearjob(Clearing::default());
+            job.start = Some([20., 10.]);
+            job.end = Some([37., 20.]);
+            job.plunge = plunge;
+            job.lead_in = Lead::Arc { radius: 0.5 };
+            job.lead_out = Lead::Arc { radius: 0.5 };
+            let mut program = Program::new();
+            clear(&mut program, &region, &job, &Heights::new(5., 2., 0.), &[-1.], &CancelToken::new()).unwrap();
+            assert!(program.validate().is_ok());
+            let mut previous = None;
+            let mut last_exit = None;
+            for step in program.steps() {
+                let (point, tag) = match step {
+                    Step::Linear { to, tag, .. } | Step::Rapid { to, tag } => (*to, *tag),
+                    Step::Arc { end, tag, .. } => (*end, *tag),
+                    _ => continue,
+                };
+                if tag.kind == MoveKind::LeadOut { last_exit = previous; }
+                previous = Some(point);
+            }
+            let exit: Point3 = last_exit.unwrap();
+            assert!((exit.x - 37.).hypot(exit.y - 20.) < 0.02, "{plunge:?}: {exit:?}");
+        }
+    }
+
     #[test]
     fn a_re_entry_descends_at_cutting_feed_from_the_stock_top() {
         let region = frame_region();

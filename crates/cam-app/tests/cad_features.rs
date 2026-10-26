@@ -371,6 +371,44 @@ fn face_profile_and_open_chain_replace_each_other_transactionally_and_survive_re
 }
 
 #[test]
+fn profile_can_be_created_from_a_certified_inner_loop() {
+    let mut fixture = Fixture::new();
+    let rings = |z| vec![square(0., 20., 0., 20., z), square(8., 12., 8., 12., z)];
+    let top = fixture.face(rings(0.), [0., 0., 1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    fixture.walls(8., 12., 8., 12., -5., 0.);
+    fixture.face(rings(-5.), [0., 0., -1.]);
+    let state = fixture.state();
+    let inner_loop = state.assets[0]
+        .topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == top && !wire.is_outer)
+        .unwrap()
+        .id;
+
+    let mut app = controller();
+    app.edit_tool(0, |tool| tool.flute_length = 10.);
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![reference(inner_loop, EntityKind::Loop)])
+        .unwrap();
+    assert!(matches!(
+        app.operation(id),
+        Some(Operation::Profile(profile)) if profile.closed && profile.side == Side::Inside
+    ));
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn cad_face_contours_preserve_independent_sides_through_resolution_save_and_undo() {
     let mut fixture = Fixture::new();
     let rings = |z| vec![square(0., 20., 0., 20., z), square(8., 12., 8., 12., z)];
@@ -450,12 +488,37 @@ fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
 }
 
 #[test]
+fn inside_profile_accepts_a_certified_top_entry_rim() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let floor = fixture.face(vec![square(6., 14., 6., 14., -5.)], [0., 0., 1.]);
+    fixture.bore([10., 10.], 4., top, floor);
+    let state = fixture.state();
+    let entry_loop = state.assets[0]
+        .topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == top && !wire.is_outer)
+        .unwrap()
+        .id;
+
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![reference(entry_loop, EntityKind::Loop)])
+        .unwrap();
+    assert!(matches!(app.operation(id), Some(Operation::Profile(profile)) if profile.side == Side::Inside));
+}
+
+#[test]
 fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() {
     for defect in [
         "blocked entry",
         "invalid solid",
         "partial rim",
-        "protected island",
+        "ambiguous floor",
         "wrong setup",
     ] {
         let (mut state, selected) = blind_bore_with_unrelated_surface();
@@ -463,7 +526,18 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
         let reason = match defect {
             "blocked entry" => {
                 topology.bodies[0].bounds[1][2] = 1.;
-                "above the bore entry"
+                // Face Contours checks local access. Enlarging only the body
+                // bounds does not put material above the selected opening.
+                topology.faces.push(CadFace {
+                    id: 1000,
+                    body_id: 1,
+                    loop_ids: Vec::new(),
+                    surface: CadSurface::Unsupported {
+                        description: "roof above the bore".into(),
+                    },
+                    bounds: [[9., 9., 0.5], [11., 11., 1.]],
+                });
+                "blocks vertical access"
             }
             "invalid solid" => {
                 topology.bodies[0].valid_solid = false;
@@ -479,9 +553,9 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
                 if let CadCurve::CircleArc { end_angle, .. } = &mut edge.curve {
                     *end_angle = std::f64::consts::PI;
                 }
-                "complete constant-diameter bore"
+                "open boundary"
             }
-            "protected island" => {
+            "ambiguous floor" => {
                 let floor_id = topology
                     .loops
                     .iter()
@@ -499,7 +573,7 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
                     .find(|w| w.face_id == floor_id && w.id != selected.id)
                     .unwrap();
                 floor.loop_ids.push(other_loop.id);
-                "circular floor boundary"
+                "multiple outer boundaries"
             }
             _ => {
                 state.instances[0].placement.rotation = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]];
@@ -513,7 +587,7 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
         let before = app.document().clone();
         let error = app
             .create_cad_operation(OpKind::Profile, vec![selected])
-            .unwrap_err();
+            .expect_err(defect);
         assert!(error.contains(reason), "{defect}: {error}");
         assert_eq!(app.document(), &before);
     }
@@ -600,6 +674,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         boundary: contour(2., 18., 2., 18.),
         islands: vec![contour(8., 12., 8., 12.)],
         depth: 3.,
+        end: None,
         start: None,
         clear: ClearParams {
             stepdown: 2.,
@@ -1680,6 +1755,29 @@ fn thread_selection_resolves_multiple_centres_and_keeps_the_nominal_diameter_edi
         result.diagnostics
     );
     assert!(!result.has_errors(), "{:?}", result.diagnostics);
+
+    // Nominal size can be enlarged independently of the prepared hole. A mill
+    // fitting that nominal thread still has to enter the selected 6 mm bore.
+    let oversized = app.use_tool(Tool {
+        number: 31,
+        diameter: 7.,
+        neck_diameter: 3.,
+        flute_length: 12.,
+        length: 30.,
+        kind: ToolKind::ThreadMill { pitch: None },
+        ..Default::default()
+    });
+    let before = app.document().clone();
+    let mut invalid = app.operation(id).unwrap().clone();
+    if let Operation::Thread(op) = &mut invalid {
+        op.tool = oversized;
+        op.major_dia = 12.;
+    }
+    assert!(app
+        .apply_operation_settings(invalid, None)
+        .unwrap_err()
+        .contains("cannot enter the selected bore"));
+    assert_eq!(app.document(), &before);
 }
 
 #[test]
@@ -1787,4 +1885,93 @@ fn external_thread_selects_a_boss_and_rejects_a_mismatched_operation_type() {
         "{:?}",
         outcome.diagnostics
     );
+}
+
+#[test]
+fn bore_cad_selection_regeneration_save_reopen_and_all_posts() {
+    let mut fixture = Fixture::new();
+    let top = fixture.face(vec![square(0., 20., 0., 20., 0.)], [0., 0., 1.]);
+    let bottom = fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+    fixture.walls(0., 20., 0., 20., -5., 0.);
+    let bores = vec![
+        reference(fixture.bore([5., 10.], 3., top, bottom), EntityKind::Face),
+        reference(fixture.bore([15., 10.], 3., top, bottom), EntityKind::Face),
+    ];
+    let state = fixture.state();
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let tool = app.use_tool(Tool {
+        number: 30,
+        diameter: 3.,
+        flute_length: 12.,
+        length: 30.,
+        kind: ToolKind::EndMill,
+        ..Default::default()
+    });
+    let id = app
+        .create_cad_operation_with_tool(OpKind::Bore, bores.clone(), tool)
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Bore(op)) if op.points == vec![[5., 10.], [15., 10.]] && op.internal && op.diameter == 6. && op.z_top == 0. && op.z_bottom == -5.)
+    );
+    assert_eq!(
+        app.geometry_state().bindings[&id].recipe,
+        ExtractionRecipe::BoreCylinders { internal: true }
+    );
+    let mut operation = app.operation(id).unwrap().clone();
+    if let Operation::Bore(op) = &mut operation {
+        op.pitch = 0.8;
+        op.repeat_pass = true;
+        op.radial_stock = 0.1;
+    }
+    app.apply_operation_settings_with_geometry(
+        operation,
+        None,
+        vec![],
+        Some(vec![bores[1].clone()]),
+    )
+    .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Bore(op)) if op.points == vec![[15., 10.]] && op.pitch == 0.8 && op.repeat_pass)
+    );
+    assert!(app.undo());
+    assert!(matches!(app.operation(id), Some(Operation::Bore(op)) if op.points.len() == 2));
+    assert!(app.redo());
+    let path = std::env::temp_dir().join(format!("bore-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = controller();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.operation(id), app.operation(id));
+    for post in [
+        cam_post::PostKind::Grbl,
+        cam_post::PostKind::Fanuc,
+        cam_post::PostKind::Okuma,
+        cam_post::PostKind::Estlcam,
+    ] {
+        reopened.set_post_kind(post);
+        let result = reopened.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        let nc = reopened.export_nc().unwrap();
+        assert!(nc.contains("Bore"), "{post:?}: {nc}");
+        assert!(
+            nc.lines()
+                .any(|line| line.contains('Z') && line.contains('I')),
+            "missing helical interpolation: {nc}"
+        );
+    }
+    let mut invalid = reopened.operation(id).unwrap().clone();
+    if let Operation::Bore(op) = &mut invalid {
+        op.taper_angle = 2.;
+    }
+    assert!(reopened
+        .apply_operation_settings_with_geometry(invalid, None, vec![], None)
+        .is_err());
 }

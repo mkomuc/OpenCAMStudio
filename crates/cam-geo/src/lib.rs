@@ -4,8 +4,7 @@
 //! is pure planar geometry in **millimetres**: closed contours, filled regions
 //! with holes, robust polygon **offsetting** (tool-radius compensation), boolean
 //! set operations, point containment, and arc flattening. No dependency on the
-//! solid kernel — toolpath geometry must never reach through to `truck`/OCCT, so
-//! that the kernel stays swappable (see `ARCHITECTURE.md`).
+//! solid kernel. Dependency isolation is enforced by `scripts/check_architecture.py`.
 //!
 //! ## Robustness model
 //!

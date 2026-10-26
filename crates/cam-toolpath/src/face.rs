@@ -142,8 +142,8 @@ impl Strategy for FaceStrategy {
         let bottom = op.start_offset - op.depth;
         let levels = depth_levels(top, bottom, op.stepdown);
         if levels.is_empty() {
-            diagnostics.push(Diagnostic::warning(format!(
-                "operation {}: nothing to face at this depth",
+            diagnostics.push(Diagnostic::error(format!(
+                "operation {}: invalid or excessive facing levels; check depth and stepdown",
                 op.id
             )));
             return StrategyResult {

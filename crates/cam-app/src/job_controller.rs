@@ -44,7 +44,16 @@ impl AppController {
     }
     /// Generation, verification and mesh preparation run in the bounded worker lane.
     pub fn start_run(&mut self) -> JobStamp {
+        self.automatic_toolpath_run = false;
         let inputs = self.job_inputs();
+        self.submit_run(inputs)
+    }
+
+    /// Apply changed operation configuration without reviewing unchanged later
+    /// operations. Those retain their yellow dependency status until a user run.
+    pub fn start_automatic_run(&mut self) -> JobStamp {
+        let inputs = self.job_inputs();
+        self.automatic_toolpath_run = true;
         self.submit_run(inputs)
     }
 
@@ -55,11 +64,27 @@ impl AppController {
         operation: Option<u32>,
         recompute: bool,
     ) -> Result<JobStamp, String> {
+        self.start_toolpath_run_with_predecessors(operation, recompute, false)
+    }
+
+    /// Build an operation simulation from the setup's earlier included cuts so
+    /// the selected operation starts with the remaining stock it will encounter.
+    pub fn start_toolpath_run_with_predecessors(
+        &mut self,
+        operation: Option<u32>,
+        recompute: bool,
+        include_predecessors: bool,
+    ) -> Result<JobStamp, String> {
         let mut inputs = self.job_inputs();
         if let Some(id) = operation {
             let document = Arc::make_mut(&mut inputs.document);
-            let ids: Vec<u32> = document.setup().operations.iter().map(Operation::id).collect();
-            document.excluded_operations.extend(ids.into_iter().filter(|op| *op != id));
+            let operations = &document.setup().operations;
+            let target = operations.iter().position(|op| op.id() == id)
+                .ok_or_else(|| "The selected operation no longer exists.".to_string())?;
+            let ids: Vec<u32> = operations.iter().enumerate()
+                .filter(|(index, op)| if include_predecessors { *index > target } else { op.id() != id })
+                .map(|(_, op)| op.id()).collect();
+            document.excluded_operations.extend(ids);
         }
         let ids: Vec<_> = inputs
             .document
@@ -77,7 +102,9 @@ impl AppController {
         }
         if recompute {
             self.operation_cache.invalidate_operations(&ids);
+            self.toolpath_fingerprints.retain(|id, _| !ids.contains(id));
         }
+        self.automatic_toolpath_run = false;
         Ok(self.submit_run(inputs))
     }
 
@@ -92,7 +119,11 @@ impl AppController {
         let setup_id = document.setup().id;
         let ids: Vec<_> = document.setup().operations.iter().filter(|op| document.operation_is_included(setup_id, op.id())).map(Operation::id).collect();
         if ids.is_empty() { return Err("No included source operations in this pattern.".into()); }
-        if recompute { self.operation_cache.invalidate_operations(&ids); }
+        if recompute {
+            self.operation_cache.invalidate_operations(&ids);
+            self.toolpath_fingerprints.retain(|id, _| !ids.contains(id));
+        }
+        self.automatic_toolpath_run = false;
         Ok(self.submit_run(inputs))
     }
 
@@ -146,6 +177,7 @@ impl AppController {
         };
         self.operation_cache = result.cache;
         self.outcome = Some(result.outcome);
+        self.record_toolpath_fingerprints();
         self.nc = None;
         true
     }
@@ -163,6 +195,143 @@ impl AppController {
         self.outcome = None;
         self.nc = None;
     }
+    /// Status follows execution order: changes upstream invalidate every later
+    /// operation, even when its independent cutting fragment remains reusable.
+    pub fn toolpath_is_up_to_date(&self, id: u32) -> bool {
+        self.current_toolpath_fingerprints()
+            .get(&id)
+            .zip(self.toolpath_fingerprints.get(&id))
+            .is_some_and(|(current, saved)| current == saved)
+    }
+
+    pub fn toolpath_statuses(&self) -> BTreeMap<u32, bool> {
+        self.toolpath_statuses_for(&self.current_toolpath_fingerprints())
+    }
+
+    pub(crate) fn toolpath_statuses_for(
+        &self,
+        fingerprints: &BTreeMap<u32, String>,
+    ) -> BTreeMap<u32, bool> {
+        fingerprints
+            .iter()
+            .map(|(id, current)| {
+                let ready = self.toolpath_fingerprints.get(id) == Some(current);
+                (*id, ready)
+            })
+            .collect()
+    }
+
+    pub(crate) fn current_toolpath_fingerprints(&self) -> BTreeMap<u32, String> {
+        let document = self.document();
+        let mut result = BTreeMap::new();
+        for setup in &document.setups {
+            // Common machining configuration; omit names and view state.
+            let models: Vec<_> = document
+                .geometry
+                .instances
+                .iter()
+                .filter(|instance| setup.model_instances.contains(&instance.id))
+                .map(|instance| {
+                    let asset = document.geometry.asset(instance.asset_id).map(|asset| {
+                        (
+                            asset.id,
+                            asset.revision,
+                            &asset.source_fingerprint,
+                            &asset.backend,
+                        )
+                    });
+                    (instance, asset)
+                })
+                .collect();
+            let common = serde_json::to_vec(&(
+                setup.id,
+                &setup.frame,
+                &setup.stock,
+                &setup.model_instances,
+                &setup.extra_origins,
+                setup.origin,
+                setup.origin_index,
+                setup.tool_change_height,
+                self.defaults,
+                models,
+                &document.geometry.drawing_regions,
+                &document.geometry.drawing_paths,
+            ))
+            .expect("toolpath dependencies serialize");
+            let common = cam_model::GeometryAsset::fingerprint_source(&common);
+            let mut previous = common.clone();
+            for op in &setup.operations {
+                let id = op.id();
+                let tools: Vec<_> = setup
+                    .tools
+                    .iter()
+                    .filter(|tool| op.tools().contains(&tool.number))
+                    .collect();
+                let binding = document
+                    .geometry
+                    .bindings
+                    .get(&id)
+                    .map(|binding| document.geometry.binding_fingerprint(binding));
+                let patterns: Vec<_> = setup
+                    .patterns
+                    .iter()
+                    .filter(|pattern| pattern.members.contains(&id))
+                    .collect();
+                let mut bytes = serde_json::to_vec(&(
+                    &common,
+                    op,
+                    tools,
+                    setup.operation_heights.get(&id).unwrap_or(&setup.heights),
+                    setup.height_settings.get(&id),
+                    setup.stock_to_leave_for(id),
+                    binding,
+                    document.cad_linked_operations.contains(&id),
+                    document.operation_is_included(setup.id, id),
+                    patterns,
+                ))
+                .expect("operation dependencies serialize");
+                if matches!(op, Operation::Adaptive(_)) {
+                    bytes.extend_from_slice(
+                        &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),
+                    );
+                }
+                let own = cam_model::GeometryAsset::fingerprint_source(&bytes);
+                previous = cam_model::GeometryAsset::fingerprint_source(
+                    format!("{previous}:{own}").as_bytes(),
+                );
+                result.insert(id, format!("{own}:{previous}"));
+            }
+        }
+        result
+    }
+
+    pub(crate) fn record_toolpath_fingerprints(&mut self) {
+        let Some(outcome) = &self.outcome else {
+            return;
+        };
+        if outcome.completion != JobCompletion::Complete {
+            return;
+        }
+        let generated: BTreeSet<_> = outcome
+            .scene
+            .strips
+            .iter()
+            .filter_map(|strip| strip.op)
+            .collect();
+        let current = self.current_toolpath_fingerprints();
+        for id in generated {
+            if let Some(fingerprint) = current.get(&id) {
+                let own_unchanged = self
+                    .toolpath_fingerprints
+                    .get(&id)
+                    .is_some_and(|saved| saved.split(':').next() == fingerprint.split(':').next());
+                if !self.automatic_toolpath_run || !own_unchanged {
+                    self.toolpath_fingerprints.insert(id, fingerprint.clone());
+                }
+            }
+        }
+    }
+
     pub fn cache_stats(&self) -> cam_toolpath::CacheStats {
         self.operation_cache.stats
     }
@@ -227,6 +396,140 @@ mod tests {
             }
         }));
         (receiver, release)
+    }
+    #[test]
+    fn toolpaths_and_status_survive_reopen_without_recalculation() {
+        let mut app = app();
+        assert!(!app.toolpath_is_up_to_date(0));
+        let program = app.run(&CancelToken::new()).program.clone();
+        assert!(app.toolpath_is_up_to_date(0));
+        assert!(app.toolpath_is_up_to_date(1));
+        let path = std::env::temp_dir().join(format!("toolpath-cache-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(reopened.toolpath_is_up_to_date(0));
+        assert!(reopened.toolpath_is_up_to_date(1));
+        assert_eq!(reopened.run(&CancelToken::new()).program, program);
+        assert_eq!(
+            reopened.cache_stats(),
+            cam_toolpath::CacheStats {
+                reused: 2,
+                computed: 0
+            }
+        );
+        reopened.start_toolpath_run(Some(0), true).unwrap();
+        drain(&mut reopened);
+        assert_eq!(
+            reopened.cache_stats(),
+            cam_toolpath::CacheStats {
+                reused: 0,
+                computed: 1
+            }
+        );
+        reopened.new_project();
+        assert!(reopened.toolpath_fingerprints.is_empty());
+    }
+
+    #[test]
+    fn operation_status_tracks_upstream_edits_order_and_undo() {
+        let mut app = app();
+        app.run(&CancelToken::new());
+        app.edit_operation(1, |op| {
+            if let Operation::Drill(drill) = op {
+                drill.depth = 1.;
+            }
+        });
+        assert!(
+            app.toolpath_is_up_to_date(0),
+            "later edits cannot invalidate earlier operations"
+        );
+        assert!(!app.toolpath_is_up_to_date(1));
+        assert!(app.undo());
+        assert!(app.toolpath_is_up_to_date(1));
+        app.edit_operation(0, |op| {
+            if let Operation::Drill(drill) = op {
+                drill.depth = 1.;
+            }
+        });
+        assert!(!app.toolpath_is_up_to_date(0));
+        assert!(
+            !app.toolpath_is_up_to_date(1),
+            "upstream changes mark unchanged later paths yellow"
+        );
+        app.start_toolpath_run(Some(0), false).unwrap();
+        drain(&mut app);
+        assert!(app.toolpath_is_up_to_date(0));
+        assert!(
+            !app.toolpath_is_up_to_date(1),
+            "a scoped job cannot mark unrelated operations green"
+        );
+        app.start_toolpath_run(Some(1), false).unwrap();
+        drain(&mut app);
+        assert!(app.toolpath_is_up_to_date(1));
+        assert_eq!(
+            app.cache_stats().computed,
+            0,
+            "unchanged cutting fragments remain reusable"
+        );
+        app.move_operation(1, true);
+        assert!(!app.toolpath_is_up_to_date(0));
+        assert!(!app.toolpath_is_up_to_date(1));
+    }
+
+    #[test]
+    fn automatic_calculation_keeps_later_paths_yellow_until_user_runs_them() {
+        let mut app = app();
+        app.run(&CancelToken::new());
+        app.edit_operation(0, |op| {
+            if let Operation::Drill(drill) = op {
+                drill.depth = 1.;
+            }
+        });
+        app.start_automatic_run();
+        drain(&mut app);
+        assert!(app.toolpath_is_up_to_date(0));
+        assert!(!app.toolpath_is_up_to_date(1));
+        assert_eq!(
+            app.cache_stats(),
+            cam_toolpath::CacheStats {
+                reused: 1,
+                computed: 1
+            }
+        );
+        app.start_toolpath_run(Some(1), true).unwrap();
+        drain(&mut app);
+        assert!(app.toolpath_is_up_to_date(1));
+    }
+
+    #[test]
+    fn stale_status_and_old_fragments_survive_save_and_reopen() {
+        let mut app = app();
+        app.run(&CancelToken::new());
+        app.edit_operation(0, |op| {
+            if let Operation::Drill(drill) = op {
+                drill.depth = 1.;
+            }
+        });
+        let path =
+            std::env::temp_dir().join(format!("stale-toolpaths-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(!reopened.toolpath_is_up_to_date(0));
+        assert!(!reopened.toolpath_is_up_to_date(1));
+        reopened.run(&CancelToken::new());
+        assert_eq!(
+            reopened.cache_stats(),
+            cam_toolpath::CacheStats {
+                reused: 1,
+                computed: 1
+            }
+        );
+        assert!(reopened.toolpath_is_up_to_date(0));
+        assert!(reopened.toolpath_is_up_to_date(1));
     }
     #[test]
     fn simulation_accuracy_changes_worker_inputs_without_editing_the_project() {

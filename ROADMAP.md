@@ -51,25 +51,14 @@ have.
 | **P7** | Verification | `cam-sim` | heightfield/dexel material removal + gouge / rapid-through-stock detection; visual **and** automated checks |
 | **P8** | Open the doors | `cam-plugin-api` | stabilize `Strategy`/`Post` traits into a `cdylib` ABI + loader + registry; first-party stays static, third-party plugins load |
 
-**P0–P4 are fully headless** — a tested, real G-code generator exists before a day
-is spent on the GUI. See `ARCHITECTURE.md` "Core design rules" for the invariants
-(machine≠post, first-class heights, static-first-party, pure strategies,
-diagnostics, undo, determinism) that P2–P5 must honor.
+**P0–P4 are fully headless**. Dependency boundaries are now checked in CI by
+[`scripts/check_architecture.py`](scripts/check_architecture.py).
 
 ## After the slice (unordered candidates)
 
-[Setup operation patterns](docs/operation-patterns-implementation.md) provide
-rectangular and circular toolpath repetition for one or multiple operations,
-created through setup/operation context menus. The implementation note records
-delivered behavior, verification and qualification limits; the
-[feature plan](docs/operation-patterns-plan.md) retains the broader acceptance gates.
-
-The active delivery sequence is in the
-[implementation milestones](docs/implementation-plan.md), updated 2026-10-14 from
-the [high-level requirements](docs/high-level-requirements-analysis.md).
-P0–P8 above remain historical phases. M1a/M1b core is implemented;
-[acceptance evidence](docs/m1-workspaces-operation-tabs.md) records automated
-checks and DXF/native STEP desktop smoke tests. The workflow gates are:
+[Setup operation patterns](docs/operation-patterns.md) provide rectangular and
+circular repetition. Current workflows and limits are in the [user guides](docs/README.md).
+P0–P8 above are historical phases. The following gates describe broader delivery goals:
 
 | Gate | Outcome |
 | --- | --- |

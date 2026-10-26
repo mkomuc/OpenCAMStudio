@@ -19,7 +19,7 @@ mod path_cone;
 mod scene;
 mod tool;
 
-pub use cad::{CadScene, PickCandidate};
+pub use cad::{CadScene, PickCandidate, SurfaceClass};
 pub use camera::{orientation, top_view, OrbitCamera, Ray, IDENTITY};
 #[cfg(feature = "gpu")]
 pub use gizmo::label_atlas;

@@ -14,6 +14,7 @@ fn machine() -> Machine {
     Machine {
         name: "test".into(),
         rapid_rate: 2000.0,
+        tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),

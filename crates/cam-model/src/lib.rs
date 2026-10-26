@@ -1,8 +1,4 @@
-//! # cam-model — the document model (P2 slice)
-//!
-//! Eventually this crate holds the full save-file document
-//! (`Project → Setup → Stock → Operation → Tool`). The P2 slice is only what a
-//! post needs to query: the [`Machine`].
+//! # cam-model — saved projects, setups, operations, tools and machines
 //!
 //! ## Machine ≠ Post
 //!
@@ -10,12 +6,18 @@
 //! limits, work envelope, tool-change position, safe height. A **post** (in
 //! `cam-post`) is the *dialect* — how those get spelled as G-code. The post
 //! **queries** the machine, so one grbl post can drive many grbl machines just
-//! by swapping the [`Machine`] it is handed. Keeping them separate is a core
-//! design rule (see `ARCHITECTURE.md`).
+//! by swapping the [`Machine`] it is handed. Dependency isolation is enforced
+//! by `scripts/check_architecture.py`.
 
+mod bore;
+pub use bore::{BoreOp, BoreOrder};
+mod thread_standards;
+pub use thread_standards::*;
 mod document;
 mod profile_selection;
 pub use profile_selection::*;
+mod profile_parameters;
+pub use profile_parameters::*;
 mod operation_heights;
 pub use operation_heights::*;
 mod cad_curves;
@@ -28,9 +30,9 @@ mod validate;
 
 pub use cam_cldata::Point3;
 pub use document::{
-    Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
+    AdaptiveContainment, AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
     DrillOp, EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp,
-    ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, ThreadOp, SCHEMA_VERSION,
+    ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, StockToLeave, ThreadOp, SCHEMA_VERSION,
     CircularDistribution, ExecutionItem, OperationPattern, PatternDirection, PatternKind, PatternOrder,
 };
 pub use geometry::*;
@@ -133,6 +135,8 @@ pub struct Machine {
     /// Rapid traverse rate, mm/min (used for time estimates and as the ceiling
     /// for `G0`).
     pub rapid_rate: f64,
+    /// Seconds spent on each tool change, used by processing-time estimates.
+    pub tool_change_seconds: f64,
     /// Maximum spindle speed, rpm.
     pub max_spindle_rpm: f64,
     /// Maximum cutting feed, mm/min.
@@ -153,6 +157,8 @@ pub struct Machine {
 struct MachineRepr {
     name: String,
     rapid_rate: f64,
+    #[serde(default)]
+    tool_change_seconds: f64,
     max_spindle_rpm: f64,
     max_feed: f64,
     envelope: Envelope,
@@ -165,6 +171,7 @@ impl From<MachineRepr> for Machine {
         Machine {
             name: r.name,
             rapid_rate: r.rapid_rate,
+            tool_change_seconds: r.tool_change_seconds,
             max_spindle_rpm: r.max_spindle_rpm,
             max_feed: r.max_feed,
             envelope: r.envelope,
@@ -179,6 +186,7 @@ impl From<Machine> for MachineRepr {
         MachineRepr {
             name: m.name,
             rapid_rate: m.rapid_rate,
+            tool_change_seconds: m.tool_change_seconds,
             max_spindle_rpm: m.max_spindle_rpm,
             max_feed: m.max_feed,
             envelope: m.envelope,
@@ -439,8 +447,8 @@ impl Tool {
     /// This tool's **2D revolve generatrix** (`TOOLING_PLAN.md` Phase 4): the built-in
     /// kinds mapped onto a kernel-neutral [`cam_geo::GeneratrixSpec`] and generated. The
     /// cutting-end shape comes from [`kind`](Self::kind); the flute/shank split from the
-    /// effective cutter dimensions. (`ThreadMill` uses a flat cylinder envelope for now —
-    /// the true tooth form is a later refinement; see the build log.)
+    /// effective cutter dimensions. Thread mills include their single tooth or
+    /// repeated full-form teeth, with the non-cutting tip, neck and shank tagged.
     pub fn profile(&self) -> cam_geo::Profile2D {
         use cam_geo::BottomShape;
         // Single-profile (single-point) thread mill: one 60° tooth at the tip, a sharply
@@ -582,12 +590,25 @@ mod tests {
         Machine {
             name: "test-3018".into(),
             rapid_rate: 2000.0,
+            tool_change_seconds: 0.0,
             max_spindle_rpm: 10_000.0,
             max_feed: 800.0,
             envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 0.0)),
             safe_z: 5.0,
             tool_change_pos: None,
         }
+    }
+
+    #[test]
+    fn machine_without_tool_change_time_loads_with_zero_and_round_trips() {
+        let json = r#"{"name":"legacy","rapid_rate":2000.0,"max_spindle_rpm":10000.0,"max_feed":800.0,"envelope":{"min":[0.0,0.0,-50.0],"max":[300.0,180.0,0.0]},"safe_z":5.0,"tool_change_pos":null}"#;
+        let machine: Machine = serde_json::from_str(json).unwrap();
+        assert_eq!(machine.tool_change_seconds, 0.0);
+        let mut configured = machine;
+        configured.tool_change_seconds = 15.0;
+        let restored: Machine =
+            serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(restored, configured);
     }
 
     #[test]

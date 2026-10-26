@@ -5,15 +5,17 @@ use iced::widget::column;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Positioning {
     ByDistance,
+    ByCount,
     Manual,
 }
 impl Positioning {
-    pub(super) const ALL: [Self; 2] = [Self::ByDistance, Self::Manual];
+    pub(super) const ALL: [Self; 3] = [Self::ByDistance, Self::ByCount, Self::Manual];
 }
 impl std::fmt::Display for Positioning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::ByDistance => "By distance",
+            Self::ByCount => "By count",
             Self::Manual => "Manual",
         })
     }
@@ -125,7 +127,7 @@ impl App {
         camera: OrbitCamera,
         browser_width: f32,
     ) -> Option<TabOverlay> {
-        if !self.inspector_active || !self.inspector_enabled {
+        if !self.inspector_active || !self.inspector_enabled || self.operation_position_pick.is_some() {
             return None;
         }
         let (op, z) = self.profile_tab_geometry()?;
@@ -607,6 +609,13 @@ mod tests {
             .controller
             .create_cad_operation(OpKind::Profile, vec![reference])
             .unwrap();
+        // Exercise the legacy binding-backed profile path; named selections
+        // intentionally resolve their own entries instead of this binding.
+        app.controller.edit_operation(id, |operation| {
+            if let Operation::Profile(profile) = operation {
+                profile.selections = None;
+            }
+        });
         app.begin_operation_draft(id);
         let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
         let _ = app.update(Message::ProfileTabsEnabled(true));
@@ -710,6 +719,7 @@ mod tests {
         // Silhouettes are selected on setup XY, even when the body is elevated.
         binding.selected[0].kind = EntityKind::Silhouette;
         binding.selected[0].id = 1;
+        binding.recipe = cam_model::ExtractionRecipe::ProfileSilhouette;
         app.operation_binding_preview = Some(binding);
         let silhouette = app.profile_tab_overlay(camera, 0.).unwrap();
         assert_eq!(silhouette.z, 0.);

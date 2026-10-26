@@ -177,7 +177,7 @@ pub(crate) fn recipe(
         OpKind::Chamfer => ExtractionRecipe::ChamferLoop,
         OpKind::Engrave => ExtractionRecipe::EngravePath,
         OpKind::Carve => ExtractionRecipe::CarveRegion,
-        OpKind::Thread => {
+        OpKind::Thread | OpKind::Bore => {
             let reference = selected
                 .first()
                 .ok_or("Select cylindrical bore or boss faces")?;
@@ -185,22 +185,22 @@ pub(crate) fn recipe(
                 .asset(reference.asset_id)
                 .and_then(|a| a.topology.faces.iter().find(|f| f.id == reference.id))
                 .filter(|_| reference.kind == EntityKind::Face)
-                .ok_or("Thread requires cylindrical bore or boss faces")?;
+                .ok_or("Thread/Bore requires cylindrical bore or boss faces")?;
             let CadSurface::Cylinder { inward, .. } = face.surface else {
-                return Err("Thread requires cylindrical bore or boss faces".into());
+                return Err("Thread/Bore requires cylindrical bore or boss faces".into());
             };
-            ExtractionRecipe::ThreadCylinders { internal: inward }
+            if kind == OpKind::Bore {
+                ExtractionRecipe::BoreCylinders { internal: inward }
+            } else {
+                ExtractionRecipe::ThreadCylinders { internal: inward }
+            }
         }
         OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette => {
             ExtractionRecipe::ProfileSilhouette
         }
-        OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Loop => {
-            ExtractionRecipe::ProfileLoop {
-                side: cam_geometry3d::profile_side(geometry, selected)?,
-            }
-        }
         OpKind::Profile => ExtractionRecipe::ProfileContours,
         OpKind::Face => ExtractionRecipe::FaceRegion,
+        OpKind::Adaptive => ExtractionRecipe::AdaptiveClearing,
     })
 }
 
@@ -313,9 +313,11 @@ pub(crate) fn operation_type(operation: &Operation) -> &'static str {
         Operation::Drill(_) => "Drill",
         Operation::Face(_) => "Face",
         Operation::Chamfer(_) => "Chamfer",
+        Operation::Bore(_) => "Bore",
         Operation::Thread(_) => "Thread",
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
+        Operation::Adaptive(_) => "3D Adaptive Clearing",
     }
 }
 
@@ -410,7 +412,11 @@ pub(crate) fn create_operation(
     defaults: JobParams,
 ) -> Result<(Operation, GeometryBinding), String> {
     let geometry = geometry_for_setup(document)?;
-    validate_selection(&geometry, &selected)?;
+    if kind == OpKind::Adaptive {
+        cam_geometry3d::validate_adaptive_selection(&geometry, &selected)?;
+    } else {
+        validate_selection(&geometry, &selected)?;
+    }
     let mut binding = cam_geometry3d::resolve_selection(
         &geometry,
         &selected,
@@ -438,6 +444,7 @@ pub(crate) fn create_operation(
             boundary: boundary()?,
             islands: resolved.regions[0].holes().to_vec(),
             depth,
+            end: None,
             start: None,
             clear: ClearParams {
                 stepdown: defaults.stepdown,
@@ -453,6 +460,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            passes: Default::default(),
             selections: None,
             closed: resolved.profiles.first().is_none_or(|p| p.closed),
             additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
@@ -484,6 +492,7 @@ pub(crate) fn create_operation(
             stepover: 0.0,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -556,6 +565,7 @@ pub(crate) fn create_operation(
             gradual: false,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             lead_in: Lead::None,
             lead_out: Lead::None,
@@ -576,6 +586,7 @@ pub(crate) fn create_operation(
             stepdown: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
         }),
         OpKind::Carve => Operation::Carve(CarveOp {
@@ -596,9 +607,31 @@ pub(crate) fn create_operation(
             scallop: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+            end: None,
             start: None,
             plunge: Plunge::Straight,
             stay_down: true,
+        }),
+        OpKind::Bore => Operation::Bore(BoreOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            points: resolved
+                .holes
+                .iter()
+                .map(|h| [h.center.x, h.center.y])
+                .collect(),
+            internal: matches!(
+                binding.recipe,
+                ExtractionRecipe::BoreCylinders { internal: true }
+            ),
+            diameter: resolved.holes[0].diameter,
+            z_top: resolved.heights.top,
+            z_bottom: resolved.heights.bottom,
+            feed: defaults.feed,
+            plunge_feed: defaults.plunge_feed,
+            ..Default::default()
         }),
         OpKind::Thread => Operation::Thread(ThreadOp {
             id,
@@ -630,6 +663,20 @@ pub(crate) fn create_operation(
             blind_allowance: 0.,
             feed: defaults.feed,
             plunge_feed: defaults.plunge_feed,
+        }),
+        OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            params: AdaptiveParams {
+                feed: defaults.feed,
+                plunge_feed: defaults.plunge_feed,
+                ..Default::default()
+            },
         }),
     };
     if surface_recipe(&binding.recipe) {
@@ -697,7 +744,10 @@ pub(crate) fn resolve_document_checked(
             if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
                 return Err(format!("Operation {id}: Needs reselection — {reason}"));
             }
-            if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
+            if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+                cam_geometry3d::validate_adaptive_selection(&resolved.geometry, &binding.selected)
+                    .map_err(|e| format!("Operation {id}: {e}"))?;
+            } else if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
                 validate_selection(&resolved.geometry, &binding.selected)
                     .map_err(|e| format!("Operation {id}: {e}"))?;
             }
@@ -727,9 +777,7 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                 }
                 (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {
-                    if p.comp != Comp::Computed || p.offset < 0. || p.stepover > 0. {
-                        return Err("CAD profiles require computed compensation, nonnegative allowance and no radial roughing".into());
-                    }
+                    p.validate_profile_source(true)?;
                     let mut contours = input.profiles.clone();
                     let first = contours.remove(0);
                     p.chain = first.chain;
@@ -744,9 +792,7 @@ pub(crate) fn resolve_document_checked(
                     ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette,
                 ) => {
                     let first = input.profiles.first().ok_or("No resolved profile chains")?;
-                    if p.comp != Comp::Computed || p.offset < 0. || p.stepover > 0. {
-                        return Err(format!("Operation {id}: CAD profiles require computed compensation, nonnegative allowance and no radial roughing"));
-                    }
+                    p.validate_profile_source(true)?;
                     p.chain = first.chain.clone();
                     p.closed = first.closed;
                     let sides: Vec<_> = p
@@ -772,9 +818,7 @@ pub(crate) fn resolve_document_checked(
                 (Operation::Profile(p), ExtractionRecipe::ProfileLoop { .. }) => {
                     // The recipe certifies the source geometry and cutting interval.
                     // Cutter side is an independent, per-contour operation setting.
-                    if p.comp != Comp::Computed || p.offset < 0.0 || p.stepover > 0.0 {
-                        return Err(format!("Operation {id}: CAD profiles require computed compensation, nonnegative allowance and no radial roughing"));
-                    }
+                    p.validate_profile_source(true)?;
                     p.chain = region()?.outer().clone();
                     p.closed = true;
                     p.additional_chains.clear();
@@ -797,6 +841,7 @@ pub(crate) fn resolve_document_checked(
                     p.closed = path.closed;
                     if !p.closed {
                         p.start = None;
+                    p.end = None;
                         p.lead_overlap = 0.;
                     }
                     p.top = input.heights.top;
@@ -809,6 +854,7 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                     if !p.closed {
                         p.start = None;
+                    p.end = None;
                     }
                 }
                 (Operation::Carve(p), ExtractionRecipe::CarveRegion) => {
@@ -817,9 +863,44 @@ pub(crate) fn resolve_document_checked(
                     p.top = input.heights.top;
                     p.depth = depth;
                 }
+                (Operation::Bore(p), ExtractionRecipe::BoreCylinders { internal }) => {
+                    if p.internal != *internal || p.taper_angle != 0. {
+                        return Err(
+                            "Bore type and straight wall must match the selected cylinder".into(),
+                        );
+                    }
+                    p.points = input
+                        .holes
+                        .iter()
+                        .map(|h| [h.center.x, h.center.y])
+                        .collect();
+                    p.diameter = input.holes[0].diameter;
+                    p.z_top = input.heights.top;
+                    p.z_bottom = input.heights.bottom;
+                    if p.axial_stock < 0. {
+                        return Err("CAD Bore axial stock cannot extend below the certified face; use a qualified bottom selection".into());
+                    }
+                }
                 (Operation::Thread(p), ExtractionRecipe::ThreadCylinders { internal }) => {
                     if p.internal != *internal {
                         return Err("Thread type must match the selected bore or boss".into());
+                    }
+                    // The nominal thread diameter is independently editable.
+                    // Fitting its theoretical minor diameter does not prove that
+                    // the cutter can enter the actual selected/prepared bore.
+                    if p.internal {
+                        let tool = document
+                            .setup()
+                            .tools
+                            .iter()
+                            .find(|t| t.number == p.tool)
+                            .ok_or("Missing thread tool")?;
+                        if input.holes.iter().any(|hole| tool.diameter >= hole.diameter) {
+                            return Err(format!(
+                                "Thread tool diameter {:.3} cannot enter the selected bore; choose a smaller thread mill or prepare a larger bore",
+                                tool.diameter
+                            ));
+                        }
                     }
                     p.points = input
                         .holes
@@ -862,6 +943,10 @@ pub(crate) fn resolve_document_checked(
                     p.boundary = region()?.outer().clone();
                     p.depth = depth;
                     p.start_offset = input.heights.top;
+                }
+                (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
+                    // Body heights and projected silhouette belong to the binding;
+                    // the adaptive planner resolves conservative CAD-derived layers.
                 }
                 _ => {
                     return Err(format!(
@@ -909,8 +994,15 @@ pub(crate) fn selection_height_defaults(
     document: &Document,
     operation: &Operation,
 ) -> OperationHeightSettings {
-    let cutting = document.operation_base_cutting_heights(operation);
     let mut settings = OperationHeightSettings::default();
+    if matches!(operation, Operation::Adaptive(_)) {
+        *settings.definition_mut(HeightPlaneKind::Top) =
+            HeightDefinition::new(HeightReference::StockTop, 0.);
+        *settings.definition_mut(HeightPlaneKind::Bottom) =
+            HeightDefinition::new(HeightReference::SelectedContours, 0.);
+        return settings;
+    }
+    let cutting = document.operation_base_cutting_heights(operation);
     *settings.definition_mut(HeightPlaneKind::Top) =
         HeightDefinition::new(HeightReference::SelectedContours, 0.);
     *settings.definition_mut(HeightPlaneKind::Bottom) = HeightDefinition::new(
@@ -937,6 +1029,12 @@ pub(crate) fn capture_height_override(
     after: &Operation,
     heights: &Heights,
 ) {
+    // Adaptive operations have no legacy cutting-height fields. Their interval
+    // belongs to the binding and reference-height settings, so comparing it with
+    // legacy_cutting would turn an unrelated edit into a spurious height shift.
+    if matches!(after, Operation::Adaptive(_)) {
+        return;
+    }
     let Some(binding) = binding else {
         return;
     };
@@ -960,8 +1058,9 @@ pub(crate) fn capture_height_override(
         Operation::Face(p) => (before.depth(), p.depth),
         Operation::Engrave(p) => (before.depth(), p.depth),
         Operation::Carve(p) => (before.depth(), p.depth),
+        Operation::Bore(p) => (before.depth(), p.z_top - p.z_bottom),
         Operation::Thread(p) => (before.depth(), p.z_top - p.z_bottom),
-        Operation::Chamfer(_) => return,
+        Operation::Chamfer(_) | Operation::Adaptive(_) => return,
     };
     if after_depth != before_depth {
         binding.overrides.bottom = Some(binding.effective_heights().top - after_depth);

@@ -9,6 +9,7 @@
 //! The core is headless and unit-tested. Rendering the resulting heightfield in
 //! the viewport is a separate concern (as with `cam-render`).
 
+mod collision;
 mod heightfield;
 mod simulation;
 mod sweep;
@@ -66,6 +67,14 @@ pub enum ProfileShape {
         half_angle_rad: f64,
         /// Radius of the rounded tip, mm (0 for a sharp point).
         tip_radius: f64,
+    },
+    /// Finite, revolved thread teeth. Unlike bottom-cutting tools these remove
+    /// bounded Z intervals, retaining stock above and below each tooth.
+    Thread {
+        root_radius: f64,
+        tooth_height: f64,
+        pitch: f64,
+        tooth_count: u32,
     },
 }
 
@@ -148,6 +157,18 @@ impl ToolProfile {
                     rt * (1.0 - a.sin()) + (d - r_t) / t
                 }
             }
+            ProfileShape::Thread {
+                root_radius,
+                tooth_height,
+                ..
+            } => {
+                let width = self.radius - root_radius;
+                if width <= 1e-9 {
+                    0.
+                } else {
+                    (d - root_radius).max(0.) / width * tooth_height * 0.5
+                }
+            }
         }
     }
 }
@@ -160,6 +181,11 @@ pub struct SimTool {
     pub number: u32,
     /// The tool's cutting profile.
     pub profile: ToolProfile,
+    /// Radius of a flat tip that cannot cut axially (thread/chamfer mills).
+    /// None means the tool has a cutting tip and may plunge into material.
+    /// A flat-envelope tool without a cutting tip needs full-profile clearance
+    /// on a straight plunge; side-cutting descents check only the tip disc.
+    pub noncutting_tip_radius: Option<f64>,
 }
 
 /// The kind of a detected problem.
@@ -167,6 +193,8 @@ pub struct SimTool {
 pub enum CollisionKind {
     /// A rapid (`G0`) traverse passes through remaining stock.
     RapidThroughStock,
+    /// A feed reposition or a non-cutting cutter tip enters remaining stock.
+    NonCuttingThroughStock,
     /// The tool cut below the desired target surface — an over-cut (gouge) that
     /// destroys part material.
     Gouge,
@@ -181,6 +209,17 @@ pub struct Collision {
     pub op_id: Option<u32>,
     pub pattern_id: Option<u64>,
     pub instance_index: Option<u32>,
+    /// Motion index in the simulated program; absent for target-surface checks.
+    pub step_index: Option<usize>,
+    /// First contact's parametric position along that motion, in [0, 1].
+    pub fraction: f64,
+}
+
+impl CollisionKind {
+    /// Whether playback should stop at contact with remaining stock.
+    pub fn is_stock_collision(self) -> bool {
+        matches!(self, Self::RapidThroughStock | Self::NonCuttingThroughStock)
+    }
 }
 
 /// The outcome of a simulation: the final stock, any collisions, and how much
@@ -240,6 +279,8 @@ pub fn check_gouge(field: &Heightfield, target: &Heightfield, tol: f64) -> Optio
         op_id: None,
         pattern_id: None,
         instance_index: None,
+        step_index: None,
+        fraction: 0.,
     })
 }
 
@@ -324,6 +365,7 @@ mod tests {
 
     fn vbit(number: u32, radius: f64, half_angle_rad: f64) -> SimTool {
         SimTool {
+            noncutting_tip_radius: None,
             number,
             profile: ToolProfile {
                 radius,
@@ -417,6 +459,7 @@ mod tests {
         // cannot plow through the ridge beside it. Regression for a false RapidThroughStock
         // that blocked export of a face op run with a chamfer tool.
         let vee = SimTool {
+            noncutting_tip_radius: None,
             number: 1,
             profile: ToolProfile {
                 radius: 2.0,
@@ -447,6 +490,7 @@ mod tests {
         // The fix must not blunt the real check: with the same cone tool, a *lateral*
         // rapid at the plunge depth, out across proud stock, is a genuine crash.
         let vee = SimTool {
+            noncutting_tip_radius: None,
             number: 1,
             profile: ToolProfile {
                 radius: 2.0,
@@ -654,6 +698,7 @@ mod tests {
             .rapid(Point3::new(38.0, 20.0, 5.0), MoveKind::Retract)
             .build();
         let tools = [SimTool {
+            noncutting_tip_radius: None,
             number: 2,
             profile: ToolProfile {
                 radius: 2.0,
