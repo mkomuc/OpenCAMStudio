@@ -244,6 +244,7 @@ pub struct AppController {
     source_name: String,
     /// The `.ocam` path this project was last saved to / opened from.
     current_path: Option<PathBuf>,
+    saved_project: Option<ProjectSnapshot>,
     /// An operation being created, awaiting a geometry pick in the viewport.
     pending_op: Option<PendingOp>,
     outcome: Option<RunOutcome>,
@@ -263,6 +264,16 @@ pub struct AppController {
     asset_id_floor: u64,
     instance_id_floor: u64,
     pattern_id_floor: u64,
+}
+
+/// User-authored project state, excluding derived toolpaths and shop settings.
+#[derive(PartialEq)]
+struct ProjectSnapshot {
+    document: Document,
+    defaults: JobParams,
+    source_name: String,
+    regions: Vec<Polygon>,
+    open_paths: Vec<Polyline>,
 }
 
 /// Which closed loop of an imported region a pick refers to.
@@ -531,7 +542,7 @@ impl AppController {
     /// geometry.
     pub fn new(machine: Machine) -> Self {
         let defaults = JobParams::default();
-        Self {
+        let mut controller = Self {
             machine,
             post_kind: PostKind::default(),
             estlcam: cam_post::EstlcamOptions::default(),
@@ -545,6 +556,7 @@ impl AppController {
             active_setup_id: 1,
             source_name: String::new(),
             current_path: None,
+            saved_project: None,
             pending_op: None,
             outcome: None,
             nc: None,
@@ -563,7 +575,9 @@ impl AppController {
             asset_id_floor: 1,
             instance_id_floor: 1,
             pattern_id_floor: 1,
-        }
+        };
+        controller.mark_project_saved();
+        controller
     }
 
     /// The machine being driven.
@@ -1300,6 +1314,7 @@ impl AppController {
         self.pending_op = None;
         self.selection = Selection::Setup;
         self.invalidate();
+        self.mark_project_saved();
     }
 
     /// What the most recently opened project recorded about the machine and post it was
@@ -1314,6 +1329,33 @@ impl AppController {
     /// The `.ocam` file this project was last saved to / opened from, if any.
     pub fn current_path(&self) -> Option<&Path> {
         self.current_path.as_deref()
+    }
+
+    fn project_snapshot(&self) -> ProjectSnapshot {
+        let mut document = self.document().clone();
+        // Allocation bookkeeping must not make undoing back to saved content dirty.
+        document.operation_id_floor = 0;
+        document.setup_id_floor = 0;
+        document.asset_id_floor = 0;
+        document.instance_id_floor = 0;
+        document.pattern_id_floor = 0;
+        ProjectSnapshot {
+            document,
+            defaults: self.defaults,
+            source_name: self.source_name.clone(),
+            regions: self.regions.clone(),
+            open_paths: self.open_paths.clone(),
+        }
+    }
+
+    fn mark_project_saved(&mut self) {
+        self.saved_project = Some(self.project_snapshot());
+    }
+
+    /// Whether user-authored project content differs from its last successful
+    /// save/open (or the initial empty project). Undoing to that content is clean.
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.saved_project.as_ref() != Some(&self.project_snapshot())
     }
 
     /// Save the current project (document + geometry + defaults) to `path` as JSON,
@@ -1360,6 +1402,7 @@ impl AppController {
             .map_err(ProjectError::Json)?;
         crate::project::atomic_save(path, &json).map_err(ProjectError::Io)?;
         self.current_path = Some(path.to_path_buf());
+        self.mark_project_saved();
         Ok(())
     }
 
@@ -1425,6 +1468,7 @@ impl AppController {
         self.selection = Selection::Setup;
         self.reconcile_selection();
         self.invalidate();
+        self.mark_project_saved();
         Ok(())
     }
 
@@ -3148,6 +3192,47 @@ fn empty_document(p: &JobParams) -> Document {
 mod tests {
     use super::*;
     use cam_model::{Envelope, Point3};
+
+    #[test]
+    fn unsaved_changes_follow_successful_save_open_undo_and_redo() {
+        let mut app = AppController::new(machine());
+        assert!(!app.has_unsaved_changes());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        assert!(app.has_unsaved_changes());
+        let path = std::env::temp_dir().join(format!("unsaved-state-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        assert!(!app.has_unsaved_changes());
+        app.edit_setup(|setup| setup.name = "Changed".into());
+        assert!(app.has_unsaved_changes());
+        assert!(app.undo());
+        assert!(!app.has_unsaved_changes());
+        assert!(app.redo());
+        assert!(app.has_unsaved_changes());
+        // Failed writes/reads never reset the saved baseline or current content.
+        assert!(app.save_project(&path.join("cannot-save.ocam")).is_err());
+        assert!(app.open_project(&path.join("cannot-open.ocam")).is_err());
+        assert!(app.has_unsaved_changes());
+        assert_eq!(app.document().setup().name, "Changed");
+        app.open_project(&path).unwrap();
+        assert!(!app.has_unsaved_changes());
+        app.new_project();
+        assert!(!app.has_unsaved_changes());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unsaved_changes_ignore_session_settings_and_allocation_bookkeeping() {
+        let mut app = AppController::new(machine());
+        app.edit_machine(|machine| machine.name = "Other shop".into());
+        app.set_post_kind(PostKind::Grbl);
+        app.document.update_view(|document| {
+            document.operation_id_floor += 10;
+            document.active_setup_id = 99;
+        });
+        assert!(!app.has_unsaved_changes());
+        app.defaults.depth += 1.0;
+        assert!(app.has_unsaved_changes());
+    }
 
     const PART_DXF: &str = "\
 0\nSECTION\n2\nENTITIES\n\

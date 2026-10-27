@@ -504,6 +504,7 @@ mod tests {
                 .is_some_and(|n| n.error && n.detail.contains("did not complete"))
         );
         let _ = app.update(Message::NewProject);
+        let _ = app.update(Message::DiscardConfirmed);
         assert!(app.status_messages.0.is_empty());
     }
 }

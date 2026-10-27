@@ -1,6 +1,387 @@
 //! Workpiece axes follow the setup draft and pending picks. A canvas overlay
 //! keeps the datum and labels readable even when the origin is inside a solid.
 use super::*;
+use iced::widget::column;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SetupOrientation {
+    Model,
+    Zx,
+    Zy,
+    Xy,
+    SelectedAxes,
+}
+impl SetupOrientation {
+    const ALL: [Self; 5] = [
+        Self::Model,
+        Self::Zx,
+        Self::Zy,
+        Self::Xy,
+        Self::SelectedAxes,
+    ];
+    fn axes(self) -> &'static [usize] {
+        match self {
+            Self::Model => &[],
+            Self::Zx => &[2, 0],
+            Self::Zy => &[2, 1],
+            Self::Xy => &[0, 1],
+            Self::SelectedAxes => &[0, 1, 2],
+        }
+    }
+}
+impl std::fmt::Display for SetupOrientation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Model => "Model orientation",
+            Self::Zx => "Select Z axis and X axis",
+            Self::Zy => "Select Z axis and Y axis",
+            Self::Xy => "Select X and Y axes",
+            Self::SelectedAxes => "Selected axes",
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SetupOriginMode {
+    Model,
+    Point,
+    StockBox,
+    ModelBox,
+    TwoPoints,
+    Coordinates,
+}
+impl SetupOriginMode {
+    const ALL: [Self; 6] = [
+        Self::Model,
+        Self::Point,
+        Self::StockBox,
+        Self::ModelBox,
+        Self::TwoPoints,
+        Self::Coordinates,
+    ];
+    pub(super) fn is_box(self) -> bool {
+        matches!(self, Self::StockBox | Self::ModelBox)
+    }
+}
+impl std::fmt::Display for SetupOriginMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Model => "Model origin",
+            Self::Point => "Selected point",
+            Self::StockBox => "Stock box point",
+            Self::ModelBox => "Model box point",
+            Self::TwoPoints => "From two points",
+            Self::Coordinates => "Coordinates",
+        })
+    }
+}
+impl App {
+    fn setup_orientation(&self, draft: &cam_model::Setup) -> SetupOrientation {
+        self.setup_orientation.unwrap_or_else(|| {
+            let refs = &draft.frame.references;
+            let present = [refs.x.is_some(), refs.y.is_some(), refs.z.is_some()];
+            let present: [bool; 3] =
+                std::array::from_fn(|i| present[i] || refs.stock_axes[i].is_some());
+            match present {
+                [true, true, false] => SetupOrientation::Xy,
+                [true, false, true] => SetupOrientation::Zx,
+                [false, true, true] => SetupOrientation::Zy,
+                [false, false, false]
+                    if refs.model_instance.is_some()
+                        || draft.frame.world_from_setup.rotation
+                            == cam_model::SetupFrame::default().world_from_setup.rotation =>
+                {
+                    SetupOrientation::Model
+                }
+                _ => SetupOrientation::SelectedAxes,
+            }
+        })
+    }
+    pub(super) fn setup_origin_mode(&self) -> SetupOriginMode {
+        self.setup_origin_mode.unwrap_or_else(|| {
+            if self.setup_draft.as_ref().is_some_and(|draft| {
+                matches!(
+                    draft.frame.references.origin,
+                    cam_model::FrameOrigin::ModelOrigin
+                )
+            }) {
+                SetupOriginMode::Model
+            } else {
+                SetupOriginMode::Coordinates
+            }
+        })
+    }
+    pub(super) fn change_setup_orientation(&mut self, mode: SetupOrientation) {
+        self.cancel_setup_picks();
+        self.cad_candidates.clear();
+        self.setup_orientation = Some(mode);
+        if mode == SetupOrientation::Model {
+            let instance = self.setup_draft.as_ref().and_then(|draft| {
+                draft
+                    .frame
+                    .references
+                    .model_instance
+                    .or_else(|| draft.model_instances.first().copied())
+            });
+            if let Some(instance) = instance {
+                let _ = self.update(Message::SetupUseModelFrame(instance));
+            } else if let Some(draft) = &mut self.setup_draft {
+                let world_origin = draft.frame.to_world_vector(draft.origin);
+                let origin_reference = draft.frame.references.origin.clone();
+                draft.frame = cam_model::SetupFrame::default();
+                draft.origin = world_origin;
+                draft.frame.references.origin =
+                    if matches!(origin_reference, cam_model::FrameOrigin::Explicit(_)) {
+                        cam_model::FrameOrigin::Explicit(draft.origin)
+                    } else {
+                        origin_reference
+                    };
+                self.clear_setup_origin_buffers();
+            }
+            return;
+        }
+        if let Some(draft) = &mut self.setup_draft {
+            let refs = &mut draft.frame.references;
+            for axis in 0..3 {
+                if !mode.axes().contains(&axis) {
+                    match axis {
+                        0 => refs.x = None,
+                        1 => refs.y = None,
+                        _ => refs.z = None,
+                    }
+                    refs.stock_axes[axis] = None;
+                    refs.stock_flipped[axis] = false;
+                }
+            }
+            refs.model_instance = None;
+        }
+        self.resolve_setup_axes();
+    }
+    pub(super) fn change_setup_origin_mode(&mut self, mode: SetupOriginMode) {
+        self.cancel_setup_picks();
+        self.setup_origin_mode = Some(mode);
+        if mode == SetupOriginMode::Model {
+            let instance = self.setup_draft.as_ref().and_then(|draft| {
+                draft
+                    .frame
+                    .references
+                    .model_instance
+                    .or_else(|| draft.model_instances.first().copied())
+            });
+            if let Some(instance) = instance {
+                let _ = self.update(Message::SetupUseModelOrigin(instance));
+            } else if let Some(draft) = &mut self.setup_draft {
+                draft.origin = [0.; 3];
+                draft.frame.references.origin = cam_model::FrameOrigin::ModelOrigin;
+                self.clear_setup_origin_buffers();
+            }
+        }
+    }
+    pub(super) fn setup_wcs_editor(&self, draft: &cam_model::Setup) -> Element<'_, Message> {
+        let orientation = self.setup_orientation(draft);
+        let origin = self.setup_origin_mode();
+        let mut form = column![
+            inspector_section("Workpiece coordinate system (WCS)"),
+            row![
+                text("Orientation").size(12).color(INSPECTOR_TEXT).width(80),
+                pick_list(
+                    &SetupOrientation::ALL[..],
+                    Some(orientation),
+                    Message::SetupOrientationChanged
+                )
+                .text_size(12)
+                .padding([7, 9])
+                .style(inspector_picker)
+                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
+        if orientation == SetupOrientation::Model {
+            // Coordinate systems belong to model instances. Offer every included
+            // instance rather than silently taking the first body in a multi-model setup.
+            if draft.model_instances.len() > 1 {
+                for &id in &draft.model_instances {
+                    if let Some(instance) = self.controller.geometry_state().instance(id) {
+                        let active = draft.frame.references.model_instance == Some(id);
+                        form = form.push(
+                            inspector_button(instance.name.clone())
+                                .style(move |theme, status| inspector_tab(theme, status, active))
+                                .width(Length::Fill)
+                                .on_press(Message::SetupUseModelFrame(id)),
+                        );
+                    }
+                }
+            }
+        } else {
+            form = form.push(
+                text(if self.setup_axis_pick.is_some() {
+                    "Pick a straight model or stock edge in the view."
+                } else {
+                    "Select axis edges. Z should point away from the machining plane."
+                })
+                .size(11)
+                .color(INSPECTOR_MUTED),
+            );
+            let refs = &draft.frame.references;
+            for &axis in orientation.axes() {
+                let reference = [&refs.x, &refs.y, &refs.z][axis].as_ref();
+                let stock = refs.stock_axes[axis].is_some();
+                let picking = self.setup_axis_pick == Some(axis);
+                let label = if picking {
+                    "Picking…".to_string()
+                } else if stock {
+                    "Stock edge".into()
+                } else {
+                    reference
+                        .map(|r| format!("Edge {}", r.entity.id))
+                        .unwrap_or_else(|| "Select edge".into())
+                };
+                form = form.push(
+                    row![
+                        text(format!("{} axis", ["X", "Y", "Z"][axis]))
+                            .size(12)
+                            .color(INSPECTOR_TEXT)
+                            .width(80),
+                        inspector_button(label)
+                            .width(Length::Fill)
+                            .style(move |theme, status| inspector_tab(theme, status, picking))
+                            .on_press(Message::SetupAxisPick(axis)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+                if reference.is_some() || stock {
+                    let flipped = reference.map_or(refs.stock_flipped[axis], |r| r.flipped);
+                    form = form.push(
+                        row![
+                            Space::new().width(80),
+                            checkbox(flipped)
+                                .label(format!("Flip {} axis", ["X", "Y", "Z"][axis]))
+                                .size(14)
+                                .text_size(11)
+                                .spacing(8)
+                                .on_toggle(move |on| Message::SetupAxisFlip(axis, on)),
+                            Space::new().width(Length::Fill),
+                            inspector_button("Clear").on_press(Message::SetupAxisClear(axis)),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+                }
+            }
+            if self.setup_axis_pick.is_some() && self.cad_candidates.len() > 1 {
+                form = form.push(
+                    text("Overlapping edge candidates")
+                        .size(11)
+                        .color(INSPECTOR_MUTED),
+                );
+                for candidate in &self.cad_candidates {
+                    form = form.push(
+                        inspector_button(format!(
+                            "Edge {} · instance {}{}",
+                            candidate.entity.id,
+                            candidate.entity.instance_id,
+                            if candidate.occluded { " · behind" } else { "" }
+                        ))
+                        .on_press(Message::CadSelect(candidate.entity.clone())),
+                    );
+                }
+            }
+        }
+        form = form.push(
+            row![
+                text("Origin").size(12).color(INSPECTOR_TEXT).width(80),
+                pick_list(
+                    &SetupOriginMode::ALL[..],
+                    Some(origin),
+                    Message::SetupOriginModeChanged
+                )
+                .text_size(12)
+                .padding([7, 9])
+                .style(inspector_picker)
+                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        if matches!(
+            origin,
+            SetupOriginMode::Point
+                | SetupOriginMode::StockBox
+                | SetupOriginMode::ModelBox
+                | SetupOriginMode::TwoPoints
+        ) {
+            let picking = self.in_origin_pick();
+            let label = if picking {
+                "Cancel point pick"
+            } else {
+                match origin {
+                    SetupOriginMode::StockBox | SetupOriginMode::ModelBox => "Point on box",
+                    SetupOriginMode::TwoPoints => "Select two points",
+                    _ => "Select point",
+                }
+            };
+            form = form.push(
+                row![
+                    text(if origin == SetupOriginMode::StockBox {
+                        "Stock point"
+                    } else if origin == SetupOriginMode::ModelBox {
+                        "Model point"
+                    } else {
+                        "Point"
+                    })
+                    .size(12)
+                    .color(INSPECTOR_TEXT)
+                    .width(80),
+                    inspector_button(label)
+                        .width(Length::Fill)
+                        .style(move |theme, status| inspector_tab(theme, status, picking))
+                        .on_press(if origin == SetupOriginMode::TwoPoints {
+                            Message::ToggleSetOrigin2pt
+                        } else {
+                            Message::ToggleSetOrigin
+                        }),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+            if origin.is_box() {
+                form = form.push(
+                    text("Choose a corner, edge midpoint, face center or box center in the view.")
+                        .size(11)
+                        .color(INSPECTOR_MUTED),
+                );
+            }
+        }
+        if origin == SetupOriginMode::Coordinates {
+            for i in 0..3 {
+                let value = self.setup_value(i, fmt_num(draft.origin[i]));
+                form = form.push(inspector_value(
+                    ["Origin X", "Origin Y", "Origin Z"][i],
+                    &value,
+                    "mm",
+                    move |v| Message::SetupOriginChanged(i, v),
+                ));
+            }
+        } else {
+            form = form.push(
+                text(format!(
+                    "X {}   Y {}   Z {} mm",
+                    fmt_num(draft.origin[0]),
+                    fmt_num(draft.origin[1]),
+                    fmt_num(draft.origin[2])
+                ))
+                .size(11)
+                .color(INSPECTOR_MUTED),
+            );
+        }
+        if let Some(error) = self.setup_frame_issue(draft) {
+            form = form.push(text(error).size(11).color(palette::ERROR));
+        }
+        form.into()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct WorkpieceAxes {
@@ -289,6 +670,149 @@ mod tests {
     fn close(a: [f64; 3], b: [f64; 3]) {
         assert!((0..3).all(|i| (a[i] - b[i]).abs() < 1e-8), "{a:?} != {b:?}");
     }
+    #[test]
+    fn orientation_modes_clear_hidden_references_and_preserve_the_world_datum() {
+        let mut app = app();
+        let committed = app.controller.document().setup().clone();
+        for (axis, value) in ["12", "23", "34"].into_iter().enumerate() {
+            let _ = app.update(Message::SetupOriginChanged(axis, value.into()));
+        }
+        for mode in [
+            SetupOrientation::Zx,
+            SetupOrientation::Zy,
+            SetupOrientation::Xy,
+        ] {
+            let _ = app.update(Message::SetupOrientationChanged(mode));
+            for &axis in mode.axes() {
+                app.set_setup_stock_axis(
+                    axis,
+                    std::array::from_fn(|i| if i == axis { 1. } else { 0. }),
+                );
+            }
+            let draft = app.setup_draft.as_ref().unwrap();
+            for axis in 0..3 {
+                assert_eq!(
+                    draft.frame.references.stock_axes[axis].is_some(),
+                    mode.axes().contains(&axis)
+                );
+            }
+            assert!(app.setup_frame_issue(draft).is_none());
+            close(axes(&app).unwrap().origin, [12., 23., 34.]);
+        }
+        app.set_setup_stock_axis(0, [0., 1., 0.]);
+        app.set_setup_stock_axis(1, [0., 0., 1.]);
+        let _ = app.update(Message::SetupOrientationChanged(SetupOrientation::Model));
+        let draft = app.setup_draft.as_ref().unwrap();
+        close(draft.origin, [12., 23., 34.]);
+        assert_eq!(
+            draft.frame.references.origin,
+            cam_model::FrameOrigin::Explicit(draft.origin)
+        );
+        assert_eq!(app.controller.document().setup(), &committed);
+        let _ = app.update(Message::SetupCancel);
+        assert_eq!(app.controller.document().setup(), &committed);
+    }
+
+    #[test]
+    fn model_orientation_preserves_explicit_datum_and_model_origin_is_separate() {
+        use cam_model::{
+            CadBody, CadFormat, GeometryAsset, GeometryInstance, RigidTransform, SourceUnits,
+            TopologySnapshot,
+        };
+        let mut app = app();
+        let rotation = cam_model::SetupFrame::from_xy([0., 1., 0.], [0., 0., 1.])
+            .unwrap()
+            .world_from_setup
+            .rotation;
+        app.controller
+            .add_cad_asset(
+                GeometryAsset {
+                    id: 1,
+                    revision: 1,
+                    name: "Fixture".into(),
+                    source_format: CadFormat::Step,
+                    source_data: vec![].into(),
+                    source_units: SourceUnits::Millimetres,
+                    backend: "test".into(),
+                    import_options: None,
+                    import_diagnostics: vec![],
+                    source_fingerprint: String::new(),
+                    topology: TopologySnapshot {
+                        bodies: vec![CadBody {
+                            id: 1,
+                            name: "Body".into(),
+                            valid_solid: true,
+                            bounds: [[0.; 3], [10.; 3]],
+                        }],
+                        ..Default::default()
+                    }
+                    .into(),
+                },
+                vec![GeometryInstance {
+                    id: 1,
+                    asset_id: 1,
+                    body_id: 1,
+                    name: "Body".into(),
+                    visible: true,
+                    placement: RigidTransform {
+                        rotation,
+                        translation: [50., 60., 70.],
+                    },
+                }],
+            )
+            .unwrap();
+        app.setup_draft.as_mut().unwrap().model_instances = vec![1];
+        for (axis, value) in ["12", "23", "34"].into_iter().enumerate() {
+            let _ = app.update(Message::SetupOriginChanged(axis, value.into()));
+        }
+        let _ = app.update(Message::SetupOrientationChanged(SetupOrientation::Model));
+        close(axes(&app).unwrap().origin, [12., 23., 34.]);
+        assert_eq!(
+            app.setup_draft
+                .as_ref()
+                .unwrap()
+                .frame
+                .world_from_setup
+                .rotation,
+            rotation
+        );
+        assert!(app
+            .setup_frame_issue(app.setup_draft.as_ref().unwrap())
+            .is_none());
+        let _ = app.update(Message::SetupOriginModeChanged(SetupOriginMode::Model));
+        close(axes(&app).unwrap().origin, [50., 60., 70.]);
+        let draft = app.setup_draft.as_ref().unwrap().clone();
+        let _ = app.update(Message::SetupCommit);
+        assert_eq!(app.controller.document().setup(), &draft, "{}", app.status);
+    }
+
+    #[test]
+    fn origin_source_changes_cancel_pending_picks_and_reset_model_origin() {
+        let mut app = app();
+        let committed = app.controller.document().setup().clone();
+        for mode in [
+            SetupOriginMode::StockBox,
+            SetupOriginMode::ModelBox,
+            SetupOriginMode::Point,
+            SetupOriginMode::TwoPoints,
+        ] {
+            app.setup_axis_pick = Some(0);
+            app.setting_origin_2pt = true;
+            app.origin_first = Some([1., 2., 3.]);
+            let _ = app.update(Message::SetupOriginModeChanged(mode));
+            assert!(!app.in_origin_pick());
+            assert!(app.setup_axis_pick.is_none());
+            assert!(app.origin_first.is_none());
+            assert_eq!(app.setup_origin_mode(), mode);
+        }
+        let _ = app.update(Message::SetupOriginChanged(0, "42".into()));
+        assert_eq!(app.setup_origin_mode(), SetupOriginMode::Coordinates);
+        let _ = app.update(Message::SetupOriginModeChanged(SetupOriginMode::Model));
+        close(app.setup_draft.as_ref().unwrap().origin, [0.; 3]);
+        assert!(!app.setup_values.contains_key(&0));
+        assert_eq!(app.controller.document().setup(), &committed);
+    }
+
     #[test]
     fn escape_aborts_wcs_edge_pick_and_preserves_setup_edits() {
         let mut app = app();

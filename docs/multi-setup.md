@@ -17,13 +17,21 @@ share one draft. OK validates and commits the entire draft as one undoable chang
 Cancel restores the committed values in every tab. Tab changes never commit.
 Resolve a draft before navigating to another setup or operation.
 
-For WCS orientation, use a selected model instance's coordinate system, or choose
-straight model edges for X, Y and Z. Select an axis reference in the right column,
-then pick its edge on the model. Each reference can be flipped or replaced.
-Two perpendicular directions can determine the third axis. Parallel, skewed,
-curved, degenerate, missing and left-handed reference combinations are rejected.
-The datum remains independent of axis direction. A model-coordinate-system datum
-follows its model instance; an explicit datum remains as entered.
+The Setup tab combines orientation and datum in **Workpiece coordinate system
+(WCS)**. The Orientation menu offers model orientation, Z/X, Z/Y and X/Y axis
+pairs, plus individual selected axes. Choose straight model or stock edges for
+axis references; each selected direction can be flipped, cleared or replaced.
+Two perpendicular directions determine the third axis. Parallel, skewed, curved,
+degenerate, missing and left-handed reference combinations are rejected.
+
+The Origin menu offers model origin, a selected point, a stock-box point, a
+model-box point, two points or numeric coordinates. For either box option, click
+Point on box and choose a corner, edge midpoint, face center or box center in the
+view. Box points remain selectable with drawing snapping disabled. Box and picked
+points capture an explicit datum; they do not follow later stock/model resizing.
+Changing orientation preserves an explicit datum's world position. Model origin
+uses the selected model instance's origin. All WCS edits preview in the same setup
+draft and commit with OK or revert with Cancel.
 
 Stock supports a fixed-size box, positioned against the model along each axis,
 or a box with independent allowances on all six sides. Material is separate from

@@ -112,9 +112,13 @@ mod operation_positions;
 #[path = "gui_wcs.rs"]
 mod wcs_view;
 use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
+use wcs_view::{SetupOrientation, SetupOriginMode};
 #[path = "gui_notices.rs"]
 mod notices;
 use notices::Notice;
+#[path = "gui_unsaved.rs"]
+mod unsaved;
+use unsaved::DiscardAction;
 #[path = "gui_status.rs"]
 mod status_view;
 use status_view::{StatusMessages, StatusTarget};
@@ -450,6 +454,7 @@ fn run_app(boot: impl iced::application::BootFn<App, Message> + 'static) -> iced
         .title("Open CAM Studio")
         .theme(theme)
         .subscription(App::subscription)
+        .exit_on_close_request(false)
         .run()
 }
 
@@ -1989,6 +1994,8 @@ struct PatternDraft {
 
 struct App {
     controller: AppController,
+    pending_discard: Option<DiscardAction>,
+    discarding_confirmed: bool,
     mcp: Option<std::sync::mpsc::Receiver<mcp::Request>>,
     viewport_cache: std::cell::RefCell<Option<(workspace_view::ViewportKey, Viewport)>>,
     cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
@@ -2044,6 +2051,8 @@ struct App {
     setup_tab: SetupEditorTab,
     /// An armed edge-reference field. Viewport picks are routed here until cleared.
     setup_axis_pick: Option<usize>,
+    setup_orientation: Option<SetupOrientation>,
+    setup_origin_mode: Option<SetupOriginMode>,
     expanded_setups: BTreeSet<u64>,
     collapsed_assets: BTreeSet<u64>,
     expanded_operations: BTreeSet<u32>,
@@ -2538,6 +2547,8 @@ enum Message {
     SetupTabChanged(SetupEditorTab),
     SetupNameChanged(String),
     SetupProgramChanged(String),
+    SetupOrientationChanged(SetupOrientation),
+    SetupOriginModeChanged(SetupOriginMode),
     SetupUseModelFrame(u64),
     SetupUseModelOrigin(u64),
     SetupOriginChanged(usize, String),
@@ -2603,6 +2614,9 @@ enum Message {
     // --- File I/O (native dialogs via rfd) ---
     /// Start a fresh, empty project.
     NewProject,
+    CloseRequested(iced::window::Id),
+    DiscardConfirmed,
+    DiscardCancelled,
     /// Prompt for and open a `.ocam` project.
     OpenProject,
     /// The chosen project to open (`None` = cancelled).
@@ -2961,6 +2975,8 @@ impl App {
         self.inspector_enabled = true;
         self.cancel_setup_picks();
         self.setup_tab = SetupEditorTab::Setup;
+        self.setup_orientation = None;
+        self.setup_origin_mode = None;
         self.setup_draft = Some(self.controller.document().setup().clone());
         self.setup_values.clear();
         self.setup_model_selection = None;
@@ -2993,6 +3009,8 @@ impl App {
             .cloned();
         self.setup_values.clear();
         self.setup_model_selection = None;
+        self.setup_orientation = None;
+        self.setup_origin_mode = None;
     }
 
     fn setup_draft_dirty(&self) -> bool {
@@ -3281,6 +3299,9 @@ impl App {
         if current == flipped {
             return;
         }
+        if self.setup_orientation == Some(SetupOrientation::Model) {
+            self.setup_orientation = Some(SetupOrientation::SelectedAxes);
+        }
         // A sign change on one axis alone mirrors the frame. Rotate by 180°
         // instead: keep Z when flipping X/Y, and keep X when flipping Z.
         let companion = if axis == 1 { 0 } else { 1 };
@@ -3364,6 +3385,8 @@ impl App {
         let active_machine = active.name().to_string();
         let mut app = Self {
             controller: AppController::new(active.machine.clone()),
+            pending_discard: None,
+            discarding_confirmed: false,
             mcp: None,
             viewport_cache: Default::default(),
             cad_scene_cache: Default::default(),
@@ -3415,6 +3438,8 @@ impl App {
             operation_tools: Vec::new(),
             setup_tab: SetupEditorTab::Setup,
             setup_axis_pick: None,
+            setup_orientation: None,
+            setup_origin_mode: None,
             expanded_setups: BTreeSet::from([1]),
             collapsed_assets: BTreeSet::new(),
             expanded_operations: BTreeSet::new(),
@@ -3543,6 +3568,34 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
+        if let Message::DiscardConfirmed = message {
+            if let Some(action) = self.pending_discard.take() {
+                self.discarding_confirmed = true;
+                let task = self.update(action.message());
+                self.discarding_confirmed = false;
+                return task;
+            }
+            return iced::Task::none();
+        }
+        if matches!(message, Message::DiscardCancelled)
+            || (self.pending_discard.is_some() && matches!(message, Message::CadEscape))
+        {
+            self.pending_discard = None;
+            return iced::Task::none();
+        }
+        if self.pending_discard.is_some()
+            && !matches!(message, Message::WindowResized(_) | Message::WindowCursor(_))
+        {
+            return iced::Task::none();
+        }
+        // Handle window-manager close requests even when another editor/dialog is open.
+        if let Message::CloseRequested(id) = message {
+            if !self.discarding_confirmed && self.has_changes_to_discard() {
+                self.pending_discard = Some(DiscardAction::Close(id));
+                return iced::Task::none();
+            }
+            return iced::window::close(id);
+        }
         if matches!(message, Message::PollMcp) {
             return self.poll_mcp();
         }
@@ -3693,7 +3746,7 @@ impl App {
             self.status="Finish or cancel the geometry entry settings first.".into();
             return iced::Task::none();
         }
-        if matches!(message,Message::CancelOp|Message::CancelOperationDraft|Message::NewProject) { self.profile_entry_editor=None; }
+        if matches!(message,Message::CancelOp|Message::CancelOperationDraft) { self.profile_entry_editor=None; }
         if self.notice.is_some() {
             if matches!(&message, Message::CadEscape | Message::Apply) {
                 return self.update(Message::NoticeDismissed);
@@ -3789,6 +3842,18 @@ impl App {
         {
             self.status = if operation_settings_dirty { "Apply or cancel operation changes before changing selection or restructuring operations." } else { "Apply or cancel setup changes before changing selection or starting another task." }.into();
             return iced::Task::none();
+        }
+        if !self.discarding_confirmed {
+            let action = match &message {
+                Message::NewProject => Some(DiscardAction::New),
+                Message::OpenSample => Some(DiscardAction::Sample),
+                Message::ProjectToOpen(Some(path)) => Some(DiscardAction::Open(path.clone())),
+                _ => None,
+            };
+            if let Some(action) = action.filter(|_| self.has_changes_to_discard()) {
+                self.pending_discard = Some(action);
+                return iced::Task::none();
+            }
         }
         if matches!(
             &message,
@@ -4358,12 +4423,26 @@ impl App {
                     draft.program_name = value;
                 }
             }
+            Message::SetupOrientationChanged(mode) => self.change_setup_orientation(mode),
+            Message::SetupOriginModeChanged(mode) => self.change_setup_origin_mode(mode),
             Message::SetupUseModelFrame(instance) => {
                 match self.controller.pending_frame_from_model(instance) {
-                    Ok((frame, origin)) => {
+                    Ok((mut frame, model_origin)) => {
+                        let mode = self.setup_origin_mode();
+                        self.setup_orientation = Some(SetupOrientation::Model);
                         self.clear_setup_origin_buffers();
                         self.cancel_setup_picks();
                         if let Some(draft) = &mut self.setup_draft {
+                            let origin = if mode == SetupOriginMode::Model {
+                                model_origin
+                            } else {
+                                frame.to_setup_vector(draft.frame.to_world_vector(draft.origin))
+                            };
+                            frame.references.origin = if mode == SetupOriginMode::Model {
+                                cam_model::FrameOrigin::ModelOrigin
+                            } else {
+                                cam_model::FrameOrigin::Explicit(origin)
+                            };
                             draft.frame = frame;
                             draft.origin = origin;
                         }
@@ -4387,6 +4466,7 @@ impl App {
                 }
             }
             Message::SetupOriginChanged(index, value) => {
+                self.setup_origin_mode = Some(SetupOriginMode::Coordinates);
                 self.setup_values.insert(index, value.clone());
                 if let (Some(draft), Ok(v)) = (&mut self.setup_draft, value.parse::<f64>()) {
                     if index < 3 {
@@ -4979,6 +5059,7 @@ impl App {
                 self.status = "Operation changes cancelled.".into();
             }
             Message::NewProject => {
+                self.profile_entry_editor = None;
                 // The post is *not* touched: a new project does not move you to a
                 // different machine or control, so there is nothing to re-target.
                 self.planar_selection.clear();
@@ -7008,6 +7089,7 @@ impl App {
             }
             // The preamble already cleared it; the arm keeps the match exhaustive.
             Message::CloseRibbonPopup => {}
+            Message::CloseRequested(_) | Message::DiscardConfirmed | Message::DiscardCancelled => unreachable!(),
             Message::OutputAction(_) | Message::OutputCopy | Message::OutputClear => unreachable!(),
             Message::SetPaneVisible(Pane::Inspector, show) => self.inspector_enabled = show,
             Message::SetPaneVisible(pane, show) => self.set_pane_visible(pane, show),
@@ -7017,6 +7099,7 @@ impl App {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::batch([
+            iced::window::close_requests().map(Message::CloseRequested),
             if self.mcp.is_some() {
                 iced::time::every(std::time::Duration::from_millis(25)).map(|_| Message::PollMcp)
             } else {
@@ -8625,6 +8708,9 @@ impl App {
             layers = layers.push(catcher).push(dialog);
         }
         if let Some(dialog) = self.notice_overlay() {
+            layers = layers.push(dialog);
+        }
+        if let Some(dialog) = self.unsaved_overlay() {
             layers = layers.push(dialog);
         }
         layers.into()

@@ -105,6 +105,7 @@ pub(super) struct ViewportKey {
     snap: Option<(SnapHit, f64)>,
     hover_loop: Option<LoopRef>,
     set_origin: bool,
+    origin_mode: Option<SetupOriginMode>,
     origin_first: Option<[f64; 3]>,
     view_prefs: crate::settings::ViewPrefs,
     snap_prefs: crate::settings::SnapPrefs,
@@ -381,6 +382,7 @@ impl App {
             snap: self.snap_hover.map(|hit| (hit, self.snap_aperture)),
             hover_loop: self.hover_loop,
             set_origin: self.in_origin_pick(),
+            origin_mode: self.in_origin_pick().then(|| self.setup_origin_mode()),
             origin_first: self.origin_first,
             view_prefs: self.settings.view.clone(),
             snap_prefs: self.settings.snapping.clone(),
@@ -478,6 +480,19 @@ impl App {
                     .unwrap_or_else(|| self.controller.document().setup()),
                 &cad_hidden,
             ));
+            if self.in_origin_pick() && self.setup_origin_mode().is_box() {
+                if let Some(draft) = &self.setup_draft {
+                    let (min, max) = self.controller.pending_setup_model_bounds(draft);
+                    let (min, max) = if self.setup_origin_mode() == SetupOriginMode::StockBox {
+                        draft.stock.resolve_bounds(min, max)
+                    } else {
+                        (min, max)
+                    };
+                    viewport.setup_geometry = Arc::new(
+                        Arc::unwrap_or_clone(viewport.setup_geometry).with_origin_box(draft, min, max),
+                    );
+                }
+            }
             if model_view {
                 viewport.setup_geometry = Arc::default();
                 viewport.drill_marks = Arc::default();
@@ -641,6 +656,7 @@ impl App {
                 };
                 let source = match hit.source {
                     SetupFeature::Stock(_) => "stock",
+                    SetupFeature::BoxPoint(_) => "box",
                     SetupFeature::Model(_) => "model",
                     SetupFeature::Drawing(_) => "drawing",
                 };
@@ -1165,6 +1181,53 @@ mod tests {
     fn assert_point(a: [f64; 3], b: [f64; 3]) {
         assert!((0..3).all(|i| (a[i] - b[i]).abs() < 1e-5), "{a:?} != {b:?}");
     }
+    #[test]
+    fn box_origin_modes_pick_only_their_bounds_without_snap_preferences_or_fallback() {
+        let mut app = picking_app();
+        app.settings.snapping.enabled = false;
+        app.view.yaw = 0.63;
+        app.view.pitch = 0.71;
+        app.setup_draft.as_mut().unwrap().frame =
+            cam_model::SetupFrame::from_xy([0., 0., 1.], [1., 0., 0.]).unwrap();
+        let committed = app.controller.document().setup().clone();
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(900., 600.));
+        // Build and cache a stock-box viewport, then change the source while
+        // picking stays armed. The model box must replace the cached stock box.
+        let mut picked = Vec::new();
+        for mode in [SetupOriginMode::StockBox, SetupOriginMode::ModelBox] {
+            let _ = app.update(Message::SetupOriginModeChanged(mode));
+            let _ = app.update(Message::ToggleSetOrigin);
+            let draft = app.setup_draft.as_ref().unwrap();
+            let (min, max) = app.controller.pending_setup_model_bounds(draft);
+            let (min, max) = if mode == SetupOriginMode::StockBox {
+                draft.stock.resolve_bounds(min, max)
+            } else {
+                (min, max)
+            };
+            let point = draft
+                .frame
+                .to_world_vector([min[0], (min[1] + max[1]) / 2., max[2]]);
+            let viewport = app.machining_viewport();
+            let cursor = picking_view::project(viewport.camera(), bounds, point)
+                .unwrap()
+                .0;
+            let hover = viewport.setup_hover_at(cursor, bounds).snap.unwrap();
+            assert_point(hover.point, point);
+            picked.push(viewport.origin_point_at(cursor, bounds).unwrap());
+            assert_point(*picked.last().unwrap(), point);
+            assert!(viewport
+                .origin_point_at(iced::Point::new(-10000., -10000.), bounds)
+                .is_none());
+            assert_eq!(app.controller.document().setup(), &committed);
+        }
+        assert_ne!(picked[0], picked[1]);
+        let _ = app.update(Message::OriginPointPicked(picked[1]));
+        let draft = app.setup_draft.as_ref().unwrap();
+        assert_point(draft.frame.to_world_vector(draft.origin), picked[1]);
+        let _ = app.update(Message::SetupCancel);
+        assert_eq!(app.controller.document().setup(), &committed);
+    }
+
     #[test]
     fn stock_origin_hover_and_click_agree_in_rotated_and_portrait_views() {
         use shader::Program;
