@@ -3637,6 +3637,8 @@ impl App {
                 | profile_entries_view::EntryMessage::Tolerance(_),
             ) => false,
             Message::CadSelect(_)
+            | Message::CadPicked(_)
+            | Message::BeginOp(_)
             | Message::ProfileEntry(_)
             | Message::ConfirmCadOperation
             | Message::GeometryRemove(_)
@@ -5442,7 +5444,7 @@ impl App {
                                 self.controller.document(),
                             )
                             .and_then(|geometry| {
-                                cam_geometry3d::resolve_binding(&geometry, &binding)
+                                cam_geometry3d::resolve_binding_advisory(&geometry, &binding)
                             }) {
                                 self.edit_operation_draft(|operation| match operation {
                                     Operation::Chamfer(op) => {
@@ -9803,7 +9805,7 @@ impl App {
                         .iter()
                         .any(|r| r.kind == EntityKind::Silhouette)
                     {
-                        " XY silhouette: whole-body outline on the setup reference plane."
+                        " XY silhouette: whole-body outline projected along setup Z."
                     } else {
                         ""
                     }
@@ -11704,6 +11706,7 @@ impl Viewport {
         // The active machine's travel per axis, when the envelope is shown.
         envelope: Option<[f32; 3]>,
         editor_geometry: Option<&[EntityRef]>,
+        silhouette_bottom: Option<f64>,
         cached_cad_scene: Option<Arc<CadScene>>,
     ) -> Self {
         let cad_hover = cad_hover.filter(|reference| {
@@ -11831,11 +11834,21 @@ impl Viewport {
             if let Ok(geometry) = controller.geometry_state().geometry_in_setup(frame) {
                 for reference in silhouette_refs {
                     if let Ok(region) = cam_geometry3d::silhouette(&geometry, &reference) {
+                        let z = silhouette_bottom
+                            .filter(|_| cad_selected.contains(&reference))
+                            .or_else(|| {
+                                controller
+                                    .document()
+                                    .height_selection_bounds(std::slice::from_ref(&reference))
+                                    .ok()
+                                    .map(|(min, _)| min[2])
+                            })
+                            .unwrap_or(0.);
                         let mut points: Vec<_> = region
                             .outer()
                             .points()
                             .iter()
-                            .map(|p| frame.to_world_vector([p.x, p.y, 0.]).map(|v| v as f32))
+                            .map(|p| frame.to_world_vector([p.x, p.y, z]).map(|v| v as f32))
                             .collect();
                         if let Some(first) = points.first().copied() {
                             points.push(first);
@@ -11845,7 +11858,7 @@ impl Viewport {
                         } else {
                             PICK_HOVER
                         };
-                        // The reference-plane outline must stay visible through
+                        // The projected outline must stay visible through
                         // the model/stock, like other selection overlays.
                         scene.add_highlight(points, color);
                     }

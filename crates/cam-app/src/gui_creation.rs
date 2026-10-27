@@ -193,6 +193,9 @@ impl App {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
         if let Operation::Profile(profile) = &mut draft {
+            if profile.selections.is_none() {
+                profile.selections = self.active_profile_geometry_entries();
+            }
             if profile.selections.is_some() {
                 let binding = crate::cad_operations::resolve_profile_entries(
                     self.controller.document(),
@@ -352,19 +355,11 @@ impl App {
         if self.cad_pending_kind.is_some() {
             col =
                 col.push(self.geometry_list(cad_geometry_labels(self.controller.cad_selection())));
-            for candidate in &self.cad_candidates {
-                col = col.push(
-                    inspector_button(format!(
-                        "{:?} {}",
-                        candidate.entity.kind, candidate.entity.id
-                    ))
-                    .on_press(Message::CadSelect(candidate.entity.clone())),
-                );
-            }
-            if let Err(reason) = self
-                .controller
-                .preview_cad_operation(kind, self.controller.cad_selection())
-            {
+            let valid = self.validate_active_profile_geometry().unwrap_or_else(|| {
+                self.controller.preview_cad_operation(kind, self.controller.cad_selection())
+                    .map(|_| ())
+            });
+            if let Err(reason) = valid {
                 if !self.controller.cad_selection().is_empty() {
                     col = col.push(text(reason).size(12).color(palette::WARN));
                 }

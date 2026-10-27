@@ -10,6 +10,7 @@
 //!   not in headless tests.
 
 mod config;
+mod geometry_verification;
 mod controller;
 mod import_jobs;
 mod jobs;

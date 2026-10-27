@@ -16,13 +16,36 @@ pub(super) fn path(
     refs: &[EntityRef],
     chamfer: bool,
 ) -> Result<(Vec<ProfileContour>, f64), String> {
-    let view = View::new(state, refs)?;
+    path_impl(state, refs, chamfer, true)
+}
+
+pub(super) fn unverified_path(
+    state: &GeometryState,
+    refs: &[EntityRef],
+    chamfer: bool,
+) -> Result<(Vec<ProfileContour>, f64), String> {
+    path_impl(state, refs, chamfer, false)
+}
+
+fn path_impl(
+    state: &GeometryState,
+    refs: &[EntityRef],
+    chamfer: bool,
+    verify_face: bool,
+) -> Result<(Vec<ProfileContour>, f64), String> {
+    let view = if verify_face {
+        View::new(state, refs)?
+    } else {
+        View::for_path(state, refs)?
+    };
     let (chain, closed, z, side) = if refs.len() == 1 && refs[0].kind == EntityKind::Loop {
         let wire = view.wire(refs[0].id)?;
         let (chain, z) = view.contour(wire)?;
-        let (_, normal) = view.plane(view.face(wire.face_id)?)?;
-        if normal[2] <= 0. {
-            return Err("Select a boundary of a face facing setup Z".into());
+        if verify_face {
+            let (_, normal) = view.plane(view.face(wire.face_id)?)?;
+            if normal[2] <= 0. {
+                return Err("Select a boundary of a face facing setup Z".into());
+            }
         }
         (
             chain,

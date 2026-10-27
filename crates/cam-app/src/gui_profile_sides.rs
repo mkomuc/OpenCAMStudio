@@ -3,6 +3,17 @@ use super::*;
 use cam_model::{ProfileContour, ProfileOp};
 
 impl App {
+    fn profile_silhouette_bottom(&self, fallback: f64) -> f64 {
+        let id = if self.creating_operation() {
+            0
+        } else if let Some(Operation::Profile(profile)) = &self.operation_draft {
+            profile.id
+        } else {
+            return fallback;
+        };
+        self.resolve_height_editor(id).map_or(fallback, |heights| heights.bottom)
+    }
+
     pub(super) fn apply_profile_side_overrides(&self, profile: &mut ProfileOp) {
         let sides: Vec<_> = profile
             .contours()
@@ -29,7 +40,7 @@ impl App {
         {
             return None;
         }
-        if profile.selections.is_some() {
+        if self.active_profile_geometry_entries().is_some() {
             let geometry =
                 crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
             let mut all = Vec::new();
@@ -39,8 +50,11 @@ impl App {
                 if let Ok((contours, heights)) =
                     cam_geometry3d::profile_entry_contours(&geometry, entry)
                 {
-                    if all.is_empty() && entry.kind != cam_model::ProfileGeometryKind::Silhouette {
+                    if all.is_empty() {
                         plane = match &entry.source {
+                            _ if entry.kind == cam_model::ProfileGeometryKind::Silhouette => {
+                                self.profile_silhouette_bottom(heights.map_or(0., |h| h.bottom))
+                            }
                             cam_model::ProfileGeometrySource::Cad(refs)
                                 if entry.kind == cam_model::ProfileGeometryKind::Chain =>
                             {
@@ -113,7 +127,7 @@ impl App {
         let z = if let Some(binding) = binding {
             let geometry =
                 crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
-            let resolved = cam_geometry3d::resolve_binding(&geometry, &binding).ok()?;
+            let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding).ok()?;
             let old_sides: Vec<_> = profile.contours().map(|c| c.side).collect();
             if let Some(first) = resolved.profiles.first() {
                 profile.chain = first.chain.clone();
@@ -150,7 +164,7 @@ impl App {
             }
             let reference = binding.selected.first()?;
             match reference.kind {
-                EntityKind::Silhouette => 0.,
+                EntityKind::Silhouette => self.profile_silhouette_bottom(resolved.heights.bottom),
                 EntityKind::Face => resolved.heights.top,
                 EntityKind::Edge => {
                     self.controller
@@ -185,7 +199,7 @@ impl App {
     }
 
     pub(super) fn set_profile_contour_side(&mut self, index: usize, side: Side) {
-        if matches!(&self.operation_draft,Some(Operation::Profile(p)) if p.selections.is_some()) {
+        if self.active_profile_geometry_entries().is_some() {
             self.set_profile_entry_contour_side(index, side);
             return;
         }

@@ -50,6 +50,31 @@ fn iges_solids_and_sewn_surfaces_use_millimetres() {
 }
 
 #[test]
+fn spline_planes_are_recognized_without_flattening_a_bulged_interior() {
+    for (name, planes) in [
+        ("spline-box-surfaces-mm.igs", 6),
+        ("spline-bulge-surfaces-mm.igs", 5),
+    ] {
+        let import = read_iges_file(fixture(name), &Default::default()).unwrap();
+        import.topology.validate().unwrap();
+        assert!(import.topology.bodies[0].valid_solid, "{name}");
+        assert_eq!(import.topology.faces.len(), 6);
+        assert_eq!(import.topology.faces.iter().filter(|face| {
+            matches!(face.surface, CadSurface::Plane { .. })
+        }).count(), planes, "{name}");
+        // Normals must retain the solid's outward orientation, also for reversed
+        // faces; setup alignment and entry checks depend on this sign.
+        let center = [30., 20., -5.];
+        for face in &import.topology.faces {
+            if let CadSurface::Plane { origin, normal } = face.surface {
+                let outward: f64 = (0..3).map(|i| (origin[i] - center[i]) * normal[i]).sum();
+                assert!(outward > 0., "{name}: {face:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn iges_imports_every_body_and_preserves_circular_geometry() {
     for name in ["two-boxes-mm.iges", "two-boxes-surfaces-mm.iges"] {
         let import = read_iges_file(fixture(name), &Default::default()).unwrap();

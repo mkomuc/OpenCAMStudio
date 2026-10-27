@@ -41,6 +41,21 @@ pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
         .collect()
 }
 
+/// Read-only source names belong with the Selection controls in geometry settings.
+pub(super) fn selected_feature_names(labels: Vec<String>) -> Element<'static, Message> {
+    let names = if labels.is_empty() {
+        "No geometry selected".to_owned()
+    } else {
+        labels.join("\n")
+    };
+    row![
+        Space::new().width(90),
+        text(names).size(12).width(Length::Fill),
+    ]
+    .spacing(6)
+    .into()
+}
+
 pub(super) fn drawing_geometry_labels(selected: &[LoopRef]) -> Vec<String> {
     selected
         .iter()

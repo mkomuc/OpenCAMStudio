@@ -778,9 +778,7 @@ impl AppController {
         &mut self,
         entities: Vec<cam_model::EntityRef>,
     ) -> Result<(), String> {
-        if !entities.is_empty() {
-            cam_geometry3d::validate_adaptive_selection(self.geometry_state(), &entities)?;
-        }
+        crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
         self.cad_selection = entities;
         Ok(())
     }
@@ -959,16 +957,45 @@ impl AppController {
         } else {
             crate::cad_operations::validate_selection(&geometry, entities)?;
         }
-        let binding = cam_geometry3d::resolve_selection(
+        let binding = cam_geometry3d::resolve_selection_advisory(
             &geometry,
             entities,
             crate::cad_operations::recipe(kind, &geometry, entities)?,
             self.stock_box().1[2],
         )?;
-        cam_geometry3d::resolve_binding(&geometry, &binding)
+        cam_geometry3d::resolve_binding_advisory(&geometry, &binding)
     }
-    /// The same qualified resolver gates both creation orders and the UI's
-    /// confirmation button; its error is the reason an input is unavailable.
+    pub(crate) fn observe_geometry_binding(
+        &self,
+        kind: OpKind,
+        binding: &cam_model::GeometryBinding,
+    ) {
+        let finding = self.setup_geometry_state().ok().and_then(|geometry| {
+            cam_geometry3d::resolve_binding(&geometry, binding)
+                .err()
+                .or_else(|| {
+                    cam_geometry3d::verify_selection(
+                        &geometry,
+                        &binding.selected,
+                        binding.recipe.clone(),
+                        self.stock_box().1[2],
+                    )
+                })
+        });
+        if let Err(error) = crate::geometry_verification::record(
+            self,
+            &binding.selected,
+            Some(kind),
+            None,
+            Some(binding),
+            finding.as_deref(),
+            None,
+        ) {
+            eprintln!("Could not record geometry verification: {error}");
+        }
+    }
+    /// Both creation orders and the confirmation button require extractable
+    /// geometry; automatic feature-recognition findings remain advisory.
     pub fn cad_operation_eligibility(
         &self,
         kind: OpKind,
@@ -1102,6 +1129,7 @@ impl AppController {
         preview.setup_mut().operations.push(op);
         preview.cad_linked_operations.insert(id);
         crate::cad_operations::validate_binding_edit(&mut preview, id)?;
+        self.observe_geometry_binding(kind, &binding);
         self.edit_document(move |doc| *doc = preview);
         self.select(Selection::Operation(id));
         self.invalidate();
@@ -1146,6 +1174,12 @@ impl AppController {
         binding.overrides = cam_model::GeometryOverrides { top, bottom };
         crate::cad_operations::validate_binding_edit(&mut doc, id)?;
         self.edit_document(move |current| *current = doc);
+        if let Some(operation) = self.operation(id) {
+            self.observe_geometry_binding(
+                Self::operation_kind(operation),
+                &self.geometry_state().bindings[&id],
+            );
+        }
         self.invalidate();
         Ok(())
     }

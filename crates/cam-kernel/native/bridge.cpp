@@ -41,6 +41,7 @@
 #include <gp_Circ.hxx>
 #include <gp_Torus.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierSurface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <GeomConvert_BSplineCurveToBezierCurve.hxx>
@@ -95,11 +96,36 @@ bool spline_extrusion_axis(const BRepAdaptor_Surface& a,gp_Dir& axis) {
     }
     return false;
 }
+// IGES commonly represents flat faces as rational splines. Certify the entire
+// positive-weight control net against a plane, not just sampled surface normals
+// or boundary points (which would also accept a surface with an interior bulge).
+bool spline_plane(const BRepAdaptor_Surface& a,gp_Pln& plane) {
+    if(a.GetType()!=GeomAbs_BSplineSurface && a.GetType()!=GeomAbs_BezierSurface) return false;
+    gp_Pnt point; gp_Vec du,dv;
+    a.D1((a.FirstUParameter()+a.LastUParameter())/2,
+         (a.FirstVParameter()+a.LastVParameter())/2,point,du,dv);
+    const gp_Vec normal=du.Crossed(dv);
+    if(normal.Magnitude()<=1e-12) return false;
+    plane=gp_Pln(point,gp_Dir(normal));
+    auto coplanar=[&](const auto& spline) {
+        for(int u=1;u<=spline->NbUPoles();++u) {
+            for(int v=1;v<=spline->NbVPoles();++v) {
+                const double weight=spline->Weight(u,v);
+                if(!std::isfinite(weight) || weight<=0
+                   || plane.Distance(spline->Pole(u,v))>1e-9) return false;
+            }
+        }
+        return true;
+    };
+    return a.GetType()==GeomAbs_BSplineSurface ? coplanar(a.BSpline()) : coplanar(a.Bezier());
+}
 std::string surface(const TopoDS_Face& f,const TopTools_IndexedMapOfShape& em,const std::vector<unsigned long long>& edge_ids) {
     BRepAdaptor_Surface a(f);
     std::ostringstream o; o << std::setprecision(17);
-    if (a.GetType()==GeomAbs_Plane) {
-        gp_Pln p=a.Plane(); gp_Dir n=p.Axis().Direction(); if(f.Orientation()==TopAbs_REVERSED) n.Reverse();
+    gp_Pln p;
+    if (a.GetType()==GeomAbs_Plane || spline_plane(a,p)) {
+        if(a.GetType()==GeomAbs_Plane) p=a.Plane();
+        gp_Dir n=p.Axis().Direction(); if(f.Orientation()==TopAbs_REVERSED) n.Reverse();
         o << "{\"Plane\":{\"origin\":" << xyz(p.Location().XYZ()) << ",\"normal\":" << xyz(n.XYZ()) << "}}";
     } else if(a.GetType()==GeomAbs_Cylinder) {
         gp_Cylinder c=a.Cylinder();

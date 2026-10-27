@@ -122,6 +122,17 @@ impl AppController {
         }
         if document.geometry.bindings.contains_key(&id) {
             crate::cad_operations::validate_binding_edit(&mut document, id)?;
+            self.observe_geometry_binding(
+                Self::operation_kind(
+                    document
+                        .setup()
+                        .operations
+                        .iter()
+                        .find(|operation| operation.id() == id)
+                        .unwrap(),
+                ),
+                &document.geometry.bindings[&id],
+            );
         }
         if stock_to_leave.enabled {
             setups::validate_stock_to_leave(

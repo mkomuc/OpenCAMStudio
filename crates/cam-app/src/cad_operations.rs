@@ -198,10 +198,55 @@ pub(crate) fn recipe(
         OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette => {
             ExtractionRecipe::ProfileSilhouette
         }
+        OpKind::Profile
+            if selected.first().is_some_and(|first| {
+                selected.iter().any(|reference| {
+                    reference.kind != first.kind
+                        || reference.instance_id != first.instance_id
+                        || reference.asset_id != first.asset_id
+                        || reference.body_id != first.body_id
+                })
+            }) =>
+        {
+            ExtractionRecipe::ProfileEntries {
+                entries: profile_entries_from_selection(selected),
+            }
+        }
         OpKind::Profile => ExtractionRecipe::ProfileContours,
         OpKind::Face => ExtractionRecipe::FaceRegion,
         OpKind::Adaptive => ExtractionRecipe::AdaptiveClearing,
     })
+}
+
+pub(crate) fn profile_entries_from_selection(selected: &[EntityRef]) -> Vec<ProfileGeometryEntry> {
+    let mut entries: Vec<ProfileGeometryEntry> = Vec::new();
+    for reference in selected {
+        if matches!(reference.kind, EntityKind::Edge | EntityKind::Face) {
+            if let Some(entry) = entries.iter_mut().find(|entry|
+                matches!(&entry.source, ProfileGeometrySource::Cad(refs) if refs.first().is_some_and(|first|
+                    first.kind == reference.kind && first.asset_id == reference.asset_id
+                        && first.instance_id == reference.instance_id && first.body_id == reference.body_id))) {
+                let ProfileGeometrySource::Cad(refs) = &mut entry.source else { unreachable!() };
+                refs.push(reference.clone());
+                continue;
+            }
+        }
+        let (kind, name) = match reference.kind {
+            EntityKind::Face => (ProfileGeometryKind::FaceContours, "Face Contours"),
+            EntityKind::Body | EntityKind::Silhouette => {
+                (ProfileGeometryKind::Silhouette, "Silhouette")
+            }
+            _ => (ProfileGeometryKind::Chain, "Chain"),
+        };
+        let mut entry = ProfileGeometryEntry::new(kind, format!("{name} {}", entries.len() + 1));
+        if reference.kind == EntityKind::Loop {
+            entry.chain_mode = ProfileChainMode::Closed;
+        }
+        entry.use_setup_models = false;
+        entry.source = ProfileGeometrySource::Cad(vec![reference.clone()]);
+        entries.push(entry);
+    }
+    entries
 }
 
 /// Source topology stays immutable. Only instance placements are rotated into
@@ -280,21 +325,8 @@ pub(crate) fn validate_selection(
     geometry: &GeometryState,
     selected: &[EntityRef],
 ) -> Result<(), String> {
-    let Some(first) = selected.first() else {
-        return Ok(());
-    };
     if selected.iter().any(|r| !geometry.entity_exists(r)) {
         return Err("Needs reselection: missing entity or stale asset revision".into());
-    }
-    if selected.iter().any(|r| r.kind != first.kind) {
-        return Err("Select features of the same kind; faces, loops and edges cannot be mixed in one geometry field".into());
-    }
-    if selected.iter().any(|r| {
-        r.asset_id != first.asset_id
-            || r.instance_id != first.instance_id
-            || r.body_id != first.body_id
-    }) {
-        return Err("Machining requires features from one body instance".into());
     }
     if selected
         .iter()
@@ -373,7 +405,7 @@ pub(crate) fn resolve_profile_entries(
             }
         }
     }
-    let mut binding = cam_geometry3d::resolve_selection(
+    let mut binding = cam_geometry3d::resolve_selection_advisory(
         &geometry,
         &selected,
         ExtractionRecipe::ProfileEntries {
@@ -387,7 +419,7 @@ pub(crate) fn resolve_profile_entries(
         binding.heights.bottom = binding.heights.top - profile.depth;
         binding.heights.validate()?;
     }
-    let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
+    let input = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
     let mut contours = input.profiles;
     let first = contours.remove(0);
     profile.chain = first.chain;
@@ -417,13 +449,13 @@ pub(crate) fn create_operation(
     } else {
         validate_selection(&geometry, &selected)?;
     }
-    let mut binding = cam_geometry3d::resolve_selection(
+    let mut binding = cam_geometry3d::resolve_selection_advisory(
         &geometry,
         &selected,
         recipe(kind, &geometry, &selected)?,
         stock_top(document),
     )?;
-    let resolved = cam_geometry3d::resolve_binding(&geometry, &binding)?;
+    let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
     let depth = resolved.heights.depth();
     let boundary = || {
         resolved
@@ -461,7 +493,10 @@ pub(crate) fn create_operation(
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
             passes: Default::default(),
-            selections: None,
+            selections: match &binding.recipe {
+                ExtractionRecipe::ProfileEntries { entries } => Some(entries.clone()),
+                _ => None,
+            },
             closed: resolved.profiles.first().is_none_or(|p| p.closed),
             additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
             tabs: Default::default(),
@@ -480,9 +515,9 @@ pub(crate) fn create_operation(
                 .unwrap_or_else(boundary)?,
             side: match binding.recipe {
                 ExtractionRecipe::ProfileLoop { side } => side,
-                ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette => {
-                    resolved.profiles[0].side
-                }
+                ExtractionRecipe::ProfileContours
+                | ExtractionRecipe::ProfileSilhouette
+                | ExtractionRecipe::ProfileEntries { .. } => resolved.profiles[0].side,
                 _ => unreachable!("Profile uses a profile extraction recipe"),
             },
             comp: Comp::Computed,
@@ -742,7 +777,9 @@ pub(crate) fn resolve_document_checked(
                 return Ok(());
             };
             if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
-                return Err(format!("Operation {id}: Needs reselection — {reason}"));
+                if !reason.starts_with("Geometry changed:") {
+                    return Err(format!("Operation {id}: Needs reselection — {reason}"));
+                }
             }
             if binding.recipe == ExtractionRecipe::AdaptiveClearing {
                 cam_geometry3d::validate_adaptive_selection(&resolved.geometry, &binding.selected)
@@ -759,15 +796,16 @@ pub(crate) fn resolve_document_checked(
             if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
                 current_binding.heights.top = stock_top(document);
             }
-            let input = cam_geometry3d::resolve_binding(&resolved.geometry, &current_binding)
-                .map_err(|e| {
-                    format!(
-                        "{} operation #{id} / setup '{}' / {}: {e}",
-                        operation_type(operation),
-                        document.setup().name,
-                        describe_entities(&resolved.geometry, &current_binding.selected)
-                    )
-                })?;
+            let input =
+                cam_geometry3d::resolve_binding_advisory(&resolved.geometry, &current_binding)
+                    .map_err(|e| {
+                        format!(
+                            "{} operation #{id} / setup '{}' / {}: {e}",
+                            operation_type(operation),
+                            document.setup().name,
+                            describe_entities(&resolved.geometry, &current_binding.selected)
+                        )
+                    })?;
             let depth = input.heights.depth();
             let region = || input.regions.first().ok_or("No resolved machining region");
             match (operation, &binding.recipe) {
@@ -1097,7 +1135,7 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
     if matches!(base.recipe, ExtractionRecipe::FaceRegion) {
         base.heights.top = stock_top(document);
     }
-    let input = cam_geometry3d::resolve_binding(&geometry_for_setup(document)?, &base)?;
+    let input = cam_geometry3d::resolve_binding_advisory(&geometry_for_setup(document)?, &base)?;
     let binding = document.geometry.bindings.get_mut(&id).unwrap();
     binding.heights = input.heights;
     binding.resolved_fingerprint = None;
@@ -1114,7 +1152,7 @@ pub(crate) fn refresh_binding_heights(document: &mut Document) {
         let owner=document.setups.iter().find(|s|s.operations.iter().any(|o|o.id()==id))?;
         context.active_setup_id=owner.id;
         if matches!(base.recipe,ExtractionRecipe::FaceRegion) {base.heights.top=stock_top(&context);}
-        Some((id,geometry_for_setup(&context).and_then(|geometry|cam_geometry3d::resolve_binding(&geometry,&base)).map(|input|input.heights)))
+        Some((id,geometry_for_setup(&context).and_then(|geometry|cam_geometry3d::resolve_binding_advisory(&geometry,&base)).map(|input|input.heights)))
     }).collect();
     for (id, result) in updates {
         let binding = document.geometry.bindings.get_mut(&id).unwrap();

@@ -100,7 +100,8 @@ pub enum OcamFile {
 }
 
 impl OcamFile {
-    /// Serialize to pretty JSON (tagged).
+    /// Serialize tagged JSON. Projects use compact JSON because embedded CAD
+    /// meshes can contain millions of numeric array entries; libraries stay pretty.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         if let OcamFile::Project(project) = self {
             project.validate().map_err(serde::ser::Error::custom)?;
@@ -108,7 +109,10 @@ impl OcamFile {
         if let OcamFile::Library(library) = self {
             library.validate().map_err(serde::ser::Error::custom)?;
         }
-        serde_json::to_string_pretty(self)
+        match self {
+            OcamFile::Project(_) => serde_json::to_string(self),
+            OcamFile::Library(_) => serde_json::to_string_pretty(self),
+        }
     }
 
     /// Parse a `.ocam` file, accepting a **legacy untagged project** (a bare [`Project`]
@@ -208,10 +212,10 @@ pub struct Project {
 }
 
 impl Project {
-    /// Serialize to pretty JSON.
+    /// Serialize to compact JSON, without expanding embedded CAD arrays.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
-        serde_json::to_string_pretty(self)
+        serde_json::to_string(self)
     }
 
     /// Parse from JSON, migrating the embedded document to the current schema first.
@@ -438,6 +442,22 @@ mod tests {
             "the file self-describes with a tag:\n{json}"
         );
         assert_eq!(OcamFile::from_json(&json).unwrap(), file);
+    }
+
+    #[test]
+    fn large_project_arrays_save_compactly_and_keep_exact_geometry() {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
+        else { panic!("expected project") };
+        project.open_paths.push(Polyline::new((0..10_000).map(|i| {
+            cam_geo::Point::new(i as f64 * 0.123456789012345, (i as f64).sin())
+        }).collect()));
+        let pretty = serde_json::to_string_pretty(&project).unwrap();
+        let compact = project.to_json().unwrap();
+        assert!(compact.len() * 3 < pretty.len() * 2);
+        assert_eq!(Project::from_json(&compact).unwrap(), project);
+        let tagged = OcamFile::Project(project.clone()).to_json().unwrap();
+        assert!(tagged.len() * 3 < pretty.len() * 2);
+        assert_eq!(OcamFile::from_json(&tagged).unwrap(), OcamFile::Project(project));
     }
 
     #[test]

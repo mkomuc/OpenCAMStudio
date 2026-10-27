@@ -151,7 +151,7 @@ impl App {
             if let Ok(geometry) =
                 crate::cad_operations::geometry_for_setup(self.controller.document())
             {
-                if let Ok(resolved) = cam_geometry3d::resolve_binding(&geometry, binding) {
+                if let Ok(resolved) = cam_geometry3d::resolve_binding_advisory(&geometry, binding) {
                     z = if binding
                         .selected
                         .iter()

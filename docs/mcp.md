@@ -81,6 +81,12 @@ tabs, cooling, cutting presets, geometry, reference-based heights and stock to
 leave. A patch merges object fields and replaces arrays; misspelled patch fields
 are rejected. Operation IDs and kinds cannot be changed through a patch.
 
+Automatic CAD feature verification is advisory. A usable selection can proceed
+with informational diagnostics when automatic wall, access or side recognition
+fails. Geometry-data errors remain distinct from these findings. Selection and
+operation creation also append local structured verification observations for
+later analysis; see [Geometry verification](geometry-verification.md).
+
 For example, after inspecting `get_state`, change a profile feed with:
 
 ```json

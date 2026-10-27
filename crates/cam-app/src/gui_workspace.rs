@@ -420,6 +420,18 @@ impl App {
             viewport_settings.view.transparent_stock = player.options.transparent_stock;
         }
         let mut viewport = cached.unwrap_or_else(|| {
+            // Resolve the full profile silhouette first. The base viewport can
+            // then reuse its outside outline for selection highlighting.
+            let editor_preview = editing.then(|| self.operation_geometry_preview());
+            let silhouette_bottom = if selected_geometry.iter()
+                .any(|reference| reference.kind == EntityKind::Silhouette) {
+                self.operation_draft.as_ref().and_then(|operation| {
+                    let id = if self.creating_operation() { 0 } else { operation.id() };
+                    self.resolve_height_editor(id).ok().map(|heights| heights.bottom)
+                })
+            } else {
+                None
+            };
             let mut viewport = Viewport::new(
                 &self.controller,
                 self.simulation
@@ -460,6 +472,7 @@ impl App {
                     [x as f32, y as f32, z as f32]
                 }),
                 editing.then_some(selected_geometry.as_slice()),
+                silhouette_bottom,
                 Some(self.cached_cad_scene(&cad_hidden)),
             );
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
@@ -522,8 +535,7 @@ impl App {
                         .line_vertices(),
                 );
             }
-            if editing {
-                let preview = self.operation_geometry_preview();
+            if let Some(preview) = editor_preview {
                 Arc::make_mut(&mut viewport.vertices).extend(preview.line_vertices());
                 let pattern_preview = self.pattern_placement_preview();
                 Arc::make_mut(&mut viewport.vertices).extend(pattern_preview.line_vertices());
@@ -1519,6 +1531,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         viewport.browser_overlay_width = 250.;
         let bounds = iced::Rectangle {
@@ -1626,6 +1639,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let bounds = iced::Rectangle {
             x: 0.,
@@ -1703,6 +1717,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         viewport.cad_operation_kind = Some(OpKind::Profile);
         let body = &controller.geometry_state().assets[0].topology.bodies[0];
@@ -1760,13 +1775,15 @@ mod tests {
         app.modifiers = iced::keyboard::Modifiers::CTRL;
         let _ = app.update(Message::CadPicked(candidates.clone()));
         assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&selected));
-        assert!(
-            app.machining_viewport()
-                .vertices
-                .iter()
-                .any(|vertex| vertex.color == PICK_BOUNDARY && vertex.position[2].abs() < 1e-6),
-            "the XY selection overlay remains visible through the stock"
-        );
+        let bottom = app.controller.document()
+            .height_selection_bounds(std::slice::from_ref(&selected)).unwrap().0[2];
+        assert_eq!(bottom, -10.);
+        let viewport = app.machining_viewport();
+        let highlights: Vec<_> = viewport.vertices.iter()
+            .filter(|vertex| vertex.color == PICK_BOUNDARY).collect();
+        assert!(!highlights.is_empty(), "the silhouette remains visible through the stock");
+        assert!(highlights.iter().all(|vertex| (f64::from(vertex.position[2]) - bottom).abs() < 1e-6),
+            "inspection silhouettes are projected onto the model bottom");
         let _ = app.update(Message::CadPicked(candidates.clone()));
         assert_eq!(app.controller.cad_selection(), &[selected]);
         app.modifiers = iced::keyboard::Modifiers::SHIFT;
@@ -1878,6 +1895,7 @@ mod performance_tests {
                 None,
                 false,
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -2218,5 +2236,51 @@ mod performance_tests {
                 start.elapsed().as_secs_f64() * 1000. / 60.
             );
         }
+    }
+
+    /// Profile a supplied saved project without changing it. Override the input
+    /// with OPENCAM_BENCH_PROJECT; run with --ignored --nocapture.
+    #[test]
+    #[ignore = "manual supplied-project performance measurement"]
+    fn supplied_project_interaction_benchmark() {
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.controller = AppController::new(crate::default_machine());
+        let path = std::env::var_os("OPENCAM_BENCH_PROJECT").map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testfiles/test2.ocam"));
+        macro_rules! measure {
+            ($label:expr, $n:expr, $body:expr) => {{
+                let start = Instant::now();
+                for _ in 0..$n { black_box($body); }
+                eprintln!("{}: {:.3} ms/call", $label,
+                    start.elapsed().as_secs_f64() * 1000. / $n as f64);
+            }};
+        }
+        measure!("open project", 1, app.controller.open_project(&path).unwrap());
+        measure!("initial viewport", 1, app.machining_viewport());
+        measure!("setup update + view", 5, {
+            let _ = app.update(Message::OrbitBy(0.01, 0.005));
+            app.view()
+        });
+        let id = app.controller.document().setup().operations[0].id();
+        measure!("open operation editor", 1, app.begin_operation_draft(id));
+        measure!("first editing view (cold geometry)", 1, app.view());
+        measure!("dirty check", 100, app.controller.has_unsaved_changes());
+        let geometry = app.controller.setup_geometry_state().unwrap();
+        let binding = &app.controller.geometry_state().bindings[&id];
+        measure!("first resolve binding", 1,
+            cam_geometry3d::resolve_binding(&geometry, binding).unwrap());
+        measure!("resolve binding (warm)", 3,
+            cam_geometry3d::resolve_binding(&geometry, binding).unwrap());
+        measure!("profile selection geometry", 3, app.profile_selection_geometry());
+        measure!("validate editor geometry", 3, app.validate_active_profile_geometry());
+        measure!("first editing viewport", 1, app.machining_viewport());
+        measure!("cached viewport", 3, app.machining_viewport());
+        measure!("inspector", 3, app.inspector());
+        measure!("editing update + view", 3, {
+            let _ = app.update(Message::OrbitBy(0.01, 0.005));
+            app.view()
+        });
     }
 }

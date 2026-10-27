@@ -74,40 +74,111 @@ impl App {
     }
 
     pub(super) fn log_geometry_validation(&mut self) {
-        let error = if let Some(editor) = &self.profile_entry_editor {
-            match &editor.draft.source {
-                cam_model::ProfileGeometrySource::Cad(selected) if !selected.is_empty() => {
-                    crate::cad_operations::geometry_for_setup(self.controller.document())
-                        .and_then(|g| {
-                            cam_geometry3d::profile_entry_contours(&g, &editor.draft).map(|_| ())
-                        })
-                        .err()
-                }
-                _ => None,
-            }
-        } else if let Some(kind) = self.cad_pending_kind {
-            if self.controller.cad_selection().is_empty() {
-                None
-            } else {
-                self.controller
-                    .preview_cad_operation(kind, self.controller.cad_selection())
-                    .err()
-            }
+        use cam_model::{ExtractionRecipe, ProfileGeometrySource};
+        let kind = self.geometry_operation_kind().or(self.cad_pending_kind);
+        let geometry = crate::cad_operations::geometry_for_setup(self.controller.document());
+        let (selected, entry, recipe, result) = if let Some(editor) = &self.profile_entry_editor {
+            let selected = match &editor.draft.source {
+                ProfileGeometrySource::Cad(selected) => selected.clone(),
+                _ => Vec::new(),
+            };
+            let result = geometry
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|geometry| {
+                    cam_geometry3d::profile_entry_contours(geometry, &editor.draft).map(|_| ())
+                });
+            (
+                selected,
+                Some(editor.draft.clone()),
+                Ok(ExtractionRecipe::ProfileEntries {
+                    entries: vec![editor.draft.clone()],
+                }),
+                result,
+            )
+        } else if let Some(entries) = self.active_profile_geometry_entries() {
+            let selected = entries
+                .iter()
+                .flat_map(|entry| match &entry.source {
+                    ProfileGeometrySource::Cad(selected) => selected.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            let result = self.validate_active_profile_geometry().unwrap();
+            (
+                selected,
+                None,
+                Ok(ExtractionRecipe::ProfileEntries { entries }),
+                result,
+            )
+        } else if let Some(kind) =
+            kind.filter(|_| self.cad_pending_kind.is_some() || self.cad_editing_op.is_some())
+        {
+            let selected = self.controller.cad_selection().to_vec();
+            let recipe = geometry
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|geometry| crate::cad_operations::recipe(kind, geometry, &selected));
+            let result = self
+                .controller
+                .preview_cad_operation(kind, &selected)
+                .map(|_| ());
+            (selected, None, recipe, result)
         } else {
-            None
+            self.output_last_geometry_error = None;
+            return;
         };
+        if selected.is_empty() {
+            self.output_last_geometry_error = None;
+            return;
+        }
+        let finding = match (&geometry, recipe) {
+            (Ok(geometry), Ok(recipe)) => cam_geometry3d::verify_selection(
+                geometry,
+                &selected,
+                recipe,
+                self.controller.stock_box().1[2],
+            ),
+            (_, Err(reason)) => Some(reason),
+            (Err(reason), _) => Some(reason.clone()),
+        };
+        let error = result.err();
+        let picking = self
+            .profile_entry_editor
+            .as_ref()
+            .is_some_and(|editor| editor.picking)
+            || self.geometry_editor.is_some() && self.geometry_additive;
+        match crate::geometry_verification::record(
+            &self.controller,
+            &selected,
+            kind,
+            entry.as_ref(),
+            None,
+            finding.as_deref(),
+            error.as_deref(),
+        ) {
+            Ok(true) => {
+                if let Some(info) = &finding {
+                    self.append_output("Geometry verification (info)", info);
+                }
+                if picking {
+                    if let Some(info) = &error {
+                        self.append_output("Geometry selection (info)", info);
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(reason) => self.append_output("Geometry verification log", &reason),
+        }
         let context = self.output_context();
-        let error_key = error.as_ref().map(|e| format!("{context} | {e}"));
+        if picking {
+            self.output_last_geometry_error = None;
+            return;
+        }
+        let error_key = error.as_ref().map(|error| format!("{context} | {error}"));
         if error_key != self.output_last_geometry_error {
             if let Some(error) = &error {
-                self.output_history.push_back(format!(
-                    "[{}] [{context}] Geometry validation error: {error}",
-                    Self::timestamp()
-                ));
-                self.output_cleared = false;
-                while self.output_history.len() > 500 {
-                    self.output_history.pop_front();
-                }
+                self.append_output(&context, &format!("Geometry data error: {error}"));
                 self.set_pane_visible(Pane::Output, true);
             }
             self.output_last_geometry_error = error_key;

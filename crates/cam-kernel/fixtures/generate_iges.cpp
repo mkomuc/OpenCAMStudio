@@ -3,6 +3,13 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
+#include <GeomConvert.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <TopoDS.hxx>
 #include <BRep_Builder.hxx>
 #include <IGESControl_Controller.hxx>
 #include <IGESControl_Writer.hxx>
@@ -12,6 +19,27 @@
 #include <gp_Trsf.hxx>
 #include <stdexcept>
 #include <string>
+
+TopoDS_Shape spline_box(const TopoDS_Shape& box,bool bulge) {
+    TopoDS_Compound faces; BRep_Builder builder; builder.MakeCompound(faces);
+    for(TopExp_Explorer it(box,TopAbs_FACE);it.More();it.Next()) {
+        auto face=TopoDS::Face(it.Current());
+        double u0,u1,v0,v1; BRepTools::UVBounds(face,u0,u1,v0,v1);
+        auto trimmed=new Geom_RectangularTrimmedSurface(BRep_Tool::Surface(face),u0,u1,v0,v1);
+        auto spline=GeomConvert::SurfaceToBSplineSurface(trimmed);
+        spline->IncreaseDegree(2,2);
+        // The boundary stays exactly flat while one face has a raised interior.
+        // Recognizing planes from their edges or a few samples is insufficient.
+        if(bulge && std::abs(spline->Pole(1,1).Z())<1e-9
+                 && std::abs(spline->Pole(3,3).Z())<1e-9) {
+            auto pole=spline->Pole(2,2); pole.SetZ(2.0); spline->SetPole(2,2,pole);
+        }
+        auto converted=BRepBuilderAPI_MakeFace(spline,1e-7).Face();
+        converted.Orientation(face.Orientation());
+        builder.Add(faces,converted);
+    }
+    return faces;
+}
 
 int main(int argc,char** argv) {
     if(argc!=2) return 2;
@@ -28,6 +56,8 @@ int main(int argc,char** argv) {
     write(box,"box-inch.igs","INCH",1);
     write(box,"box-m.iges","M",1);
     write(box,"box-surfaces-mm.igs","MM",0);
+    write(spline_box(box,false),"spline-box-surfaces-mm.igs","MM",0);
+    write(spline_box(box,true),"spline-bulge-surfaces-mm.igs","MM",0);
     TopExp_Explorer face(box,TopAbs_FACE);
     write(face.Current(),"open-surface-mm.iges","MM",0);
     TopExp_Explorer edge(box,TopAbs_EDGE);

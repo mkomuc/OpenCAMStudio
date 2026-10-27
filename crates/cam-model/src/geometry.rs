@@ -390,7 +390,7 @@ pub struct GeometryImportOptions {
     pub import_tolerance: f64,
     pub display_tolerance: f64,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeometryAsset {
     #[serde(default)]
     pub import_options: Option<GeometryImportOptions>,
@@ -409,6 +409,26 @@ pub struct GeometryAsset {
     pub source_fingerprint: String,
     /// Shared immutable topology; replacement creates a new snapshot/revision.
     pub topology: Arc<TopologySnapshot>,
+}
+impl PartialEq for GeometryAsset {
+    fn eq(&self, other: &Self) -> bool {
+        self.import_options == other.import_options
+            && self.id == other.id
+            && self.revision == other.revision
+            && self.name == other.name
+            && self.source_format == other.source_format
+            && self.source_units == other.source_units
+            && self.backend == other.backend
+            && self.import_diagnostics == other.import_diagnostics
+            && self.source_fingerprint == other.source_fingerprint
+            && (Arc::ptr_eq(&self.source_data, &other.source_data)
+                || self.source_data == other.source_data)
+            // Arc's PartialEq does not skip shared allocations for types containing
+            // floats. Dirty-state checks otherwise walk every projection triangle
+            // on each GUI update, even when both snapshots share the same topology.
+            && (Arc::ptr_eq(&self.topology, &other.topology)
+                || self.topology == other.topology)
+    }
 }
 impl GeometryAsset {
     pub fn fingerprint_source(bytes: &[u8]) -> String {
@@ -1291,6 +1311,25 @@ mod tests {
             &history.current().assets[0].topology,
             &topology
         ));
+    }
+    #[test]
+    fn shared_asset_equality_still_compares_detached_geometry_and_metadata() {
+        let original = state().assets.remove(0);
+        assert_eq!(original, original.clone());
+        let detached: GeometryAsset =
+            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        assert!(!Arc::ptr_eq(&original.topology, &detached.topology));
+        assert_eq!(original, detached);
+
+        let mut edited = original.clone();
+        edited.name.push_str(" renamed");
+        assert_ne!(original, edited);
+        let mut edited = original.clone();
+        Arc::make_mut(&mut edited.topology).mesh.vertices.push([1., 2., 3.]);
+        assert_ne!(original, edited);
+        let mut edited = original.clone();
+        Arc::make_mut(&mut edited.source_data).push(0);
+        assert_ne!(original, edited);
     }
     #[test]
     fn stale_revision_requires_reselection_and_never_reattaches_by_entity_number() {

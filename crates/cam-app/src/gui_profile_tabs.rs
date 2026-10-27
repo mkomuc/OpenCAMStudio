@@ -95,8 +95,8 @@ impl App {
         self.profile_tab_geometry().map(|(op, _)| op)
     }
 
-    /// Resolve the selected source rather than the cached machining contour or
-    /// a stock/height plane. Replacement geometry remains transactional.
+    /// Curves stay on their source plane; projected silhouettes follow the
+    /// operation's Bottom plane. Replacement geometry remains transactional.
     pub(super) fn profile_tab_geometry(&self) -> Option<(cam_model::ProfileOp, f64)> {
         if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
             return None;
@@ -716,7 +716,7 @@ mod tests {
         assert!(replacement.nearest(p, bounds).is_none());
         assert!(replacement.nearest(unrelated, bounds).is_some());
 
-        // Silhouettes are selected on setup XY, even when the body is elevated.
+        // This body's bottom happens to be setup Z0.
         binding.selected[0].kind = EntityKind::Silhouette;
         binding.selected[0].id = 1;
         binding.recipe = cam_model::ExtractionRecipe::ProfileSilhouette;
@@ -724,6 +724,79 @@ mod tests {
         let silhouette = app.profile_tab_overlay(camera, 0.).unwrap();
         assert_eq!(silhouette.z, 0.);
         assert!(silhouette.points.iter().all(|p| p[0] > 59.));
+    }
+
+    #[test]
+    fn silhouette_outlines_and_pickers_follow_draft_bottom_in_rotated_setups() {
+        use cam_model::*;
+        for named in [false, true] {
+            let (mut app, id) = selected_cad_profile();
+            let rotation = [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
+            app.controller.place_cad_instance(2, RigidTransform {
+                rotation, translation: [60., 20., 0.],
+            }).unwrap();
+            app.controller.edit_setup(|setup| setup.frame.world_from_setup.rotation = rotation);
+            app.begin_operation_draft(id);
+            let mut reference = app.controller.geometry_state().bindings[&id].selected[0].clone();
+            reference.kind = EntityKind::Silhouette;
+            reference.id = reference.body_id;
+            reference.instance_id = 2;
+            let geometry = app.controller.setup_geometry_state().unwrap();
+            let binding = cam_geometry3d::resolve_selection(&geometry,
+                std::slice::from_ref(&reference), ExtractionRecipe::ProfileSilhouette, 30.).unwrap();
+            assert_eq!(binding.heights.bottom, 15.);
+            app.operation_binding_preview = Some(binding);
+            if named {
+                let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Silhouette,
+                    "Projected body".into());
+                entry.source = ProfileGeometrySource::Cad(vec![reference]);
+                let Some(Operation::Profile(profile)) = &mut app.operation_draft else { panic!("profile") };
+                profile.selections = Some(vec![entry]);
+            }
+            let before = app.controller.document().clone();
+            let _ = app.update(Message::HeightReferenceChanged(HeightPlaneKind::Bottom,
+                HeightReference::SelectedContours));
+            let camera = OrbitCamera::framed([-20.; 3], [100.; 3]);
+            for (offset, expected) in [("-2", 13.), ("-4", 11.)] {
+                let _ = app.update(Message::HeightOffsetChanged(HeightPlaneKind::Bottom, offset.into()));
+                assert_eq!(app.resolve_height_editor(id).unwrap().bottom, expected);
+                assert_eq!(app.profile_tab_overlay(camera, 0.).unwrap().z, expected);
+                let frame = &app.controller.document().setup().frame;
+                let preview = app.operation_geometry_preview();
+                assert!(!preview.strips.is_empty());
+                assert!(preview.strips.iter().flat_map(|strip| &strip.points)
+                    .all(|point| (frame.to_setup_vector(point.map(f64::from))[2] - expected).abs() < 1e-5));
+                let viewport = app.machining_viewport();
+                let selected: Vec<_> = viewport.vertices.iter()
+                    .filter(|vertex| vertex.color == PICK_BOUNDARY).collect();
+                assert!(!selected.is_empty());
+                assert!(selected.iter().all(|vertex|
+                    (frame.to_setup_vector(vertex.position.map(f64::from))[2] - expected).abs() < 1e-5),
+                    "all silhouette highlights must follow Bottom, named={named}");
+            }
+            assert_eq!(app.controller.document(), &before, "preview edits must stay transactional");
+        }
+    }
+
+    #[test]
+    #[ignore = "qualification against the supplied test2.ocam project"]
+    fn supplied_test2_silhouette_preview_uses_bottom() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testfiles/test2.ocam")).unwrap();
+        let id = app.controller.document().setup().operations[0].id();
+        app.begin_operation_draft(id);
+        let bottom = app.resolve_height_editor(id).unwrap().bottom;
+        assert_eq!(bottom, -3.);
+        assert_eq!(app.profile_selection_geometry().unwrap().1, bottom);
+        let viewport = app.machining_viewport();
+        let frame = &app.controller.document().setup().frame;
+        let selected: Vec<_> = viewport.vertices.iter()
+            .filter(|vertex| vertex.color == PICK_BOUNDARY).collect();
+        assert!(!selected.is_empty());
+        assert!(selected.iter().all(|vertex|
+            (frame.to_setup_vector(vertex.position.map(f64::from))[2] - bottom).abs() < 1e-5));
     }
 
     #[test]

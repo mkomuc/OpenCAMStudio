@@ -66,10 +66,13 @@ impl App {
     }
 
     pub(super) fn stock_to_leave_value(&self) -> cam_model::StockToLeave {
-        self.stock_to_leave_draft.unwrap_or_else(|| match self.controller.selection() {
-            Selection::Operation(id) => self.controller.document().setup().stock_to_leave_for(id),
-            _ => cam_model::StockToLeave::default(),
-        })
+        self.stock_to_leave_draft
+            .unwrap_or_else(|| match self.controller.selection() {
+                Selection::Operation(id) => {
+                    self.controller.document().setup().stock_to_leave_for(id)
+                }
+                _ => cam_model::StockToLeave::default(),
+            })
     }
 
     pub(super) fn operation_uses_cad_geometry(&self) -> bool {
@@ -136,7 +139,9 @@ impl App {
                     .padding(4)
                     .style(inspector_secondary)
                     .on_press(Message::OperationGeometry(GeometryMessage::Add(filter))),
-                description, self.tooltips));
+                description,
+                self.tooltips,
+            ));
         }
         toolbar = toolbar.push(hint(
             button(icon("remove", 28.))
@@ -145,7 +150,9 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Remove)),
                 ),
-            "Delete the selected geometry item.", self.tooltips));
+            "Delete the selected geometry item.",
+            self.tooltips,
+        ));
         toolbar = toolbar.push(hint(
             button(icon("settings", 28.))
                 .padding(4)
@@ -153,7 +160,9 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Edit)),
                 ),
-            "Configure the selected geometry and its selection mode.", self.tooltips));
+            "Configure the selected geometry and its selection mode.",
+            self.tooltips,
+        ));
         geometry_collection(
             if kind == OpKind::Bore {
                 "Bore selection"
@@ -440,9 +449,11 @@ impl App {
                 )
                 .map(|_| ())
         } else if self.cad_pending_kind.is_some() {
-            self.controller
-                .preview_cad_operation(editor.kind, self.controller.cad_selection())
-                .map(|_| ())
+            self.validate_active_profile_geometry().unwrap_or_else(|| {
+                self.controller
+                    .preview_cad_operation(editor.kind, self.controller.cad_selection())
+                    .map(|_| ())
+            })
         } else {
             self.controller
                 .planar_operation_eligibility(
@@ -502,16 +513,18 @@ impl App {
             ]
             .spacing(6)
             .align_y(Alignment::Center),
-            text(format!("{} source feature(s) selected", labels.len()))
-                .size(11)
-                .color(INSPECTOR_MUTED),
+            geometry_selection::selected_feature_names(labels),
         ]
         .spacing(9);
         if cad && matches!(kind, OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive) {
             let options = if kind == OpKind::Adaptive {
                 vec![
                     (CadFilter::Body, "silhouette", "Whole solid body"),
-                    (CadFilter::Face, "face", "Selected faces only; each needs a positive-area setup XY projection"),
+                    (
+                        CadFilter::Face,
+                        "face",
+                        "Selected faces only; each needs a positive-area setup XY projection",
+                    ),
                 ]
             } else if kind == OpKind::Carve {
                 vec![
@@ -552,7 +565,9 @@ impl App {
                         .padding(4)
                         .style(move |theme, status| inspector_tab(theme, status, active))
                         .on_press(Message::GeometryFilterChanged(filter)),
-                    description, self.tooltips));
+                    description,
+                    self.tooltips,
+                ));
             }
             body = body.push(controls);
         }
@@ -566,8 +581,35 @@ impl App {
             _ => unreachable!(),
         };
         body = body.push(text(description).size(12));
-        for label in labels {
-            body = body.push(text(label).size(12));
+        if cad {
+            if let Some(info) =
+                crate::cad_operations::geometry_for_setup(self.controller.document())
+                    .ok()
+                    .and_then(|geometry| {
+                        crate::cad_operations::recipe(
+                            kind,
+                            &geometry,
+                            self.controller.cad_selection(),
+                        )
+                        .ok()
+                        .and_then(|recipe| {
+                            cam_geometry3d::verify_selection(
+                                &geometry,
+                                self.controller.cad_selection(),
+                                recipe,
+                                self.controller.stock_box().1[2],
+                            )
+                        })
+                    })
+            {
+                body = body.push(
+                    text(format!(
+                        "Info: Automatic verification: {info}. Operation settings are used."
+                    ))
+                    .size(11)
+                    .color(INSPECTOR_MUTED),
+                );
+            }
         }
         let valid = self.geometry_settings_valid();
         if let Err(error) = &valid {
@@ -733,13 +775,9 @@ mod tests {
         assert!(!app.cad_filter_explicit);
         let viewport = app.machining_viewport();
         assert!(viewport.cad_operation_kind.is_none());
-        let bounds = iced::Rectangle::new(
-            iced::Point::ORIGIN,
-            iced::Size::new(900., 600.),
-        );
-        let point: [f64; 3] = std::array::from_fn(|axis| {
-            (face_bounds[0][axis] + face_bounds[1][axis]) / 2.
-        });
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(900., 600.));
+        let point: [f64; 3] =
+            std::array::from_fn(|axis| (face_bounds[0][axis] + face_bounds[1][axis]) / 2.);
         let point = placement.transform_point(point);
         let cursor = picking_view::project(viewport.camera(), bounds, point).unwrap().0;
         let candidates = viewport.cad_candidates_at(cursor, bounds);

@@ -1,7 +1,7 @@
 use super::*;
 
 /// Resolve named entries independently, allowing faces, chains and silhouettes
-/// in one operation while retaining each source's topology qualification.
+/// in one operation with advisory feature verification.
 pub fn profile_entry_contours(
     state: &GeometryState,
     entry: &ProfileGeometryEntry,
@@ -9,6 +9,21 @@ pub fn profile_entry_contours(
     let mut heights = None;
     let mut contours = match &entry.source {
         ProfileGeometrySource::Contours(contours) => contours.clone(),
+        ProfileGeometrySource::Cad(selected)
+            if entry.kind == ProfileGeometryKind::Chain
+                && entry.chain_mode == ProfileChainMode::Closed =>
+        {
+            // Keep automatic wall heights where a complete feature certificate
+            // exists. Otherwise a selected closed path uses operation heights,
+            // just as an explicit open path or a drawing contour does.
+            match profile_contours::extract(state, selected) {
+                Ok((contours, interval)) => {
+                    heights = Some(interval);
+                    contours
+                }
+                Err(_) => profile_contours::closed_chain(state, selected)?,
+            }
+        }
         ProfileGeometrySource::Cad(selected)
             if entry.kind == ProfileGeometryKind::Chain
                 && entry.chain_mode == ProfileChainMode::Open
@@ -51,7 +66,8 @@ pub fn profile_entry_contours(
                         return Err("Face Contours requires planar faces".into());
                     }
                     let candidates = if entry.coplanar {
-                        coplanar_profile_faces(state, reference)?
+                        coplanar_profile_faces(state, reference)
+                            .unwrap_or_else(|_| vec![reference.clone()])
                     } else {
                         vec![reference.clone()]
                     };
@@ -84,8 +100,8 @@ pub fn profile_entry_contours(
             }
             let mut all = Vec::new();
             for (references, recipe) in groups {
-                let binding = resolve_selection(state, &references, recipe, 0.)?;
-                let input = resolve_binding(state, &binding)?;
+                let binding = resolve_selection_advisory(state, &references, recipe, 0.)?;
+                let input = resolve_binding_advisory(state, &binding)?;
                 merge_heights(&mut heights, input.heights)?;
                 if input.profiles.is_empty() {
                     let side = match binding.recipe {
@@ -152,10 +168,8 @@ pub fn profile_entry_contours(
 }
 fn merge_heights(result: &mut Option<CuttingHeights>, next: CuttingHeights) -> Result<(), String> {
     if let Some(previous) = result {
-        if (previous.top - next.top).abs() > T {
-            return Err("Profile entries lie on different planes; use separate operations".into());
-        }
-        previous.bottom = previous.bottom.max(next.bottom);
+        previous.top = previous.top.max(next.top);
+        previous.bottom = previous.bottom.min(next.bottom);
     } else {
         *result = Some(next);
     }
@@ -192,9 +206,6 @@ fn collect(
             merge_heights(&mut heights, interval)?;
         }
         for contour in contours {
-            if profiles.iter().any(|previous| cam_model::equivalent_profile_contours(previous,&contour)) {
-                return Err(format!("Profile geometry entry '{}': this contour repeats an earlier selected boundary; remove the duplicate",entry.name));
-            }
             profiles.push(contour);
         }
     }
@@ -212,18 +223,34 @@ pub(super) fn resolve(
         bottom: binding.overrides.bottom.unwrap_or(base.bottom),
     };
     heights.validate()?;
+    let mut findings: Vec<_> = verify_selection(
+        state,
+        &binding.selected,
+        binding.recipe.clone(),
+        binding.heights.top,
+    )
+    .into_iter()
+    .map(|reason| format!("Automatic geometry verification (info): {reason}"))
+    .collect();
     if certified.is_some() && (heights.bottom < base.bottom - T || heights.top < base.top - T) {
-        return Err("Height override is outside the geometry-certified cutting interval".into());
+        findings.push("Automatic geometry verification (info): operation heights extend outside the inferred feature interval; the operation's heights are used.".into());
     }
+    let uses_projection = entries.iter().any(|entry| {
+        entry.kind == ProfileGeometryKind::Silhouette
+            && matches!(entry.source, ProfileGeometrySource::Cad(_))
+    });
     let exact: Vec<_> = state
         .assets
         .iter()
         .map(|asset| {
-            let mut topology = (*asset.topology).clone();
-            topology.mesh = CadMesh::default();
-            (asset.id, asset.revision, &asset.backend, topology)
+            Ok((
+                asset.id,
+                asset.revision,
+                &asset.backend,
+                topology_fingerprint(&asset.topology, uses_projection)?,
+            ))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     let encoded = serde_json::to_vec(&(
         exact,
         &state.instances,
@@ -247,11 +274,11 @@ pub(super) fn resolve(
         holes: Vec::new(),
         heights,
         fingerprint: format!("{hash:016x}"),
-        diagnostics: vec![if certified.is_none() {
-            "Open profile paths resolved from exact planar curves; operation heights define the cut depth without an adjoining wall certificate.".into()
+        diagnostics: std::iter::once(if certified.is_none() {
+            "Profile paths resolved from exact planar curves; operation heights define the cut depth without an adjoining wall certificate.".into()
         } else {
             "Profile geometry entries resolved from their individual sources and settings.".into()
-        }],
+        }).chain(findings).collect(),
     })
 }
 

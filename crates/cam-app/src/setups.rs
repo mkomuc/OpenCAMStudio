@@ -715,8 +715,8 @@ impl AppController {
                     .is_some_and(|b| b.selected != *selected)
                 {
                     let binding =
-                        cam_geometry3d::resolve_selection(&geometry, selected, recipe.clone(), 0.)?;
-                    let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
+                        cam_geometry3d::resolve_selection_advisory(&geometry, selected, recipe.clone(), 0.)?;
+                    let input = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
                     if let Operation::Profile(profile) = &mut operation {
                         let previous: Vec<_> = profile.contours().collect();
                         let mut contours = input.profiles;
