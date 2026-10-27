@@ -80,7 +80,7 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
         Operation::Thread(op) => (0..op.points.len())
             .map(|i| format!("Thread centre {}", i + 1))
             .collect(),
-        Operation::Adaptive(_) => vec!["Machining geometry".into()],
+        Operation::Adaptive(_) | Operation::Parallel(_) => vec!["Machining geometry".into()],
         Operation::Pocket(op) => std::iter::once("Boundary".into())
             .chain((0..op.islands.len()).map(|i| format!("Island {}", i + 1)))
             .collect(),
@@ -213,7 +213,7 @@ impl App {
             | OpKind::Carve
             | OpKind::Bore
             | OpKind::Thread
-            | OpKind::Adaptive),
+            | OpKind::Adaptive | OpKind::Parallel),
         ) = self.geometry_operation_kind()
         {
             return self.operation_geometry_collection(kind, labels);
@@ -435,7 +435,7 @@ impl App {
             } else {
                 selected.clear();
             }
-            let result = if self.geometry_operation_kind() == Some(OpKind::Adaptive) {
+            let result = if matches!(self.geometry_operation_kind(), Some(OpKind::Adaptive | OpKind::Parallel)) {
                 self.controller.try_set_adaptive_cad_selection(selected)
             } else {
                 self.controller.try_set_cad_selection(selected)

@@ -158,6 +158,7 @@ impl App {
                     Message::PlungeKindChanged,
                 ));
             }
+            Operation::Parallel(_) => { moves.push(label_help("Full clearance retraction", "Each surface pass feeds in vertically and retracts to clearance before the next pass. Use on pre-roughed stock.", self.tooltips)); }
             Operation::Adaptive(_) => {
                 moves.push(label_help(
                     "Retract along cleared path",

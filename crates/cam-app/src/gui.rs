@@ -204,6 +204,7 @@ enum Icon {
     Engrave,
     Carve,
     Adaptive,
+    Parallel,
     Face,
     NewTool,
     Materials,
@@ -230,7 +231,7 @@ impl Icon {
     /// Every icon, so tests can sweep the whole bundled set. Kept beside the enum:
     /// a variant added without a line here fails `every_icon_is_listed_in_all`.
     #[cfg(test)]
-    const ALL: [Icon; 39] = [
+    const ALL: [Icon; 40] = [
         Icon::New,
         Icon::Open,
         Icon::Save,
@@ -252,6 +253,7 @@ impl Icon {
         Icon::Engrave,
         Icon::Carve,
         Icon::Adaptive,
+        Icon::Parallel,
         Icon::Face,
         Icon::NewTool,
         Icon::Materials,
@@ -296,6 +298,7 @@ impl Icon {
             Icon::Chamfer => include_bytes!("../assets/icons/chamfer.svg"),
             Icon::Engrave => include_bytes!("../assets/icons/engrave.svg"),
             Icon::Carve => include_bytes!("../assets/icons/carve.svg"),
+            Icon::Parallel => include_bytes!("../assets/icons/parallel.svg"),
             Icon::Adaptive => include_bytes!("../assets/icons/adaptive.svg"),
             Icon::Face => include_bytes!("../assets/icons/face.svg"),
             Icon::Materials => include_bytes!("../assets/icons/materials.svg"),
@@ -354,6 +357,7 @@ impl Icon {
                             with a V-bit. Unlike engraving, the tool never touches the boundary: its \
                             flanks land on it, and the depth follows from the shape's own width."
             }
+            Icon::Parallel => "Add a 3D Parallel finishing operation for selected CAD bodies or faces.",
             Icon::Adaptive => "Add a 3D Adaptive Clearing operation for selected CAD bodies or faces.",
             Icon::Face => "Add a Face operation — skim the top of the stock flat.",
             Icon::NewTool => "Add a new tool to the library.",
@@ -1157,6 +1161,8 @@ enum Field {
     /// Drill dwell at the hole bottom (seconds); 0 = no dwell.
     Dwell,
     Stepdown,
+    ParallelStepover,
+    ParallelAngle,
     AdaptiveTolerance,
     AdaptiveOptimalLoad,
     AdaptiveFineStepdown,
@@ -1315,6 +1321,8 @@ impl Field {
             Field::ProfileOffset => "Wall allowance (mm)",
             Field::Profile(n) => n.label(),
             Field::Stepdown => "Stepdown (mm)",
+            Field::ParallelStepover => "Stepover (mm)",
+            Field::ParallelAngle => "Pass angle (deg)",
             Field::AdaptiveTolerance => "Tolerance (mm)",
             Field::AdaptiveOptimalLoad => "Optimal load (mm)",
             Field::AdaptiveFineStepdown => "Fine stepdown (mm)",
@@ -1385,6 +1393,8 @@ impl Field {
             Field::BoreLeadRadius => "Tangent lead radius; hole leads are limited to half the tool-centre orbit.",
 
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
+            Field::ParallelStepover => "Horizontal distance between parallel finishing passes, in millimetres.",
+            Field::ParallelAngle => "Direction of the cutting rows measured counterclockwise from setup X, in degrees.",
             Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres. Path simplification is calculated automatically from this tolerance.",
             Field::AdaptiveOptimalLoad => "Target radial engagement for adaptive clearing, in millimetres.",
             Field::AdaptiveFineStepdown => "Axial spacing for intermediate terrace refinement, in millimetres. Fine passes are added only where shelves or slopes expose additional material; unchanged vertical walls use the primary stepdown.",
@@ -2829,6 +2839,7 @@ enum Message {
     /// Toggle climb (true) vs conventional (false) clearing on the selected
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
+    ParallelBothWaysToggled(bool),
     AdaptiveClimbToggled(bool),
     AdaptiveContainmentChanged(cam_model::AdaptiveContainment),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
@@ -5256,7 +5267,7 @@ impl App {
             Message::GeometryFilterChanged(filter) => {
                 let _ = self.pick_operation_geometry();
                 if self.cad_filter != filter
-                    && self.geometry_operation_kind() != Some(OpKind::Adaptive)
+                    && !matches!(self.geometry_operation_kind(), Some(OpKind::Adaptive | OpKind::Parallel))
                 {
                     self.remove_operation_geometry(None);
                 }
@@ -5545,7 +5556,7 @@ impl App {
                                 _ => CadFilter::Loop,
                             }
                         }
-                        cam_model::ExtractionRecipe::AdaptiveClearing => match refs.first().map(|r| r.kind) {
+                        cam_model::ExtractionRecipe::AdaptiveClearing | cam_model::ExtractionRecipe::ParallelFinishing => match refs.first().map(|r| r.kind) {
                             Some(EntityKind::Face) => CadFilter::Face,
                             _ => CadFilter::Body,
                         },
@@ -5796,7 +5807,7 @@ impl App {
                 self.cad_filter_explicit = false;
                 self.operation_tools.clear();
                 self.operation_tab = OperationTab::Tool;
-                if kind == OpKind::Adaptive && self.controller.geometry_state().instances.is_empty() {
+                if matches!(kind, OpKind::Adaptive | OpKind::Parallel) && self.controller.geometry_state().instances.is_empty() {
                     self.status = "Import a solid CAD model before creating 3D Adaptive Clearing.".into();
                     return iced::Task::none();
                 }
@@ -5824,7 +5835,7 @@ impl App {
                     self.cad_inspecting = false;
                     self.cad_editing_op = None;
                     self.cad_filter =
-                        if kind == OpKind::Adaptive {
+                        if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                             match self.controller.cad_selection().first().map(|r| r.kind) {
                                 Some(EntityKind::Face) => CadFilter::Face,
                                 _ => CadFilter::Body,
@@ -6652,6 +6663,10 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::ParallelBothWaysToggled(on) => {
+                self.edit_operation_draft(|op| { if let Operation::Parallel(p) = op { p.params.both_ways = on; } });
+                self.refresh_operation_fields();
+            }
             Message::AdaptiveClimbToggled(on) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Adaptive(adaptive) = op {
@@ -6665,6 +6680,7 @@ impl App {
                     if let Operation::Adaptive(adaptive) = op {
                         adaptive.params.containment = value;
                     }
+                    if let Operation::Parallel(p) = op { p.params.containment = value; }
                 });
                 self.refresh_operation_fields();
             }
@@ -9355,6 +9371,7 @@ impl App {
                     cmd(Icon::Engrave, "Engrave", begin(OpKind::Engrave)),
                     cmd(Icon::Carve, "Carve", begin(OpKind::Carve)),
                     cmd(Icon::Adaptive, "3D Adaptive Clearing", begin(OpKind::Adaptive)),
+                    cmd(Icon::Parallel, "3D Parallel", begin(OpKind::Parallel)),
                 ],
             }],
             RibbonTab::Machinery => vec![GroupSpec {
@@ -9747,8 +9764,8 @@ impl App {
             return;
         }
         let multiple = (profile && entity.kind != EntityKind::Silhouette)
-            || self.cad_pending_kind == Some(OpKind::Adaptive)
-            || self.cad_editing_op.and_then(|id| self.current_operation(id)).is_some_and(|op| matches!(op, Operation::Adaptive(_)))
+            || matches!(self.cad_pending_kind, Some(OpKind::Adaptive | OpKind::Parallel))
+            || self.cad_editing_op.and_then(|id| self.current_operation(id)).is_some_and(|op| matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)))
             || matches!(
                 self.cad_pending_kind,
                 Some(
@@ -9777,10 +9794,10 @@ impl App {
                 || (self.modifiers.command() && !self.modifiers.control())
                 || self.modifiers.shift();
         self.geometry_row_selection = None;
-        let adaptive = self.cad_pending_kind == Some(OpKind::Adaptive)
+        let adaptive = matches!(self.cad_pending_kind, Some(OpKind::Adaptive | OpKind::Parallel))
             || self.cad_editing_op
                 .and_then(|id| self.current_operation(id))
-                .is_some_and(|operation| matches!(operation, Operation::Adaptive(_)));
+                .is_some_and(|operation| matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)));
         let selection_result = if adaptive {
             self.controller.toggle_adaptive_cad_selection(entity.clone(), additive)
         } else {
@@ -9876,8 +9893,8 @@ impl App {
             (OpKind::Engrave, EntityKind::Edge) => CadFilter::Edge,
             (OpKind::Carve, EntityKind::Face) => CadFilter::Face,
             (OpKind::Thread | OpKind::Drill, EntityKind::Face) => CadFilter::Face,
-            (OpKind::Adaptive, EntityKind::Face) => CadFilter::Face,
-            (OpKind::Adaptive, EntityKind::Body) => CadFilter::Body,
+            (OpKind::Adaptive | OpKind::Parallel, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Adaptive | OpKind::Parallel, EntityKind::Body) => CadFilter::Body,
             (OpKind::Face, EntityKind::Silhouette) => CadFilter::Silhouette,
             _ => self.cad_filter,
         };
@@ -10774,6 +10791,7 @@ fn op_kind(op: &Operation) -> &'static str {
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
         Operation::Adaptive(_) => "3D Adaptive Clearing",
+        Operation::Parallel(_) => "3D Parallel",
     }
 }
 
@@ -10886,6 +10904,12 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Thread(o), Field::ThreadBlindAllowance) => Some(o.blind_allowance),
         (Operation::Thread(o), Field::Feed) => Some(o.feed),
         (Operation::Thread(o), Field::PlungeFeed) => Some(o.plunge_feed),
+        (Operation::Parallel(o), Field::ParallelStepover) => Some(o.params.stepover),
+        (Operation::Parallel(o), Field::ParallelAngle) => Some(o.params.angle),
+        (Operation::Parallel(o), Field::AdaptiveTolerance) => Some(o.params.tolerance),
+        (Operation::Parallel(o), Field::AdaptiveOffset) => Some(o.params.additional_offset),
+        (Operation::Parallel(o), Field::Feed) => Some(o.params.feed),
+        (Operation::Parallel(o), Field::PlungeFeed) => Some(o.params.plunge_feed),
         (Operation::Adaptive(o), Field::AdaptiveTolerance) => Some(o.params.tolerance),
         (Operation::Adaptive(o), Field::AdaptiveOptimalLoad) => Some(o.params.optimal_load),
         (Operation::Adaptive(o), Field::Stepdown) => Some(o.params.stepdown),
@@ -11162,6 +11186,14 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             if let Some(v) = get(Field::PlungeFeed) {
                 o.plunge_feed = v;
             }
+        }
+        Operation::Parallel(o) => {
+            if let Some(v) = get(Field::ParallelStepover) { o.params.stepover = v; }
+            if let Some(v) = get(Field::ParallelAngle) { o.params.angle = v; }
+            if let Some(v) = get(Field::AdaptiveTolerance) { o.params.tolerance = v; }
+            if let Some(v) = get(Field::AdaptiveOffset) { o.params.additional_offset = v; }
+            if let Some(v) = get(Field::Feed) { o.params.feed = v; }
+            if let Some(v) = get(Field::PlungeFeed) { o.params.plunge_feed = v; }
         }
         Operation::Adaptive(o) => {
             if let Some(v) = get(Field::AdaptiveTolerance) { o.params.tolerance = v; }
@@ -12269,7 +12301,7 @@ impl Viewport {
             OpKind::Drill | OpKind::Bore | OpKind::Thread => self
                 .cad_scene
                 .pick_drill_candidates(ray, aperture, through),
-            OpKind::Adaptive => self.cad_scene.pick_any_candidates(
+            OpKind::Adaptive | OpKind::Parallel => self.cad_scene.pick_any_candidates(
                 ray,
                 &[EntityKind::Face, EntityKind::Body],
                 aperture,
@@ -12316,7 +12348,7 @@ impl Viewport {
                             EntityKind::Loop => 1,
                             _ => 2,
                         },
-                        OpKind::Adaptive | OpKind::Pocket => match entity.kind {
+                        OpKind::Adaptive | OpKind::Parallel | OpKind::Pocket => match entity.kind {
                             EntityKind::Face => 0,
                             EntityKind::Body => 1,
                             _ => 2,
@@ -13747,6 +13779,28 @@ mod multi_setup_draft_tests {
         let id = app.controller.document().setup().operations[0].id();
         app.begin_operation_draft(id);
         (app, id)
+    }
+
+    #[test]
+    fn parallel_editor_updates_scan_controls_and_preserves_draft_cancel() {
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Parallel, 1);
+        let id = operation.id();
+        assert_eq!(families_for(OpKind::Parallel), &[crate::ToolKindPick::BallMill]);
+        for field in [Field::ParallelStepover, Field::ParallelAngle, Field::AdaptiveTolerance] {
+            assert!(operation_fields(&operation).contains(&field));
+            assert_eq!(operation_tabs::field_tab(field), OperationTab::Passes);
+        }
+        assert!(operation_tabs::operation_field_invalid(&operation, Field::ParallelStepover, 0.));
+        assert!(!operation_tabs::operation_field_invalid(&operation, Field::ParallelAngle, -45.));
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        send(&mut app, Message::FieldChanged(Field::ParallelStepover, "0.3".into()));
+        send(&mut app, Message::FieldChanged(Field::ParallelAngle, "35".into()));
+        send(&mut app, Message::ParallelBothWaysToggled(false));
+        assert!(matches!(app.current_operation(id), Some(Operation::Parallel(p)) if !p.params.both_ways));
+        send(&mut app, Message::CancelOperationDraft);
+        assert!(matches!(app.controller.operation(id), Some(Operation::Parallel(p)) if p.params.both_ways && p.params.angle == 0.));
     }
 
     #[test]

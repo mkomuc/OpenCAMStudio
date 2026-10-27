@@ -1,6 +1,8 @@
 //! Fixed-axis feature extraction. Analytic operations use exact topology;
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
+mod parallel;
+pub use parallel::{resolve_parallel, ParallelGeometry};
 mod adaptive;
 mod advisory;
 pub use advisory::{
@@ -211,7 +213,7 @@ pub fn resolve_binding(
     if heights.top < base.top - T {
         return Err("top override skips material above the geometry-certified entry plane".into());
     }
-    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+    if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
         return Ok(ResolvedInput {
             chamfers: Vec::new(),
             profiles: Vec::new(),
@@ -219,7 +221,7 @@ pub fn resolve_binding(
             holes,
             heights,
             fingerprint: state.binding_fingerprint(binding),
-            diagnostics: vec!["3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into()],
+            diagnostics: vec![if binding.recipe == ExtractionRecipe::ParallelFinishing { "3D Parallel follows selected CAD surfaces and protects all setup bodies".into() } else { "3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into() }],
         });
     }
     let view = View::new(state, &binding.selected)?;
@@ -1108,7 +1110,7 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
-    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+    if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
         return Ok((
             Vec::new(),
             Vec::new(),
@@ -1413,7 +1415,7 @@ fn derive(
             unreachable!()
         }
         ExtractionRecipe::ProfileSilhouette => Err("Select one body for its silhouette".into()),
-        ExtractionRecipe::AdaptiveClearing => unreachable!(),
+        ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing => unreachable!(),
     }
 }
 fn derive_holes(

@@ -220,7 +220,7 @@ impl App {
                 Operation::Drill(p) => centers.extend(p.points.iter().copied()),
                 Operation::Bore(p) => centers.extend(p.points.iter().copied()),
                 Operation::Thread(p) => centers.extend(p.points.iter().copied()),
-                Operation::Profile(_) | Operation::Adaptive(_) => {}
+                Operation::Profile(_) | Operation::Adaptive(_) | Operation::Parallel(_) => {}
             }
         }
         for (points, closed) in outlines {

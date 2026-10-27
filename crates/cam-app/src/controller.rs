@@ -16,7 +16,7 @@ use crate::project::{OcamFile, Project};
 use cam_model::{
     reconcile_tool_numbers, Axis, CarveOp, ChamferOp, ClearParams, Comp, Document, DrillOp,
     EngraveOp, FaceOp, Hand, Heights, History, Lead, Machine, Operation, Origin, Plunge, PocketOp,
-    AdaptiveOp, AdaptiveParams, ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
+    ParallelOp, ParallelParams, AdaptiveOp, AdaptiveParams, ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
 };
 use cam_post::{PostError, PostKind, PostOptions};
 use cam_render::{MeshVertex, Scene};
@@ -94,6 +94,7 @@ pub enum OpKind {
     Engrave,
     Carve,
     Adaptive,
+    Parallel,
 }
 
 /// Whether an operation kind restricts geometry selection to **circular** loops.
@@ -952,7 +953,7 @@ impl AppController {
         entities: &[cam_model::EntityRef],
     ) -> Result<cam_geometry3d::ResolvedInput, String> {
         let geometry = self.setup_geometry_state()?;
-        if kind == OpKind::Adaptive {
+        if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
             cam_geometry3d::validate_adaptive_selection(&geometry, entities)?;
         } else {
             crate::cad_operations::validate_selection(&geometry, entities)?;
@@ -1118,7 +1119,7 @@ impl AppController {
         preview.geometry.bindings.insert(id, binding.clone());
         let settings = if matches!(
             kind,
-            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive
+            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel
                 | OpKind::Bore
         ) {
             crate::cad_operations::selection_height_defaults(&preview, &op)
@@ -1141,7 +1142,7 @@ impl AppController {
         entities: Vec<cam_model::EntityRef>,
     ) -> Result<(), String> {
         let mut doc = self.document().clone();
-        if matches!(self.operation(id), Some(Operation::Adaptive(_))) {
+        if matches!(self.operation(id), Some(Operation::Adaptive(_) | Operation::Parallel(_))) {
             cam_geometry3d::validate_adaptive_selection(self.geometry_state(), &entities)?;
         } else {
             crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
@@ -2393,6 +2394,16 @@ impl AppController {
                 work_offset: 1,
                 params: AdaptiveParams::default(),
             }),
+            OpKind::Parallel => Operation::Parallel(ParallelOp {
+                id: 0,
+                tool,
+                spindle_rpm,
+                tool_preset: None,
+                cooling: Default::default(),
+                entry_feeds: Default::default(),
+                work_offset: 1,
+                params: ParallelParams::default(),
+            }),
         };
         if let Some(cooling) = self
             .setup()
@@ -3163,6 +3174,7 @@ fn op_kind_of(op: &Operation) -> OpKind {
         Operation::Engrave(_) => OpKind::Engrave,
         Operation::Carve(_) => OpKind::Carve,
         Operation::Adaptive(_) => OpKind::Adaptive,
+        Operation::Parallel(_) => OpKind::Parallel,
     }
 }
 
@@ -3411,6 +3423,7 @@ mod tests {
             Operation::Engrave(o) => o.depth,
             Operation::Carve(o) => o.depth,
             Operation::Adaptive(o) => o.params.stepdown,
+            Operation::Parallel(_) => 1.0,
         }
     }
 

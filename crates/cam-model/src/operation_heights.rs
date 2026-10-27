@@ -419,6 +419,7 @@ pub fn legacy_cutting(op: &Operation, h: &Heights) -> CuttingHeights {
             top: o.top,
             bottom: o.top - o.depth,
         },
+        Operation::Parallel(_) => CuttingHeights { top: h.top_of_stock, bottom: h.top_of_stock - 1.0 },
         Operation::Adaptive(o) => {
             let top = h.top_of_stock;
             let stepdown = if o.params.stepdown.is_finite() && o.params.stepdown > 0.0 {
@@ -503,7 +504,7 @@ impl Document {
     /// A chamfer's zero depth means its natural cutter depth, rather than a zero
     /// cutting interval. All other strategies store their target interval directly.
     pub fn operation_base_cutting_heights(&self, op: &Operation) -> CuttingHeights {
-        if matches!(op, Operation::Adaptive(_)) {
+        if matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)) {
             if let Some(binding) = self.geometry.bindings.get(&op.id()) {
                 return binding.effective_heights();
             }

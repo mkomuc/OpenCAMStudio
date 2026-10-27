@@ -48,6 +48,7 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
         OpKind::Carve => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary; its holes remain uncut islands.")],
         OpKind::Bore => vec![(CadFilter::Face, "bore", "Select cylindrical holes or bosses with equal diameter and heights, or circular drawing loops.")],
         OpKind::Thread => vec![(CadFilter::Face, "thread", "Add Thread Centres. Select cylindrical bores or bosses with the same diameter and cutting heights; for a drawing, select circular holes.")],
+        OpKind::Parallel => vec![(CadFilter::Body, "silhouette", "Add solid bodies to 3D Parallel finishing."), (CadFilter::Face, "face", "Add machining faces. All setup bodies remain protected.")],
         OpKind::Adaptive => vec![
             (CadFilter::Body, "silhouette", "Add solid bodies to 3D Adaptive Clearing. Multiple bodies and instances can be selected."),
             (CadFilter::Face, "face", "Add individual faces to 3D Adaptive Clearing. Faces need a positive-area projection onto setup XY; selection never expands to the whole body."),
@@ -58,7 +59,7 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
 
 impl App {
     pub(super) fn stock_to_leave_supported(operation: &Operation) -> bool {
-        matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_))
+        matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_))
     }
 
     pub(super) fn stock_to_leave_enabled(&self) -> bool {
@@ -116,7 +117,7 @@ impl App {
                     "bore"
                 } else if kind == OpKind::Thread {
                     "thread"
-                } else if kind == OpKind::Adaptive
+                } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel)
                     && sources.get(index).is_some_and(|r| r.kind == EntityKind::Body)
                 {
                     "silhouette"
@@ -168,7 +169,7 @@ impl App {
                 "Bore selection"
             } else if kind == OpKind::Thread {
                 "Thread selection"
-            } else if kind == OpKind::Adaptive {
+            } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                 "Machining geometry"
             } else {
                 "Contour selection"
@@ -250,10 +251,10 @@ impl App {
     pub(super) fn geometry_operation_fields(&self, operation: &Operation) -> Vec<Field> {
         let mut fields = operation_fields(operation);
         if self.stock_to_leave_draft.is_some_and(|stock| stock.enabled) {
-            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_)) {
+            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) | Operation::Parallel(_)) {
                 fields.push(Field::StockLeaveRadial);
             }
-            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_)) {
+            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_)) {
                 fields.push(Field::StockLeaveAxial);
             }
         }
@@ -335,7 +336,7 @@ impl App {
                     | OpKind::Carve
                     | OpKind::Bore
                     | OpKind::Thread
-                    | OpKind::Adaptive),
+                    | OpKind::Adaptive | OpKind::Parallel),
                 ) = self.geometry_operation_kind()
                 else {
                     return;
@@ -474,6 +475,7 @@ impl App {
             OpKind::Carve => "Carve",
             OpKind::Bore => "Bore",
             OpKind::Thread => "Thread",
+            OpKind::Parallel => "3D Parallel",
             OpKind::Adaptive => "3D Adaptive Clearing",
             _ => unreachable!(),
         };
@@ -487,7 +489,7 @@ impl App {
                 icon(
                     if kind == OpKind::Thread {
                         "thread"
-                    } else if kind == OpKind::Adaptive {
+                    } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                         if self.cad_filter == CadFilter::Body { "silhouette" } else { "face" }
                     } else if kind == OpKind::Carve && cad && self.cad_filter == CadFilter::Face {
                         "face"
@@ -516,8 +518,8 @@ impl App {
             geometry_selection::selected_feature_names(labels),
         ]
         .spacing(9);
-        if cad && matches!(kind, OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive) {
-            let options = if kind == OpKind::Adaptive {
+        if cad && matches!(kind, OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive | OpKind::Parallel) {
+            let options = if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                 vec![
                     (CadFilter::Body, "silhouette", "Whole solid body"),
                     (
@@ -577,6 +579,7 @@ impl App {
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
             OpKind::Bore => "Select cylindrical holes or bosses, or circular drawing loops. Selected features must share diameter and cutting heights.",
             OpKind::Thread => "Select cylindrical bores or bosses, or circular drawing holes. Selected features must share diameter and cutting heights. A verified rounded entrance is supported; only the cylinder is threaded. Choose a thread mill, then review the suggested standard size in Geometry > Thread or enter a custom major diameter and pitch.",
+            OpKind::Parallel => "Select solid bodies or machining faces. Parallel rows follow the surface with a ball nose cutter. Containment uses the selected geometry bounding box in the pass direction.",
             OpKind::Adaptive => "Select whole solid bodies, individual faces, or both. Body selection includes all of its faces; face selection limits machining to the chosen face footprint.",
             _ => unreachable!(),
         };

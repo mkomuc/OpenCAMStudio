@@ -95,7 +95,7 @@ impl OperationCache {
             axial,
         };
         let key = Dependencies {
-            adaptive_domain_revision: if matches!(op, Operation::Adaptive(_)) {
+            adaptive_domain_revision: if matches!(op, Operation::Parallel(_)) { crate::ParallelStrategy::DOMAIN_REVISION } else if matches!(op, Operation::Adaptive(_)) {
                 crate::AdaptiveStrategy::DOMAIN_REVISION
             } else {
                 0

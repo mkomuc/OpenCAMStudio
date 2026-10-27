@@ -2,15 +2,19 @@
 
 A CAM application for CNC toolpath generation, built in Rust.
 
-> **Status: the 2.5-D milling slice works end-to-end** — DXF/DWG in, toolpaths
-> and material simulation in a live viewport, real G-code out. Initial 3D Adaptive
-> Clearing uses conservative CAD-derived Z levels. Freeform finishing, turning
-> and plugins remain roadmap work.
+> **Status: 2.5-D milling and initial 3D machining work end-to-end** — geometry
+> import, toolpath generation, material-removal simulation and G-code export.
+> 3D Adaptive Clearing provides CAD-derived roughing levels; 3D Parallel finishing
+> follows freeform surfaces with a ball nose cutter on pre-roughed stock.
+> Additional 3D finishing strategies, turning and plugins remain roadmap work.
 
-![The OpenCAMStudio desktop application](docs/screenshot_step.png)
+![3D Parallel finishing toolpath generated for the tray project](docs/tray-parallel-toolpath.png)
 
-*The built-in sample (**Home → Sample**) with a profile and a pocket, run and ready
-to export.*
+*3D Parallel finishing on `tray.ocam`: surface-following passes with a 6 mm ball nose cutter and 1 mm stepover.*
+
+![Simulation of the tray Parallel finishing operation](docs/tray-parallel-simulation.png)
+
+*Completed material-removal simulation of the tray’s Parallel finishing operation.*
 
 ## What works
 
@@ -23,8 +27,11 @@ to export.*
   tessellation. Select the bodies or faces to machine while retaining other setup
   bodies as protected obstacles. See the [workflow and geometry
   limits](docs/3d-adaptive-clearing.md).
+- **3D Parallel finishing** — ball nose surface passes with scan angle, horizontal
+  stepover, one-way or zigzag cutting, CAD body/face selection, bounding-box
+  containment and full-clearance links. See [controls and limits](docs/parallel.md).
 - **Stock to Leave** — shared radial and axial finishing allowances for Profile,
-  Pocket and 3D Adaptive Clearing; axial allowance for Face. Disabled settings
+  Pocket, 3D Adaptive Clearing and 3D Parallel; axial allowance for Face. Disabled settings
   preserve existing toolpaths.
 - **V-carving** — the boundary outlines an *area*, not a path: the tool never
   touches it, its flanks land on it, and the depth follows from the shape's own

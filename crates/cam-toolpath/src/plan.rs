@@ -143,7 +143,7 @@ fn build_job_with_compute(
     }
     let adaptive_operation_ids: std::collections::HashSet<_> = setup.operations.iter()
         .filter(|operation| doc.operation_is_included(setup.id, operation.id()))
-        .filter(|operation| matches!(operation, Operation::Adaptive(_)))
+        .filter(|operation| matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)))
         .map(Operation::id)
         .collect();
     if let Some(pattern) = setup.patterns.iter().find(|pattern| {
@@ -154,7 +154,7 @@ fn build_job_with_compute(
         return JobResult {
             program,
             diagnostics: vec![Diagnostic::error(
-                "3D Adaptive cannot be repeated in an operation pattern because its path is resolved against the setup's actual model instances; create separate adaptive operations for each machining location",
+                "3D surface strategies cannot be repeated in an operation pattern because its path is resolved against the setup's actual model instances; create separate adaptive operations for each machining location",
             ).for_setup(setup.id).for_pattern(pattern.id, 1)],
             completion: JobCompletion::Failed,
         };
@@ -576,7 +576,7 @@ fn compute_at_heights(
             p.depth = depth;
             0.0
         }
-        Operation::Adaptive(_) => 0.0,
+        Operation::Adaptive(_) | Operation::Parallel(_) => 0.0,
         Operation::Carve(p) => {
             p.top = heights.top;
             p.depth = depth;
@@ -637,6 +637,7 @@ fn apply_feed_height(
         Operation::Pocket(o) => o.clear.plunge_feed,
         Operation::Face(o) => o.plunge_feed,
         Operation::Adaptive(o) => o.params.plunge_feed,
+        Operation::Parallel(o) => o.params.plunge_feed,
         Operation::Drill(o) => o.feed,
         Operation::Bore(o) => o.plunge_feed,
         Operation::Thread(o) => o.plunge_feed,
@@ -1003,6 +1004,15 @@ fn compute_with_stock(
 ) -> StrategyResult {
     let (radial, axial) = stock_to_leave.effective();
     match operation {
+        Operation::Parallel(op) => {
+            let resolved = geometry_state.bindings.get(&op.id)
+                .ok_or_else(|| "Parallel geometry binding is missing".to_string())
+                .and_then(|binding| cam_geometry3d::resolve_parallel(geometry_state, binding));
+            match resolved {
+                Ok(mut geometry) => { geometry.heights = cutting_heights.unwrap_or(geometry.heights); crate::ParallelStrategy::new(op.clone(), stock_to_leave, geometry).compute(env, cancel) },
+                Err(reason) => StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() },
+            }
+        }
         Operation::Adaptive(op) => {
             let Some(binding) = geometry_state.bindings.get(&op.id) else {
                 return StrategyResult { diagnostics: vec![Diagnostic::error(format!("operation {}: adaptive geometry binding is missing", op.id))], ..Default::default() };
@@ -1319,7 +1329,7 @@ mod tests {
         });
         let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
         assert_eq!(result.completion, JobCompletion::Failed);
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("supported for Profile, Pocket, Face, and Adaptive only")));
+        assert!(result.diagnostics.iter().any(|d| d.message.contains("supported for Profile, Pocket, Face, Adaptive, and Parallel only")));
     }
 
     #[test]

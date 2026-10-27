@@ -187,6 +187,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
+        Operation::Parallel(_) => vec![Field::ParallelStepover, Field::ParallelAngle, Field::AdaptiveTolerance, Field::AdaptiveOffset, Field::SpindleRpm, Field::Feed, Field::PlungeFeed],
         Operation::Adaptive(_) => vec![
             Field::AdaptiveTolerance,
             Field::AdaptiveOptimalLoad,

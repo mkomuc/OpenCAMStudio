@@ -255,6 +255,7 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         26 => Ok(()),
         // v28 adds profile pass controls; control aliases preserve milling direction.
         27 => Ok(()),
+        29 => Ok(()), // Additive Parallel finishing operations and surface bindings.
         28 => Ok(()), // Additive Bore operations and cylindrical geometry bindings.
         _ => Err(MigrationError::MissingStep { from }),
     }

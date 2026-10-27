@@ -6,6 +6,7 @@
 //! enough to drive first light (a profile → G-code) — and grows toward the full
 //! `Project → Setup → Stock → Operation → Tool` tree as later phases need it.
 
+use crate::ParallelParams;
 use cam_geo::Contour;
 
 use crate::{BoreOp, Tool};
@@ -89,7 +90,8 @@ use crate::{BoreOp, Tool};
 /// member is now ignored; simplification is derived from the operation tolerance.
 /// v28: profile pass controls, tab shapes/counts, and one controller compensation method.
 /// v29: helical Bore operations and cylindrical Bore geometry bindings.
-pub const SCHEMA_VERSION: u32 = 29;
+/// v30: 3D Parallel finishing and CAD surface bindings.
+pub const SCHEMA_VERSION: u32 = 30;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -839,9 +841,26 @@ pub struct PocketOp {
     pub clear: ClearParams,
 }
 
-/// A 3D adaptive roughing operation over a CAD solid. Its geometry is resolved
-/// from the operation's `AdaptiveClearing` geometry binding; no display mesh is
-/// stored or consulted by the toolpath generator.
+/// 3D surface finishing over a CAD solid or selected faces.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParallelOp {
+    pub id: u32,
+    pub tool: u32,
+    #[serde(default)]
+    pub spindle_rpm: f64,
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    #[serde(default)]
+    pub cooling: crate::Cooling,
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
+    #[serde(default = "default_work_offset")]
+    pub work_offset: u32,
+    #[serde(default)]
+    pub params: ParallelParams,
+}
+
+/// 3D adaptive roughing resolved from an independent CAD machining projection.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveOp {
     pub id: u32,
@@ -1595,6 +1614,8 @@ pub enum Operation {
     Pocket(PocketOp),
     /// 3D adaptive roughing over a CAD solid.
     Adaptive(AdaptiveOp),
+    /// Equally spaced, surface-following 3D finishing passes.
+    Parallel(ParallelOp),
     /// A facing operation.
     Face(FaceOp),
     /// A chamfering operation.
@@ -1617,6 +1638,7 @@ impl Operation {
             Operation::Drill(op) => op.id,
             Operation::Pocket(op) => op.id,
             Operation::Adaptive(op) => op.id,
+            Operation::Parallel(op) => op.id,
             Operation::Face(op) => op.id,
             Operation::Chamfer(op) => op.id,
             Operation::Bore(op) => op.id,
@@ -1634,6 +1656,7 @@ impl Operation {
             Operation::Drill(op) => op.tool,
             Operation::Pocket(op) => op.tool,
             Operation::Adaptive(op) => op.tool,
+            Operation::Parallel(op) => op.tool,
             Operation::Face(op) => op.tool,
             Operation::Chamfer(op) => op.tool,
             Operation::Bore(op) => op.tool,
@@ -1669,6 +1692,7 @@ impl Operation {
             Operation::Drill(op) => op.spindle_rpm,
             Operation::Pocket(op) => op.spindle_rpm,
             Operation::Adaptive(op) => op.spindle_rpm,
+            Operation::Parallel(op) => op.spindle_rpm,
             Operation::Face(op) => op.spindle_rpm,
             Operation::Chamfer(op) => op.spindle_rpm,
             Operation::Bore(op) => op.spindle_rpm,
@@ -1685,6 +1709,7 @@ impl Operation {
             Operation::Drill(op) => op.spindle_rpm = rpm,
             Operation::Pocket(op) => op.spindle_rpm = rpm,
             Operation::Adaptive(op) => op.spindle_rpm = rpm,
+            Operation::Parallel(op) => op.spindle_rpm = rpm,
             Operation::Face(op) => op.spindle_rpm = rpm,
             Operation::Chamfer(op) => op.spindle_rpm = rpm,
             Operation::Bore(op) => op.spindle_rpm = rpm,
@@ -1703,6 +1728,7 @@ impl Operation {
             Operation::Drill(op) => op.work_offset,
             Operation::Pocket(op) => op.work_offset,
             Operation::Adaptive(op) => op.work_offset,
+            Operation::Parallel(op) => op.work_offset,
             Operation::Face(op) => op.work_offset,
             Operation::Chamfer(op) => op.work_offset,
             Operation::Bore(op) => op.work_offset,
@@ -1719,6 +1745,7 @@ impl Operation {
             Operation::Drill(op) => op.work_offset = work_offset,
             Operation::Pocket(op) => op.work_offset = work_offset,
             Operation::Adaptive(op) => op.work_offset = work_offset,
+            Operation::Parallel(op) => op.work_offset = work_offset,
             Operation::Face(op) => op.work_offset = work_offset,
             Operation::Chamfer(op) => op.work_offset = work_offset,
             Operation::Bore(op) => op.work_offset = work_offset,
@@ -1735,6 +1762,7 @@ impl Operation {
             Operation::Drill(op) => op.id = id,
             Operation::Pocket(op) => op.id = id,
             Operation::Adaptive(op) => op.id = id,
+            Operation::Parallel(op) => op.id = id,
             Operation::Face(op) => op.id = id,
             Operation::Chamfer(op) => op.id = id,
             Operation::Bore(op) => op.id = id,
@@ -1753,6 +1781,7 @@ impl Operation {
             Operation::Drill(op) => op.tool = tool,
             Operation::Pocket(op) => op.tool = tool,
             Operation::Adaptive(op) => op.tool = tool,
+            Operation::Parallel(op) => op.tool = tool,
             Operation::Face(op) => op.tool = tool,
             Operation::Chamfer(op) => op.tool = tool,
             Operation::Bore(op) => op.tool = tool,
@@ -1906,7 +1935,7 @@ impl Setup {
             allowances.validate()?;
             let (radial, axial) = allowances.effective();
             let supported = match operation {
-                Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) => true,
+                Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) | Operation::Parallel(_) => true,
                 Operation::Face(_) => {
                     if radial > 0.0 {
                         return Err(format!("operation {operation_id}: Face supports axial stock to leave only; radial allowance must be 0 mm"));
@@ -1917,7 +1946,7 @@ impl Setup {
                 | Operation::Engrave(_) | Operation::Carve(_) => false,
             };
             if !supported && (radial > 0.0 || axial > 0.0) {
-                return Err(format!("operation {operation_id}: stock to leave is supported for Profile, Pocket, Face, and Adaptive only"));
+                return Err(format!("operation {operation_id}: stock to leave is supported for Profile, Pocket, Face, Adaptive, and Parallel only"));
             }
         }
         Ok(())

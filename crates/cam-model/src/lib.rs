@@ -9,6 +9,8 @@
 //! by swapping the [`Machine`] it is handed. Dependency isolation is enforced
 //! by `scripts/check_architecture.py`.
 
+mod parallel;
+pub use parallel::*;
 mod bore;
 pub use bore::{BoreOp, BoreOrder};
 mod thread_standards;
@@ -30,7 +32,7 @@ mod validate;
 
 pub use cam_cldata::Point3;
 pub use document::{
-    AdaptiveContainment, AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
+    ParallelOp, AdaptiveContainment, AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
     DrillOp, EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp,
     ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, StockToLeave, ThreadOp, SCHEMA_VERSION,
     CircularDistribution, ExecutionItem, OperationPattern, PatternDirection, PatternKind, PatternOrder,

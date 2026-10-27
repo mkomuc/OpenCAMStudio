@@ -472,6 +472,7 @@ impl ToolLibrary {
                 .filter(|t| matches!(t.kind, ToolKind::EndMill | ToolKind::FaceMill))
                 .max_by(|a, b| a.diameter.total_cmp(&b.diameter)),
             OpKind::Profile | OpKind::Pocket | OpKind::Adaptive => middle(|k| matches!(k, ToolKind::EndMill)),
+            OpKind::Parallel => middle(|k| matches!(k, ToolKind::BallMill)),
             OpKind::Drill => middle(|k| matches!(k, ToolKind::Drill { .. })),
             OpKind::Bore => middle(|k| matches!(k, ToolKind::EndMill)),
             OpKind::Thread => middle(|k| matches!(k, ToolKind::ThreadMill { .. })),
@@ -645,6 +646,7 @@ pub fn families_for(kind: OpKind) -> &'static [ToolKindPick] {
         // Side-milling a vertical wall: the end-mill family only.
         OpKind::Profile | OpKind::Pocket => &[F::EndMill, F::BallMill, F::BullNose],
         OpKind::Adaptive => &[F::EndMill],
+        OpKind::Parallel => &[F::BallMill],
         // A flat floor: flat-bottomed tools (a bull-nose floor is still flat).
         OpKind::Face => &[F::EndMill, F::BullNose, F::FaceMill],
         OpKind::Drill => &[F::Drill],

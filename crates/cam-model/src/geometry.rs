@@ -628,6 +628,7 @@ pub enum ExtractionRecipe {
     /// Conservative 3D adaptive roughing over selected bodies and faces, with
     /// every included setup body retained as an obstacle.
     AdaptiveClearing,
+    ParallelFinishing,
     PocketFloor,
     DrillHoles,
     /// One closed planar rim; the operation defines the bevel dimensions.
@@ -744,7 +745,7 @@ impl GeometryState {
     /// Deterministic dependency key for an immutable asset revision. Display
     /// tessellation does not participate; placement and machining overrides do.
     pub fn binding_fingerprint(&self, binding: &GeometryBinding) -> String {
-        if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+        if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
             let mut dependencies: Vec<_> = self
                 .instances
                 .iter()

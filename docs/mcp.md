@@ -5,6 +5,12 @@ same controller implements GUI edits and MCP edits, including undo/redo, linked
 CAD validation, toolpath invalidation, collision verification and export gates.
 `tools/list` discovers the command names, argument schemas and read-only hints.
 
+The `Parallel` operation kind creates [3D Parallel finishing](parallel.md) over
+CAD bodies or faces using a ball nose cutter. Its `params` include `stepover`,
+`angle`, `tolerance`, `both_ways`, `containment`, `additional_offset`, `feed`, and
+`plunge_feed`. Body/face selection uses the same multi-reference CAD selection
+contract as Adaptive.
+
 ## Build and launch
 
 ```sh

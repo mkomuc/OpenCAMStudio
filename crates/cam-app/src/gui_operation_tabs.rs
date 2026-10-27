@@ -178,6 +178,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::ChamferWidth
         | Field::Feed
         | Field::PlungeFeed
+        | Field::ParallelStepover
         | Field::AdaptiveTolerance
         | Field::AdaptiveOptimalLoad
         | Field::AdaptiveFineStepdown
@@ -189,7 +190,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         Field::Stepdown
             if matches!(
                 op,
-                Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_)
+                Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_)
             ) =>
         {
             value <= 0.0
@@ -226,7 +227,9 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::ThreadTop
         | Field::ThreadBottom
         | Field::ChamferTop
-        | Field::FaceOvershoot => false,
+        | Field::FaceOvershoot
+        | Field::ParallelAngle
+        | Field::AdaptiveOffset => false,
         Field::ProfileOffset if matches!(op, Operation::Profile(_)) => false,
         _ => value < 0.0,
     }
@@ -279,13 +282,13 @@ fn stock_offset_fields(operation: &Operation) -> Vec<Field> {
     let mut fields = Vec::with_capacity(2);
     if matches!(
         operation,
-        Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_)
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) | Operation::Parallel(_)
     ) {
         fields.push(Field::StockLeaveRadial);
     }
     if matches!(
         operation,
-        Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_)
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_)
     ) {
         fields.push(Field::StockLeaveAxial);
     }
@@ -523,7 +526,7 @@ impl App {
                 Operation::Drill(o) => format!("{} hole centres", o.points.len()),
                 Operation::Bore(o) => format!("{} bore centres", o.points.len()),
                 Operation::Thread(o) => format!("{} thread centres", o.points.len()),
-                Operation::Adaptive(_) => linked.map_or_else(
+                Operation::Parallel(_) | Operation::Adaptive(_) => linked.map_or_else(
                     || "Selected geometry".into(),
                     |binding| {
                         let bodies = binding
@@ -889,6 +892,12 @@ impl App {
                     );
                 }
             }
+            Operation::Parallel(p) if tab == OperationTab::Passes => {
+                list = list.section("Passes").push(row![text("Both ways (zigzag)").size(12), checkbox(p.params.both_ways).size(15).on_toggle(Message::ParallelBothWaysToggled)].spacing(8));
+            }
+            Operation::Parallel(p) if tab == OperationTab::Geometry => {
+                list = list.push(profile_picker("Tool containment", "Position of the cutter relative to the selected model bounding box.", self.tooltips, p.params.containment, &[cam_model::AdaptiveContainment::Inside, cam_model::AdaptiveContainment::Center, cam_model::AdaptiveContainment::Outside][..], Message::AdaptiveContainmentChanged));
+            }
             Operation::Adaptive(adaptive) if tab == OperationTab::Passes => {
                 list = list.section("Passes").push(
                     row![
@@ -1135,7 +1144,7 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut operation, &fields);
-        if matches!(operation, Operation::Adaptive(_)) {
+        if matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)) {
             cam_geometry3d::validate_adaptive_selection(
                 self.controller.geometry_state(),
                 &selected,

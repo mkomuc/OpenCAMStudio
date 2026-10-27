@@ -290,6 +290,7 @@ impl AppController {
                     patterns,
                 ))
                 .expect("operation dependencies serialize");
+                if matches!(op, Operation::Parallel(_)) { bytes.extend_from_slice(&cam_toolpath::ParallelStrategy::DOMAIN_REVISION.to_le_bytes()); }
                 if matches!(op, Operation::Adaptive(_)) {
                     bytes.extend_from_slice(
                         &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),

@@ -107,7 +107,7 @@ impl App {
     pub(super) fn sync_creation_geometry_heights(&mut self) {
         if !matches!(
             self.cad_pending_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel)
         ) {
             return;
         }
@@ -281,7 +281,7 @@ impl App {
                     op.z_top = new.z_top;
                     op.z_bottom = new.z_bottom;
                 }
-                (Operation::Adaptive(_), Operation::Adaptive(_)) => {}
+                (Operation::Adaptive(_), Operation::Adaptive(_)) | (Operation::Parallel(_), Operation::Parallel(_)) => {}
                 _ => return Err("Geometry does not match operation".into()),
             }
             if crate::cad_operations::surface_recipe(&binding.recipe) {
