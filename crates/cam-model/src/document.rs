@@ -91,7 +91,8 @@ use crate::{BoreOp, Tool};
 /// v28: profile pass controls, tab shapes/counts, and one controller compensation method.
 /// v29: helical Bore operations and cylindrical Bore geometry bindings.
 /// v30: 3D Parallel finishing and CAD surface bindings.
-pub const SCHEMA_VERSION: u32 = 30;
+/// v31: remaining stock inherited from the immediately preceding setup.
+pub const SCHEMA_VERSION: u32 = 31;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -246,12 +247,9 @@ impl Heights {
     }
 }
 
-/// A description of the raw material. The first-light slice models only a
-/// rectangular block, defined **relative to the part** so it auto-fits: the
-/// part's XY bounding box grown by per-axis offsets, hanging `thickness` below
-/// an explicit top Z. The app resolves it to a concrete box with the loaded
-/// geometry's bounds ([`Stock::resolve`]). `from-model` stock arrives with the
-/// kernel as a further variant.
+/// Input material for a setup: a model-relative box, or the remaining solid
+/// simulated from the preceding setup. Document-level bounds resolution accounts
+/// for both model selection and the work axes of inherited stock.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Stock {
     /// A block sized from the part's XY bounding box: grown by `x_offset` on both
@@ -270,6 +268,10 @@ pub enum Stock {
     },
     /// A box grown independently on the negative and positive side of each axis.
     RelativeBox { offsets: [[f64; 3]; 2] },
+    /// Remaining material after the preceding setup in document execution order.
+    /// Resolve its enclosing bounds through `Document::stock_bounds_for`; the
+    /// machining worker supplies the actual simulated solid.
+    PreviousSetup,
 }
 
 impl Stock {
@@ -291,7 +293,9 @@ impl Stock {
         }
     }
 
-    /// Resolve stock against all three model bounds in setup coordinates.
+    /// Resolve box stock against all three model bounds in setup coordinates.
+    /// `PreviousSetup` needs `Document::stock_bounds_for`; this local method
+    /// can only return the supplied bounds for that document-dependent mode.
     pub fn resolve_bounds(&self, min: [f64; 3], max: [f64; 3]) -> ([f64; 3], [f64; 3]) {
         match *self {
             Self::BoundingBox {
@@ -312,6 +316,7 @@ impl Stock {
                 });
                 (lo, std::array::from_fn(|i| lo[i] + size[i]))
             }
+            Self::PreviousSetup => (min, max),
             Self::RelativeBox { offsets } => (
                 std::array::from_fn(|i| min[i] - offsets[0][i]),
                 std::array::from_fn(|i| max[i] + offsets[1][i]),

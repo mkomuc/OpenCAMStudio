@@ -236,6 +236,9 @@ impl Project {
         if self.document.setups.is_empty() {
             return Err("project must contain at least one setup".into());
         }
+        if self.document.setups[0].stock == cam_model::Stock::PreviousSetup {
+            return Err("The first setup has no previous setup; choose box stock".into());
+        }
         let mut setup_ids = BTreeSet::new();
         let mut operation_ids = BTreeSet::new();
         let mut pattern_ids = BTreeSet::new();

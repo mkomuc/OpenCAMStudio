@@ -510,9 +510,9 @@ impl App {
                 self.status_indicator(
                     StatusTarget::Setup(setup.id), &toolpath_statuses, &status_fingerprints,
                 ),
-                text(&setup.name)
-                    .size(11)
-                    .width(Length::Fill)
+                mouse_area(text(&setup.name).size(11).width(Length::Fill)).on_double_click(
+                    Message::Tree(TreeMessage::DoubleClick(TreeNode::Setup(setup.id))),
+                ),
             ]
             .spacing(3)
             .align_y(Alignment::Center);
@@ -1181,6 +1181,91 @@ mod tests {
         );
         assert!(app.status.contains("no longer exists"));
         assert!(!app.controller.run_pending());
+    }
+
+    #[test]
+    fn closing_operation_simulation_then_selecting_a_later_operation_restores_its_path() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.refresh_fields();
+        send(&mut app, Message::ToolpathCommand(
+            TreeNode::Operation(ids[0]), ToolpathAction::Simulate));
+        drain_context_job(&mut app);
+        assert!(app.simulation.is_some());
+        let verified = app.controller.outcome().unwrap().program.clone();
+        assert!(verified.steps().iter().filter_map(Step::tag).all(|t| t.op_id == ids[0]));
+        send(&mut app, Message::SimulationClose);
+        send(&mut app, Message::ClickOp(ids[2]));
+        app.drain_operation_preview();
+        let preview = app.operation_preview_outcome().unwrap();
+        assert_eq!(preview.completion, JobCompletion::Complete);
+        assert!(preview.scene.strips.iter().any(|strip| strip.op == Some(ids[2])));
+        assert!(app.machining_viewport().path_cones.iter().any(|cone| cone.op == ids[2]));
+        assert_eq!(app.controller.outcome().unwrap().program, verified,
+            "browser previews leave the verified export program intact");
+    }
+
+    #[test]
+    fn changing_selection_and_cancelling_preview_discards_obsolete_work() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.refresh_fields();
+        app.controller.run(&cam_toolpath::CancelToken::new());
+        let verified = app.controller.outcome().unwrap().program.clone();
+        send(&mut app, Message::ClickOp(ids[2]));
+        send(&mut app, Message::ClickOp(ids[0]));
+        app.drain_operation_preview();
+        let preview = app.operation_preview_outcome().unwrap();
+        assert!(preview.program.steps().iter().filter_map(Step::tag)
+            .all(|tag| tag.op_id == ids[0]));
+        send(&mut app, Message::ClickOp(ids[1]));
+        send(&mut app, Message::CancelOperationPreview);
+        app.drain_operation_preview();
+        assert!(app.operation_preview_outcome().is_none());
+        assert_eq!(app.controller.outcome().unwrap().program, verified);
+        send(&mut app, Message::ClickOp(ids[2]));
+        app.drain_operation_preview();
+        assert!(app.operation_preview_outcome().unwrap().scene.strips.iter()
+            .any(|s| s.op == Some(ids[2])));
+    }
+
+    #[test]
+    #[ignore = "uses the supplied local testfiles/tray-parallel.ocam CAD project"]
+    fn tray_parallel_browser_stock_and_paths_follow_selection_after_simulation() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/tray-parallel.ocam");
+        app.controller.open_project(path).unwrap();
+        app.end_setup_draft();
+        app.operation_draft = None;
+        app.show_stock = true;
+        app.refresh_fields();
+        let parallel = app.controller.document().setup().operations.iter()
+            .find(|op| matches!(op, Operation::Parallel(_))).unwrap().id();
+        let profile = app.controller.document().setup().operations.iter()
+            .find(|op| matches!(op, Operation::Profile(_))).unwrap().id();
+        send(&mut app, Message::ClickOp(parallel));
+        app.drain_operation_preview();
+        let preview = app.operation_preview_outcome().unwrap();
+        assert_eq!(preview.completion, JobCompletion::Complete, "{:?}", preview.diagnostics);
+        assert!(preview.stock_operations.contains(&Some(parallel)));
+        assert!(!preview.stock_operations.contains(&Some(profile)));
+        assert!(app.controller.outcome().is_none(), "preview is independent of verification");
+
+        send(&mut app, Message::ToolpathCommand(
+            TreeNode::Operation(parallel), ToolpathAction::Simulate));
+        drain_context_job(&mut app);
+        assert!(app.simulation.is_some());
+        send(&mut app, Message::SimulationClose);
+        app.drain_operation_preview();
+        assert!(!app.operation_preview_outcome().unwrap().stock_operations.contains(&Some(profile)));
+        send(&mut app, Message::ClickOp(profile));
+        app.drain_operation_preview();
+        let preview = app.operation_preview_outcome().unwrap();
+        assert_eq!(preview.completion, JobCompletion::Complete, "{:?}", preview.diagnostics);
+        assert!(preview.stock_operations.contains(&Some(profile)));
+        assert!(preview.scene.strips.iter().any(|s| s.op == Some(profile)));
+        assert!(app.machining_viewport().path_cones.iter().any(|c| c.op == profile));
     }
 
     #[test]

@@ -328,7 +328,7 @@ impl OperationHeightSettings {
         use HeightReference::*;
         let setup = doc.setup();
         let (model_min, model_max) = doc.height_model_bounds();
-        let (stock_min, stock_max) = setup.stock.resolve_bounds(model_min, model_max);
+        let (stock_min, stock_max) = doc.stock_bounds_for(setup);
         Ok(match reference {
             Plane(p) => self
                 .resolve_plane(p, doc, op, values, visiting)?
@@ -527,7 +527,10 @@ impl Document {
     }
     /// Same conservative source bounds used for stock, independent of display mesh.
     pub fn height_model_bounds(&self) -> ([f64; 3], [f64; 3]) {
-        let setup = self.setup();
+        self.height_model_bounds_for(self.setup())
+    }
+
+    pub fn height_model_bounds_for(&self, setup: &crate::Setup) -> ([f64; 3], [f64; 3]) {
         let mut points = vec![];
         for instance in &self.geometry.instances {
             if !setup.model_instances.contains(&instance.id) {
@@ -556,6 +559,30 @@ impl Document {
         }
         bounds(&points).unwrap_or(([0.; 3], [0.; 3]))
     }
+    /// Enclosing stock bounds in the requested setup's machining axes. Inherited
+    /// stock keeps the original blank's enclosure; its removed regions are supplied
+    /// by simulation. Resolve directly from the source axes to avoid accumulating
+    /// oversized bounding boxes through a chain of rotated setups.
+    pub fn stock_bounds_for(&self, setup: &crate::Setup) -> ([f64; 3], [f64; 3]) {
+        if setup.stock != crate::Stock::PreviousSetup {
+            let (min, max) = self.height_model_bounds_for(setup);
+            return setup.stock.resolve_bounds(min, max);
+        }
+        let Some(at) = self.setups.iter().position(|s| s.id == setup.id) else {
+            return self.height_model_bounds_for(setup);
+        };
+        let Some(source) = self.setups[..at].iter().rev()
+            .find(|s| s.stock != crate::Stock::PreviousSetup) else {
+            return self.height_model_bounds_for(setup);
+        };
+        let (min, max) = self.height_model_bounds_for(source);
+        let (min, max) = source.stock.resolve_bounds(min, max);
+        let points = box_corners([min, max]).map(|p| {
+            setup.frame.to_setup_vector(source.frame.to_world_vector(p))
+        });
+        bounds(&points).unwrap_or(([0.; 3], [0.; 3]))
+    }
+
     pub fn height_definition_bounds(
         &self,
         d: &HeightDefinition,

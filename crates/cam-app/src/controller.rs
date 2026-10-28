@@ -135,6 +135,8 @@ pub struct RunOutcome {
     pub program: Program,
     pub diagnostics: Vec<Diagnostic>,
     pub scene: Scene,
+    /// Processed input blank for an inherited-stock setup, before its own cuts.
+    pub initial_stock: Option<(Vec<MeshVertex>, Vec<u32>)>,
     /// Interleaved position+normal vertices of the cut stock surface.
     pub stock_vertices: Vec<MeshVertex>,
     /// Per-vertex flag distinguishing cut surfaces from original stock faces.
@@ -2787,8 +2789,7 @@ impl AppController {
     /// The current stock resolved to a concrete box `(min, max)` (mm), fitting the
     /// stock spec to the loaded geometry's XY bounds.
     pub fn stock_box(&self) -> ([f64; 3], [f64; 3]) {
-        let (min, max) = self.setup_model_bounds();
-        self.setup().stock.resolve_bounds(min, max)
+        self.document().stock_bounds_for(self.setup())
     }
 
     /// Edit the setup's stock definition as one undoable change.

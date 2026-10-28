@@ -8,7 +8,7 @@ On **Passes**, set horizontal **Stepover**, **Pass angle** (degrees counterclock
 
 Every pass approaches at clearance, feeds vertically to its first contact, cuts the surface, and retracts vertically to clearance. Clearance must exceed the model, allowances and stock. This is a finishing operation for pre-roughed stock. It does not calculate roughing entries or stock-aware stay-down links. The ball and cylindrical cutter envelope are checked against the CAD projection, including between contact samples. Wider shafts, holder collision checks, flat/bull nose cutters, silhouette/custom boundaries, slope filters, multiple depths, and up/down-only passes are not implemented.
 
-Projects use schema 30; earlier projects migrate without changing their operations. The operation is also available through MCP as kind `Parallel`.
+Projects use schema 31; earlier projects migrate without changing their operations. The operation is also available through MCP as kind `Parallel`.
 
 The supplied tray regression can be run locally:
 

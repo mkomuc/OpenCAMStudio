@@ -47,8 +47,13 @@ pub(super) fn stock_world_bounds(controller: &AppController) -> Option<([f32; 3]
     ))
 }
 
-/// Uncut stock before a run, using the setup box and its orientation exactly.
+/// The configured input blank: a box, or the preceding setup's processed stock.
 pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, Vec<u32>) {
+    if controller.document().setup().stock == cam_model::Stock::PreviousSetup {
+        return controller.outcome()
+            .filter(|o| o.completion == JobCompletion::Complete)
+            .and_then(|o| o.initial_stock.clone()).unwrap_or_default();
+    }
     let (min, max) = controller.stock_box();
     if !controller.has_geometry() || (0..3).any(|axis| max[axis] <= min[axis]) {
         return (vec![], vec![]);
@@ -93,6 +98,7 @@ pub(super) struct ViewportKey {
     selection: Selection,
     pending: Option<crate::PendingOp>,
     outcome: Option<crate::JobStamp>,
+    operation_preview: Option<crate::JobStamp>,
     cad_selection: Vec<EntityRef>,
     cad_hover: Option<EntityRef>,
     cad_hidden: BTreeSet<InstanceId>,
@@ -367,6 +373,7 @@ impl App {
             selection: self.controller.selection(),
             pending: self.controller.pending_op(),
             outcome: self.controller.outcome().and_then(|o| o.stamp.clone()),
+            operation_preview: self.operation_preview_outcome().and_then(|o| o.stamp.clone()),
             cad_selection: self.controller.cad_selection().to_vec(),
             cad_hover: self.cad_hover.clone(),
             cad_hidden: cad_hidden.clone(),
@@ -438,6 +445,7 @@ impl App {
                     .as_ref()
                     .filter(|_| !model_view)
                     .map(|player| &player.preview),
+                self.operation_preview_outcome(),
                 if self.setup_model_pick {
                     EntityKind::Body
                 } else {
@@ -497,7 +505,7 @@ impl App {
                 if let Some(draft) = &self.setup_draft {
                     let (min, max) = self.controller.pending_setup_model_bounds(draft);
                     let (min, max) = if self.setup_origin_mode() == SetupOriginMode::StockBox {
-                        draft.stock.resolve_bounds(min, max)
+                        self.controller.pending_setup_stock_bounds(draft)
                     } else {
                         (min, max)
                     };
@@ -975,6 +983,39 @@ mod tests {
     }
 
     #[test]
+    fn inherited_setup_shows_the_processed_input_blank() {
+        let mut app = picking_app();
+        app.end_setup_draft();
+        app.controller.edit_setup(|s| s.operations.clear());
+        app.controller.edit_stock(|s| *s = cam_model::Stock::FixedBox {
+            size: [10., 10., 5.], model_position: [0., 0., 1.],
+        });
+        app.controller.edit_heights(|h| *h = cam_model::Heights::new(5., 2., 0.));
+        app.controller.edit_tool(0, |t| { t.diameter = 2.; t.flute_length = 12.; });
+        let (min, max) = app.controller.stock_box();
+        let center = [(min[0] + max[0]) / 2., (min[1] + max[1]) / 2.];
+        app.controller.add_operation(Operation::Drill(cam_model::DrillOp {
+            id: 0, tool: 1, points: vec![center], depth: 3., start_offset: 0.,
+            peck: None, dwell: None, spindle_rpm: 1000., tool_preset: None,
+            cooling: Default::default(), entry_feeds: Default::default(), work_offset: 1, feed: 100.,
+        }));
+        app.controller.add_setup();
+        app.controller.edit_stock(|s| *s = cam_model::Stock::PreviousSetup);
+        assert!(uncut_stock_mesh(&app.controller).0.is_empty(), "uncomputed stock must not appear as a fresh box");
+        app.rerun();
+        assert!(app.controller.run_pending(), "an empty inherited-stock setup still needs its input blank calculated");
+        let outcome = app.controller.run(&cam_toolpath::CancelToken::new());
+        assert_eq!(outcome.completion, JobCompletion::Complete, "{:?}", outcome.diagnostics);
+        let initial = outcome.initial_stock.clone().unwrap();
+        assert!(initial.0.iter().any(|v| (v.position[2] + 3.).abs() < 1e-4));
+        app.controller.select(Selection::Setup);
+        assert_eq!(uncut_stock_mesh(&app.controller), initial);
+        let viewport = app.machining_viewport();
+        assert_eq!(viewport.mesh_vertices.as_slice(), initial.0);
+        assert_eq!(viewport.mesh_indices.as_slice(), initial.1);
+    }
+
+    #[test]
     fn stock_visibility_and_transparency_work_before_and_after_simulation() {
         let mut app = picking_app();
         app.setup_draft = None;
@@ -1117,11 +1158,21 @@ mod tests {
         for &selected in &ids {
             app.clear_browser_selection();
             let _ = app.update(Message::ClickOp(selected));
+            app.drain_operation_preview();
             let viewport = app.machining_viewport();
-            assert_eq!(viewport.mesh_indices.as_slice(), outcome.stock_indices);
+            let scoped = app.operation_preview_outcome().unwrap();
+            assert_eq!(viewport.mesh_indices.as_slice(), scoped.stock_indices);
+            assert!(scoped.stock_operations.contains(&Some(selected)));
+            if selected == ids[0] {
+                assert!(!scoped.stock_operations.contains(&Some(ids[1])),
+                    "a later operation must not remove material in this preview");
+            } else {
+                assert!(scoped.stock_operations.contains(&Some(ids[0])),
+                    "earlier cuts remain in the selected operation's starting stock");
+            }
             assert_eq!(viewport.path_cones.len(), 2);
             assert!(viewport.path_cones.iter().all(|cone| cone.op == selected));
-            for (vertex, owner) in viewport.mesh_vertices.iter().zip(&outcome.stock_operations) {
+            for (vertex, owner) in viewport.mesh_vertices.iter().zip(&scoped.stock_operations) {
                 let expected = if *owner == Some(selected) {
                     [0.1, 0.9, 0.2, 1.]
                 } else {
@@ -1132,6 +1183,7 @@ mod tests {
         }
         app.modifiers = iced::keyboard::Modifiers::COMMAND;
         let _ = app.update(Message::ClickOp(ids[0]));
+        app.drain_operation_preview();
         let both = app.machining_viewport();
         assert_eq!(both.path_cones.len(), 4);
         for (vertex, owner) in both.mesh_vertices.iter().zip(&outcome.stock_operations) {
@@ -1212,7 +1264,7 @@ mod tests {
             let draft = app.setup_draft.as_ref().unwrap();
             let (min, max) = app.controller.pending_setup_model_bounds(draft);
             let (min, max) = if mode == SetupOriginMode::StockBox {
-                draft.stock.resolve_bounds(min, max)
+                app.controller.pending_setup_stock_bounds(draft)
             } else {
                 (min, max)
             };
@@ -1512,6 +1564,7 @@ mod tests {
         let mut viewport = Viewport::new(
             &controller,
             None,
+            None,
             EntityKind::Face,
             None,
             &BTreeSet::new(),
@@ -1620,6 +1673,7 @@ mod tests {
         let viewport = Viewport::new(
             &controller,
             None,
+            None,
             EntityKind::Face,
             None,
             &BTreeSet::new(),
@@ -1697,6 +1751,7 @@ mod tests {
         controller.edit_setup(|setup| setup.model_instances = models);
         let mut viewport = Viewport::new(
             &controller,
+            None,
             None,
             EntityKind::Loop,
             None,
@@ -1880,6 +1935,7 @@ mod performance_tests {
             Viewport::new(
                 controller,
                 preview,
+                None,
                 EntityKind::Face,
                 hover,
                 &BTreeSet::new(),

@@ -57,8 +57,7 @@ impl SetupPickGeometry {
         if !controller.has_geometry() {
             return result;
         }
-        let (min, max) = controller.pending_setup_model_bounds(setup);
-        let (min, max) = setup.stock.resolve_bounds(min, max);
+        let (min, max) = controller.pending_setup_stock_bounds(setup);
         if (0..3).all(|i| min[i].is_finite() && max[i].is_finite() && min[i] <= max[i]) {
             let corners: Vec<_> = (0..8)
                 .map(|index| {

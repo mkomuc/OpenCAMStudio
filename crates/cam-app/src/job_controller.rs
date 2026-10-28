@@ -4,6 +4,11 @@ use crate::jobs::{JobInputs, JobProgress, JobStamp};
 use std::sync::Arc;
 
 impl AppController {
+    #[cfg(feature = "gui")]
+    pub(crate) fn operation_preview_cache(&self) -> cam_toolpath::OperationCache {
+        self.operation_cache.clone()
+    }
+
     /// Session revision increases through edits and undo/redo; it never rolls back.
     pub fn revision(&self) -> u64 {
         self.document_epoch
@@ -27,6 +32,18 @@ impl AppController {
         // here would leave pattern membership dangling.
         let document = self.document().clone();
         let (min, max) = self.stock_box();
+        let frame_error = self.validate_setup_frame(self.setup()).err().or_else(|| {
+            if self.setup().stock != Stock::PreviousSetup {
+                return None;
+            }
+            let at = document.setups.iter()
+                .position(|s| s.id == self.active_setup_id).unwrap();
+            let start = document.setups[..at].iter()
+                .rposition(|s| s.stock != Stock::PreviousSetup).unwrap_or(0);
+            document.setups[start..at].iter().find_map(|s| {
+                self.validate_setup_frame(s).err().map(|e| format!("{}: {e}", s.name))
+            })
+        });
         JobInputs {
             document: Arc::new(document),
             machine: self.machine.clone(),
@@ -36,7 +53,7 @@ impl AppController {
             max,
             spindle_rpm: self.defaults.spindle_rpm,
             tool_diameter: self.defaults.tool_diameter,
-            frame_error: self.validate_setup_frame(self.setup()).err(),
+            frame_error,
             preview_program: None,
             preview_resolution: None,
             simulation_accuracy: self.simulation_accuracy,
@@ -138,7 +155,7 @@ impl AppController {
             .map(|a| (a.id, a.revision, &a.source_fingerprint))
             .collect();
         let bytes = serde_json::to_vec(&(
-            inputs.document.setup(),
+            &inputs.document.setups,
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,
             &geometry.bindings,
@@ -224,6 +241,7 @@ impl AppController {
     pub(crate) fn current_toolpath_fingerprints(&self) -> BTreeMap<u32, String> {
         let document = self.document();
         let mut result = BTreeMap::new();
+        let mut previous_setup = String::new();
         for setup in &document.setups {
             // Common machining configuration; omit names and view state.
             let models: Vec<_> = document
@@ -247,6 +265,8 @@ impl AppController {
                 setup.id,
                 &setup.frame,
                 &setup.stock,
+                (setup.stock == Stock::PreviousSetup).then_some(&previous_setup),
+                document.stock_bounds_for(setup),
                 &setup.model_instances,
                 &setup.extra_origins,
                 setup.origin,
@@ -302,6 +322,7 @@ impl AppController {
                 );
                 result.insert(id, format!("{own}:{previous}"));
             }
+            previous_setup = previous;
         }
         result
     }

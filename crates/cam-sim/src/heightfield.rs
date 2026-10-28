@@ -10,6 +10,8 @@ use crate::{sweep::Sweep, ToolProfile};
 use std::collections::BTreeMap;
 #[path = "bounded.rs"]
 mod bounded;
+#[path = "stock_transfer.rs"]
+mod stock_transfer;
 use bounded::RemovedSpan;
 
 #[path = "surface.rs"]
@@ -90,6 +92,7 @@ pub struct Heightfield {
     // Winning cutter at each sample supplies contour geometry and operation ownership.
     winners: Vec<u32>,
     cuts: Vec<Sweep>,
+    inherited_operations: Vec<Option<u32>>,
     previous_layers: Vec<u32>,
     layers: Vec<CutLayer>,
     /// Sparse bounded removals for side-cutting teeth, keyed by XY sample.
@@ -112,6 +115,7 @@ impl Heightfield {
             z: vec![top as f32; nx * ny],
             winners: vec![u32::MAX; nx * ny],
             cuts: Vec::new(),
+            inherited_operations: Vec::new(),
             previous_layers: vec![u32::MAX; nx * ny],
             layers: Vec::new(),
             bounded: BTreeMap::new(),
@@ -124,6 +128,7 @@ impl Heightfield {
 
     pub(crate) fn storage_bytes(&self) -> usize {
         self.z.len() * 12
+            + self.inherited_operations.len() * std::mem::size_of::<Option<u32>>()
             + self.cuts.len() * std::mem::size_of::<Sweep>()
             + self.layers.len() * std::mem::size_of::<CutLayer>()
             + self
@@ -232,7 +237,10 @@ impl Heightfield {
 
     fn operation_at(&self, x: usize, y: usize) -> Option<u32> {
         let winner = self.winners[y * self.nx + x];
-        self.cuts.get(winner as usize).and_then(|cut| cut.operation)
+        self.cuts.get(winner as usize).map_or_else(
+            || self.inherited_operations.get(y * self.nx + x).copied().flatten(),
+            |cut| cut.operation,
+        )
     }
 
     /// The greatest remaining-stock height within `radius` of the swept XY path

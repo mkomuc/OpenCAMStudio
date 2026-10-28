@@ -35,7 +35,17 @@ draft and commit with OK or revert with Cancel.
 
 Stock supports a fixed-size box, positioned against the model along each axis,
 or a box with independent allowances on all six sides. Material is separate from
-stock shape. Model dimensions and containment feedback are in the right column.
+stock shape. After the first setup, **From previous setup** uses the remaining
+material after the immediately preceding setup's included operations. Generating
+or simulating recalculates the required earlier setups automatically, including
+chains of inherited stock. Reordering setups changes the source. Upstream edits,
+suppression and tool changes invalidate the inherited result. Separate box stock
+starts a new stock chain. Work axes can change between setups; transferred stock
+retains cavities when the workpiece is turned over. Resolve any upstream generation
+errors or simulation collisions before using its stock. The first setup needs box
+stock and cannot inherit stock.
+
+Model dimensions and containment feedback are in the right column.
 The center viewport contains the model and operation previews, including semantic
 selection highlights; setup controls and stock/WCS overlays stay out of it.
 
@@ -52,10 +62,11 @@ operations require the same axes when transferred between setups.
 
 ## Limits
 
-Stock is a box. Cylindrical stock, stock from another solid and transfer of remaining
-stock from a previous setup are not available. Material-removal simulation is
-per-setup and uses a heightfield; it does not verify fixtures, holders or an entire
-machine assembly.
+Initial stock is a box. Cylindrical stock and stock from another solid are not
+available. Material-removal simulation uses a heightfield with bounded material
+intervals for transferred cavities. Stock transfer is sampled at the simulation
+accuracy and stock bounds/heights use the enclosing original blank. Simulation
+does not verify fixtures, holders or an entire machine assembly.
 
 ## Browser visibility
 

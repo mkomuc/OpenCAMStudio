@@ -164,6 +164,9 @@ impl AppController {
         if self.setups().len() == 1 {
             return Err("Keep at least one setup in the project".into());
         }
+        if self.setups()[0].id == id && self.setups()[1].stock == Stock::PreviousSetup {
+            return Err("The next setup uses this setup's stock. Choose a box stock for it before deleting this setup".into());
+        }
         let removed = self
             .setups()
             .iter()
@@ -196,6 +199,11 @@ impl AppController {
             (at + 1 < self.setups().len()).then_some(at + 1)
         };
         if let Some(next) = next {
+            if (next == 0 && self.setups()[at].stock == Stock::PreviousSetup)
+                || (at == 0 && self.setups()[next].stock == Stock::PreviousSetup)
+            {
+                return;
+            }
             self.edit_document(|doc| doc.setups.swap(at, next));
             self.invalidate();
         }
@@ -223,6 +231,10 @@ impl AppController {
         let at = target - usize::from(from < target);
         if from == at {
             return Ok(());
+        }
+        let first = if at == 0 { from } else if from == 0 { 1 } else { 0 };
+        if self.setups()[first].stock == Stock::PreviousSetup {
+            return Err("The first setup needs box stock; it has no previous setup".into());
         }
         self.edit_document(move |doc| {
             let setup = doc.setups.remove(from);
@@ -938,6 +950,9 @@ impl AppController {
         }
         let (min, max) = self.pending_setup_model_bounds(&setup);
         match setup.stock {
+            Stock::PreviousSetup if self.setups()[0].id == setup.id => {
+                return Err("The first setup has no previous setup; choose box stock".into());
+            }
             Stock::FixedBox {
                 size,
                 model_position,
@@ -969,13 +984,14 @@ impl AppController {
             }
             _ => {}
         }
-        let (stock_min, stock_max) = setup.stock.resolve_bounds(min, max);
+        let (stock_min, stock_max) = self.pending_setup_stock_bounds(&setup);
         if (0..3).any(|i| {
             !stock_min[i].is_finite() || !stock_max[i].is_finite() || stock_max[i] <= stock_min[i]
         }) {
             return Err("Stock must have finite, positive dimensions on all axes".into());
         }
-        if !self.geometry_state().instances.is_empty()
+        if setup.stock != Stock::PreviousSetup
+            && !self.geometry_state().instances.is_empty()
             && (0..3).any(|i| stock_min[i] > min[i] + 1e-6 || stock_max[i] < max[i] - 1e-6)
         {
             return Err("Stock does not contain the selected machining model".into());
@@ -1076,6 +1092,10 @@ impl AppController {
     pub fn setup_geometry_state(&self) -> Result<cam_model::GeometryState, String> {
         self.validate_setup_frame(self.setup())?;
         crate::cad_operations::geometry_for_setup(self.document())
+    }
+
+    pub fn pending_setup_stock_bounds(&self, setup: &Setup) -> ([f64; 3], [f64; 3]) {
+        self.document().stock_bounds_for(setup)
     }
 
     pub fn setup_model_bounds(&self) -> ([f64; 3], [f64; 3]) {

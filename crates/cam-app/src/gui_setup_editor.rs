@@ -146,10 +146,20 @@ impl App {
                     cam_model::Stock::FixedBox { .. } => StockEditorKind::FixedBox,
                     cam_model::Stock::RelativeBox { .. } => StockEditorKind::RelativeBox,
                     cam_model::Stock::BoundingBox { .. } => StockEditorKind::LegacyBox,
+                    cam_model::Stock::PreviousSetup => StockEditorKind::PreviousSetup,
                 };
                 list = list.push(
                     pick_list(
-                        &StockEditorKind::ALL[..],
+                        if self
+                            .controller
+                            .setups()
+                            .first()
+                            .is_some_and(|s| s.id != draft.id)
+                        {
+                            &StockEditorKind::ALL[..]
+                        } else {
+                            &StockEditorKind::ALL[..3]
+                        },
                         Some(kind),
                         Message::SetupStockKindChanged,
                     )
@@ -159,6 +169,18 @@ impl App {
                     .width(Length::Fill),
                 );
                 match draft.stock {
+                    cam_model::Stock::PreviousSetup => {
+                        let previous = self
+                            .controller
+                            .setups()
+                            .iter()
+                            .take_while(|s| s.id != draft.id)
+                            .last();
+                        list = list.push(text(previous.map_or_else(
+                            || "The first setup needs box stock.".into(),
+                            |s| format!("Uses the remaining material after {}. Included operations are recalculated when generating or simulating.", s.name),
+                        )).size(11).color(INSPECTOR_MUTED));
+                    }
                     cam_model::Stock::FixedBox {
                         size,
                         model_position,
@@ -243,10 +265,12 @@ impl App {
                     .size(11)
                     .color(INSPECTOR_MUTED),
                 );
-                let (stock_min, stock_max) = draft.stock.resolve_bounds(model_min, model_max);
-                if (0..3).any(|i| {
-                    stock_min[i] > model_min[i] + 1e-6 || stock_max[i] < model_max[i] - 1e-6
-                }) {
+                let (stock_min, stock_max) = self.controller.pending_setup_stock_bounds(draft);
+                if draft.stock != cam_model::Stock::PreviousSetup
+                    && (0..3).any(|i| {
+                        stock_min[i] > model_min[i] + 1e-6 || stock_max[i] < model_max[i] - 1e-6
+                    })
+                {
                     list = list.push(
                         text("Stock does not contain the selected machining model.")
                             .size(11)

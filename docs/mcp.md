@@ -11,6 +11,11 @@ CAD bodies or faces using a ball nose cutter. Its `params` include `stepover`,
 `plunge_feed`. Body/face selection uses the same multi-reference CAD selection
 contract as Adaptive.
 
+For [stock from the previous setup](multi-setup.md), activate a setup after the
+first and call `update_setup` with `{"patch":{"stock":"PreviousSetup"}}`.
+Generation and simulation recalculate the preceding setup's included operations.
+`get_setup_bounds` reports the enclosing original blank in the active setup's axes.
+
 ## Build and launch
 
 ```sh

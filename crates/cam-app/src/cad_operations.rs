@@ -317,8 +317,7 @@ pub(crate) fn model_bounds(geometry: &GeometryState, setup: &Setup) -> ([f64; 3]
 }
 
 fn stock_top(document: &Document) -> f64 {
-    let (min, max) = model_bounds(&document.geometry, document.setup());
-    document.setup().stock.resolve_bounds(min, max).1[2]
+    document.stock_bounds_for(document.setup()).1[2]
 }
 /// Validate the complete selection before strategy extraction. A mixed geometry
 /// field cannot become a valid operation by dropping its incompatible members.

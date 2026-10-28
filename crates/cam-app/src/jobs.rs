@@ -14,7 +14,7 @@ use cam_toolpath::{
 use std::sync::{mpsc, Arc, Mutex};
 
 #[path = "job_simulation.rs"]
-mod simulation;
+pub(crate) mod simulation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobStamp {
@@ -79,7 +79,7 @@ impl JobInputs {
         cancel: &CancelToken,
         cache: &mut OperationCache,
         progress: &Progress,
-        simulation: &mut SimulationCache,
+        simulation: &mut simulation::StockSimulationCache,
     ) -> RunOutcome {
         cache.reset_stats();
         if cancel.is_cancelled() {
@@ -88,7 +88,7 @@ impl JobInputs {
                 ..Default::default()
             };
         }
-        let job = if let Some(program) = &self.preview_program {
+        let mut job = if let Some(program) = &self.preview_program {
             cam_toolpath::JobResult {
                 program: program.clone(),
                 diagnostics: Vec::new(),
@@ -208,7 +208,14 @@ impl JobInputs {
             scene.add_open_path(path.points(), PART);
         }
         let stock = if completion == JobCompletion::Complete && !cancel.is_cancelled() {
-            self.simulate_stock(&job.program, cancel, progress, simulation)
+            match self.simulate_stock(&job.program, cancel, cache, progress, simulation) {
+                Ok(stock) => stock,
+                Err(error) => {
+                    completion = JobCompletion::Failed;
+                    job.diagnostics.push(error);
+                    simulation::StockSimulation::default()
+                }
+            }
         } else {
             simulation::StockSimulation::default()
         };
@@ -224,6 +231,7 @@ impl JobInputs {
             program: job.program,
             diagnostics: job.diagnostics,
             scene,
+            initial_stock: stock.initial,
             stock_vertices: stock.vertices,
             stock_machined: stock.machined,
             stock_operations: stock.operations,
@@ -252,7 +260,7 @@ pub(crate) struct JobOutput {
 type TestHook = Arc<dyn Fn(&CancelToken) + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct JobService {
-    simulation: Arc<Mutex<SimulationCache>>,
+    simulation: Arc<Mutex<simulation::StockSimulationCache>>,
     serial: u64,
     expected: Option<JobStamp>,
     running: Option<Running>,

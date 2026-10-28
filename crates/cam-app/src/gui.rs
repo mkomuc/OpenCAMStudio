@@ -54,6 +54,8 @@ mod processing_time_view;
 #[path = "gui_output.rs"]
 mod output_view;
 use jobs_view::ToolpathAction;
+#[path = "gui_backplot_preview.rs"]
+mod backplot_preview_view;
 #[path = "gui_simulation.rs"]
 mod simulation_view;
 use simulation_view::{SimulationOption, SimulationPlayer, SimulationTab};
@@ -674,11 +676,12 @@ impl std::fmt::Display for SetupEditorTab {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::enum_variant_names)] // All supported stock editor modes are boxes.
+#[allow(clippy::enum_variant_names)]
 enum StockEditorKind {
     FixedBox,
     RelativeBox,
     LegacyBox,
+    PreviousSetup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -718,7 +721,12 @@ impl std::fmt::Display for BoxAnchor {
 }
 
 impl StockEditorKind {
-    const ALL: [Self; 3] = [Self::RelativeBox, Self::FixedBox, Self::LegacyBox];
+    const ALL: [Self; 4] = [
+        Self::RelativeBox,
+        Self::FixedBox,
+        Self::LegacyBox,
+        Self::PreviousSetup,
+    ];
 }
 
 impl std::fmt::Display for StockEditorKind {
@@ -727,6 +735,7 @@ impl std::fmt::Display for StockEditorKind {
             Self::FixedBox => "Fixed-size box",
             Self::RelativeBox => "Relative to model bounds",
             Self::LegacyBox => "Legacy box (existing project)",
+            Self::PreviousSetup => "From previous setup",
         })
     }
 }
@@ -2157,6 +2166,7 @@ struct App {
     pending_processing_time: Option<processing_time_view::PendingProcessingTime>,
     processing_time_dialog: Option<processing_time_view::ProcessingTimeDialog>,
     simulation: Option<SimulationPlayer>,
+    operation_preview: backplot_preview_view::OperationPreview,
     op_menu_pos: iced::Point,
     /// The project tool (by number) whose right-click "Add to library" menu is open,
     /// and where to anchor it. `None` unless a menu is open.
@@ -2650,6 +2660,7 @@ enum Message {
     PollCadImport,
     PollRun,
     CancelRun,
+    CancelOperationPreview,
     CancelCadImport,
     NoticeDismissed,
     NoticeBackdrop,
@@ -3499,6 +3510,7 @@ impl App {
             pending_processing_time: None,
             processing_time_dialog: None,
             simulation: None,
+            operation_preview: Default::default(),
             op_menu_pos: iced::Point::ORIGIN,
             open_tool_menu: None,
             tool_menu_pos: iced::Point::ORIGIN,
@@ -3684,6 +3696,7 @@ impl App {
             self.simulation = None;
         }
         self.sync_inspector_visibility();
+        self.sync_operation_preview();
         task
     }
 
@@ -4542,6 +4555,7 @@ impl App {
             Message::SetupStockKindChanged(kind) => {
                 if let Some(draft) = &mut self.setup_draft {
                     let stock = match kind {
+                        StockEditorKind::PreviousSetup => cam_model::Stock::PreviousSetup,
                         StockEditorKind::FixedBox => match draft.stock {
                             cam_model::Stock::FixedBox { .. } => draft.stock,
                             _ => cam_model::Stock::FixedBox {
@@ -4573,6 +4587,7 @@ impl App {
                 self.setup_values.insert(20 + index, value.clone());
                 if let (Some(draft), Ok(v)) = (&mut self.setup_draft, value.parse::<f64>()) {
                     match &mut draft.stock {
+                        cam_model::Stock::PreviousSetup => {}
                         cam_model::Stock::FixedBox {
                             size,
                             model_position,
@@ -5066,9 +5081,7 @@ impl App {
                 self.operation_geometry = None;
                 self.operation_binding_preview = None;
                 self.operation_draft = None;
-                if let Selection::Operation(id) = self.controller.selection() {
-                    self.begin_operation_draft(id);
-                }
+                self.inspector_active = false;
                 self.status = "Operation changes cancelled.".into();
             }
             Message::NewProject => {
@@ -5212,6 +5225,7 @@ impl App {
                 return self.show_next_notice();
             }
             Message::PollRun => {
+                self.poll_operation_preview();
                 if self.controller.poll_run() {
                     self.record_status_messages();
                     self.report_run();
@@ -5252,12 +5266,17 @@ impl App {
                     }
                 }
             }
+            Message::CancelOperationPreview => {
+                self.cancel_operation_preview();
+                self.status = "Operation preview cancelled.".into();
+            }
             Message::CancelRun => {
                 self.pending_toolpath_export = None;
                 self.pending_simulation = None;
                 self.pending_processing_time = None;
                 self.processing_time_dialog = None;
                 self.controller.cancel_run();
+                self.cancel_operation_preview();
                 self.status = "Run cancelled. Run again before exporting.".into();
             }
             Message::CancelCadImport => {
@@ -7133,7 +7152,7 @@ impl App {
             } else {
                 iced::Subscription::none()
             },
-            if self.controller.run_needs_poll() {
+            if self.controller.run_needs_poll() || self.operation_preview.needs_poll() {
                 iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::PollRun)
             } else {
                 iced::Subscription::none()
@@ -11719,6 +11738,7 @@ impl Viewport {
     fn new(
         controller: &AppController,
         preview: Option<&crate::RunOutcome>,
+        operation_preview: Option<&crate::RunOutcome>,
         cad_filter: EntityKind,
         cad_hover: Option<&EntityRef>,
         cad_hidden: &BTreeSet<InstanceId>,
@@ -11756,7 +11776,7 @@ impl Viewport {
         let outcome = if editor_geometry.is_some() {
             None
         } else {
-            preview.or_else(|| controller.outcome())
+            preview.or(operation_preview).or_else(|| controller.outcome())
         };
         let mut scene = match outcome {
             Some(outcome) => outcome.scene.clone(),
@@ -11979,13 +11999,27 @@ impl Viewport {
                 pick_z,
             );
         }
-        // Setup selection shows its configured, uncut stock. Operation selection
-        // and playback show the remaining material from the simulation.
+        // Browser stock ends at the last selected operation in execution order.
+        // Never flash a later operation's removal while its preview is pending.
         // Transparent stock is drawn separately after the opaque CAD surfaces.
-        let stock_outcome = if controller.selection() == Selection::Setup && preview.is_none() {
+        let stock_outcome = if preview.is_some() {
+            outcome
+        } else if focus_ops.is_empty() || editor_geometry.is_some() {
             None
         } else {
-            outcome
+            operation_preview.or_else(|| {
+                let operations = &controller.document().setup().operations;
+                let through = operations.iter().rposition(|op| focus_ops.contains(&op.id()))?;
+                let expected: BTreeSet<_> = operations[..=through].iter()
+                    .filter(|op| controller.document().operation_is_included(
+                        controller.active_setup_id(), op.id()))
+                    .map(Operation::id).collect();
+                outcome.filter(|result| {
+                    let actual: BTreeSet<_> = result.program.steps().iter()
+                        .filter_map(Step::tag).map(|tag| tag.op_id).collect();
+                    actual == expected
+                })
+            })
         };
         let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_outcome) {
             (true, Some(outcome))

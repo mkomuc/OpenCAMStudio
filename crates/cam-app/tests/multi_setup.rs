@@ -57,6 +57,37 @@ fn new_app() -> AppController {
 }
 
 #[test]
+fn inherited_stock_persists_and_cannot_lose_its_first_source() {
+    let mut app = new_app();
+    let first = app.active_setup_id();
+    let mut settings = app.document().setup().clone();
+    settings.stock = Stock::PreviousSetup;
+    assert!(app.apply_setup_settings(settings).unwrap_err().contains("first setup"));
+    let second = app.add_setup();
+    let mut settings = app.document().setup().clone();
+    settings.stock = Stock::PreviousSetup;
+    app.apply_setup_settings(settings).unwrap();
+    assert_eq!(app.stock_box(), ([0.; 3], [50., 50., 20.]));
+    assert!(app.undo());
+    assert_ne!(app.document().setup().stock, Stock::PreviousSetup);
+    assert!(app.redo());
+    assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
+    assert!(app.reorder_setup_to(second, Some(first)).is_err());
+    app.move_setup(second, true);
+    assert_eq!(app.setups()[0].id, first);
+    assert!(app.delete_setup(first).is_err());
+
+    let path = std::env::temp_dir().join(format!("inherited-stock-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = new_app();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    reopened.activate_setup(second).unwrap();
+    assert_eq!(reopened.document().setup().stock, Stock::PreviousSetup);
+    assert_eq!(reopened.stock_box(), app.stock_box());
+}
+
+#[test]
 fn setups_keep_independent_settings_and_operations_across_switch_save_and_history() {
     let mut app = new_app();
     let first = app.active_setup_id();

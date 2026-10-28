@@ -5,6 +5,74 @@ use cam_sim::{
 use std::cell::Cell;
 
 #[test]
+fn inherited_stock_is_used_for_collisions_rewind_and_changed_source() {
+    let min = [0., 0., -5.];
+    let max = [10., 10., 0.];
+    let options = SimOptions {
+        resolution: 0.2,
+        tool_radius: 0.5,
+    };
+    let mut stock = Heightfield::new([0., 0.], [10., 10.], options.resolution, 0.);
+    stock.lower_rect([1., 1.], [9., 9.], -3.);
+    let program = ProgramBuilder::new()
+        .op(2)
+        .feed(100.)
+        .rapid(Point3::new(3., 5., 2.), MoveKind::Link)
+        .rapid(Point3::new(3., 5., -2.), MoveKind::Link)
+        .linear(Point3::new(7., 5., -4.), MoveKind::Cutting)
+        .build();
+    let mut cache = SimulationCache::default();
+    let simulate = |cache: &mut SimulationCache, program: &Program, key: &str| {
+        cache
+            .simulate_from_stock_controlled(
+                program,
+                min,
+                max,
+                &options,
+                &[],
+                &stock,
+                key,
+                &|| false,
+                |_, _| {},
+            )
+            .unwrap()
+    };
+    let full = simulate(&mut cache, &program, "first source");
+    assert!(full.collisions.is_empty());
+    assert!(full.field.sample(7., 5.) < -3.);
+    let prefix = Program {
+        steps: program.steps[..2].to_vec(),
+    };
+    let rewind = simulate(&mut cache, &prefix, "first source");
+    assert_eq!(rewind.field.sample(7., 5.), -3.);
+    assert_eq!(
+        simulate(&mut cache, &program, "first source")
+            .field
+            .to_solid_mesh(-5.),
+        full.field.to_solid_mesh(-5.)
+    );
+
+    let virgin = Heightfield::new([0., 0.], [10., 10.], options.resolution, 0.);
+    let changed = cache
+        .simulate_from_stock_controlled(
+            &program,
+            min,
+            max,
+            &options,
+            &[],
+            &virgin,
+            "edited source",
+            &|| false,
+            |_, _| {},
+        )
+        .unwrap();
+    assert!(
+        !changed.collisions.is_empty(),
+        "a changed upstream blank must invalidate checkpoints"
+    );
+}
+
+#[test]
 fn circular_wall_vertices_follow_the_cutter_rather_than_the_grid() {
     for resolution in [0.5, 0.25] {
         let mut field = Heightfield::new([0., 0.], [20., 20.], resolution, 0.);
