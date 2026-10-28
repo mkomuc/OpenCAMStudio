@@ -544,6 +544,88 @@ mod tests {
     }
 
     #[test]
+    fn feed_height_below_stock_preserves_safe_pocket_entry_with_a_shifted_wcs() {
+        use cam_cldata::{MoveKind, Step};
+        use cam_geo::{Contour, Point};
+        use cam_model::{
+            HeightDefinition, HeightPlaneKind as P, HeightReference as R, OperationHeightSettings,
+            PocketOp,
+        };
+        let mut app = drilled_blank();
+        app.edit_tool(0, |tool| {
+            tool.kind = cam_model::ToolKind::EndMill;
+            tool.flute_length = 30.;
+        });
+        app.edit_setup(|setup| {
+            setup.origin[2] = 20.;
+            setup.stock = Stock::BoundingBox {
+                x_offset: 10.,
+                y_offset: 10.,
+                top: 33.,
+                thickness: 17.,
+            };
+            setup.operations = vec![Operation::Pocket(PocketOp {
+                id: 1,
+                tool: 1,
+                work_offset: 1,
+                spindle_rpm: 1000.,
+                tool_preset: None,
+                cooling: Default::default(),
+                entry_feeds: Default::default(),
+                boundary: Contour::new(vec![
+                    Point::new(-6., -6.),
+                    Point::new(6., -6.),
+                    Point::new(6., 6.),
+                    Point::new(-6., 6.),
+                ]),
+                islands: vec![],
+                depth: 4.,
+                start: None,
+                end: None,
+                clear: cam_model::ClearParams {
+                    stepdown: 2.,
+                    overlap: 0.4,
+                    feed: 300.,
+                    plunge_feed: 100.,
+                    ..Default::default()
+                },
+            })];
+            let mut settings = OperationHeightSettings::default();
+            *settings.definition_mut(P::Top) = HeightDefinition::new(R::Origin, 0.);
+            *settings.definition_mut(P::Bottom) = HeightDefinition::new(R::Plane(P::Top), -4.);
+            setup.height_settings.insert(1, settings);
+        });
+        let heights = app.document().setup().height_settings[&1]
+            .resolve(app.document(), &app.document().setup().operations[0])
+            .unwrap();
+        assert_eq!(heights.feed, Some(25.));
+        assert_eq!(heights.stock_top, 33.);
+        let result = app.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+        assert!(result.program.steps().iter().any(|step| {
+            matches!(step, Step::Linear { to, tag, .. }
+                if tag.kind == MoveKind::Plunge && to.z == 16.)
+        }));
+        let program = result.program.clone();
+        assert_eq!(app.run(&CancelToken::new()).program, program);
+        let mut playback = app.job_inputs();
+        playback.preview_program = Some(program);
+        let result = playback.execute(
+            &CancelToken::new(),
+            &mut OperationCache::default(),
+            &Progress::default(),
+            &mut StockSimulationCache::default(),
+        );
+        assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+    }
+
+    #[test]
     fn parallel_links_use_clearance_only_when_remaining_stock_blocks_them() {
         use cam_cldata::{MoveKind, Point3, Step, Tag};
         let mut app = drilled_blank();

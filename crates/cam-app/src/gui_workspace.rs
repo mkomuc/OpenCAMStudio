@@ -151,6 +151,9 @@ pub(super) struct CadSceneKey {
 impl App {
     pub(super) fn reset_model_browser(&mut self) {
         self.model_view = Some(TreeNode::Models);
+        self.browser_view = TreeNode::Models;
+        self.models_collapsed = true;
+        self.setups_collapsed = false;
         self.cad_hidden.clear();
         self.hidden_assets.clear();
         self.collapsed_assets.clear();
@@ -234,6 +237,7 @@ impl App {
                     scale: self.settings.view.origin_marker_scale,
                     interactive: !self.in_origin_pick() && self.operation_position_pick.is_none(),
                     browser_overlay_width: viewport.browser_overlay_width,
+                    browser_overlay_height: viewport.browser_overlay_height,
                 });
         let labels = grid_view::GridLabels {
             camera: viewport.camera(),
@@ -256,51 +260,47 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fill)
         ];
+        // Keep the browser at a stable sibling index. Optional scene overlays
+        // appear/disappear on selection; shifting the browser would discard its
+        // mouse-area state between the first and second click.
+        let mut overlays = iced::widget::stack![Space::new().width(Length::Fill).height(Length::Fill)];
         if let Some(preview) = height_preview {
-            layers = layers.push(
+            overlays = overlays.push(
                 canvas::Canvas::new(preview)
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
         }
         if let Some(workpiece) = workpiece {
-            layers = layers.push(
+            overlays = overlays.push(
                 canvas::Canvas::new(workpiece)
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
         }
         if let Some(tabs) = tab_overlay {
-            layers = layers.push(
+            overlays = overlays.push(
                 canvas::Canvas::new(tabs)
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
         }
         if let Some(sides) = side_overlay {
-            layers = layers.push(
+            overlays = overlays.push(
                 canvas::Canvas::new(sides)
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
         }
+        layers = layers.push(overlays.width(Length::Fill).height(Length::Fill));
         if self.show_project_browser {
             let browser =
                 container(column![text(self.project_title()).size(13), self.project_tree()].spacing(6))
                     .width(Length::Fixed(self.project_px.clamp(220., 360.)))
                     .height(Length::Fill)
+                    .max_height(self.project_browser_height())
                     .padding(8)
-                    .style(|_| container::Style {
-                        background: Some(Background::Color(Color::from_rgba(
-                            0.14, 0.16, 0.18, 0.96,
-                        ))),
-                        border: Border {
-                            color: palette::SEPARATOR,
-                            width: 1.,
-                            radius: 5.0.into(),
-                        },
-                        ..Default::default()
-                    });
+                    .style(|_| container::Style::default());
             layers = layers.push(container(browser).padding(8).height(Length::Fill));
         }
         column![
@@ -657,6 +657,7 @@ impl App {
         } else {
             0.
         };
+        viewport.browser_overlay_height = self.project_browser_height();
         viewport.planar_features = if self.simulation.is_some() {
             Vec::new()
         } else {

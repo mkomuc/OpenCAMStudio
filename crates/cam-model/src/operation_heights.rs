@@ -449,7 +449,6 @@ impl Document {
                 | crate::ExtractionRecipe::ChamferFaces
                 | crate::ExtractionRecipe::EngravePath
                 | crate::ExtractionRecipe::CarveRegion
-                | crate::ExtractionRecipe::PocketBoundary
                 | crate::ExtractionRecipe::BoreCylinders { .. }
                 | crate::ExtractionRecipe::ThreadCylinders { .. }
         ) {
@@ -470,7 +469,9 @@ impl Document {
                     })
                     .collect()
             }
-            crate::ExtractionRecipe::ProfileContours => binding.selected.clone(),
+            crate::ExtractionRecipe::ProfileContours | crate::ExtractionRecipe::PocketBoundary => {
+                binding.selected.clone()
+            }
             _ => vec![],
         };
         if references.is_empty()
@@ -932,6 +933,78 @@ mod tests {
             kind: EntityKind::Body,
             id: 1,
         }
+    }
+    #[test]
+    fn pocket_contour_height_follows_placement_and_setup_axes_independently_of_wcs() {
+        let mut doc = doc();
+        let mut reference = add_body(&mut doc);
+        reference.kind = EntityKind::Loop;
+        reference.id = 4;
+        let topology = std::sync::Arc::make_mut(&mut doc.geometry.assets[0].topology);
+        topology.faces.push(CadFace {
+            id: 3,
+            body_id: 1,
+            surface: CadSurface::Plane {
+                origin: [0.; 3],
+                normal: [0., 0., -1.],
+            },
+            loop_ids: vec![4],
+            bounds: [[0.; 3], [20., 10., 0.]],
+        });
+        topology.loops.push(CadLoop {
+            id: 4,
+            body_id: 1,
+            face_id: 3,
+            edge_uses: vec![],
+            is_outer: false,
+        });
+        doc.geometry.bindings.insert(
+            1,
+            GeometryBinding {
+                selected: vec![reference],
+                recipe: ExtractionRecipe::PocketBoundary,
+                heights: CuttingHeights {
+                    top: 0.,
+                    bottom: -4.,
+                },
+                overrides: GeometryOverrides::default(),
+                status: ResolutionStatus::Resolved,
+                resolved_fingerprint: None,
+            },
+        );
+        let mut settings = OperationHeightSettings::default();
+        *settings.definition_mut(HeightPlaneKind::Top) =
+            HeightDefinition::new(HeightReference::SelectedContours, 0.);
+        *settings.definition_mut(HeightPlaneKind::Bottom) =
+            HeightDefinition::new(HeightReference::Plane(HeightPlaneKind::Top), -4.);
+        doc.setup_mut().stock = Stock::BoundingBox {
+            x_offset: 0.,
+            y_offset: 0.,
+            top: 40.,
+            thickness: 45.,
+        };
+        let resolve = |doc: &Document| settings.resolve(doc, &doc.setup().operations[0]).unwrap();
+        doc.geometry.instances[0].placement.translation = [0., 0., 20.];
+        assert_eq!(resolve(&doc).top, 20.);
+        assert_eq!(resolve(&doc).bottom, 16.);
+        doc.setup_mut().origin[2] = 20.;
+        assert_eq!(resolve(&doc).top - doc.setup().origin[2], 0.);
+        assert_eq!(resolve(&doc).bottom - doc.setup().origin[2], -4.);
+        doc.geometry.instances[0].placement.translation = [0., 30., 20.];
+        doc.setup_mut().frame.world_from_setup.rotation =
+            [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
+        // This loop is perpendicular to world Z, so rotating setup Z into world Y
+        // must reject it rather than reuse the cached, apparently planar height.
+        assert!(settings
+            .resolve(&doc, &doc.setup().operations[0])
+            .unwrap_err()
+            .contains("one plane"));
+        doc.setup_mut().frame.world_from_setup.rotation = RigidTransform::default().rotation;
+        doc.geometry.bindings.get_mut(&1).unwrap().selected[0].revision = 2;
+        assert!(settings
+            .resolve(&doc, &doc.setup().operations[0])
+            .unwrap_err()
+            .contains("missing or changed"));
     }
     #[test]
     fn selected_chain_height_uses_source_plane_in_setup_axes_instead_of_cached_wall_bottom() {

@@ -2086,6 +2086,9 @@ struct App {
     hidden_assets: BTreeSet<u64>,
     /// None scopes display and picking to the active setup.
     model_view: Option<TreeNode>,
+    browser_view: TreeNode,
+    models_collapsed: bool,
+    setups_collapsed: bool,
     hidden_setups: BTreeSet<u64>,
     hidden_ops: BTreeSet<u32>,
     panes: pane_grid::State<Pane>,
@@ -3484,6 +3487,9 @@ impl App {
             tools_expanded: false,
             hidden_assets: BTreeSet::new(),
             model_view: Some(TreeNode::Models),
+            browser_view: TreeNode::Models,
+            models_collapsed: true,
+            setups_collapsed: false,
             hidden_setups: BTreeSet::new(),
             hidden_ops: BTreeSet::new(),
             panes: initial_panes(),
@@ -4837,6 +4843,9 @@ impl App {
                 } else {
                     let models = self.selected_setup_models();
                     let id = self.controller.add_setup_with_models(models);
+                    self.workspace = Workspace::Machining;
+                    self.active_tab = RibbonTab::Machining;
+                    self.machining_tab = RibbonTab::Machining;
                     self.expanded_setups.insert(id);
                     self.controller.activate_setup(id).ok();
                     self.controller.select(Selection::Setup);
@@ -4935,7 +4944,7 @@ impl App {
                 self.operation_geometry = None;
                 self.operation_binding_preview = None;
                 if self.focus_ops.is_empty() {
-                    self.model_view = Some(TreeNode::Models);
+                    self.restore_browser_view();
                 } else {
                     // Selecting an operation leaves the model browser and returns
                     // to its machining backplot. Keeping Models active hides every
@@ -8746,6 +8755,9 @@ impl App {
         self.pending_processing_time = None;
         self.processing_time_dialog = None;
         self.controller.open_project(path)?;
+        self.workspace = Workspace::Machining;
+        self.active_tab = RibbonTab::Machining;
+        self.machining_tab = RibbonTab::Machining;
         self.status_messages = StatusMessages::default();
         self.reset_model_browser();
         self.planar_selection.clear();
@@ -11717,6 +11729,10 @@ const RESIZE_BAND: f32 = PANE_RESIZE_LEEWAY + 2.0;
 
 /// Whether `pos` (absolute) is within [`RESIZE_BAND`] of any edge of `bounds` —
 /// i.e. where a press likely means "drag the pane divider", not "orbit".
+fn browser_region_contains(point: iced::Point, bounds: iced::Rectangle, width: f32, height: f32) -> bool {
+    browser_contains(point, bounds, width) && point.y <= bounds.y + 8. + height.min(bounds.height - 16.)
+}
+
 fn browser_contains(point: iced::Point, bounds: iced::Rectangle, width: f32) -> bool {
     width > 0.
         && point.x >= bounds.x + 8.
@@ -11818,6 +11834,7 @@ struct Viewport {
     highlight_features: bool,
     snap_marker_scale: f32,
     browser_overlay_width: f32,
+    browser_overlay_height: f32,
     planar_features: Vec<LoopRef>,
     planar_outlines: Arc<Vec<(LoopRef, Vec<Vertex>)>>,
     vertices: Arc<Vec<Vertex>>,
@@ -12226,6 +12243,7 @@ impl Viewport {
             highlight_features: prefs.snapping.highlight_features,
             snap_marker_scale: prefs.snapping.marker_scale,
             browser_overlay_width: 0.,
+            browser_overlay_height: f32::INFINITY,
             planar_features: Vec::new(),
             planar_outlines: Arc::new(
                 controller
@@ -12598,7 +12616,7 @@ impl shader::Program<Message> for Viewport {
             _ => cursor.position(),
         };
         if position
-            .is_some_and(|position| browser_contains(position, bounds, self.browser_overlay_width))
+            .is_some_and(|position| browser_region_contains(position, bounds, self.browser_overlay_width, self.browser_overlay_height))
         {
             state.drag = None;
             state.last = None;
@@ -12897,7 +12915,7 @@ impl shader::Program<Message> for Viewport {
         }
         if self.operation_position_picking {
             if let Some(point) = cursor.position_over(bounds)
-                .filter(|point| !browser_contains(*point, bounds, self.browser_overlay_width))
+                .filter(|point| !browser_region_contains(*point, bounds, self.browser_overlay_width, self.browser_overlay_height))
                 .and_then(|point| self.operation_position_at(point, bounds))
             {
                 let point = self.setup_geometry.to_world(point);
@@ -13812,7 +13830,7 @@ mod multi_setup_draft_tests {
         assert!(app.pattern_draft.is_none());
 
         app.inspector_enabled = false;
-        send(&mut app, Message::EditPattern(pattern.id));
+        send(&mut app, Message::Tree(TreeMessage::DoubleClick(TreeNode::Pattern(pattern.id))));
         assert!(app.pane_handle(Pane::Inspector).is_some());
         send(&mut app, Message::PatternValue(2, "35".into()));
         send(&mut app, Message::PatternCancel);
@@ -13863,6 +13881,8 @@ mod multi_setup_draft_tests {
             Message::Tree(TreeMessage::Command(Box::new(Message::SetupNew))),
         );
         assert_ne!(app.controller.active_setup_id(), id);
+        assert_eq!(app.active_tab, RibbonTab::Machining);
+        assert_eq!(app.machining_tab, RibbonTab::Machining);
         assert!(app.setup_draft.is_some());
         assert!(app.pane_handle(Pane::Inspector).is_some());
     }

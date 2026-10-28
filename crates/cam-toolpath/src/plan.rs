@@ -308,7 +308,11 @@ fn build_job_with_compute(
         };
         if let Some(Ok(heights)) = configured {
             if let Some(feed_z) = heights.feed {
-                match apply_feed_height(&result.program, feed_z, operation) {
+                // A contour can be below the stock top (for example an underside
+                // loop). Its feed plane does not prove the material above it is
+                // clear. Only turn the approach into a rapid through known air.
+                let air_floor = feed_z.max(heights.stock_top);
+                match apply_feed_height(&result.program, air_floor, operation) {
                     Ok(program) => result.program = program,
                     Err(reason) => {
                         result.program = Program::new();

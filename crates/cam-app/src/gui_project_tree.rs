@@ -2,10 +2,10 @@
 use super::*;
 use iced::widget::column;
 
-const TREE_ROW_H: f32 = 26.0;
+const TREE_ROW_H: f32 = 30.0;
 const TREE_TEXT_SIZE: u32 = 12;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TreeNode {
     Models,
     Setups,
@@ -26,6 +26,9 @@ pub(super) struct TreeDrag {
 #[derive(Clone, Debug)]
 pub(super) enum TreeMessage {
     Press(TreeNode),
+    View(TreeNode),
+    ToggleModels,
+    ToggleSetups,
     Hover(TreeNode, bool),
     Leave(TreeNode),
     Open(TreeNode),
@@ -37,6 +40,42 @@ pub(super) enum TreeMessage {
 }
 
 impl App {
+    /// The radio selection survives temporary operation and geometry selections.
+    pub(super) fn restore_browser_view(&mut self) {
+        match self.browser_view {
+            TreeNode::Setup(id) if self.controller.setups().iter().any(|s| s.id == id) => {
+                let _ = self.controller.activate_setup(id);
+                self.model_view = None;
+            }
+            TreeNode::Asset(id) if self.controller.geometry_state().assets.iter().any(|a| a.id == id) => self.model_view = Some(TreeNode::Asset(id)),
+            TreeNode::Model(id) if self.controller.geometry_state().instances.iter().any(|i| i.id == id) => self.model_view = Some(TreeNode::Model(id)),
+            _ => { self.browser_view = TreeNode::Models; self.model_view = Some(TreeNode::Models); }
+        }
+    }
+
+    fn browser_radio(&self, node: TreeNode) -> Element<'_, Message> {
+        tooltip(
+            iced::widget::radio("", node, Some(self.browser_view), |node| Message::Tree(TreeMessage::View(node)))
+                .size(14).spacing(0),
+            text("Use this view when no operation is selected").size(12),
+            tooltip::Position::Right,
+        ).into()
+    }
+
+    fn browser_visibility(&self, visible: bool, message: Message) -> Element<'_, Message> {
+        let slash = if visible { "" } else { "<path d='M3 3l18 18'/>" };
+        let image = format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#c6cbd2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z'/><circle cx='12' cy='12' r='3'/>{slash}</svg>");
+        tooltip(button(iced::widget::svg(iced::widget::svg::Handle::from_memory(image.into_bytes())).width(16).height(16))
+            .width(22).height(22).padding(3).style(button::text).on_press(message),
+            text(if visible { "Hide in viewport" } else { "Show in viewport" }).size(12), tooltip::Position::Right).into()
+    }
+
+    fn browser_disclosure(&self, expanded: bool, message: Message) -> Element<'_, Message> {
+        button(container(text(if expanded { "▾" } else { "▸" }).size(13))
+            .width(18).height(20).center_x(18).center_y(20))
+            .padding(0).style(button::text).on_press(message).into()
+    }
+
     pub(super) fn project_title(&self) -> String {
         self.controller
             .current_path()
@@ -92,7 +131,7 @@ impl App {
         self.controller.select(Selection::Setup);
         self.controller.set_cad_selection(vec![]);
         self.focus_ops.clear();
-        self.model_view = Some(TreeNode::Models);
+        self.restore_browser_view();
         self.refresh_fields();
     }
 
@@ -191,6 +230,13 @@ impl App {
 
     pub(super) fn update_tree(&mut self, message: TreeMessage) -> iced::Task<Message> {
         match message {
+            TreeMessage::ToggleModels => self.models_collapsed = !self.models_collapsed,
+            TreeMessage::ToggleSetups => self.setups_collapsed = !self.setups_collapsed,
+            TreeMessage::View(node) => {
+                if self.tree_edit_blocked() { return iced::Task::none(); }
+                self.browser_view = node;
+                self.clear_browser_selection();
+            }
             TreeMessage::Hover(node, after) => self.tree_hover = Some((node, after)),
             TreeMessage::Leave(node) => {
                 if self
@@ -258,7 +304,14 @@ impl App {
                 }
                 match node {
                     TreeNode::Setup(id) => return self.update(Message::EditSetup(id)),
+                    TreeNode::Pattern(id) => return self.update(Message::EditPattern(id)),
                     TreeNode::Operation(id) => {
+                        let Some(owner) = self.controller.setups().iter()
+                            .find(|setup| setup.operations.iter().any(|op| op.id() == id))
+                            .map(|setup| setup.id) else { return iced::Task::none(); };
+                        let _ = self.controller.activate_setup(owner);
+                        self.expanded_setups.insert(owner);
+                        self.inspector_enabled = true;
                         return self.update(Message::Select(Selection::Operation(id)));
                     }
                     _ => return iced::Task::none(),
@@ -381,6 +434,35 @@ impl App {
                 .is_some_and(|(hover, _)| hover == node)
     }
 
+    fn browser_row_surface<'a>(
+        &self,
+        content: Element<'a, Message>,
+        selected: bool,
+        hovered: bool,
+        target: bool,
+    ) -> Element<'a, Message> {
+        container(content)
+            .width(Length::Shrink)
+            .height(Length::Fixed(TREE_ROW_H))
+            .padding([2, 4])
+            .style(move |_| container::Style {
+                background: Some(Background::Color(if selected {
+                    palette::SELECT_BG
+                } else if hovered {
+                    palette::ROW_HOVER
+                } else {
+                    Color::from_rgba(0.20, 0.23, 0.27, 0.88)
+                })),
+                border: Border {
+                    color: if target { palette::ACCENT_BLUE } else { Color::TRANSPARENT },
+                    width: if target { 1.0 } else { 0.0 },
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     fn tree_row<'a>(
         &self,
         node: TreeNode,
@@ -388,54 +470,67 @@ impl App {
         selected: bool,
     ) -> Element<'a, Message> {
         let target = self.tree_target_active(&node);
-        let leave = node.clone();
-        let press = node.clone();
-        let open = node.clone();
-        let double_click = node.clone();
-        mouse_area(
-            container(content)
-                .width(Length::Fill)
-                .height(Length::Fixed(TREE_ROW_H))
-                .padding(Padding::from([2.0, 4.0]))
-                .style(move |_| container::Style {
-                    background: selected.then_some(Background::Color(palette::SELECT_BG)),
-                    border: Border {
-                        color: if target {
-                            palette::ACCENT_BLUE
-                        } else {
-                            Color::TRANSPARENT
-                        },
-                        width: if target { 1.0 } else { 0.0 },
-                        ..Border::default()
-                    },
-                    ..container::Style::default()
-                }),
-        )
-        .on_press(Message::Tree(TreeMessage::Press(press)))
-        .on_double_click(Message::Tree(TreeMessage::DoubleClick(double_click)))
-        .on_right_press(Message::Tree(TreeMessage::Open(open)))
-        .on_move(move |point| {
-            Message::Tree(TreeMessage::Hover(
-                node.clone(),
-                point.y >= TREE_ROW_H / 2.0,
-            ))
-        })
-        .on_exit(Message::Tree(TreeMessage::Leave(leave)))
-        .into()
+        let hovered = self.tree_hover.as_ref().is_some_and(|(hover, _)| hover == &node);
+        let depth = match node {
+            TreeNode::Models | TreeNode::Setups => 0,
+            TreeNode::Asset(_) | TreeNode::Setup(_) => 1,
+            TreeNode::Model(_) | TreeNode::Pattern(_) => 2,
+            TreeNode::Operation(id) => {
+                if self.controller.setups().iter().any(|s| s.patterns.iter().any(|p| p.members.contains(&id))) { 3 } else { 2 }
+            }
+        };
+        // Indentation is outside the painted and interactive row.
+        container(mouse_area(self.browser_row_surface(content, selected, hovered, target))
+            .on_press(Message::Tree(TreeMessage::Press(node)))
+            .on_double_click(Message::Tree(TreeMessage::DoubleClick(node)))
+            .on_right_press(Message::Tree(TreeMessage::Open(node)))
+            .on_move(move |point| Message::Tree(TreeMessage::Hover(node, point.y >= TREE_ROW_H / 2.0)))
+            .on_exit(Message::Tree(TreeMessage::Leave(node))))
+            .padding(Padding { left: depth as f32 * 12., ..Padding::ZERO })
+            .into()
     }
+    /// Bound the input shield to the visible browser, leaving the viewport below usable.
+    pub(super) fn project_browser_height(&self) -> f32 {
+        let mut height = 3. * (TREE_ROW_H + 2.) + 46.; // groups and project title
+        if !self.models_collapsed {
+            let geometry = self.controller.geometry_state();
+            for asset in &geometry.assets {
+                let count = geometry.instances.iter().filter(|i| i.asset_id == asset.id).count();
+                if count == 0 { continue; }
+                height += TREE_ROW_H + 2.;
+                if !self.collapsed_assets.contains(&asset.id) { height += count as f32 * (TREE_ROW_H + 2.); }
+            }
+        }
+        if self.tools_expanded { height += self.controller.used_tools().len() as f32 * (TREE_ROW_H + 2.); }
+        if !self.setups_collapsed {
+            for setup in self.controller.setups() {
+                height += TREE_ROW_H + 2.;
+                if !self.expanded_setups.contains(&setup.id) { continue; }
+                height += setup.patterns.len() as f32 * (TREE_ROW_H + 2.);
+                for op in &setup.operations {
+                    if setup.patterns.iter().any(|p| p.members.contains(&op.id()) && !self.expanded_patterns.contains(&p.id)) { continue; }
+                    height += TREE_ROW_H + 2.;
+                    if self.expanded_operations.contains(&op.id()) { height += op.tools().len() as f32 * 24.; }
+                }
+                if setup.origin_indices().len() > 1 { height += setup.origin_indices().len() as f32 * 24.; }
+            }
+        }
+        height.min(560.)
+    }
+
     pub(super) fn project_tree(&self) -> Element<'_, Message> {
         // Workpiece origins live as group headers in the operation list below (H1
         // above the first op, added origins each heading their own group), not as a
         // node here — an origin *is* the datum a group of operations runs under.
         let mut list = column![self.tree_row(
             TreeNode::Models,
-            text("Models").size(TREE_TEXT_SIZE).into(),
+            row![self.browser_disclosure(!self.models_collapsed, Message::Tree(TreeMessage::ToggleModels)), icon_svg(Icon::ShowCube, 16.), text("Models").size(TREE_TEXT_SIZE).width(Length::Shrink), self.browser_radio(TreeNode::Models)].spacing(5).align_y(Alignment::Center).into(),
             self.model_view == Some(TreeNode::Models) && self.controller.cad_selection().is_empty(),
         )]
         .spacing(2);
 
         let geometry = self.controller.geometry_state();
-        for asset in &geometry.assets {
+        for asset in geometry.assets.iter().filter(|_| !self.models_collapsed) {
             let instances: Vec<_> = geometry
                 .instances
                 .iter()
@@ -446,14 +541,11 @@ impl App {
             }
             let expanded = !self.collapsed_assets.contains(&asset.id);
             let asset_row = row![
-                button(text(if expanded { "▾" } else { "▸" }).size(11))
-                    .padding(2)
-                    .style(inspector_secondary)
-                    .on_press(Message::ToggleAssetExpanded(asset.id)),
-                checkbox(!self.hidden_assets.contains(&asset.id))
-                    .size(12)
-                    .on_toggle(move |visible| Message::SetAssetVisible(asset.id, visible)),
-                text(&asset.name).size(TREE_TEXT_SIZE).width(Length::Fill),
+                self.browser_disclosure(expanded, Message::ToggleAssetExpanded(asset.id)),
+                icon_svg(Icon::ShowCube, 16.),
+                self.browser_visibility(!self.hidden_assets.contains(&asset.id), Message::SetAssetVisible(asset.id, self.hidden_assets.contains(&asset.id))),
+                text(&asset.name).size(TREE_TEXT_SIZE).width(Length::Shrink),
+                self.browser_radio(TreeNode::Asset(asset.id)),
             ]
             .spacing(4)
             .align_y(Alignment::Center);
@@ -468,11 +560,11 @@ impl App {
             for instance in instances {
                 let hidden = !instance.visible || self.cad_hidden.contains(&instance.id);
                 let model_row = row![
-                    Space::new().width(16),
-                    checkbox(!hidden).size(12).on_toggle(move |visible| {
-                        Message::SetInstanceVisible(instance.id, visible)
-                    }),
-                    text(&instance.name).size(TREE_TEXT_SIZE).width(Length::Fill),
+                    Space::new().width(18),
+                    icon_svg(Icon::ShowCube, 16.),
+                    self.browser_visibility(!hidden, Message::SetInstanceVisible(instance.id, hidden)),
+                    text(&instance.name).size(TREE_TEXT_SIZE).width(Length::Shrink),
+                    self.browser_radio(TreeNode::Model(instance.id)),
                 ]
                 .spacing(4)
                 .align_y(Alignment::Center);
@@ -484,84 +576,34 @@ impl App {
             }
         }
 
-        // Tools in use. A tool that matches the shop library shows its **shop number**
-        // (`T4 …`); one that isn't in the library shows **no number** — the simple,
-        // clear signal that it's project-local. Right-clicking an un-numbered tool
-        // offers "Add to library" (which registers it and gives it a number).
-        list = list.push(
-            button(
-                row![
-                    text(if self.tools_expanded { "▾" } else { "▸" }).size(11),
-                    text("Tools (in use)").size(TREE_TEXT_SIZE),
-                ]
-                .spacing(4),
-            )
-            .padding([4, 2])
-            .style(inspector_secondary)
-            .on_press(Message::ToggleToolsExpanded),
-        );
-        if self.tools_expanded {
-            let used = self.controller.used_tools();
-            for t in used {
-                let in_library = self
-                    .library
-                    .tools
-                    .iter()
-                    .any(|lt| lt.identity() == t.identity());
-                // Numbered ⇒ in the library; un-numbered ⇒ project-local. The number goes
-                // at the *end* (`⌀6 End mill (T5)`) so descriptions align left; a
-                // project-local tool has no `(Tn)` at all — the presence of the number *is*
-                // the distinction (kept deliberately simple).
-                let label = if in_library {
-                    format!("⌀{} {} (T{})", fmt_num(t.diameter), t.kind, t.number)
-                } else {
-                    format!("⌀{} {}", fmt_num(t.diameter), t.kind)
-                };
-                let row = container(text(label).size(TREE_TEXT_SIZE).color(if in_library {
-                    palette::LABEL_COLOR
-                } else {
-                    palette::GROUP_LABEL
-                }))
-                .padding(Padding::from([3.0, 6.0]));
-                if in_library {
-                    list = list.push(row);
-                } else {
-                    // Only un-numbered (not-in-library) tools carry the right-click menu.
-                    list = list.push(mouse_area(row).on_right_press(Message::ToolMenu(t.number)));
-                }
-            }
-        }
         list = list.push(self.tree_row(
             TreeNode::Setups,
-            text("Setups").size(TREE_TEXT_SIZE).into(),
+            row![self.browser_disclosure(!self.setups_collapsed, Message::Tree(TreeMessage::ToggleSetups)), icon_svg(Icon::Open, 16.), text("Setups").size(TREE_TEXT_SIZE)].spacing(5).align_y(Alignment::Center).into(),
             false,
         ));
         let status_fingerprints = self.controller.current_toolpath_fingerprints();
         let toolpath_statuses = self.controller.toolpath_statuses_for(&status_fingerprints);
-        for setup in self.controller.setups() {
+        for setup in self.controller.setups().iter().filter(|_| !self.setups_collapsed) {
             let active = setup.id == self.controller.active_setup_id();
             let expanded = self.expanded_setups.contains(&setup.id);
             let setup_row = row![
-                button(text(if expanded { "▾" } else { "▸" }).size(11))
-                    .padding(2)
-                    .style(inspector_secondary)
-                    .on_press(Message::ToggleSetupExpanded(setup.id)),
-                checkbox(!self.hidden_setups.contains(&setup.id))
-                    .size(12)
-                    .on_toggle(move |visible| Message::SetSetupVisible(setup.id, visible)),
+                self.browser_disclosure(expanded, Message::ToggleSetupExpanded(setup.id)),
+                icon_svg(Icon::Open, 16.),
+                self.browser_visibility(!self.hidden_setups.contains(&setup.id), Message::SetSetupVisible(setup.id, self.hidden_setups.contains(&setup.id))),
                 self.status_indicator(
                     StatusTarget::Setup(setup.id), &toolpath_statuses, &status_fingerprints,
                 ),
-                mouse_area(text(&setup.name).size(TREE_TEXT_SIZE).width(Length::Fill)).on_double_click(
+                mouse_area(text(&setup.name).size(TREE_TEXT_SIZE).width(Length::Shrink)).on_double_click(
                     Message::Tree(TreeMessage::DoubleClick(TreeNode::Setup(setup.id))),
                 ),
+                self.browser_radio(TreeNode::Setup(setup.id)),
             ]
             .spacing(3)
             .align_y(Alignment::Center);
             list = list.push(self.tree_row(
                 TreeNode::Setup(setup.id),
                 setup_row.into(),
-                active && self.model_view.is_none(),
+                active && self.model_view.is_none() && self.focus_ops.is_empty(),
             ));
             if !expanded {
                 continue;
@@ -591,7 +633,11 @@ impl App {
                 if let Some(pattern) = setup.patterns.iter().find(|pattern| pattern.members.first() == Some(&id)) {
                     let count = pattern.kind.instance_count().unwrap_or(0);
                     let expanded = self.expanded_patterns.contains(&pattern.id);
-                    let pattern_row = row![button(text(if expanded { "▾" } else { "▸" }).size(11)).padding(2).style(inspector_secondary).on_press(Message::TogglePatternExpanded(pattern.id)), text(format!("▦ {} · {count} instances{}", pattern.name, if pattern.suppressed { " · suppressed" } else { "" })).size(TREE_TEXT_SIZE).width(Length::Fill)].align_y(Alignment::Center);
+                    let pattern_row = row![
+                        self.browser_disclosure(expanded, Message::TogglePatternExpanded(pattern.id)),
+                        icon_svg(Icon::Pattern, 16.),
+                        text(format!("{} · {count} instances{}", pattern.name, if pattern.suppressed { " · suppressed" } else { "" })).size(TREE_TEXT_SIZE),
+                    ].spacing(5).align_y(Alignment::Center);
                     list = list.push(self.tree_row(TreeNode::Pattern(pattern.id), pattern_row.into(), false));
                 }
                 if let Some(pattern) = setup.patterns.iter().find(|p| p.members.contains(&id)) {
@@ -599,21 +645,15 @@ impl App {
                 }
                 let expanded = self.expanded_operations.contains(&id);
                 let controls = row![
-                    Space::new().width(Length::Fixed(if setup.patterns.iter().any(|p| p.members.contains(&id)) { 28.0 } else { 14.0 })),
-                    button(text(if expanded { "▾" } else { "▸" }).size(11))
-                        .padding(2)
-                        .style(inspector_secondary)
-                        .on_press(Message::ToggleOperationExpanded(id)),
-                    checkbox(!self.hidden_ops.contains(&id))
-                        .size(12)
-                        .on_toggle(move |visible| Message::SetOperationVisible(id, visible)),
+                    self.browser_disclosure(expanded, Message::ToggleOperationExpanded(id)),
+                    self.browser_visibility(!self.hidden_ops.contains(&id), Message::SetOperationVisible(id, self.hidden_ops.contains(&id))),
                     self.status_indicator(
                         StatusTarget::Operation(id), &toolpath_statuses, &status_fingerprints,
                     ),
                     icon_svg(operation_icon(op), 18.0),
                     text(operation_label)
                         .size(TREE_TEXT_SIZE)
-                        .width(Length::Fill)
+                        .width(Length::Shrink)
                 ]
                 .spacing(3)
                 .align_y(Alignment::Center);
@@ -633,7 +673,7 @@ impl App {
                             })
                             .unwrap_or_else(|| format!("T{number} · missing tool"));
                         list = list.push(container(text(label).size(TREE_TEXT_SIZE)).padding(Padding {
-                            left: 52.,
+                            left: if setup.patterns.iter().any(|p| p.members.contains(&id)) { 48. } else { 36. },
                             top: 2.,
                             bottom: 2.,
                             right: 4.,
@@ -642,7 +682,53 @@ impl App {
                 }
             }
         }
-        scrollable(list.padding(6))
+        // Tools in use. A tool that matches the shop library shows its **shop number**
+        // (`T4 …`); one that isn't in the library shows **no number** — the simple,
+        // clear signal that it's project-local. Right-clicking an un-numbered tool
+        // offers "Add to library" (which registers it and gives it a number).
+        list = list.push(mouse_area(self.browser_row_surface(
+            row![
+                self.browser_disclosure(self.tools_expanded, Message::ToggleToolsExpanded),
+                icon_svg(Icon::NewTool, 16.),
+                text("Tools in use").size(TREE_TEXT_SIZE),
+            ].spacing(5).align_y(Alignment::Center).into(),
+            false, false, false,
+        )).on_press(Message::ToggleToolsExpanded));
+        if self.tools_expanded {
+            let used = self.controller.used_tools();
+            for t in used {
+                let in_library = self
+                    .library
+                    .tools
+                    .iter()
+                    .any(|lt| lt.identity() == t.identity());
+                // Numbered ⇒ in the library; un-numbered ⇒ project-local. The number goes
+                // at the *end* (`⌀6 End mill (T5)`) so descriptions align left; a
+                // project-local tool has no `(Tn)` at all — the presence of the number *is*
+                // the distinction (kept deliberately simple).
+                let label = if in_library {
+                    format!("⌀{} {} (T{})", fmt_num(t.diameter), t.kind, t.number)
+                } else {
+                    format!("⌀{} {}", fmt_num(t.diameter), t.kind)
+                };
+                let row = container(self.browser_row_surface(
+                    row![Space::new().width(18), icon_svg(Icon::NewTool, 16.),
+                        text(label).size(TREE_TEXT_SIZE).color(if in_library {
+                            palette::LABEL_COLOR
+                        } else {
+                            palette::GROUP_LABEL
+                        })].spacing(5).align_y(Alignment::Center).into(),
+                    false, false, false,
+                )).padding(Padding { left: 12., ..Padding::ZERO });
+                if in_library {
+                    list = list.push(row);
+                } else {
+                    // Only un-numbered (not-in-library) tools carry the right-click menu.
+                    list = list.push(mouse_area(row).on_right_press(Message::ToolMenu(t.number)));
+                }
+            }
+        }
+        scrollable(list.padding(2))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -1028,6 +1114,50 @@ mod tests {
     }
 
     #[test]
+    fn radio_view_survives_operation_selection_and_visibility_changes() {
+        let (mut app, ids) = tree_app();
+        add_browser_models(&mut app);
+        let setup = app.controller.active_setup_id();
+        send(&mut app, Message::Tree(TreeMessage::View(TreeNode::Setup(setup))));
+        assert!(app.model_view.is_none());
+        send(&mut app, Message::ClickOp(ids[0]));
+        send(&mut app, Message::ClickOp(ids[0]));
+        assert_eq!(app.browser_view, TreeNode::Setup(setup));
+        assert!(app.model_view.is_none());
+        send(&mut app, Message::Tree(TreeMessage::View(TreeNode::Asset(2))));
+        send(&mut app, Message::ClickOp(ids[0]));
+        assert!(app.model_view.is_none());
+        send(&mut app, Message::SetAssetVisible(2, false));
+        assert_eq!(app.browser_view, TreeNode::Asset(2));
+        send(&mut app, Message::ClickOp(ids[0]));
+        assert_eq!(app.model_view, Some(TreeNode::Asset(2)));
+        assert!(app.viewport_hidden_instances().contains(&3));
+        send(&mut app, Message::SetAssetVisible(2, true));
+        assert_eq!(visible_bodies(&app), [3, 4]);
+    }
+
+    #[test]
+    fn transparent_space_below_browser_accepts_viewport_input() {
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(1000., 800.));
+        assert!(browser_region_contains(iced::Point::new(100., 80.), bounds, 280., 200.));
+        assert!(!browser_region_contains(iced::Point::new(100., 400.), bounds, 280., 200.));
+        assert!(!browser_region_contains(iced::Point::new(400., 80.), bounds, 280., 200.));
+        let (mut app, _) = tree_app();
+        let expanded = app.project_browser_height();
+        send(&mut app, Message::Tree(TreeMessage::ToggleSetups));
+        assert!(app.project_browser_height() < expanded);
+    }
+
+    #[test]
+    fn missing_radio_target_falls_back_to_models() {
+        let (mut app, _) = tree_app();
+        app.browser_view = TreeNode::Setup(u64::MAX);
+        app.clear_browser_selection();
+        assert_eq!(app.browser_view, TreeNode::Models);
+        assert_eq!(app.model_view, Some(TreeNode::Models));
+    }
+
+    #[test]
     fn body_picks_reveal_their_tree_rows_and_seed_the_first_setup() {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
@@ -1135,6 +1265,38 @@ mod tests {
         send(&mut app, Message::ClickOp(ids[0]));
         assert!(app.operation_draft.is_none());
         assert!(app.pane_handle(Pane::Inspector).is_none());
+    }
+
+    #[test]
+    fn operation_double_click_from_setup_radio_view_opens_editor() {
+        let (mut app, ids) = tree_app();
+        let setup = app.controller.active_setup_id();
+        send(&mut app, Message::Tree(TreeMessage::View(TreeNode::Setup(setup))));
+        let before = iced::advanced::widget::Tree::new(&app.workspace_main());
+        let browser_index = before.children[0].children.len() - 1;
+        send(&mut app, Message::Tree(TreeMessage::Press(TreeNode::Operation(ids[0]))));
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        let after = iced::advanced::widget::Tree::new(&app.workspace_main());
+        assert_eq!(after.children[0].children.len() - 1, browser_index,
+            "selection must preserve the browser widget and its double-click state");
+        send(&mut app, Message::Tree(TreeMessage::Press(TreeNode::Operation(ids[0]))));
+        send(&mut app, Message::Tree(TreeMessage::DoubleClick(TreeNode::Operation(ids[0]))));
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        assert_eq!(app.operation_draft.as_ref().map(Operation::id), Some(ids[0]), "{}", app.status);
+        assert!(app.pane_handle(Pane::Inspector).is_some());
+    }
+
+    #[test]
+    fn operation_double_click_opens_editor_even_when_inspector_is_hidden() {
+        let (mut app, ids) = tree_app();
+        app.inspector_enabled = false;
+        app.tree_drag = Some(TreeDrag { node: TreeNode::Operation(ids[0]), start: iced::Point::ORIGIN, dragging: false });
+        send(&mut app, Message::Tree(TreeMessage::DoubleClick(TreeNode::Operation(ids[0]))));
+        // The global release after the double-click must not clear the editor.
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        assert_eq!(app.controller.selection(), Selection::Operation(ids[0]));
+        assert_eq!(app.operation_draft.as_ref().map(Operation::id), Some(ids[0]));
+        assert!(app.pane_handle(Pane::Inspector).is_some());
     }
 
     #[test]
