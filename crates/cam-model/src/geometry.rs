@@ -855,7 +855,7 @@ impl GeometryState {
             if !ids.insert(a.id) {
                 return Err("duplicate geometry asset ID".into());
             }
-            a.topology.validate()?;
+            a.topology.validate_cached()?;
         }
         ids.clear();
         for i in &self.instances {
@@ -904,7 +904,33 @@ impl Operation {
     }
 }
 
+thread_local! {
+    // Weak ownership lets deleted imports go and makes Arc::make_mut detach a
+    // validated snapshot even when it has only one remaining strong owner.
+    static VALID_TOPOLOGIES: std::cell::RefCell<Vec<std::sync::Weak<TopologySnapshot>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl TopologySnapshot {
+    /// Validate an immutable shared snapshot once per thread. Reference revisions,
+    /// placements and selections still need validation on every request.
+    pub fn validate_cached(self: &Arc<Self>) -> Result<(), String> {
+        VALID_TOPOLOGIES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.retain(|entry| entry.strong_count() > 0);
+            if cache.iter().any(|entry| {
+                entry.upgrade().is_some_and(|old| Arc::ptr_eq(&old, self))
+            }) {
+                return Ok(());
+            }
+            self.validate()?;
+            if cache.len() >= 32 {
+                cache.remove(0);
+            }
+            cache.push(Arc::downgrade(self));
+            Ok(())
+        })
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!(
@@ -1260,6 +1286,30 @@ mod tests {
             display_tolerance: 0.1,
         });
         assert!(s.validate().unwrap_err().contains("tolerances"));
+    }
+
+    #[test]
+    fn shared_topology_validation_reuses_only_immutable_snapshots() {
+        let mut s = state();
+        s.validate().unwrap();
+        let original = s.assets[0].topology.clone();
+        assert_eq!(Arc::weak_count(&original), 1);
+        s.validate().unwrap();
+        assert_eq!(Arc::weak_count(&original), 1, "reuse the existing cache entry");
+
+        Arc::make_mut(&mut s.assets[0].topology).version = 2;
+        assert!(s.validate().unwrap_err().contains("snapshot version"));
+        original.validate_cached().unwrap();
+        let weak = Arc::downgrade(&original);
+        drop(original);
+        assert!(weak.upgrade().is_none(), "validation must not retain deleted CAD data");
+
+        let mut sole_owner = state().assets.remove(0).topology;
+        sole_owner.validate_cached().unwrap();
+        let weak = Arc::downgrade(&sole_owner);
+        Arc::make_mut(&mut sole_owner).mesh.triangles.push([999; 3]);
+        assert!(weak.upgrade().is_none());
+        assert!(sole_owner.validate_cached().is_err(), "sole-owner edits must be revalidated");
     }
     #[test]
     fn self_contained_geometry_roundtrip_keeps_identity_mesh_and_overrides() {

@@ -648,6 +648,44 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Read-only benchmark for the supplied local tray; no project is saved.
+    #[test]
+    #[ignore = "manual supplied-project performance measurement"]
+    fn tray_face_selection_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testfiles/tray-parallel.ocam")).unwrap();
+        app.setup_draft = None;
+        let id = app.controller.document().setup().operations.iter()
+            .find(|op| matches!(op, Operation::Parallel(_))).unwrap().id();
+        app.begin_operation_draft(id);
+        app.operation_geometry_message(GeometryMessage::Add(CadFilter::Face));
+        let state = app.controller.geometry_state();
+        let instance = &state.instances[0];
+        let asset = state.asset(instance.asset_id).unwrap();
+        let faces: Vec<_> = asset.topology.faces.iter()
+            .filter(|face| face.body_id == instance.body_id)
+            .map(|face| EntityRef { asset_id: asset.id, revision: asset.revision,
+                instance_id: instance.id, body_id: instance.body_id,
+                kind: EntityKind::Face, id: face.id }).collect();
+        for count in [1, 10, faces.len()] {
+            app.controller.set_cad_selection(faces[..count].to_vec());
+            let start = Instant::now();
+            let _ = black_box(app.geometry_settings_valid());
+            eprintln!("{count} faces: validation {:?}", start.elapsed());
+            let start = Instant::now();
+            for _ in 0..3 {
+                let _ = app.update(Message::OrbitBy(0.01, 0.005));
+                black_box(app.view());
+            }
+            eprintln!("{count} faces: {:.3} ms/update+view", start.elapsed().as_secs_f64() * 1000. / 3.);
+        }
+    }
+
     fn drawing_app() -> App {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());

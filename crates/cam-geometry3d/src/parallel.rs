@@ -28,7 +28,7 @@ pub fn resolve_parallel(
         let asset = state
             .asset(instance.asset_id)
             .ok_or("Missing setup asset")?;
-        asset.topology.validate()?;
+        asset.topology.validate_cached()?;
         let body = asset
             .topology
             .bodies

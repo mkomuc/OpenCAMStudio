@@ -1259,6 +1259,7 @@ mod tests {
         send(&mut app, Message::SimulationClose);
         app.drain_operation_preview();
         assert!(!app.operation_preview_outcome().unwrap().stock_operations.contains(&Some(profile)));
+        let parallel_stamp = app.operation_preview_outcome().unwrap().stamp.clone();
         send(&mut app, Message::ClickOp(profile));
         app.drain_operation_preview();
         let preview = app.operation_preview_outcome().unwrap();
@@ -1266,6 +1267,15 @@ mod tests {
         assert!(preview.stock_operations.contains(&Some(profile)));
         assert!(preview.scene.strips.iter().any(|s| s.op == Some(profile)));
         assert!(app.machining_viewport().path_cones.iter().any(|c| c.op == profile));
+        let profile_stamp = preview.stamp.clone();
+        for (id, stamp) in [(parallel, parallel_stamp), (profile, profile_stamp)] {
+            let start = std::time::Instant::now();
+            send(&mut app, Message::ClickOp(id));
+            assert!(app.operation_preview.progress().is_none(), "unchanged operation must not start a worker");
+            assert_eq!(app.operation_preview_outcome().unwrap().stamp, stamp);
+            let _ = app.machining_viewport();
+            eprintln!("tray cached operation {id}: {:?}", start.elapsed());
+        }
     }
 
     #[test]

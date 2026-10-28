@@ -330,32 +330,9 @@ thread_local! {
     // Hover reuses immutable CAD data. Weak ownership does not keep deleted
     // imports alive; placement and snapshot identity prevent stale outlines.
     static SILHOUETTES: std::cell::RefCell<Vec<CachedSilhouette>> = const { std::cell::RefCell::new(Vec::new()) };
-    // Immutable snapshots are validated once per thread, not once per hovered
-    // contour. Weak ownership releases deleted models and makes Arc::make_mut
-    // edits miss the cache even when no other strong owner exists.
-    static VALID_TOPOLOGIES: std::cell::RefCell<Vec<std::sync::Weak<TopologySnapshot>>> = const { std::cell::RefCell::new(Vec::new()) };
     static TOPOLOGY_FINGERPRINTS: std::cell::RefCell<Vec<CachedTopologyFingerprint>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn validate_topology(topology: &std::sync::Arc<TopologySnapshot>) -> Result<(), String> {
-    VALID_TOPOLOGIES.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache.retain(|entry| entry.strong_count() > 0);
-        if cache.iter().any(|entry| {
-            entry
-                .upgrade()
-                .is_some_and(|old| std::sync::Arc::ptr_eq(&old, topology))
-        }) {
-            return Ok(());
-        }
-        topology.validate()?;
-        if cache.len() >= 32 {
-            cache.remove(0);
-        }
-        cache.push(std::sync::Arc::downgrade(topology));
-        Ok(())
-    })
-}
 struct View<'a> {
     asset: &'a GeometryAsset,
     instance: &'a GeometryInstance,
@@ -389,7 +366,7 @@ impl<'a> View<'a> {
         if !instance.placement.is_rigid() {
             return Err("invalid machining placement".into());
         }
-        validate_topology(&asset.topology)?;
+        asset.topology.validate_cached()?;
         let body = asset
             .topology
             .bodies

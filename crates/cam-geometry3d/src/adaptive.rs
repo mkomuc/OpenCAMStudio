@@ -31,7 +31,7 @@ pub fn validate_adaptive_selection(
         if !instance.placement.is_rigid() {
             return Err("invalid machining placement".into());
         }
-        asset.topology.validate()?;
+        asset.topology.validate_cached()?;
         let body = asset
             .topology
             .bodies
@@ -392,7 +392,7 @@ pub fn resolve_adaptive(
         let asset = state
             .asset(instance.asset_id)
             .ok_or("setup model asset missing")?;
-        asset.topology.validate()?;
+        asset.topology.validate_cached()?;
         let body = asset
             .topology
             .bodies
