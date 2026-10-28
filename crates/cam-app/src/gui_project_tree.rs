@@ -21,6 +21,7 @@ pub(super) struct TreeDrag {
     node: TreeNode,
     start: iced::Point,
     dragging: bool,
+    edit_on_release: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -237,7 +238,14 @@ impl App {
                 self.browser_view = node;
                 self.clear_browser_selection();
             }
-            TreeMessage::Hover(node, after) => self.tree_hover = Some((node, after)),
+            TreeMessage::Hover(node, after) => {
+                // Row movement is authoritative too: global cursor updates may
+                // arrive after widget messages or be coalesced during a drag.
+                if let Some(drag) = self.tree_drag.as_mut() {
+                    if drag.node != node { drag.dragging = true; }
+                }
+                self.tree_hover = Some((node, after));
+            }
             TreeMessage::Leave(node) => {
                 if self
                     .tree_hover
@@ -258,6 +266,7 @@ impl App {
                     node,
                     start: self.window_cursor,
                     dragging: false,
+                    edit_on_release: false,
                 });
             }
             TreeMessage::Open(node) => {
@@ -295,6 +304,9 @@ impl App {
                 self.tree_menu = Some(node);
             }
             TreeMessage::DoubleClick(node) => {
+                if let Some(drag) = self.tree_drag.as_mut() {
+                    if drag.node == node { drag.edit_on_release = true; return iced::Task::none(); }
+                }
                 self.tree_drag = None;
                 self.tree_menu = None;
                 self.pattern_menu_y = None;
@@ -341,7 +353,11 @@ impl App {
                     return iced::Task::none();
                 }
                 if !drag.dragging {
-                    return self.select_tree_node(&drag.node);
+                    return if drag.edit_on_release {
+                        self.update_tree(TreeMessage::DoubleClick(drag.node))
+                    } else {
+                        self.select_tree_node(&drag.node)
+                    };
                 }
                 let Some((target, after)) = self.tree_hover.take() else {
                     self.status = "Drop cancelled: release over a setup or operation row.".into();
@@ -363,7 +379,12 @@ impl App {
                         self.controller.reorder_setup_to(*id, before)
                     }
                     (TreeNode::Operation(id), TreeNode::Setup(destination)) => {
-                        self.controller.reorder_operation_to(*id, destination, None)
+                        self.controller.move_operation_in_tree(*id, destination, None, None)
+                    }
+                    (TreeNode::Operation(id), TreeNode::Pattern(pattern)) => {
+                        if let Some(destination) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == pattern)).map(|s| s.id) {
+                            self.controller.move_operation_in_tree(*id, destination, None, Some(pattern))
+                        } else { Err("Pattern no longer exists".into()) }
                     }
                     (TreeNode::Operation(id), TreeNode::Operation(anchor)) => {
                         let destination = self
@@ -395,8 +416,8 @@ impl App {
                             } else {
                                 Some(anchor)
                             };
-                            self.controller
-                                .reorder_operation_to(*id, destination.id, before)
+                            let pattern = destination.patterns.iter().find(|p| p.members.contains(&anchor)).map(|p| p.id);
+                            self.controller.move_operation_in_tree(*id, destination.id, before, pattern)
                         } else {
                             Err("Drop target no longer exists".into())
                         }
@@ -479,9 +500,12 @@ impl App {
                 if self.controller.setups().iter().any(|s| s.patterns.iter().any(|p| p.members.contains(&id))) { 3 } else { 2 }
             }
         };
-        // Indentation is outside the painted and interactive row.
-        container(mouse_area(self.browser_row_surface(content, selected, hovered, target))
+        // Paint only the contents, but accept vertical drags across the full
+        // browser width: shorter labels must remain reachable drop targets.
+        container(mouse_area(container(self.browser_row_surface(content, selected, hovered, target))
+            .width(Length::Fill))
             .on_press(Message::Tree(TreeMessage::Press(node)))
+            .on_release(Message::Tree(TreeMessage::Release))
             .on_double_click(Message::Tree(TreeMessage::DoubleClick(node)))
             .on_right_press(Message::Tree(TreeMessage::Open(node)))
             .on_move(move |point| Message::Tree(TreeMessage::Hover(node, point.y >= TREE_ROW_H / 2.0)))
@@ -1290,7 +1314,7 @@ mod tests {
     fn operation_double_click_opens_editor_even_when_inspector_is_hidden() {
         let (mut app, ids) = tree_app();
         app.inspector_enabled = false;
-        app.tree_drag = Some(TreeDrag { node: TreeNode::Operation(ids[0]), start: iced::Point::ORIGIN, dragging: false });
+        app.tree_drag = Some(TreeDrag { node: TreeNode::Operation(ids[0]), start: iced::Point::ORIGIN, dragging: false, edit_on_release: false });
         send(&mut app, Message::Tree(TreeMessage::DoubleClick(TreeNode::Operation(ids[0]))));
         // The global release after the double-click must not clear the editor.
         send(&mut app, Message::Tree(TreeMessage::Release));
@@ -1694,6 +1718,60 @@ mod tests {
             visible_bodies(&app).is_empty(),
             "empty setup must not show all bodies"
         );
+    }
+
+    #[test]
+    fn dragging_on_second_click_does_not_open_editor_or_cancel_reorder() {
+        let (mut app, ids) = tree_app();
+        send(&mut app, Message::ClickOp(ids[2]));
+        send(&mut app, Message::Tree(TreeMessage::Press(TreeNode::Operation(ids[2]))));
+        send(&mut app, Message::Tree(TreeMessage::DoubleClick(TreeNode::Operation(ids[2]))));
+        assert!(app.operation_draft.is_none());
+        send(&mut app, Message::Tree(TreeMessage::Hover(TreeNode::Operation(ids[0]), false)));
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        assert_eq!(app.controller.inspection_setup().operations.iter().map(Operation::id).collect::<Vec<_>>(), [ids[2], ids[0], ids[1]]);
+        assert!(app.operation_draft.is_none());
+        app.controller.cancel_run();
+    }
+
+    #[test]
+    fn dragging_sources_into_within_and_out_of_patterns_is_undoable() {
+        let (mut app, ids) = tree_app();
+        let setup = app.controller.active_setup_id();
+        app.focus_ops = ids[..2].iter().copied().collect();
+        send(&mut app, Message::BeginPattern(false));
+        send(&mut app, Message::PatternCommit);
+        assert!(!app.setup_draft_dirty());
+        let pattern = app.controller.inspection_setup().patterns[0].id;
+        let original = app.controller.document().clone();
+        let drop = |app: &mut App, source, target, after| {
+            send(app, Message::Tree(TreeMessage::Press(TreeNode::Operation(source))));
+            send(app, Message::Tree(TreeMessage::Hover(target, after)));
+            send(app, Message::Tree(TreeMessage::Release));
+            app.controller.cancel_run();
+        };
+        drop(&mut app, ids[2], TreeNode::Pattern(pattern), false);
+        assert_eq!(app.controller.inspection_setup().patterns[0].members, ids, "{}", app.status);
+        drop(&mut app, ids[2], TreeNode::Operation(ids[0]), false);
+        assert_eq!(app.controller.inspection_setup().patterns[0].members, [ids[2], ids[0], ids[1]]);
+        drop(&mut app, ids[2], TreeNode::Setup(setup), false);
+        assert_eq!(app.controller.inspection_setup().patterns[0].members, ids[..2]);
+        assert_eq!(app.controller.inspection_setup().operations.iter().map(Operation::id).collect::<Vec<_>>(), ids);
+        for _ in 0..3 { assert!(app.controller.undo()); }
+        assert_eq!(app.controller.document(), &original);
+    }
+
+    #[test]
+    fn crossing_rows_reorders_without_a_global_cursor_update() {
+        let (mut app, ids) = tree_app();
+        send(&mut app, Message::Tree(TreeMessage::Press(TreeNode::Operation(ids[2]))));
+        send(&mut app, Message::Tree(TreeMessage::Hover(TreeNode::Operation(ids[0]), false)));
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        assert_eq!(app.controller.inspection_setup().operations.iter().map(Operation::id).collect::<Vec<_>>(), [ids[2], ids[0], ids[1]]);
+        send(&mut app, Message::Tree(TreeMessage::Release));
+        app.controller.cancel_run();
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.inspection_setup().operations.iter().map(Operation::id).collect::<Vec<_>>(), ids);
     }
 
     #[test]

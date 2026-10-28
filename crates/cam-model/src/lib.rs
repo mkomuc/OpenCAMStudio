@@ -9,6 +9,8 @@
 //! by swapping the [`Machine`] it is handed. Dependency isolation is enforced
 //! by `scripts/check_architecture.py`.
 
+mod pocket;
+pub use pocket::PocketFinishing;
 mod parallel;
 pub use parallel::*;
 mod bore;

@@ -107,6 +107,8 @@ mod profile_sides;
 mod illustrated_help;
 #[path = "gui_profile_parameters.rs"]
 mod profile_parameters;
+#[path = "gui_pocket_parameters.rs"]
+mod pocket_parameters;
 #[path = "gui_profile_tabs.rs"]
 mod profile_tabs;
 #[path = "gui_operation_positions.rs"]
@@ -1183,6 +1185,7 @@ enum Field {
     /// Profile finishing allowance left on the wall (mm).
     ProfileOffset,
     Profile(profile_parameters::Number),
+    PocketFinish(pocket_parameters::Number),
     TabWidth,
     TabHeight,
     TabSpacing,
@@ -1331,6 +1334,7 @@ impl Field {
             Field::TabSpacing => "Tab spacing (mm)",
             Field::ProfileOffset => "Wall allowance (mm)",
             Field::Profile(n) => n.label(),
+            Field::PocketFinish(n) => n.label(),
             Field::Stepdown => "Stepdown (mm)",
             Field::ParallelStepover => "Stepover (mm)",
             Field::ParallelAngle => "Pass angle (deg)",
@@ -1564,6 +1568,7 @@ impl Field {
             Field::TabHeight => "Tab height above the final profile floor; must be less than the cut depth.",
             Field::TabSpacing => "Maximum distance between tab centres. Tabs are distributed evenly along each toolpath contour.",
             Field::Profile(n) => n.help(),
+            Field::PocketFinish(n) => n.help(),
             Field::ProfileOffset => {
                 "Finishing allowance left on the wall (mm): the roughing pass stops this \
                  far from the final profile so a finish pass can clean it up. 0 = cut to \
@@ -2547,6 +2552,7 @@ enum Message {
     OperationSectionToggled(operation_sections::Section),
     ProfileCompChanged(cam_model::Comp),
     ProfilePassToggle(profile_parameters::Toggle, bool),
+    PocketFinishToggle(pocket_parameters::Toggle, bool),
     ProfileOrder(cam_model::ProfileOrder),
     ProfileTabShape(cam_model::TabShape),
     ProfileCorner(cam_model::ProfileCorner),
@@ -4238,6 +4244,16 @@ impl App {
                     }
                 });
             }
+            Message::PocketFinishToggle(toggle, value) => {
+                let parsed = self.fields.iter().filter_map(|(f, s)| {
+                    s.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (*f, v))
+                }).collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Pocket(p) = op { toggle.set(&mut p.finishing, value); }
+                });
+                self.refresh_operation_fields();
+            }
             Message::ProfilePassToggle(toggle, value) => {
                 let parsed = self.fields.iter().filter_map(|(f, s)| {
                     s.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (*f, v))
@@ -4686,6 +4702,8 @@ impl App {
             }
             Message::PatternTabChanged(tab) => self.pattern_tab = tab,
             Message::BeginPattern(circular) => {
+                if self.setup_draft_dirty() { self.status = "Apply or cancel setup changes before editing a pattern.".into(); return iced::Task::none(); }
+                self.end_setup_draft();
                 self.simulation = None;
                 self.pattern_tab = pattern_editor_view::PatternTab::Placement;
                 let Some(setup) = self.controller.setups().iter().find(|s| s.id == self.controller.active_setup_id()) else { return iced::Task::none(); };
@@ -4702,6 +4720,8 @@ impl App {
                 self.status = "Choose source operations and pattern placement, then create or cancel the draft.".into();
             }
             Message::EditPattern(id) => {
+                if self.setup_draft_dirty() { self.status = "Apply or cancel setup changes before editing a pattern.".into(); return iced::Task::none(); }
+                self.end_setup_draft();
                 self.simulation = None;
                 self.pattern_tab = pattern_editor_view::PatternTab::Placement;
                 let Some((setup_id, pattern)) = self.controller.setups().iter().find_map(|setup| setup.patterns.iter().find(|p| p.id == id).map(|p| (setup.id, p.clone()))) else { self.status = "Pattern no longer exists.".into(); return iced::Task::none(); };
@@ -10999,6 +11019,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Profile(o), Field::Engagement) => Some(o.clearing.engagement),
         (Operation::Profile(o), Field::PlungeA) => Some(plunge_params(o.plunge).0),
         (Operation::Profile(o), Field::PlungeB) => Some(plunge_params(o.plunge).1),
+        (Operation::Pocket(o), Field::PocketFinish(n)) => Some(n.get(&o.finishing)),
         (Operation::Pocket(o), Field::Depth) => Some(o.depth),
         (Operation::Pocket(o), Field::Stepdown) => Some(o.clear.stepdown),
         (Operation::Pocket(o), Field::Overlap) => Some(o.clear.overlap * 100.0),
@@ -11161,6 +11182,11 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             o.plunge = set_plunge_params(o.plunge, a, b);
         }
         Operation::Pocket(o) => {
+            for (&field, &value) in parsed {
+                if let Field::PocketFinish(n) = field {
+                    if !n.invalid(value) { n.set(&mut o.finishing, value); }
+                }
+            }
             if let Some(v) = get(Field::Depth) {
                 o.depth = v;
             }

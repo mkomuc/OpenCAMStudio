@@ -565,6 +565,7 @@ mod tests {
                 thickness: 17.,
             };
             setup.operations = vec![Operation::Pocket(PocketOp {
+                finishing: Default::default(),
                 id: 1,
                 tool: 1,
                 work_offset: 1,

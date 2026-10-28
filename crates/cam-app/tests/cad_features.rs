@@ -777,6 +777,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         ])
     };
     planar.add_operation(Operation::Pocket(PocketOp {
+        finishing: Default::default(),
         id,
         tool: 1,
         work_offset: 1,

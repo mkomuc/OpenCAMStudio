@@ -36,6 +36,9 @@ impl Strategy for PocketStrategy {
         if let Err(reason) = op.entry_feeds.validate() {
             return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
         }
+        if let Err(reason) = op.finishing.validate() {
+            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+        }
         let mut diagnostics = Vec::new();
 
         macro_rules! fail {
@@ -91,7 +94,13 @@ impl Strategy for PocketStrategy {
         if spacing <= 1e-9 {
             fail!("operation {}: overlap leaves no stepover", op.id);
         }
-        let first = r + op.clear.offset;
+        let finish_allowance = if op.finishing.enabled {
+            op.finishing.count as f64 * op.finishing.stepover
+        } else { 0. };
+        let first = r + op.clear.offset + finish_allowance;
+        if !first.is_finite() || first < r {
+            fail!("operation {}: invalid pocket wall allowance", op.id);
+        }
 
         // The cleared region the wall leads must stay inside: the region held back by
         // the wall ring's own offset. A lead-in/out that would swing past this (a
@@ -102,13 +111,14 @@ impl Strategy for PocketStrategy {
         if levels.is_empty() { fail!("operation {}: invalid or excessive depth levels; increase stepdown",op.id); }
         let mut program = Program::new();
         // Clear through the shared engine: engagement-spaced, climb-oriented,
-        // stay-down inside-out rings, with the finishing wall leads.
+        // stay-down inside-out rings. Explicit finishing owns the wall leads;
+        // otherwise keep the existing clearing-wall leads.
         let job = crate::clearing::ClearJob {
             lift_height: op.clear.lift_height,
             id: op.id,
             simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: r,
-            finish: op.clear.offset,
+            finish: op.clear.offset + finish_allowance,
             first,
             spacing,
             clearing: op.clear.clearing,
@@ -117,29 +127,36 @@ impl Strategy for PocketStrategy {
             plunge_feed: op.clear.plunge_feed,
             entry_feeds: op.entry_feeds,
             lead_overlap: op.clear.lead_overlap,
-            lead_in: op.clear.lead_in,
-            lead_out: op.clear.lead_out,
+            lead_in: if op.finishing.enabled { cam_model::Lead::None } else { op.clear.lead_in },
+            lead_out: if op.finishing.enabled { cam_model::Lead::None } else { op.clear.lead_out },
             start: op.start,
             end: op.end,
             guard: &guard,
                     spindle: env.spindle,
         };
-        match crate::clearing::clear(&mut program, &region, &job, &env.heights, &levels, cancel) {
-            Ok(0) => fail!(
-                "operation {}: tool (⌀{}) is too large to enter the pocket",
-                op.id,
-                tool.diameter
-            ),
-            Ok(_) => {}
-            Err(crate::rings::RingsError::Cancelled) => {
-                return StrategyResult {
-                    diagnostics,
-                    cancelled: true,
-                    ..Default::default()
+        let emit = |program: &mut Program, rough_levels: &[f64]| -> Result<(), crate::rings::RingsError> {
+            if crate::clearing::clear(program, &region, &job, &env.heights, rough_levels, cancel)? == 0 {
+                let reason = if op.finishing.enabled {
+                    "tool is too large to enter the pocket with the reserved finishing allowance; reduce the finishing stepover or pass count".into()
+                } else {
+                    format!("tool (⌀{}) is too large to enter the pocket", tool.diameter)
                 };
+                return Err(crate::rings::RingsError::Limit(reason));
+            }
+            Ok(())
+        };
+        let result = if op.finishing.enabled {
+            emit_with_finishing(&mut program, op, &region, r, env, &levels, cancel, emit)
+        } else {
+            emit(&mut program, &levels)
+        };
+        match result {
+            Ok(()) => {}
+            Err(crate::rings::RingsError::Cancelled) => {
+                return StrategyResult { diagnostics, cancelled: true, ..Default::default() };
             }
             Err(crate::rings::RingsError::Offset(e) | crate::rings::RingsError::Limit(e)) => {
-                fail!("operation {}: offset failed: {e}", op.id)
+                fail!("operation {}: pocket toolpath failed: {e}", op.id)
             }
         }
 
@@ -149,6 +166,82 @@ impl Strategy for PocketStrategy {
             cancelled: false,
         }
     }
+}
+
+/// Finish each cleared depth before stepping down again. Each disconnected loop
+/// approaches from clearance, so links cannot cut through an island or another lobe.
+#[allow(clippy::too_many_arguments)]
+fn emit_with_finishing(
+    program: &mut Program,
+    op: &PocketOp,
+    region: &Polygon,
+    radius: f64,
+    env: &JobEnv,
+    levels: &[f64],
+    cancel: &CancelToken,
+    rough: impl Fn(&mut Program, &[f64]) -> Result<(), crate::rings::RingsError>,
+) -> Result<(), crate::rings::RingsError> {
+    use cam_cldata::{MoveKind, Point3, SpindleDir, Step, Tag};
+    use crate::rings::{concentric_rings, RingsError};
+    let finish = op.finishing;
+    let stages = finish.count + u32::from(finish.repeat_pass);
+    let reversed = op.clear.clearing.climb != (env.spindle == SpindleDir::Cw);
+    let feed = if finish.feed > 0. { finish.feed } else { op.clear.feed };
+    let mut paths = Vec::new();
+    let mut total_points = 0usize;
+    for stage in 0..stages {
+        if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
+        let remaining = finish.count.saturating_sub(stage + 1);
+        let distance = radius + op.clear.offset + remaining as f64 * finish.stepover;
+        let mut rings = concentric_rings(region, distance, 0., cancel)?;
+        if rings.is_empty() {
+            return Err(RingsError::Limit("finishing pass does not fit inside the pocket".into()));
+        }
+        for ring in &mut rings {
+            if reversed { ring.pts.reverse(); }
+            total_points = total_points.saturating_add(ring.pts.len());
+        }
+        if total_points.saturating_mul(levels.len()) > 1_000_000 {
+            return Err(RingsError::Limit("too many pocket finishing moves; reduce pass count or depth levels".into()));
+        }
+        let guard = offset(std::slice::from_ref(region), -distance, JoinStyle::Round)
+            .map_err(|e| RingsError::Offset(e.to_string()))?;
+        paths.push((rings, guard));
+    }
+    let mut from_z = env.heights.top_of_stock;
+    for &z in levels {
+        if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
+        rough(program, &[z])?;
+        for (stage, (rings, guard)) in paths.iter().enumerate() {
+            for ring in rings {
+                if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
+                // A segment midpoint gives the entry and exit leads room on both
+                // sides of the seam. A corner start would discard a valid arc lead.
+                let seed = op.start.map(|p| cam_geo::Point::new(p[0], p[1])).unwrap_or_else(|| {
+                    let (a, b) = ring.pts.iter().zip(ring.pts.iter().cycle().skip(1))
+                        .max_by(|(a, b), (c, d)| {
+                            (b.x - a.x).hypot(b.y - a.y).total_cmp(&(d.x - c.x).hypot(d.y - c.y))
+                        }).unwrap();
+                    cam_geo::Point::new((a.x + b.x) / 2., (a.y + b.y) / 2.)
+                });
+                let last = stage + 1 == paths.len();
+                let exit = crate::rings::emit_wall_ring(
+                    program, &ring.pts, seed, from_z, z, op.id, feed,
+                    op.clear.plunge_feed, op.entry_feeds, finish.overlap,
+                    if finish.lead_in_out_all || stage == 0 { op.clear.lead_in } else { cam_model::Lead::None },
+                    if finish.lead_in_out_all || last { op.clear.lead_out } else { cam_model::Lead::None },
+                    guard, reversed, &env.heights, op.clear.plunge,
+                    -1., op.clear.lift_height, if last { op.end } else { None },
+                );
+                program.push(Step::Rapid {
+                    to: Point3::new(exit.x, exit.y, env.heights.clearance),
+                    tag: Tag::new(op.id, MoveKind::Retract),
+                });
+            }
+        }
+        from_z = z;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -211,6 +304,7 @@ mod tests {
         // Depth 3 at 1.5 stepdown ⇒ 2 levels. Staying down means one plunge and one
         // retract *per level*, not per ring — and the rings are still all cut.
         let op = PocketOp {
+            finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -257,6 +351,7 @@ mod tests {
     #[test]
     fn helix_plunge_pocket_enters_on_helical_arcs() {
         let op = PocketOp {
+            finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -318,6 +413,7 @@ mod tests {
     #[test]
     fn tool_too_large_for_pocket_errors() {
         let op = PocketOp {
+            finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -376,6 +472,7 @@ mod tests {
         // Finer overlap ⇒ smaller spacing ⇒ more rings ⇒ more cutting moves.
         let run = |overlap: f64| {
             let mut op = PocketOp {
+                finishing: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
                 cooling: Default::default(),
@@ -423,6 +520,7 @@ mod tests {
         // boundary, so the deepest cut into the +X wall is 2 mm shallower.
         let run = |offset: f64| {
             let op = PocketOp {
+                finishing: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
                 cooling: Default::default(),
@@ -489,6 +587,7 @@ mod tests {
 
     fn leaded_op(islands: Vec<Contour>) -> PocketOp {
         PocketOp {
+            finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -514,6 +613,116 @@ mod tests {
                 lead_in: Lead::Arc { radius: 2.0 },
                 lead_out: Lead::Arc { radius: 2.0 },
             },
+        }
+    }
+
+    fn finishing_result(op: PocketOp) -> StrategyResult {
+        let ts = tools(8.);
+        PocketStrategy::new(op).compute(&JobEnv {
+            heights: Heights::new(5., 2., 0.), tools: &ts, stock: None,
+            spindle: cam_cldata::SpindleDir::Cw,
+        }, &CancelToken::new())
+    }
+
+    fn finish_length(result: &StrategyResult) -> f64 {
+        let mut pos = cam_cldata::Point3::new(0., 0., 5.);
+        let mut length = 0.;
+        for step in result.program.steps() {
+            match step {
+                Step::Linear { to, feed, tag } => {
+                    if tag.kind == MoveKind::Cutting && *feed == 123. {
+                        length += (to.x - pos.x).hypot(to.y - pos.y);
+                    }
+                    pos = *to;
+                }
+                Step::Rapid { to, .. } => pos = *to,
+                Step::Arc { end, .. } => pos = *end,
+                _ => {}
+            }
+        }
+        length
+    }
+
+    #[test]
+    fn finishing_reserves_stock_and_cuts_each_depth_at_its_own_feed() {
+        let mut op = leaded_op(vec![]);
+        op.clear.lead_in = Lead::None;
+        op.clear.lead_out = Lead::None;
+        op.clear.stepdown = 1.;
+        op.clear.offset = 1.;
+        op.depth = 2.;
+        op.finishing = cam_model::PocketFinishing {
+            enabled: true, count: 2, stepover: 0.6, feed: 123., ..Default::default()
+        };
+        let result = finishing_result(op.clone());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        for z in [-1., -2.] {
+            let max_x = |feed| result.program.steps().iter().filter_map(|step| match step {
+                Step::Linear { to, feed: f, tag } if tag.kind == MoveKind::Cutting && *f == feed && to.z == z => Some(to.x),
+                Step::Arc { end, feed: f, tag, .. } if tag.kind == MoveKind::Cutting && *f == feed && end.z == z => Some(end.x),
+                _ => None,
+            }).fold(f64::NEG_INFINITY, f64::max);
+            assert!((max_x(300.) - 33.8).abs() < 1e-6, "roughing must reserve both finishing cuts");
+            assert!((max_x(123.) - 35.).abs() < 1e-6, "finishing must respect the 1 mm wall allowance");
+        }
+        // Two rectangular finish loops, side lengths 28.8 and 30 mm, at two depths.
+        let base = finish_length(&result);
+        assert!((base - 2. * (4. * 28.8 + 4. * 30.)).abs() < 1e-6, "length={base}");
+        op.finishing.repeat_pass = true;
+        let repeated = finishing_result(op.clone());
+        assert!((finish_length(&repeated) - base - 240.).abs() < 1e-6);
+        op.finishing.overlap = 0.75;
+        let overlapped = finishing_result(op.clone());
+        assert!((finish_length(&overlapped) - finish_length(&repeated) - 4.5).abs() < 1e-6);
+        // A disabled section must produce exactly the legacy path, even with saved values.
+        op.finishing.enabled = false;
+        let disabled = finishing_result(op.clone());
+        op.finishing = Default::default();
+        assert_eq!(disabled.program, finishing_result(op).program);
+    }
+
+    #[test]
+    fn finishing_leads_apply_to_first_and_last_or_every_pass() {
+        let mut op = leaded_op(vec![]);
+        op.finishing = cam_model::PocketFinishing {
+            enabled: true, count: 3, feed: 123., ..Default::default()
+        };
+        let first_last = finishing_result(op.clone());
+        assert!(!first_last.has_errors(), "{:?}", first_last.diagnostics);
+        assert_eq!(leadin_arcs(&first_last).len(), 2);
+        op.finishing.lead_in_out_all = true;
+        let all = finishing_result(op);
+        assert!(!all.has_errors(), "{:?}", all.diagnostics);
+        assert_eq!(leadin_arcs(&all).len(), 6);
+    }
+
+    #[test]
+    fn finishing_settings_round_trip_and_old_pockets_default_to_off() {
+        let mut op = leaded_op(vec![]);
+        op.finishing = cam_model::PocketFinishing {
+            enabled: true, count: 3, feed: 123., repeat_pass: true,
+            lead_in_out_all: true, overlap: 0.4, stepover: 0.25,
+        };
+        let mut saved = serde_json::to_value(&op).unwrap();
+        assert_eq!(serde_json::from_value::<PocketOp>(saved.clone()).unwrap(), op);
+        saved.as_object_mut().unwrap().remove("finishing");
+        assert_eq!(serde_json::from_value::<PocketOp>(saved).unwrap().finishing, Default::default());
+    }
+
+    #[test]
+    fn invalid_finishing_settings_fail_without_motion() {
+        for (count, stepover, feed, overlap) in [
+            (0, 0.6, 0., 0.), (1001, 0.6, 0., 0.), (1, 0., 0., 0.),
+            (1, f64::NAN, 0., 0.), (1, 0.6, -1., 0.), (1, 0.6, 0., f64::INFINITY),
+            (1, 50., 0., 0.),
+        ] {
+            let mut op = leaded_op(vec![]);
+            op.finishing = cam_model::PocketFinishing {
+                enabled: true, count, stepover, feed, overlap, ..Default::default()
+            };
+            let result = finishing_result(op);
+            assert!(result.has_errors());
+            assert!(result.program.steps().is_empty());
         }
     }
 
@@ -613,6 +822,7 @@ mod tests {
         // the geometric floor. The gate is 1.5·e = 3.0 — see
         // `frontadvance::CERT_ENGAGEMENT_SLACK`.
         let op = PocketOp {
+            finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -750,6 +960,7 @@ mod tests {
         // arc), never emitted overshooting the boundary. High overlap gives the
         // multiple rings that put the wall ring on the leaded path in the first place.
         let small = PocketOp {
+            finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),

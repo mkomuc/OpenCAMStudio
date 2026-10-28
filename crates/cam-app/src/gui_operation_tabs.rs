@@ -174,6 +174,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
     }
     match field {
         Field::Profile(n) => n.invalid(value),
+        Field::PocketFinish(n) => n.invalid(value),
         Field::Depth
         | Field::ChamferWidth
         | Field::Feed
@@ -579,6 +580,7 @@ impl App {
             if matches!(
                 field,
                 Field::Profile(_)
+                    | Field::PocketFinish(_)
                     | Field::TabWidth
                     | Field::TabHeight
                     | Field::TabSpacing
@@ -742,6 +744,7 @@ impl App {
             }
             Operation::Pocket(p) => {
                 if tab == OperationTab::Passes {
+                    list = list.extend(self.pocket_finishing_controls(&p.finishing));
                     list = list.section("Passes");
                     list = list.push(
                         row![

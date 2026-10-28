@@ -116,6 +116,7 @@ fn run(doc: &Document) -> cam_sim::SimResult {
 #[test]
 fn a_pocket_clears_its_floor_without_collisions() {
     let op = PocketOp {
+        finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),
@@ -190,6 +191,7 @@ fn pocket_target(intended_depth: f64) -> Heightfield {
 
 fn pocket_op() -> PocketOp {
     PocketOp {
+        finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),
@@ -215,6 +217,32 @@ fn pocket_op() -> PocketOp {
             lead_in: Lead::None,
             lead_out: Lead::None,
         },
+    }
+}
+
+#[test]
+fn pocket_finishing_clears_walls_without_crossing_islands_or_rapiding_through_stock() {
+    for climb in [true, false] {
+        for plunge in [Plunge::Straight, Plunge::Helix { radius: 0.5, pitch: 1. }] {
+            let mut op = pocket_op();
+            op.islands = vec![square(17., 17., 23., 23.)];
+            op.clear.clearing.climb = climb;
+            // Exercise the adaptive rougher as well as the concentric fallback.
+            op.clear.clearing.engagement = 1.;
+            op.clear.plunge = plunge;
+            op.clear.lead_in = Lead::Arc { radius: 0.75 };
+            op.clear.lead_out = Lead::Arc { radius: 0.75 };
+            op.finishing = cam_model::PocketFinishing {
+                enabled: true, count: 2, stepover: 0.4, feed: 123.,
+                lead_in_out_all: true, repeat_pass: true, overlap: 0.5,
+            };
+            let sim = run(&setup(vec![Operation::Pocket(op)]));
+            assert!(sim.is_clean(), "climb={climb}, plunge={plunge:?}: {:?}", sim.collisions);
+            assert!(sim.field.sample(20., 20.) > -0.1, "island must remain intact");
+            assert!(sim.field.sample(6., 20.) < -3.9, "finishing must reach the wall");
+            assert!(sim.field.sample(16., 20.) < -3.9, "finishing must reach the island wall");
+            assert!(sim.field.sample(4., 20.) > -0.1, "outer wall must remain intact");
+        }
     }
 }
 

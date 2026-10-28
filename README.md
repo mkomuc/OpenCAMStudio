@@ -21,7 +21,9 @@ A CAM application for CNC toolpath generation, built in Rust.
 - **Operations** — profile, pocket, drill, face, chamfer, **thread milling**,
   **V-carve engraving** and **V-carving**; leads and ramp/helix plunges;
   engagement-capped area clearing (adaptive front-advance where it certifies,
-  concentric otherwise).
+  concentric otherwise). Pocket operations offer optional finishing passes with
+  separate radial stepover and feed, leads, a repeat pass and closure overlap;
+  cutter compensation is computed in the toolpath.
 - **3D Adaptive Clearing** — roughing levels with upward fine-step refinement,
   optimal load and tolerance controls, using the independent CAD machining
   tessellation. Select the bodies or faces to machine while retaining other setup

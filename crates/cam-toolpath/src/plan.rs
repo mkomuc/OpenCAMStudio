@@ -1292,6 +1292,7 @@ mod tests {
             Point::new(30.0, 30.0), Point::new(0.0, 30.0),
         ]);
         let pocket = Operation::Pocket(cam_model::PocketOp {
+            finishing: Default::default(),
             id: 2, tool: 1, boundary: square(), islands: Vec::new(), depth: 2.0,
             spindle_rpm: 1000.0, tool_preset: None, cooling: Default::default(),
             entry_feeds: Default::default(), work_offset: 1, start: None, end: None,

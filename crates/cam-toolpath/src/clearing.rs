@@ -473,7 +473,10 @@ fn emit_adaptive_moves(
         let mut lifted = false;
         for i in 1..moves.len() {
             let (p, is_cut) = moves[i];
-            let is_air = is_cut && air.get(i).copied().unwrap_or(false);
+            // Air flags certify the clearing region. With wall stock reserved,
+            // the cutter can still graze material just outside that region, so
+            // these transitions must remain feed moves rather than rapids.
+            let is_air = is_cut && job.finish == 0.0 && air.get(i).copied().unwrap_or(false);
             if lifted && !is_air {
                 if is_cut {
                     let from = moves[i - 1].0;

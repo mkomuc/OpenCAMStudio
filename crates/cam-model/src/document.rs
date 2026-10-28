@@ -952,6 +952,9 @@ pub struct PocketOp {
     /// broken operation rather than a refusal. Requiring the field means a document that
     /// reached the deserializer un-migrated fails there, loudly, with the field named.
     pub clear: ClearParams,
+    /// Optional radial wall finishing, with compensation computed in the toolpath.
+    #[serde(default)]
+    pub finishing: crate::PocketFinishing,
 }
 
 /// 3D surface finishing over a CAD solid or selected faces.

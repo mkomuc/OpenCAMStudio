@@ -281,7 +281,7 @@ fn approach(
 /// the cutter never eases on across the finished wall (`guard` bounds the cleared
 /// region; see [`lead_fits`]). Lead-in and lead-out are judged independently.
 #[allow(clippy::too_many_arguments)]
-fn emit_wall_ring(
+pub(crate) fn emit_wall_ring(
     prog: &mut Program,
     pts: &[Point],
     prev_end: Point,

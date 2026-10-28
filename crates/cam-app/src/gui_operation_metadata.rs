@@ -66,6 +66,9 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 Field::PlungeFeed,
                 Field::LeadOverlap,
             ];
+            if p.finishing.enabled {
+                fields.extend(pocket_parameters::Number::ALL.map(Field::PocketFinish));
+            }
             if p.clear.lead_in != Lead::None {
                 fields.push(Field::LeadInSize);
             }

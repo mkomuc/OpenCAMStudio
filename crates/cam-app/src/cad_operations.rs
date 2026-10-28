@@ -472,6 +472,7 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            finishing: Default::default(),
             id,
             tool,
             work_offset,
