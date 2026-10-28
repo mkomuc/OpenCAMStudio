@@ -43,7 +43,7 @@ impl JobInputs {
     /// Empty when there is no stock (no geometry loaded).
     pub(super) fn simulate_stock(
         &self,
-        program: &Program,
+        program: &mut Program,
         cancel: &CancelToken,
         cache: &mut OperationCache,
         progress: &Progress,
@@ -161,7 +161,7 @@ impl JobInputs {
 
     fn simulate_field(
         &self,
-        program: &Program,
+        program: &mut Program,
         resolution: f64,
         initial: Option<(&str, &Heightfield)>,
         cancel: &CancelToken,
@@ -190,15 +190,118 @@ impl JobInputs {
         };
         let cancelled = || cancel.is_cancelled();
         let report = |done, total| progress.set(JobPhase::Verification, done, total, None);
-        if let Some((key, field)) = initial {
-            simulation.simulate_from_stock_controlled(
-                program, self.min, self.max, &options, &sim_tools, field, key, &cancelled, report,
-            )
-        } else {
-            simulation.simulate_controlled(
-                program, self.min, self.max, &options, &sim_tools, &cancelled, report,
-            )
+        let verify = |program: &Program, simulation: &mut SimulationCache| {
+            if let Some((key, field)) = initial {
+                simulation.simulate_from_stock_controlled(
+                    program, self.min, self.max, &options, &sim_tools, field, key, &cancelled, report,
+                )
+            } else {
+                simulation.simulate_controlled(
+                    program, self.min, self.max, &options, &sim_tools, &cancelled, report,
+                )
+            }
+        };
+        let mut result = verify(program, simulation)?;
+        if self.preview_program.is_none() {
+            if let Some(repaired) = self.reroute_parallel_stock_links(program, &result.collisions, cancel) {
+                *program = repaired;
+                // Re-run the unchanged collision checks on the actual output.
+                // Clearance entries can only remove additional stock, so a
+                // previously clear link cannot become blocked by this rewrite.
+                result = verify(program, simulation)?;
+            }
         }
+        (!cancelled()).then_some(result)
+    }
+
+    /// CAD clearance is not proof of cleared stock: a ball nose leaves scallops
+    /// and the next row may still be uncut. Preserve non-cutting link semantics
+    /// and replace only blocked Parallel links with the normal clearance entry.
+    fn reroute_parallel_stock_links(
+        &self,
+        program: &Program,
+        collisions: &[Collision],
+        cancel: &CancelToken,
+    ) -> Option<Program> {
+        use cam_cldata::{MoveKind, Point3, Step};
+        let blocked: std::collections::BTreeSet<_> = collisions
+            .iter()
+            .filter(|c| c.kind == cam_sim::CollisionKind::NonCuttingThroughStock)
+            .filter_map(|c| c.step_index)
+            .collect();
+        if blocked.is_empty() {
+            return None;
+        }
+        let setup = self.document.setup();
+        let policies: std::collections::BTreeMap<_, _> = setup
+            .operations
+            .iter()
+            .filter_map(|op| {
+                let cam_model::Operation::Parallel(parallel) = op else {
+                    return None;
+                };
+                if !parallel.params.stay_down || parallel.params.lift_height <= 0. {
+                    return None;
+                }
+                let clearance = match setup.height_settings.get(&op.id()) {
+                    Some(settings) => settings.resolve(&self.document, op).ok()?.clearance,
+                    None => setup.heights_for(op.id()).clearance,
+                };
+                Some((op.id(), (clearance, parallel.params.plunge_feed)))
+            })
+            .collect();
+        let mut output = Program::new();
+        let mut current: Option<Point3> = None;
+        let mut changed = false;
+        for (index, step) in program.steps().iter().enumerate() {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            if let Step::Linear { to, tag, .. } = step {
+                if tag.kind == MoveKind::Link && blocked.contains(&index) {
+                    if let (Some(from), Some(&(clearance, feed))) =
+                        (current, policies.get(&tag.op_id))
+                    {
+                        if clearance.is_finite()
+                            && clearance > from.z.max(to.z).max(self.max[2])
+                            && feed.is_finite()
+                            && feed > 0.
+                        {
+                            output.push(Step::Rapid {
+                                to: Point3::new(from.x, from.y, clearance),
+                                tag: cam_cldata::Tag {
+                                    kind: MoveKind::Retract,
+                                    ..*tag
+                                },
+                            });
+                            output.push(Step::Rapid {
+                                to: Point3::new(to.x, to.y, clearance),
+                                tag: *tag,
+                            });
+                            output.push(Step::Linear {
+                                to: *to,
+                                feed,
+                                tag: cam_cldata::Tag {
+                                    kind: MoveKind::Plunge,
+                                    ..*tag
+                                },
+                            });
+                            current = Some(*to);
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+            match step {
+                Step::Rapid { to, .. } | Step::Linear { to, .. } => current = Some(*to),
+                Step::Arc { end, .. } => current = Some(*end),
+                Step::Drill(_) => current = None,
+                _ => {}
+            }
+            output.push(step.clone());
+        }
+        changed.then_some(output)
     }
 
     fn previous_stock_key(&self, resolution: f64) -> Option<String> {
@@ -317,7 +420,7 @@ impl JobInputs {
                     setup.name
                 )));
             }
-            let job = build_job_cached(
+            let mut job = build_job_cached(
                 PlanRequest {
                     document: &document,
                     spindle_rpm: self.spindle_rpm,
@@ -344,6 +447,9 @@ impl JobInputs {
             }
             let mut source = self.clone();
             source.document = Arc::new(document);
+            // Predecessors are regenerated whole jobs, even when the destination
+            // is a playback preview. Their links still require stock validation.
+            source.preview_program = None;
             source.min = min;
             source.max = max;
             let res = source.stock_resolution(&job.program);
@@ -356,7 +462,7 @@ impl JobInputs {
             };
             let result = source
                 .simulate_field(
-                    &job.program,
+                    &mut job.program,
                     res,
                     initial.as_ref().map(|f| ("predecessor", f)),
                     cancel,
@@ -435,6 +541,135 @@ mod tests {
         settings.stock = Stock::PreviousSetup;
         app.apply_setup_settings(settings).unwrap();
         id
+    }
+
+    #[test]
+    fn parallel_links_use_clearance_only_when_remaining_stock_blocks_them() {
+        use cam_cldata::{MoveKind, Point3, Step, Tag};
+        let mut app = drilled_blank();
+        app.edit_tool(0, |tool| tool.kind = cam_model::ToolKind::BallMill);
+        app.edit_setup(|setup| {
+            setup.height_settings.clear();
+            setup.operation_heights.clear();
+            setup.operations = vec![Operation::Parallel(cam_model::ParallelOp {
+                id: 7,
+                tool: 1,
+                work_offset: 1,
+                spindle_rpm: 1000.,
+                tool_preset: None,
+                cooling: Default::default(),
+                entry_feeds: Default::default(),
+                params: cam_model::ParallelParams {
+                    stay_down: true,
+                    lift_height: 2.,
+                    plunge_feed: 60.,
+                    ..Default::default()
+                },
+            })];
+        });
+        let mut inputs = app.job_inputs();
+        inputs.min = [-5., -5., -5.];
+        inputs.max = [5., 5., 0.];
+        let tag = |kind| Tag {
+            op_id: 7,
+            kind,
+            pattern_id: Some(9),
+            instance_index: Some(2),
+        };
+        let original = Program {
+            steps: vec![
+                Step::ToolChange { tool: 1 },
+                Step::Rapid {
+                    to: Point3::new(0., 0., 5.),
+                    tag: tag(MoveKind::Link),
+                },
+                Step::Linear {
+                    to: Point3::new(0., 0., -2.),
+                    feed: 60.,
+                    tag: tag(MoveKind::Plunge),
+                },
+                Step::Linear {
+                    to: Point3::new(1., 0., -2.),
+                    feed: 300.,
+                    tag: tag(MoveKind::Cutting),
+                },
+                Step::Linear {
+                    to: Point3::new(1., 2., -2.),
+                    feed: 300.,
+                    tag: tag(MoveKind::Link),
+                },
+                Step::Linear {
+                    to: Point3::new(0., 2., -2.),
+                    feed: 300.,
+                    tag: tag(MoveKind::Cutting),
+                },
+                Step::Linear {
+                    to: Point3::new(1., 2., -2.),
+                    feed: 300.,
+                    tag: tag(MoveKind::Link),
+                },
+                Step::Rapid {
+                    to: Point3::new(1., 2., 5.),
+                    tag: tag(MoveKind::Retract),
+                },
+            ],
+        };
+        let cancel = CancelToken::new();
+        let simulate = |source: &JobInputs, program: &mut Program, initial| {
+            source
+                .simulate_field(
+                    program,
+                    0.2,
+                    initial,
+                    &cancel,
+                    &Progress::default(),
+                    &mut SimulationCache::default(),
+                )
+                .unwrap()
+        };
+        let mut preview = inputs.clone();
+        preview.preview_program = Some(original.clone());
+        let raw = simulate(&preview, &mut original.clone(), None);
+        assert!(raw
+            .collisions
+            .iter()
+            .any(|c| c.kind == cam_sim::CollisionKind::NonCuttingThroughStock));
+
+        let mut repaired = original.clone();
+        let verified = simulate(&inputs, &mut repaired, None);
+        assert!(verified.is_clean(), "{:?}", verified.collisions);
+        assert!(repaired.validate().is_ok());
+        assert_eq!(repaired.len(), original.len() + 2);
+        assert!(matches!(&repaired.steps()[4], Step::Rapid { to, tag: t }
+            if *to == Point3::new(1., 0., 5.) && *t == tag(MoveKind::Retract)));
+        assert!(
+            matches!(&repaired.steps()[6], Step::Linear { to, feed, tag: t }
+            if *to == Point3::new(1., 2., -2.) && *feed == 60. && *t == tag(MoveKind::Plunge))
+        );
+        assert_eq!(
+            &repaired.steps()[8],
+            &original.steps()[6],
+            "a link through cleared stock stays down"
+        );
+
+        let mut prepared = Heightfield::new([-5., -5.], [5., 5.], 0.2, 0.);
+        prepared.lower_rect([-5., -5.], [5., 5.], -3.);
+        let mut pre_roughed = original.clone();
+        assert!(simulate(&inputs, &mut pre_roughed, Some(("prepared", &prepared))).is_clean());
+        assert_eq!(
+            pre_roughed, original,
+            "pre-roughed stock keeps all the requested stay-down links"
+        );
+
+        let mut unrelated = original.clone();
+        if let Step::Linear { tag, .. } = &mut unrelated.steps[4] {
+            tag.op_id = 99;
+        }
+        let failed = simulate(&inputs, &mut unrelated, None);
+        assert!(
+            failed.collisions.iter().any(|c| c.op_id == Some(99)),
+            "other operations' failures remain visible"
+        );
     }
 
     #[test]

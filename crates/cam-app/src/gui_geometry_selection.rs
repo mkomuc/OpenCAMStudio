@@ -208,7 +208,8 @@ impl App {
             return self.profile_geometry_collection();
         }
         if let Some(
-            kind @ (OpKind::Chamfer
+            kind @ (OpKind::Pocket
+            | OpKind::Chamfer
             | OpKind::Engrave
             | OpKind::Carve
             | OpKind::Bore

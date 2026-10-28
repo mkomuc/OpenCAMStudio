@@ -1,21 +1,36 @@
 # Setups and work coordinates
 
-Import a STEP model once. The left browser lists physical setups, with operations
+New projects start with no setups. Import a STEP model once, select a model or
+body in the project browser or 3D view, and create a setup. A selected model adds
+all its bodies; selected bodies add just those instances. With no model or body
+selected, the setup starts with no model targets.
+
+The left browser lists physical setups, with operations
 directly beneath them in execution order. Add a setup for another machining side,
 or duplicate an existing setup to copy its operations and geometry links. Each
 setup has independent model targets, work axes, datum, stock, material, safety
 heights and NC program name. Selecting an operation activates its parent setup.
 
-New setups start with no model bodies selected. In the Setup tab, click Add,
+In the Setup tab, click Add to include more bodies,
 then click each desired body in the shaded view. Done or Escape finishes picking;
 Remove can clear the last body. The model list and viewport highlights preview
 this selection until OK. Duplicating a setup retains its selected bodies.
+The copy is inserted immediately after its source and automatically uses **From
+previous setup** stock. Choose a box in its Stock tab to start with a fresh blank.
 The Models tree groups body instances beneath their imported source model.
 
 The right column holds Setup, Stock and Postprocess tabs. Edits across the tabs
 share one draft. OK validates and commits the entire draft as one undoable change;
 Cancel restores the committed values in every tab. Tab changes never commit.
 Resolve a draft before navigating to another setup or operation.
+
+Double-click a setup (or choose **Edit setup** from its context menu), then open
+the **Setup** tab's **Tool change** section. **Use machine maximum Z** is enabled
+by default; disable it to enter a **Tool-change height** in millimetres relative
+to the base WCS origin. Click **Apply setup** to save. This height is used before
+tool changes and manual re-fixturing and should be at or above every operation's
+clearance plane. The planner raises lower values to clearance, with a warning
+for differences greater than 0.000001 mm; smaller CAD padding is clamped silently.
 
 The Setup tab combines orientation and datum in **Workpiece coordinate system
 (WCS)**. The Orientation menu offers model orientation, Z/X, Z/Y and X/Y axis
@@ -72,7 +87,9 @@ does not verify fixtures, holders or an entire machine assembly.
 
 Imported model rows expand/collapse their body instances and provide a whole-model
 visibility checkbox and context action. Parent visibility preserves individual
-body choices. Selecting Models shows the collection; selecting a model or body
+body choices. Picking geometry in the 3D view highlights its body in the browser
+and expands the parent model. The browser title is the project filename without
+`.ocam`, or Untitled before the first save. Selecting Models shows the collection; selecting a model or body
 shows that item. Selecting a setup or one of its operations scopes CAD display,
 picking, snapping and framing to the setup's model instances (including draft
 membership). An empty setup shows no CAD bodies. Add-model picking temporarily

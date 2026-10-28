@@ -8,6 +8,11 @@ the diameter, internal/external side, top and bottom; reselection refreshes thos
 dimensions without discarding cutting settings. Multiple selected features must
 share diameter, side and cutting heights.
 
+Cutter suitability is advisory. Pointed, rounded and other cutters can follow
+the same nominal bore path; their actual profiles determine the simulated cut.
+Flank, floor and reach mismatches warn without blocking generation or simulation.
+See [advisory verification](geometry-verification.md).
+
 CAD cylinders can have a qualified coaxial rounded entrance opening upward to a
 planar rim. Bore cuts only the straight cylindrical wall beneath the entrance.
 Capped, incomplete, obstructed entrances and rounded bottoms are rejected.

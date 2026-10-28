@@ -33,7 +33,7 @@ pub(crate) fn is_read_only(name: &str) -> bool {
 }
 
 fn setup(c: &AppController) -> &cam_model::Setup {
-    c.document().setup()
+    c.inspection_setup()
 }
 fn operation(c: &mut AppController, id: u32) -> Result<Operation, String> {
     let owner = c
@@ -177,7 +177,7 @@ catalog! {
         c.select(selection); serialized(c.selection())
     }
     activate_setup [false] "Activate an existing setup by its stable ID." {"id":id()} |c,a| {c.activate_setup(a.get("id")?)?; serialized(c.active_setup_id())}
-    add_setup [false] "Create and activate an empty setup." {} |c,_a| {serialized(c.add_setup())}
+    add_setup [false] "Create and activate a setup using the selected CAD body instances, with no operations." {} |c,_a| {serialized(c.add_setup())}
     duplicate_setup [false] "Duplicate a setup with remapped operation and pattern IDs." {"id":id()} |c,a| {serialized(c.duplicate_setup(a.get("id")?)?)}
     delete_setup [false] "Delete a setup; the project must retain at least one." {"id":id()} |c,a| {c.delete_setup(a.get("id")?)?; Ok(json!(true))}
     reorder_setup [false] "Move a setup before another setup, or append if before is omitted." {"id":id(),"before":optional(id())} |c,a| {

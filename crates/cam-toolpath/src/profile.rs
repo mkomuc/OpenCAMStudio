@@ -232,31 +232,22 @@ impl ProfileStrategy {
                 ..Default::default()
             };
         }
-        // The tool must be able to cut a vertical wall to the requested depth with a
-        // *cutting* surface (see `guards`): a pointed tool has no cylindrical flank,
-        // and a cut past the flute length drags the shank along the wall.
-        if !crate::guards::check_side_milling(op.id, "profile", tool, op.depth, &mut diagnostics) {
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
+        // Report shape/reach differences while retaining the operator's cutter.
+        crate::guards::warn_side_milling(op.id, "profile", tool, op.depth, &mut diagnostics);
         if let Err(message) = op.validate_control_leads(tool.radius()) {
             return StrategyResult {
                 diagnostics: vec![Diagnostic::error(message)],
                 ..Default::default()
             };
         }
-        // Each pass enters with a plunge, so the tip must cut.
-        if !crate::guards::check_plunge(op.id, "profile", tool, &mut diagnostics) {
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
+        // Report a non-cutting tip before generating the requested plunge.
+        crate::guards::warn_plunge(op.id, "profile", tool, &mut diagnostics);
 
         if !op.closed {
-            return open_profile(op, tool.radius(), env, cancel);
+            let mut result = open_profile(op, tool.radius(), env, cancel);
+            diagnostics.append(&mut result.diagnostics);
+            result.diagnostics = diagnostics;
+            return result;
         }
         // Validate the geometry and parameters.
         if !op.chain.is_valid() {
@@ -377,6 +368,7 @@ impl ProfileStrategy {
                 // finishing allowance is baked into the roughing island, so the wall
                 // ring sits at the tool radius.
                 let job = crate::clearing::ClearJob {
+                    lift_height: 0.0,
                     id: op.id,
                     simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
                     radius,

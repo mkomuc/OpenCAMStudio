@@ -55,6 +55,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
         }
         Operation::Pocket(p) => {
             let mut fields = vec![
+                Field::LiftHeight,
                 Field::Depth,
                 Field::Stepdown,
                 Field::Overlap,
@@ -187,8 +188,9 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
-        Operation::Parallel(_) => vec![Field::ParallelStepover, Field::ParallelAngle, Field::AdaptiveTolerance, Field::AdaptiveOffset, Field::SpindleRpm, Field::Feed, Field::PlungeFeed],
+        Operation::Parallel(_) => vec![Field::LiftHeight, Field::ParallelStepover, Field::ParallelAngle, Field::AdaptiveTolerance, Field::AdaptiveOffset, Field::SpindleRpm, Field::Feed, Field::PlungeFeed],
         Operation::Adaptive(_) => vec![
+            Field::LiftHeight,
             Field::AdaptiveTolerance,
             Field::AdaptiveOptimalLoad,
             Field::Stepdown,

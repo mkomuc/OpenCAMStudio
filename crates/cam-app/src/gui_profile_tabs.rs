@@ -153,7 +153,7 @@ impl App {
             points: op.chain.points().iter().map(|p| [p.x, p.y]).collect(),
             positions: self.profile_tab_locations(),
             z,
-            frame: self.controller.document().setup().frame.clone(),
+            frame: self.controller.inspection_setup().frame.clone(),
             picking: self.profile_tab_picking
                 && op.tabs.enabled
                 && op.tabs.manual
@@ -370,6 +370,41 @@ impl canvas::Program<Message> for TabOverlay {
                 .with_color(Color::from_rgb(0.2, 0.6, 0.98))
                 .with_width(2.),
         );
+        // Tab solids sit at the profile's bottom plane, inside the CAD body.
+        // The viewport's normal depth test therefore hides them when there is
+        // no stock mesh. Draw a lightweight projected preview over the scene
+        // so tabs remain visible in that case too.
+        let mut tab_faces = self
+            .triangles
+            .iter()
+            .filter_map(|(index, triangle)| {
+                let projected = triangle.map(|point| {
+                    let world = self.frame.to_world_vector(point);
+                    picking_view::project(self.camera, local, world)
+                });
+                let points = projected.map(|point| point.map(|(screen, depth)| (screen, depth)));
+                let points = [points[0]?, points[1]?, points[2]?];
+                let depth = points.iter().map(|(_, depth)| depth).sum::<f32>() / 3.0;
+                Some((*index, depth, points.map(|(screen, _)| screen)))
+            })
+            .collect::<Vec<_>>();
+        tab_faces.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (index, _, points) in tab_faces {
+            let selected = self.selected == Some(index);
+            let fill = if selected {
+                Color::from_rgba(1.0, 0.60, 0.08, 0.58)
+            } else {
+                Color::from_rgba(0.86, 0.86, 0.65, 0.52)
+            };
+            let face = canvas::Path::new(|path| {
+                path.move_to(points[0]);
+                path.line_to(points[1]);
+                path.line_to(points[2]);
+                path.close();
+            });
+            frame.fill(&face, fill);
+            frame.stroke(&face, stroke(if selected { 1.5 } else { 0.75 }));
+        }
         for (index, point) in self.positions.iter().enumerate() {
             if let Some(p) = self.project(*point, local) {
                 frame.fill(
@@ -761,7 +796,7 @@ mod tests {
                 let _ = app.update(Message::HeightOffsetChanged(HeightPlaneKind::Bottom, offset.into()));
                 assert_eq!(app.resolve_height_editor(id).unwrap().bottom, expected);
                 assert_eq!(app.profile_tab_overlay(camera, 0.).unwrap().z, expected);
-                let frame = &app.controller.document().setup().frame;
+                let frame = &app.controller.inspection_setup().frame;
                 let preview = app.operation_geometry_preview();
                 assert!(!preview.strips.is_empty());
                 assert!(preview.strips.iter().flat_map(|strip| &strip.points)
@@ -785,13 +820,13 @@ mod tests {
         app.controller = AppController::new(crate::default_machine());
         app.controller.open_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testfiles/test2.ocam")).unwrap();
-        let id = app.controller.document().setup().operations[0].id();
+        let id = app.controller.inspection_setup().operations[0].id();
         app.begin_operation_draft(id);
         let bottom = app.resolve_height_editor(id).unwrap().bottom;
         assert_eq!(bottom, -3.);
         assert_eq!(app.profile_selection_geometry().unwrap().1, bottom);
         let viewport = app.machining_viewport();
-        let frame = &app.controller.document().setup().frame;
+        let frame = &app.controller.inspection_setup().frame;
         let selected: Vec<_> = viewport.vertices.iter()
             .filter(|vertex| vertex.color == PICK_BOUNDARY).collect();
         assert!(!selected.is_empty());
@@ -806,9 +841,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -985,9 +1018,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()

@@ -50,14 +50,9 @@ impl Strategy for FaceStrategy {
         let Some(tool) = env.tool(op.tool) else {
             fail!("operation {}: tool {} is not in the setup", op.id, op.tool);
         };
-        // Facing leaves a floor: a non-cutting tip cannot make one at all, a
-        // non-flat tool only makes a worse one (warning — the machinist stays free).
-        if !crate::guards::check_flat_floor(op.id, "face", tool, &mut diagnostics) {
-            return StrategyResult { diagnostics, ..Default::default() };
-        }
-        if !crate::guards::check_axial_reach(op.id, "face", tool, op.depth, &mut diagnostics) {
-            return StrategyResult { diagnostics, ..Default::default() };
-        }
+        // Report floor and reach differences; simulation uses the actual cutter.
+        crate::guards::warn_flat_floor(op.id, "face", tool, &mut diagnostics);
+        crate::guards::warn_axial_reach(op.id, "face", tool, op.depth, &mut diagnostics);
         if !op.boundary.is_valid() {
             fail!("operation {}: face boundary is not a closed area", op.id);
         }

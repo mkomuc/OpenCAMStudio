@@ -10,6 +10,9 @@ impl AppController {
         mut tool: Tool,
         cutting: CuttingData,
     ) -> Result<u32, String> {
+        if self.setups().is_empty() {
+            return Err("Create a setup and select its models before creating an operation.".into());
+        }
         if ![cutting.rpm, cutting.feed, cutting.plunge_feed]
             .iter()
             .all(|v| v.is_finite())
@@ -55,10 +58,14 @@ impl AppController {
             self.active_origin,
             defaults,
         )?;
-        document
-            .setup_mut()
-            .height_settings
-            .insert(id, cam_model::OperationHeightSettings::default());
+        let settings = if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary {
+            let mut preview = document.clone();
+            preview.geometry.bindings.insert(id, binding.clone());
+            crate::cad_operations::selection_height_defaults(&preview, &operation)
+        } else {
+            cam_model::OperationHeightSettings::default()
+        };
+        document.setup_mut().height_settings.insert(id, settings);
         document.setup_mut().operations.push(operation);
         document.geometry.bindings.insert(id, binding);
         document.cad_linked_operations.insert(id);
@@ -78,6 +85,9 @@ impl AppController {
         stock_to_leave: cam_model::StockToLeave,
     ) -> Result<u32, String> {
         let replacing = self.pending_op.as_ref().and_then(|p| p.replacing);
+        if self.setups().is_empty() {
+            return Err("Create a setup before creating an operation.".into());
+        }
         let id = replacing.unwrap_or_else(|| self.next_op_id());
         operation.set_id(id);
         operation.set_work_offset(self.active_origin);

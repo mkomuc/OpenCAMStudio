@@ -41,6 +41,11 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
         } else {
             "Add Chain. Select an open or closed engraving path. Configure individual edge selection in settings."
         })],
+        OpKind::Pocket if cad => vec![
+            (CadFilter::Face, "face", "Add Pocket Floor. Select a planar floor face, preserving its islands."),
+            (CadFilter::Loop, "chain", "Add Chain. Select a closed pocket boundary; set the cutting depth in Heights."),
+        ],
+        OpKind::Pocket => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary and optional islands.")],
         OpKind::Carve if cad => vec![
             (CadFilter::Face, "face", "Add Face Contours. Select a planar face, preserving its holes as islands."),
             (CadFilter::Loop, "chain", "Add Chain. Select one closed boundary enclosing the carving region."),
@@ -70,7 +75,7 @@ impl App {
         self.stock_to_leave_draft
             .unwrap_or_else(|| match self.controller.selection() {
                 Selection::Operation(id) => {
-                    self.controller.document().setup().stock_to_leave_for(id)
+                    self.controller.inspection_setup().stock_to_leave_for(id)
                 }
                 _ => cam_model::StockToLeave::default(),
             })
@@ -197,6 +202,34 @@ impl App {
         matches!(self.operation_draft, Some(Operation::Chamfer(ref op)) if !op.faces.is_empty())
     }
 
+    pub(super) fn sync_pocket_geometry_height_defaults(&mut self, binding: &cam_model::GeometryBinding) {
+        let Some(operation @ Operation::Pocket(_)) = self.operation_draft.as_ref() else { return; };
+        let previous = self.operation_binding_preview.as_ref()
+            .or_else(|| self.controller.geometry_state().bindings.get(&operation.id()));
+        let Some(previous) = previous else { return; };
+        if previous.recipe == binding.recipe { return; }
+        let defaults_for = |recipe: &cam_model::ExtractionRecipe| {
+            if *recipe == cam_model::ExtractionRecipe::PocketBoundary {
+                crate::cad_operations::selection_height_defaults(self.controller.document(), operation)
+            } else {
+                cam_model::OperationHeightSettings::default()
+            }
+        };
+        let old = defaults_for(&previous.recipe);
+        let new = defaults_for(&binding.recipe);
+        if let Some(settings) = &mut self.height_draft {
+            for plane in cam_model::HeightPlaneKind::ALL {
+                let definition = old.definition(plane);
+                if settings.definition(plane) == definition
+                    && self.height_offsets.get(&plane).and_then(|s| s.parse::<f64>().ok()) == Some(definition.offset)
+                {
+                    *settings.definition_mut(plane) = new.definition(plane).clone();
+                    self.height_offsets.insert(plane, fmt_num(new.definition(plane).offset));
+                }
+            }
+        }
+    }
+
     pub(super) fn sync_chamfer_face_height_defaults(&mut self, before: Option<&Operation>) {
         let (Some(before @ Operation::Chamfer(_)), Some(after @ Operation::Chamfer(chamfer))) =
             (before, self.operation_draft.as_ref())
@@ -301,6 +334,10 @@ impl App {
         let (contours, closed): (Vec<_>, _) = match operation {
             Operation::Chamfer(op) => (vec![&op.chain], op.closed),
             Operation::Engrave(op) => (vec![&op.chain], op.closed),
+            Operation::Pocket(cam_model::PocketOp { boundary, islands, .. }) => (
+                std::iter::once(boundary).chain(islands.iter()).collect(),
+                true,
+            ),
             Operation::Carve(op) => (
                 std::iter::once(&op.boundary)
                     .chain(op.islands.iter())
@@ -331,7 +368,8 @@ impl App {
                     return;
                 }
                 let Some(
-                    kind @ (OpKind::Chamfer
+                    kind @ (OpKind::Pocket
+                    | OpKind::Chamfer
                     | OpKind::Engrave
                     | OpKind::Carve
                     | OpKind::Bore
@@ -470,6 +508,7 @@ impl App {
         let cad = self.operation_uses_cad_geometry();
         let kind = editor.kind;
         let name = match kind {
+            OpKind::Pocket => "Pocket",
             OpKind::Chamfer => "Chamfer",
             OpKind::Engrave => "Engrave",
             OpKind::Carve => "Carve",
@@ -491,7 +530,7 @@ impl App {
                         "thread"
                     } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                         if self.cad_filter == CadFilter::Body { "silhouette" } else { "face" }
-                    } else if kind == OpKind::Carve && cad && self.cad_filter == CadFilter::Face {
+                    } else if matches!(kind, OpKind::Pocket | OpKind::Carve) && cad && self.cad_filter == CadFilter::Face {
                         "face"
                     } else {
                         "chain"
@@ -518,7 +557,7 @@ impl App {
             geometry_selection::selected_feature_names(labels),
         ]
         .spacing(9);
-        if cad && matches!(kind, OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive | OpKind::Parallel) {
+        if cad && matches!(kind, OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive | OpKind::Parallel) {
             let options = if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                 vec![
                     (CadFilter::Body, "silhouette", "Whole solid body"),
@@ -527,6 +566,12 @@ impl App {
                         "face",
                         "Selected faces only; each needs a positive-area setup XY projection",
                     ),
+                ]
+            } else if kind == OpKind::Pocket {
+                vec![
+                    (CadFilter::Face, "face", "Pocket floor and islands"),
+                    (CadFilter::Loop, "closed", "Closed boundary loop"),
+                    (CadFilter::Edge, "chain", "Select connected edges forming a closed boundary"),
                 ]
             } else if kind == OpKind::Carve {
                 vec![
@@ -574,6 +619,7 @@ impl App {
             body = body.push(controls);
         }
         let description = match kind {
+            OpKind::Pocket => "Select a planar pocket floor with its islands, a closed boundary loop, or connected edges forming a closed chain. For chains, set the cutting depth in Heights.",
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
@@ -657,13 +703,28 @@ mod tests {
         let (mut app, _) = App::new();
         app.settings = crate::Settings::default();
         app.controller = AppController::new(crate::default_machine());
-        app.controller.open_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let start = Instant::now();
+        app.library.tools.clear();
+        app.open_project(&std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testfiles/tray-parallel.ocam")).unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        while app.controller.run_needs_poll() {
+            let _ = app.update(Message::PollRun);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        eprintln!("open project {:?}", start.elapsed());
         app.setup_draft = None;
-        let id = app.controller.document().setup().operations.iter()
+        let id = app.controller.inspection_setup().operations.iter()
             .find(|op| matches!(op, Operation::Parallel(_))).unwrap().id();
+        let start = Instant::now();
         app.begin_operation_draft(id);
+        eprintln!("open editor {:?}", start.elapsed());
+        let start = Instant::now();
+        black_box(app.view());
+        eprintln!("first editor view {:?}", start.elapsed());
         app.operation_geometry_message(GeometryMessage::Add(CadFilter::Face));
+        let saved_faces = app.controller.cad_selection().to_vec();
         let state = app.controller.geometry_state();
         let instance = &state.instances[0];
         let asset = state.asset(instance.asset_id).unwrap();
@@ -684,6 +745,26 @@ mod tests {
             }
             eprintln!("{count} faces: {:.3} ms/update+view", start.elapsed().as_secs_f64() * 1000. / 3.);
         }
+        app.controller.set_cad_selection(saved_faces.clone());
+        for face in saved_faces.iter().take(5).chain(saved_faces.iter().take(5)) {
+            let start = Instant::now();
+            let _ = app.update(Message::CadSelect(face.clone()));
+            eprintln!("toggle face {} {:?}", face.id, start.elapsed());
+            let start = Instant::now();
+            black_box(app.view());
+            eprintln!("view after face toggle {:?}", start.elapsed());
+            let start = Instant::now();
+            let _ = app.update(Message::CadHover(Some(face.clone())));
+            black_box(app.view());
+            eprintln!("hover after face toggle {:?}", start.elapsed());
+        }
+        app.controller.set_cad_selection(saved_faces);
+        let start = Instant::now();
+        app.operation_geometry_message(GeometryMessage::Confirm);
+        eprintln!("confirm faces {:?}", start.elapsed());
+        let start = Instant::now();
+        let _ = app.update(Message::Apply);
+        eprintln!("apply operation {:?}", start.elapsed());
     }
 
     fn drawing_app() -> App {

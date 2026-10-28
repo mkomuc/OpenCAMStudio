@@ -457,7 +457,7 @@ pub fn run_with_mcp(path: Option<&Path>) -> Result<(), Box<dyn std::error::Error
 
 fn run_app(boot: impl iced::application::BootFn<App, Message> + 'static) -> iced::Result {
     iced::application(boot, App::update, App::view)
-        .title("Open CAM Studio")
+        .title(App::window_title)
         .theme(theme)
         .subscription(App::subscription)
         .exit_on_close_request(false)
@@ -1085,6 +1085,7 @@ fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
 /// An editable inspector field, keyed independently of which node owns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Field {
+    LiftHeight,
     OperationTop,
     StartX,
     StartY,
@@ -1318,6 +1319,7 @@ impl Field {
             Field::BoreAxialStock => "Axial stock to leave (mm)",
             Field::BoreTolerance => "Tolerance (mm)",
             Field::BoreSafeDistance => "Safe distance (mm)",
+            Field::LiftHeight => "Lift height (mm)",
             Field::BoreLeadRadius => "Horizontal lead radius (mm)",
             Field::ToolThreadPitch => "Pitch (mm)",
             Field::Depth => "Depth (mm)",
@@ -1388,6 +1390,7 @@ impl Field {
     /// shown as a hover tooltip on its label in the inspector.
     fn help(self) -> &'static str {
         match self {
+            Field::LiftHeight => "Distance above the cutting level for local linking moves, in millimetres. 0 keeps transitions at depth. Lifts are limited to clearance; distant links still retract fully.",
             Field::BoreDiameter => "Finished feature diameter at the top height.",
             Field::BoreTaper => "Positive narrows downward; negative widens downward. Undercuts are rejected.",
             Field::BorePitch => "Axial travel per revolution of the bore helix.",
@@ -2006,9 +2009,12 @@ struct PatternDraft {
     name: String,
     members: Vec<u32>,
     circular: bool,
-    by_operation: bool,
+    order: cam_model::PatternOrder,
     clockwise: bool,
-    values: [String; 5],
+    options: cam_model::PatternOptions,
+    picking: Option<usize>,
+    highlighted: Option<usize>,
+    values: [String; 4],
 }
 
 struct App {
@@ -2573,6 +2579,8 @@ enum Message {
     SetupUseModelOrigin(u64),
     SetupOriginChanged(usize, String),
     SetupWorkOffsetChanged(String),
+    SetupToolChangeAutomatic(bool),
+    SetupToolChangeHeightChanged(String),
     SetupModelPick,
     SetupModelSelected(InstanceId),
     SetupModelToggled(u64, bool),
@@ -2586,7 +2594,17 @@ enum Message {
     PatternName(String),
     PatternValue(usize, String),
     PatternMember(u32, bool),
-    PatternOrderChanged(bool),
+    PatternOrderChanged(cam_model::PatternOrder),
+    PatternTypeChanged(bool),
+    PatternSpacingChanged(cam_model::PatternSpacing),
+    PatternSecondDirection(bool),
+    PatternKeepOriginal(bool),
+    PatternReverse(bool),
+    PatternAxisReversed(usize, bool),
+    PatternSymmetric(usize, bool),
+    PatternPick(usize),
+    PatternHighlight(usize),
+    PatternClear(usize),
     PatternDirectionChanged(bool),
     TogglePatternExpanded(u64),
     PatternSuppression(u64, bool),
@@ -2851,6 +2869,7 @@ enum Message {
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
     ParallelBothWaysToggled(bool),
+    ParallelStayDownToggled(bool),
     AdaptiveClimbToggled(bool),
     AdaptiveContainmentChanged(cam_model::AdaptiveContainment),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
@@ -2999,7 +3018,7 @@ impl App {
         self.setup_tab = SetupEditorTab::Setup;
         self.setup_orientation = None;
         self.setup_origin_mode = None;
-        self.setup_draft = Some(self.controller.document().setup().clone());
+        self.setup_draft = self.controller.document().active_setup().cloned();
         self.setup_values.clear();
         self.setup_model_selection = None;
         self.operation_draft = None;
@@ -3136,7 +3155,7 @@ impl App {
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
         self.stock_to_leave_draft = Some(
-            self.controller.document().setup().stock_to_leave_for(id),
+            self.controller.inspection_setup().stock_to_leave_for(id),
         );
         if matches!(self.operation_draft, Some(Operation::Profile(_))) {
             let first = self
@@ -3160,9 +3179,7 @@ impl App {
 
     fn stage_operation_tool(&mut self, mut tool: cam_model::Tool) -> u32 {
         if let Some(number) = self
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .tools
             .iter()
             .find(|saved| saved.identity() == tool.identity())
@@ -3187,9 +3204,7 @@ impl App {
             return number;
         }
         let number = self
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .tools
             .iter()
             .chain(self.operation_tools.iter())
@@ -3918,7 +3933,6 @@ impl App {
             Message::SelectSetup(_)
                 | Message::EditSetup(_)
                 | Message::BeginOp(_)
-                | Message::SetupNew
                 | Message::SetupDuplicate(_)
                 | Message::SetupDelete(_)
         ) {
@@ -4508,6 +4522,26 @@ impl App {
                     draft.origin_index = v;
                 }
             }
+            Message::SetupToolChangeAutomatic(automatic) => {
+                self.setup_values.remove(&41);
+                if let Some(draft) = &mut self.setup_draft {
+                    draft.tool_change_height = if automatic {
+                        None
+                    } else {
+                        Some(draft.resolved_tool_change_height(
+                            self.controller.machine().envelope.max.z,
+                        ))
+                    };
+                }
+            }
+            Message::SetupToolChangeHeightChanged(value) => {
+                self.setup_values.insert(41, value.clone());
+                if let (Some(draft), Ok(v)) = (&mut self.setup_draft, value.trim().parse::<f64>()) {
+                    if v.is_finite() {
+                        draft.tool_change_height = Some(v + draft.origin[2]);
+                    }
+                }
+            }
             Message::SetupModelPick => {
                 if self.setup_draft.is_some() {
                     let picking = !self.setup_model_pick;
@@ -4544,6 +4578,9 @@ impl App {
                             draft.model_instances.push(instance);
                         }
                         self.setup_model_selection = Some(instance);
+                        if let Some(body) = self.controller.geometry_state().instance(instance) {
+                            self.collapsed_assets.remove(&body.asset_id);
+                        }
                     } else {
                         draft.model_instances.retain(|id| *id != instance);
                         if self.setup_model_selection == Some(instance) {
@@ -4594,12 +4631,12 @@ impl App {
                         } => {
                             if index < 3 {
                                 size[index] = v;
-                            } else if index < 6 {
+                            } else if index < 4 {
                                 model_position[index - 3] = v;
                             }
                         }
                         cam_model::Stock::RelativeBox { offsets } => {
-                            if index < 6 {
+                            if index < 4 {
                                 offsets[index / 3][index % 3] = v;
                             }
                         }
@@ -4643,13 +4680,15 @@ impl App {
             }
             Message::PatternTabChanged(tab) => self.pattern_tab = tab,
             Message::BeginPattern(circular) => {
+                self.simulation = None;
                 self.pattern_tab = pattern_editor_view::PatternTab::Placement;
                 let Some(setup) = self.controller.setups().iter().find(|s| s.id == self.controller.active_setup_id()) else { return iced::Task::none(); };
                 let members: Vec<u32> = if self.focus_ops.is_empty() { Vec::new() } else { self.focus_ops.iter().copied().collect() };
                 let origin = setup.origin_position(self.controller.active_origin());
                 self.pattern_draft = Some(PatternDraft {
-                    setup_id: setup.id, pattern_id: None, name: "Pattern".into(), members, circular, by_operation: false, clockwise: false,
-                    values: if circular { ["4".into(), origin[0].to_string(), origin[1].to_string(), "360".into(), String::new()] } else { ["2".into(), "1".into(), "20".into(), "0".into(), String::new()] },
+                    setup_id: setup.id, pattern_id: None, name: "Pattern".into(), members, circular, order: cam_model::PatternOrder::ByInstance, clockwise: false,
+                    options: cam_model::PatternOptions { spacing: if circular { cam_model::PatternSpacing::Extent } else { cam_model::PatternSpacing::Spacing }, second_direction: false, ..Default::default() }, picking: None, highlighted: None,
+                    values: if circular { ["4".into(), origin[0].to_string(), origin[1].to_string(), "360".into()] } else { ["2".into(), "2".into(), "20".into(), "20".into()] },
                 });
                 self.controller.select(Selection::Setup);
                 self.inspector_active = true;
@@ -4657,49 +4696,78 @@ impl App {
                 self.status = "Choose source operations and pattern placement, then create or cancel the draft.".into();
             }
             Message::EditPattern(id) => {
+                self.simulation = None;
                 self.pattern_tab = pattern_editor_view::PatternTab::Placement;
                 let Some((setup_id, pattern)) = self.controller.setups().iter().find_map(|setup| setup.patterns.iter().find(|p| p.id == id).map(|p| (setup.id, p.clone()))) else { self.status = "Pattern no longer exists.".into(); return iced::Task::none(); };
                 let (circular, clockwise, values) = match pattern.kind {
-                    cam_model::PatternKind::Rectangular { nx, ny, dx, dy } => (false, false, [nx.to_string(), ny.to_string(), dx.to_string(), dy.to_string(), String::new()]),
+                    cam_model::PatternKind::Rectangular { nx, ny, dx, dy } => (false, false, [nx.to_string(), ny.to_string(), dx.to_string(), dy.to_string()]),
                     cam_model::PatternKind::Circular { center_xy, count, distribution, direction } => {
-                        let sweep = match distribution { cam_model::CircularDistribution::Full => 360.0, cam_model::CircularDistribution::Partial { sweep_degrees } => sweep_degrees };
-                        (true, direction == cam_model::PatternDirection::Cw, [count.to_string(), center_xy[0].to_string(), center_xy[1].to_string(), sweep.to_string(), String::new()])
+                        let sweep = match distribution { cam_model::CircularDistribution::Full => 360.0, cam_model::CircularDistribution::Partial { sweep_degrees } => sweep_degrees, cam_model::CircularDistribution::Spacing { angle_degrees } => angle_degrees };
+                        (true, direction == cam_model::PatternDirection::Cw, [count.to_string(), center_xy[0].to_string(), center_xy[1].to_string(), sweep.to_string()])
                     }
                 };
-                self.pattern_draft = Some(PatternDraft { setup_id, pattern_id: Some(id), name: pattern.name, members: pattern.members, circular, by_operation: pattern.order == cam_model::PatternOrder::ByOperation, clockwise, values });
+                let mut options = pattern.options;
+                if let cam_model::PatternKind::Circular { distribution, .. } = pattern.kind {
+                    options.spacing = if matches!(distribution, cam_model::CircularDistribution::Spacing { .. }) { cam_model::PatternSpacing::Spacing } else { cam_model::PatternSpacing::Extent };
+                }
+                self.pattern_draft = Some(PatternDraft { setup_id, pattern_id: Some(id), name: pattern.name, members: pattern.members, circular, order: pattern.order, clockwise, options, picking: None, highlighted: None, values });
                 self.controller.activate_setup(setup_id).ok();
                 self.controller.select(Selection::Setup);
                 self.inspector_active = true;
                 self.inspector_enabled = true;
             }
             Message::PatternName(value) => if let Some(draft) = self.pattern_draft.as_mut() { draft.name = value; },
-            Message::PatternValue(index, value) => if let Some(draft) = self.pattern_draft.as_mut() { if index < 5 { draft.values[index] = value; } },
+            Message::PatternValue(index, value) => if let Some(draft) = self.pattern_draft.as_mut() { if index < 4 {
+                draft.values[index] = value;
+                if draft.circular && (index == 1 || index == 2) { draft.options.axis = None; }
+            } },
             Message::PatternMember(id, checked) => if let Some(draft) = self.pattern_draft.as_mut() {
                 if checked { if !draft.members.contains(&id) { draft.members.push(id); } } else { draft.members.retain(|member| *member != id); }
             },
-            Message::PatternOrderChanged(by_operation) => if let Some(draft) = self.pattern_draft.as_mut() { draft.by_operation = by_operation; },
+            Message::PatternOrderChanged(order) => if let Some(draft) = self.pattern_draft.as_mut() { draft.order = order; },
+            Message::PatternTypeChanged(circular) => self.change_pattern_type(circular),
+            Message::PatternSpacingChanged(spacing) => if let Some(draft) = &mut self.pattern_draft { draft.options.spacing = spacing; },
+            Message::PatternSecondDirection(enabled) => if let Some(draft) = &mut self.pattern_draft { draft.options.second_direction = enabled; },
+            Message::PatternKeepOriginal(enabled) => if let Some(draft) = &mut self.pattern_draft { draft.options.keep_original = enabled; },
+            Message::PatternReverse(enabled) => if let Some(draft) = &mut self.pattern_draft { draft.options.reverse = enabled; },
+            Message::PatternAxisReversed(axis, enabled) => if let Some(draft) = &mut self.pattern_draft { if axis < 2 { draft.options.directions[axis].reversed = enabled; } },
+            Message::PatternSymmetric(axis, enabled) => if let Some(draft) = &mut self.pattern_draft { if axis < 2 { draft.options.directions[axis].symmetric = enabled; } },
+            Message::PatternHighlight(axis) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    draft.picking = None;
+                    draft.highlighted = Some(axis);
+                }
+                self.cad_hover = None;
+                self.cad_candidates.clear();
+                self.status = "Selected pattern edge highlighted.".into();
+            },
+            Message::PatternPick(axis) => {
+                self.cancel_setup_picks();
+                if let Some(draft) = &mut self.pattern_draft { draft.picking = Some(axis); }
+                self.cad_filter = CadFilter::Edge;
+                self.cad_candidates.clear();
+                self.status = if axis == 2 { "Select a circular edge or a straight axis parallel to setup Z." } else { "Select a straight edge in setup XY." }.into();
+            },
+            Message::PatternClear(axis) => if let Some(draft) = &mut self.pattern_draft {
+                draft.picking = None;
+                if draft.highlighted == Some(axis) { draft.highlighted = None; }
+                if axis < 2 { draft.options.directions[axis].reference = None; draft.options.directions[axis].angle_degrees = if axis == 0 { 0.0 } else { 90.0 }; }
+                else { draft.options.axis = None; }
+            },
             Message::PatternDirectionChanged(clockwise) => if let Some(draft) = self.pattern_draft.as_mut() { draft.clockwise = clockwise; },
             Message::TogglePatternExpanded(id) => { if !self.expanded_patterns.remove(&id) { self.expanded_patterns.insert(id); } },
             Message::PatternCancel => { self.pattern_draft = None; self.status = "Pattern draft cancelled.".into(); },
             Message::PatternCommit => {
                 if let Some(draft) = self.pattern_draft.clone() {
-                    let parsed = (|| -> Result<cam_model::PatternKind, String> {
-                        if draft.circular {
-                            let count = draft.values[0].parse::<u32>().map_err(|_| "Enter an integer instance count")?;
-                            let cx = draft.values[1].parse::<f64>().map_err(|_| "Enter a finite center X")?;
-                            let cy = draft.values[2].parse::<f64>().map_err(|_| "Enter a finite center Y")?;
-                            let sweep = draft.values[3].parse::<f64>().map_err(|_| "Enter a sweep angle")?;
-                            let distribution = if sweep == 360.0 { cam_model::CircularDistribution::Full } else { cam_model::CircularDistribution::Partial { sweep_degrees: sweep } };
-                            Ok(cam_model::PatternKind::Circular { center_xy: [cx, cy], count, distribution, direction: if draft.clockwise { cam_model::PatternDirection::Cw } else { cam_model::PatternDirection::Ccw } })
+                    let parsed = pattern_editor_view::configuration_from_draft(&draft);
+                    match parsed.and_then(|(kind, options)| {
+                        if let Some(id) = draft.pattern_id {
+                            self.controller.edit_pattern_with_options(draft.setup_id, id, &draft.members, draft.name.clone(), kind, draft.order, options)?;
                         } else {
-                            let nx = draft.values[0].parse::<u32>().map_err(|_| "Enter an integer X count")?;
-                            let ny = draft.values[1].parse::<u32>().map_err(|_| "Enter an integer Y count")?;
-                            let dx = draft.values[2].parse::<f64>().map_err(|_| "Enter X pitch")?;
-                            let dy = draft.values[3].parse::<f64>().map_err(|_| "Enter Y pitch")?;
-                            Ok(cam_model::PatternKind::Rectangular { nx, ny, dx, dy })
+                            self.controller.create_pattern_with_options(draft.setup_id, &draft.members, draft.name.clone(), kind, draft.order, options)?;
                         }
-                    })();
-                    match parsed.and_then(|kind| { kind.validate()?; if let Some(id) = draft.pattern_id { self.controller.edit_pattern(draft.setup_id, id, &draft.members, draft.name.clone(), kind, if draft.by_operation { cam_model::PatternOrder::ByOperation } else { cam_model::PatternOrder::ByInstance })?; } else { self.controller.create_pattern(draft.setup_id, &draft.members, draft.name.clone(), kind, if draft.by_operation { cam_model::PatternOrder::ByOperation } else { cam_model::PatternOrder::ByInstance })?; } Ok(kind) }) {
+                        Ok(())
+                    }) {
                         Ok(_) => { self.pattern_draft = None; self.inspector_active = false; self.status = "Pattern created. Seed operations remain editable inside the group.".into(); }
                         Err(reason) => self.status = reason,
                     }
@@ -4732,7 +4800,7 @@ impl App {
                 if self
                     .setup_values
                     .values()
-                    .any(|v| v.trim().parse::<f64>().is_err())
+                    .any(|v| !v.trim().parse::<f64>().is_ok_and(|n| n.is_finite()))
                     || self
                         .setup_values
                         .get(&40)
@@ -4741,7 +4809,12 @@ impl App {
                     self.status = "Correct the invalid setup value before applying.".into();
                     return iced::Task::none();
                 }
-                if let Some(draft) = self.setup_draft.clone() {
+                if let Some(mut draft) = self.setup_draft.clone() {
+                    if let Some(value) = self.setup_values.get(&41) {
+                        // Interpret the edited WCS Z against the final draft datum.
+                        draft.tool_change_height =
+                            Some(value.trim().parse::<f64>().unwrap() + draft.origin[2]);
+                    }
                     match self.controller.apply_setup_settings(draft) {
                         Ok(()) => {
                             self.end_setup_draft();
@@ -4762,7 +4835,8 @@ impl App {
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before adding a setup.".into();
                 } else {
-                    let id = self.controller.add_setup();
+                    let models = self.selected_setup_models();
+                    let id = self.controller.add_setup_with_models(models);
                     self.expanded_setups.insert(id);
                     self.controller.activate_setup(id).ok();
                     self.controller.select(Selection::Setup);
@@ -5081,6 +5155,12 @@ impl App {
                 self.operation_geometry = None;
                 self.operation_binding_preview = None;
                 self.operation_draft = None;
+                self.operation_tools.clear();
+                self.stock_to_leave_draft = None;
+                self.cad_editing_op = None;
+                self.cad_inspecting = false;
+                self.height_draft_id = None;
+                self.refresh_fields();
                 self.inspector_active = false;
                 self.status = "Operation changes cancelled.".into();
             }
@@ -5303,6 +5383,10 @@ impl App {
             }
             Message::CadHover(entity) => self.cad_hover = entity,
             Message::CadPicked(candidates) => {
+                if self.pattern_draft.as_ref().is_some_and(|draft| draft.picking.is_some()) {
+                    if let Some(candidate) = candidates.first() { self.pattern_entity_picked(candidate.entity.clone()); }
+                    return iced::Task::none();
+                }
                 if self.profile_entry_editor.as_ref().is_some_and(|e|e.picking) {
                     if let Some(candidate)=candidates.first(){self.profile_entry_cad_pick(candidate.entity.clone());}
                     return iced::Task::none();
@@ -5375,6 +5459,10 @@ impl App {
             Message::GeometryRemove(index) => self.remove_operation_geometry(Some(index)),
             Message::GeometryClear => self.remove_operation_geometry(None),
             Message::CadSelect(entity) => {
+                if self.pattern_draft.as_ref().is_some_and(|draft| draft.picking.is_some()) {
+                    self.pattern_entity_picked(entity);
+                    return iced::Task::none();
+                }
                 if self.setup_model_pick {
                     return self.update(Message::SetupModelToggled(entity.instance_id, true));
                 }
@@ -5414,6 +5502,11 @@ impl App {
                 }
             }
             Message::CadEscape => {
+                if self.pattern_draft.as_mut().is_some_and(|draft| draft.picking.take().is_some()) {
+                    self.cad_candidates.clear();
+                    self.status = "Pattern selection cancelled.".into();
+                    return iced::Task::none();
+                }
                 if self.simulation.take().is_some() {
                     self.pending_simulation = None;
                 }
@@ -5505,6 +5598,12 @@ impl App {
                                             }
                                         }
                                     }
+                                    Operation::Pocket(cam_model::PocketOp { boundary, islands, .. }) => {
+                                        if let Some(region) = input.regions.first() {
+                                            *boundary = region.outer().clone();
+                                            *islands = region.holes().to_vec();
+                                        }
+                                    }
                                     Operation::Carve(op) => {
                                         if let Some(region) = input.regions.first() {
                                             op.boundary = region.outer().clone();
@@ -5533,6 +5632,7 @@ impl App {
                                     _ => {}
                                 });
                             }
+                            self.sync_pocket_geometry_height_defaults(&binding);
                             self.sync_chamfer_face_height_defaults(previous_operation.as_ref());
                             self.sync_chamfer_geometry_fields();
                             self.operation_binding_preview = Some(binding);
@@ -5568,7 +5668,8 @@ impl App {
                         | cam_model::ExtractionRecipe::ChamferLoop
                         | cam_model::ExtractionRecipe::ChamferFaces
                         | cam_model::ExtractionRecipe::EngravePath
-                        | cam_model::ExtractionRecipe::CarveRegion => {
+                        | cam_model::ExtractionRecipe::CarveRegion
+                        | cam_model::ExtractionRecipe::PocketBoundary => {
                             match refs.first().map(|r| r.kind) {
                                 Some(EntityKind::Edge) => CadFilter::Edge,
                                 Some(EntityKind::Face) => CadFilter::Face,
@@ -5822,6 +5923,10 @@ impl App {
                 }
             }
             Message::BeginOp(kind) => {
+                if self.controller.setups().is_empty() {
+                    self.status = "Select a model or body and create a setup before adding an operation.".into();
+                    return iced::Task::none();
+                }
                 self.end_setup_draft();
                 self.cad_filter_explicit = false;
                 self.operation_tools.clear();
@@ -6205,6 +6310,10 @@ impl App {
                 self.setup_hover = hover;
             }
             Message::SetupStockEdgePicked(direction) => {
+                if let Some(axis) = self.pattern_draft.as_ref().and_then(|draft| draft.picking).filter(|axis| *axis < 2) {
+                    self.pattern_direction_picked(axis, direction, None);
+                    return iced::Task::none();
+                }
                 if let Some(axis) = self.setup_axis_pick.take() {
                     self.set_setup_stock_axis(axis, direction);
                 }
@@ -6686,6 +6795,10 @@ impl App {
                 self.edit_operation_draft(|op| { if let Operation::Parallel(p) = op { p.params.both_ways = on; } });
                 self.refresh_operation_fields();
             }
+            Message::ParallelStayDownToggled(on) => {
+                self.edit_operation_draft(|op| { if let Operation::Parallel(p) = op { p.params.stay_down = on; } });
+                self.refresh_operation_fields();
+            }
             Message::AdaptiveClimbToggled(on) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Adaptive(adaptive) = op {
@@ -6990,9 +7103,7 @@ impl App {
                 // reconcile so it adopts the shop number (§6.3). Idempotent by geometry.
                 self.open_tool_menu = None;
                 let tool = self
-                    .controller
-                    .document()
-                    .setup()
+                    .controller.inspection_setup()
                     .tools
                     .iter()
                     .find(|t| t.number == number)
@@ -7640,9 +7751,7 @@ impl App {
                 .or_else(|| self.library.tools.get(self.lib_sel).map(|t| t.kind));
         }
         if let Selection::Tool(i) = self.controller.selection() {
-            self.controller
-                .document()
-                .setup()
+            self.controller.inspection_setup()
                 .tools
                 .get(i)
                 .map(|t| t.kind)
@@ -7690,6 +7799,9 @@ impl App {
     /// the cutting disc, …), so the help matches the (kind-aware) label. Non-tool fields,
     /// and kinds where the generic wording already fits, fall back to `field.help()`.
     fn field_help(&self, field: Field) -> &'static str {
+        if field == Field::LiftHeight && self.geometry_operation_kind() == Some(OpKind::Parallel) {
+            return "Lift above neighboring surface passes when Keep tool down is enabled, in millimetres. 0 continues the finishing cut along the surface without an added lift. With Keep tool down disabled, all passes retract to clearance. Gaps and unsafe transitions still use clearance; use on pre-roughed stock.";
+        }
         use ToolKind::*;
         match (self.inspected_tool_kind(), field) {
             // Cutting/flute diameter — the meaning turns on the kind.
@@ -7903,9 +8015,7 @@ impl App {
                 && !self.creating_operation()
                 && (self.height_rules_dirty()
                     || self
-                        .controller
-                        .document()
-                        .setup()
+                        .controller.inspection_setup()
                         .height_settings
                         .contains_key(&id))
                 && self.resolve_height_editor(id).is_err()
@@ -7977,7 +8087,7 @@ impl App {
                 .or(self.library.tools.get(self.lib_sel).cloned());
         }
         match self.controller.selection() {
-            Selection::Tool(i) => self.controller.document().setup().tools.get(i).cloned(),
+            Selection::Tool(i) => self.controller.inspection_setup().tools.get(i).cloned(),
             _ => None,
         }
     }
@@ -8039,7 +8149,7 @@ impl App {
             return draft != cam_model::StockToLeave::default();
         }
         match self.controller.selection() {
-            Selection::Operation(id) => draft != self.controller.document().setup().stock_to_leave_for(id),
+            Selection::Operation(id) => draft != self.controller.inspection_setup().stock_to_leave_for(id),
             _ => false,
         }
     }
@@ -8200,9 +8310,7 @@ impl App {
                 Field::OriginZ,
             ],
             Selection::Tool(i) => tool_fields(
-                self.controller
-                    .document()
-                    .setup()
+                self.controller.inspection_setup()
                     .tools
                     .get(i)
                     .map(|t| t.kind),
@@ -8274,7 +8382,7 @@ impl App {
         if field == Field::MachineToolChangeSeconds {
             return Some(self.controller.machine().tool_change_seconds);
         }
-        let setup = self.controller.document().setup();
+        let setup = self.controller.inspection_setup();
         let heights = match self.controller.selection() {
             Selection::Operation(id) => setup.heights_for(id),
             _ => setup.heights,
@@ -8504,9 +8612,7 @@ impl App {
             let heights = self.preview_safety_heights(id);
             let result = if self.height_rules_dirty()
                 || self
-                    .controller
-                    .document()
-                    .setup()
+                    .controller.inspection_setup()
                     .height_settings
                     .contains_key(&id)
             {
@@ -8653,9 +8759,9 @@ impl App {
         // Opening a stale/legacy project must not initiate a recalculation.
         let statuses = self.controller.toolpath_statuses();
         let document = self.controller.document();
-        if document.setup().operations.iter()
+        if document.active_setup().is_some_and(|setup| setup.operations.iter()
             .filter(|op| document.operation_is_included(document.setup().id, op.id()))
-            .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
+            .all(|op| statuses.get(&op.id()).copied().unwrap_or(false)))
         {
             self.rerun();
         }
@@ -8672,6 +8778,22 @@ impl App {
             Ok(()) => format!("Saved {}.", path.display()),
             Err(e) => format!("Save failed: {e}"),
         };
+    }
+
+    fn window_title(&self) -> String {
+        let project_name = self
+            .controller
+            .current_path()
+            .and_then(Path::file_stem)
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_else(|| "New Project".into());
+        let unsaved_marker = if self.controller.has_unsaved_changes() {
+            " *"
+        } else {
+            ""
+        };
+
+        format!("Open CAM Studio - {project_name}{unsaved_marker}")
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -9108,9 +9230,7 @@ impl App {
     /// [`origin_move_targets`], which holds the rule and can be tested without an app.
     fn origin_move_targets_for(&self, id: u32) -> Vec<u32> {
         let current = self
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .iter()
             .find(|op| op.id() == id)
@@ -9341,7 +9461,7 @@ impl App {
         let has_geo = self.controller.has_geometry();
         // A new op needs geometry to pick; its tool is drawn from the library, so the
         // library must have at least one tool (it seeds defaults, so it always does).
-        let can_create = has_geo && !self.library.tools.is_empty();
+        let can_create = has_geo && !self.controller.setups().is_empty() && !self.library.tools.is_empty();
         let begin = |kind: OpKind| can_create.then_some(Message::BeginOp(kind));
         match self.active_tab {
             RibbonTab::Home => vec![
@@ -9782,7 +9902,9 @@ impl App {
             }
             return;
         }
-        let multiple = (profile && entity.kind != EntityKind::Silhouette)
+        let pocket_edges = entity.kind == EntityKind::Edge
+            && self.geometry_operation_kind() == Some(OpKind::Pocket);
+        let multiple = pocket_edges || (profile && entity.kind != EntityKind::Silhouette)
             || matches!(self.cad_pending_kind, Some(OpKind::Adaptive | OpKind::Parallel))
             || self.cad_editing_op.and_then(|id| self.current_operation(id)).is_some_and(|op| matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)))
             || matches!(
@@ -9830,6 +9952,7 @@ impl App {
                     self.controller.set_cad_selection(selected);
                 }
                 self.sync_chamfer_geometry_fields();
+                self.reveal_selected_bodies();
                 self.sync_creation_geometry_heights();
                 self.focus_ops.clear();
                 self.status = format!(
@@ -9906,11 +10029,11 @@ impl App {
         self.cad_filter = match (kind, entity.kind) {
             (OpKind::Chamfer, EntityKind::Face) => CadFilter::Face,
             (OpKind::Chamfer, EntityKind::Edge) => CadFilter::Edge,
-            (OpKind::Chamfer | OpKind::Engrave | OpKind::Carve, EntityKind::Loop) => {
+            (OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve, EntityKind::Loop) => {
                 CadFilter::Loop
             }
-            (OpKind::Engrave, EntityKind::Edge) => CadFilter::Edge,
-            (OpKind::Carve, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Pocket | OpKind::Engrave, EntityKind::Edge) => CadFilter::Edge,
+            (OpKind::Pocket | OpKind::Carve, EntityKind::Face) => CadFilter::Face,
             (OpKind::Thread | OpKind::Drill, EntityKind::Face) => CadFilter::Face,
             (OpKind::Adaptive | OpKind::Parallel, EntityKind::Face) => CadFilter::Face,
             (OpKind::Adaptive | OpKind::Parallel, EntityKind::Body) => CadFilter::Body,
@@ -10817,6 +10940,9 @@ fn op_kind(op: &Operation) -> &'static str {
 /// Read an operation's value for a given field, if the op has it.
 fn op_field(op: &Operation, field: Field) -> Option<f64> {
     match (op, field) {
+        (Operation::Pocket(o), Field::LiftHeight) => Some(o.clear.lift_height),
+        (Operation::Adaptive(o), Field::LiftHeight) => Some(o.params.lift_height),
+        (Operation::Parallel(o), Field::LiftHeight) => Some(o.params.lift_height),
         (op, Field::StartX) => operation_tabs::operation_start(op).map(|point| point[0]),
         (op, Field::StartY) => operation_tabs::operation_start(op).map(|point| point[1]),
         (Operation::Engrave(op), Field::OperationTop) => Some(op.top),
@@ -10943,6 +11069,14 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
 /// Write the parsed inspector fields onto an operation.
 fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
     let get = |f: Field| parsed.get(&f).copied();
+    if let Some(value) = get(Field::LiftHeight) {
+        match op {
+            Operation::Pocket(o) => o.clear.lift_height = value,
+            Operation::Adaptive(o) => o.params.lift_height = value,
+            Operation::Parallel(o) => o.params.lift_height = value,
+            _ => {}
+        }
+    }
     if let Some(value) = get(Field::RampFeed) { op.entry_feeds_mut().ramp = (value > 0.).then_some(value); }
     if let Some(value) = get(Field::LeadInFeed) { op.entry_feeds_mut().lead_in = (value > 0.).then_some(value); }
     if let Some(value) = get(Field::LeadOutFeed) { op.entry_feeds_mut().lead_out = (value > 0.).then_some(value); }
@@ -11770,7 +11904,7 @@ impl Viewport {
                     .is_some_and(|instance| instance.visible)
         });
         let picking = controller.pending_op().is_some();
-        let pick_z = controller.document().setup().heights.top_of_stock as f32;
+        let pick_z = controller.inspection_setup().heights.top_of_stock as f32;
         // After a run, show the full backplot; before it, at least show the
         // imported part outlines so opening a file is visibly reflected.
         let outcome = if editor_geometry.is_some() {
@@ -11809,7 +11943,7 @@ impl Viewport {
         // run has produced a program. Anchors only — sized to the screen at draw.
         let drill_marks = outcome
             .map(|o| {
-                let frame = &controller.document().setup().frame;
+                let frame = &controller.inspection_setup().frame;
                 let visible_drills = Program {
                     steps: o.program.steps.iter().filter(|step| {
                         matches!(step, Step::Drill(c) if focus_ops.contains(&c.tag.op_id) && !hidden_ops.contains(&c.tag.op_id))
@@ -11833,7 +11967,7 @@ impl Viewport {
             Arc::new(CadScene::from_geometry_in_setup(
                 controller.geometry_state(),
                 cad_hidden,
-                &controller.document().setup().frame,
+                &controller.inspection_setup().frame,
             ))
         });
         let bounds = union_bounds(
@@ -11882,7 +12016,7 @@ impl Viewport {
             .cloned()
             .collect();
         if !silhouette_refs.is_empty() {
-            let frame = &controller.document().setup().frame;
+            let frame = &controller.inspection_setup().frame;
             if let Ok(geometry) = controller.geometry_state().geometry_in_setup(frame) {
                 for reference in silhouette_refs {
                     if let Ok(region) = cam_geometry3d::silhouette(&geometry, &reference) {
@@ -11953,9 +12087,7 @@ impl Viewport {
                 // (the one the pick flow and inspector edit) is drawn larger, so it
                 // reads without relying on colour.
                 for idx in controller.origin_indices() {
-                    let pos = controller
-                        .document()
-                        .setup()
+                    let pos = controller.inspection_setup()
                         .frame
                         .to_world_vector(controller.origin_position(idx));
                     let r = if idx == active { base_r } else { base_r * 0.65 };
@@ -12008,7 +12140,7 @@ impl Viewport {
             None
         } else {
             operation_preview.or_else(|| {
-                let operations = &controller.document().setup().operations;
+                let operations = &controller.inspection_setup().operations;
                 let through = operations.iter().rposition(|op| focus_ops.contains(&op.id()))?;
                 let expected: BTreeSet<_> = operations[..=through].iter()
                     .filter(|op| controller.document().operation_is_included(
@@ -12079,7 +12211,7 @@ impl Viewport {
         Self {
             setup_geometry: Arc::new(SetupPickGeometry::new(
                 controller,
-                controller.document().setup(),
+                controller.inspection_setup(),
                 cad_hidden,
             )),
             setup_axis: false,
@@ -12236,7 +12368,7 @@ impl Viewport {
         } else {
             self.cad_operation_kind
         } {
-            Some(OpKind::Profile | OpKind::Chamfer | OpKind::Engrave)
+            Some(OpKind::Pocket | OpKind::Profile | OpKind::Chamfer | OpKind::Engrave)
                 if matches!(self.cad_filter, EntityKind::Face | EntityKind::Edge) =>
             {
                 self.cad_scene.pick_candidates(
@@ -12246,7 +12378,10 @@ impl Viewport {
                     self.cad_select_through,
                 )
             }
-            Some(OpKind::Chamfer | OpKind::Engrave) | Some(OpKind::Carve)
+            Some(OpKind::Pocket) if self.cad_filter == EntityKind::Loop => {
+                self.cad_scene.pick_pocket_loop_candidates(ray, aperture as f64, self.cad_select_through)
+            }
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve)
                 if self.cad_filter == EntityKind::Loop =>
             {
                 self.cad_scene.pick_surface_loop_candidates(
@@ -12319,17 +12454,18 @@ impl Viewport {
                 aperture,
                 through,
             ),
-            OpKind::Carve => {
+            OpKind::Pocket | OpKind::Carve => {
                 let mut candidates = self.cad_scene.pick_any_candidates(
                     ray,
                     &[EntityKind::Face],
                     aperture,
                     through,
                 );
-                candidates.extend(
-                    self.cad_scene
-                        .pick_surface_loop_candidates(ray, aperture, through),
-                );
+                candidates.extend(if kind == OpKind::Pocket {
+                    self.cad_scene.pick_pocket_loop_candidates(ray, aperture, through)
+                } else {
+                    self.cad_scene.pick_surface_loop_candidates(ray, aperture, through)
+                });
                 candidates
             }
             OpKind::Drill | OpKind::Bore | OpKind::Thread => self
@@ -12338,12 +12474,6 @@ impl Viewport {
             OpKind::Adaptive | OpKind::Parallel => self.cad_scene.pick_any_candidates(
                 ray,
                 &[EntityKind::Face, EntityKind::Body],
-                aperture,
-                through,
-            ),
-            OpKind::Pocket => self.cad_scene.pick_any_candidates(
-                ray,
-                &[EntityKind::Face],
                 aperture,
                 through,
             ),
@@ -12377,12 +12507,12 @@ impl Viewport {
                             EntityKind::Edge => 1,
                             _ => 2,
                         },
-                        OpKind::Carve => match entity.kind {
+                        OpKind::Pocket | OpKind::Carve => match entity.kind {
                             EntityKind::Face => 0,
                             EntityKind::Loop => 1,
                             _ => 2,
                         },
-                        OpKind::Adaptive | OpKind::Parallel | OpKind::Pocket => match entity.kind {
+                        OpKind::Adaptive | OpKind::Parallel => match entity.kind {
                             EntityKind::Face => 0,
                             EntityKind::Body => 1,
                             _ => 2,
@@ -13573,7 +13703,7 @@ mod multi_setup_draft_tests {
         let loaded = app.open_project(&path);
         std::fs::remove_file(&path).unwrap();
         loaded.unwrap();
-        let operations = &app.controller.document().setup().operations;
+        let operations = &app.controller.inspection_setup().operations;
         let first = operations[0].id();
         let second = operations[1].id();
         let before = app.controller.document().clone();
@@ -13652,7 +13782,7 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::EditSetup(id));
         send(&mut app, Message::SetupNameChanged("Applied edit".into()));
         send(&mut app, Message::SetupCommit);
-        assert_eq!(app.controller.document().setup().name, "Applied edit");
+        assert_eq!(app.controller.inspection_setup().name, "Applied edit");
         assert!(app.setup_draft.is_none());
         assert!(app.pane_handle(Pane::Inspector).is_none());
     }
@@ -13661,7 +13791,7 @@ mod multi_setup_draft_tests {
     fn pattern_editor_create_apply_and_cancel_are_transactional() {
         let (mut app, _) = App::new();
         send(&mut app, Message::OpenSample);
-        let operation = app.controller.document().setup().operations[0].id();
+        let operation = app.controller.inspection_setup().operations[0].id();
         app.focus_ops.insert(operation);
         send(&mut app, Message::BeginPattern(false));
         assert_eq!(app.pattern_draft.as_ref().unwrap().members, vec![operation]);
@@ -13673,10 +13803,10 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::PatternValue(0, "1".into()));
         send(&mut app, Message::PatternCommit);
         assert!(app.pattern_draft.is_some(), "invalid drafts remain open");
-        assert!(app.controller.document().setup().patterns.is_empty());
+        assert!(app.controller.inspection_setup().patterns.is_empty());
         send(&mut app, Message::PatternValue(0, "2".into()));
         send(&mut app, Message::PatternCommit);
-        let pattern = app.controller.document().setup().patterns[0].clone();
+        let pattern = app.controller.inspection_setup().patterns[0].clone();
         assert_eq!(pattern.members, vec![operation]);
         assert_eq!(pattern.kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 20.0, dy: 0.0 });
         assert!(app.pattern_draft.is_none());
@@ -13686,14 +13816,14 @@ mod multi_setup_draft_tests {
         assert!(app.pane_handle(Pane::Inspector).is_some());
         send(&mut app, Message::PatternValue(2, "35".into()));
         send(&mut app, Message::PatternCancel);
-        assert_eq!(app.controller.document().setup().patterns[0].kind, pattern.kind);
+        assert_eq!(app.controller.inspection_setup().patterns[0].kind, pattern.kind);
 
         send(&mut app, Message::EditPattern(pattern.id));
         send(&mut app, Message::PatternValue(2, "35".into()));
         send(&mut app, Message::PatternCommit);
-        assert_eq!(app.controller.document().setup().patterns[0].kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 35.0, dy: 0.0 });
+        assert_eq!(app.controller.inspection_setup().patterns[0].kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 35.0, dy: 0.0 });
         assert!(app.controller.undo());
-        assert_eq!(app.controller.document().setup().patterns[0].kind, pattern.kind);
+        assert_eq!(app.controller.inspection_setup().patterns[0].kind, pattern.kind);
     }
 
     #[test]
@@ -13702,7 +13832,7 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::OpenSample);
         app.controller.add_origin();
         app.controller.edit_active_origin(|origin| *origin = [17.25, -8.5, 0.0]);
-        let setup = app.controller.document().setup();
+        let setup = app.controller.inspection_setup();
         let expected = setup.origin_position(app.controller.active_origin());
         send(&mut app, Message::BeginPattern(true));
         let draft = app.pattern_draft.as_ref().unwrap();
@@ -13759,6 +13889,7 @@ mod multi_setup_draft_tests {
     fn blank_app() -> App {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
+        app.controller.add_setup();
         app.begin_setup_draft();
         app
     }
@@ -13801,7 +13932,7 @@ mod multi_setup_draft_tests {
                 end: None,
                 start: None,
             }));
-        let id = app.controller.document().setup().operations[0].id();
+        let id = app.controller.inspection_setup().operations[0].id();
         app.begin_operation_draft(id);
         (app, id)
     }
@@ -13810,7 +13941,7 @@ mod multi_setup_draft_tests {
         let mut app = blank_app();
         let operation = app.controller.operation_template(OpKind::Profile, 1);
         app.controller.add_operation(operation);
-        let id = app.controller.document().setup().operations[0].id();
+        let id = app.controller.inspection_setup().operations[0].id();
         app.begin_operation_draft(id);
         (app, id)
     }
@@ -13835,6 +13966,72 @@ mod multi_setup_draft_tests {
         assert!(matches!(app.current_operation(id), Some(Operation::Parallel(p)) if !p.params.both_ways));
         send(&mut app, Message::CancelOperationDraft);
         assert!(matches!(app.controller.operation(id), Some(Operation::Parallel(p)) if p.params.both_ways && p.params.angle == 0.));
+    }
+
+    #[test]
+    fn parallel_keep_tool_down_checkbox_supports_zero_lift_apply_cancel_and_undo() {
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Parallel, 1);
+        let id = operation.id();
+        app.controller.add_operation(operation);
+        let checked = |op: &Operation| matches!(op, Operation::Parallel(p) if p.params.stay_down);
+        app.begin_operation_draft(id);
+        send(&mut app, Message::ParallelStayDownToggled(true));
+        assert!(checked(app.current_operation(id).unwrap()));
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        assert_eq!(op_field(app.current_operation(id).unwrap(), Field::LiftHeight), Some(0.));
+        send(&mut app, Message::CancelOperationDraft);
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        app.begin_operation_draft(id);
+        send(&mut app, Message::ParallelStayDownToggled(true));
+        send(&mut app, Message::Apply);
+        assert!(checked(app.controller.operation(id).unwrap()), "{}", app.status);
+        assert!(app.controller.undo());
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        assert!(app.controller.redo());
+        assert!(checked(app.controller.operation(id).unwrap()));
+        app.begin_operation_draft(id);
+        send(&mut app, Message::FieldChanged(Field::LiftHeight, "2".into()));
+        send(&mut app, Message::ParallelStayDownToggled(false));
+        send(&mut app, Message::Apply);
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        assert_eq!(op_field(app.controller.operation(id).unwrap(), Field::LiftHeight), Some(2.));
+    }
+
+    #[test]
+    fn lift_height_editor_supports_validation_apply_cancel_and_undo() {
+        for kind in [OpKind::Pocket, OpKind::Adaptive, OpKind::Parallel] {
+            let mut app = blank_app();
+            let mut operation = app.controller.operation_template(kind, 1);
+            if let Operation::Adaptive(op) = &mut operation {
+                op.params.feed = 300.;
+                op.params.plunge_feed = 100.;
+            }
+            let id = operation.id();
+            let field = Field::LiftHeight;
+            assert!(operation_fields(&operation).contains(&field));
+            assert_eq!(operation_tabs::field_tab(field), OperationTab::Linking);
+            assert_eq!(op_field(&operation, field), Some(0.));
+            for value in [-1., f64::NAN, f64::INFINITY] {
+                assert!(operation_tabs::operation_field_invalid(&operation, field, value));
+            }
+            assert!(!operation_tabs::operation_field_invalid(&operation, field, 0.));
+            assert!(!operation_tabs::operation_field_invalid(&operation, field, 2.));
+            app.controller.add_operation(operation);
+            app.begin_operation_draft(id);
+            send(&mut app, Message::FieldChanged(field, "2".into()));
+            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.));
+            send(&mut app, Message::CancelOperationDraft);
+            app.begin_operation_draft(id);
+            assert_eq!(app.fields.get(&field).map(String::as_str), Some("0"));
+            send(&mut app, Message::FieldChanged(field, "2".into()));
+            send(&mut app, Message::Apply);
+            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(2.), "{}", app.status);
+            assert!(app.controller.undo());
+            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.));
+            assert!(app.controller.redo());
+            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(2.));
+        }
     }
 
     #[test]
@@ -13871,28 +14068,28 @@ mod multi_setup_draft_tests {
     #[test]
     fn stock_to_leave_edit_is_staged_until_apply_and_cancel_discards_it() {
         let (mut app, id) = stock_profile_app();
-        let before = app.controller.document().setup().clone();
+        let before = app.controller.inspection_setup().clone();
         send(&mut app, Message::StockToLeaveToggled(true));
         send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()));
         send(&mut app, Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()));
-        assert_eq!(app.controller.document().setup(), &before);
+        assert_eq!(app.controller.inspection_setup(), &before);
         assert!(app.inspector_dirty());
 
         send(&mut app, Message::CancelOperationDraft);
-        assert_eq!(app.controller.document().setup(), &before);
-        assert_eq!(app.controller.document().setup().stock_to_leave_for(id), Default::default());
+        assert_eq!(app.controller.inspection_setup(), &before);
+        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(id), Default::default());
 
         send(&mut app, Message::StockToLeaveToggled(true));
         send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.5".into()));
         send(&mut app, Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()));
         send(&mut app, Message::Apply);
         assert_eq!(
-            app.controller.document().setup().stock_to_leave_for(id),
+            app.controller.inspection_setup().stock_to_leave_for(id),
             cam_model::StockToLeave { enabled: true, radial: 0.5, axial: 0.2 }
         );
         assert_eq!(app.stock_to_leave_value().radial, 0.5);
         assert!(app.controller.undo());
-        assert_eq!(app.controller.document().setup().stock_to_leave_for(id), Default::default());
+        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(id), Default::default());
     }
 
     #[test]
@@ -13909,10 +14106,10 @@ mod multi_setup_draft_tests {
         let Selection::Operation(copy_id) = app.controller.selection() else {
             panic!("duplicate should be selected");
         };
-        assert_eq!(app.controller.document().setup().stock_to_leave_for(copy_id), allowance);
+        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(copy_id), allowance);
         app.controller.delete_selected_operation();
-        assert_eq!(app.controller.document().setup().stock_to_leave_for(copy_id), Default::default());
-        assert_eq!(app.controller.document().setup().stock_to_leave_for(id), allowance);
+        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(copy_id), Default::default());
+        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(id), allowance);
 
         let setup_copy = app.controller.duplicate_setup(app.controller.active_setup_id()).unwrap();
         let duplicate_setup = app.controller.setups().iter().find(|s| s.id == setup_copy).unwrap();
@@ -14032,15 +14229,15 @@ mod multi_setup_draft_tests {
             .pending_setup_model_bounds(app.setup_draft.as_ref().unwrap());
         assert_eq!((min, max), ([0.; 3], [10.; 3]));
         send(&mut app, Message::SetupCommit);
-        assert_eq!(app.controller.document().setup().model_instances, vec![1]);
+        assert_eq!(app.controller.inspection_setup().model_instances, vec![1]);
         app.begin_setup_draft();
         send(&mut app, Message::SetupModelToggled(1, false));
         assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
         assert!(app.setup_model_selection.is_none());
         send(&mut app, Message::SetupCommit);
-        assert!(app.controller.document().setup().model_instances.is_empty());
+        assert!(app.controller.inspection_setup().model_instances.is_empty());
         assert!(app.controller.undo());
-        assert_eq!(app.controller.document().setup().model_instances, vec![1]);
+        assert_eq!(app.controller.inspection_setup().model_instances, vec![1]);
     }
 
     #[test]
@@ -14089,7 +14286,7 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::SetupCommit);
         let first = app.controller.active_setup_id();
         app.controller.duplicate_setup(first).unwrap();
-        assert_eq!(app.controller.document().setup().model_instances, vec![2]);
+        assert_eq!(app.controller.inspection_setup().model_instances, vec![2]);
         send(&mut app, Message::SetupNew);
         assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
     }
@@ -14097,7 +14294,7 @@ mod multi_setup_draft_tests {
     #[test]
     fn setup_tabs_share_one_draft_and_cancel_restores_every_tab() {
         let mut app = blank_app();
-        let committed = app.controller.document().setup().clone();
+        let committed = app.controller.inspection_setup().clone();
         send(&mut app, Message::SetupNameChanged("Top fixture".into()));
         send(
             &mut app,
@@ -14118,7 +14315,7 @@ mod multi_setup_draft_tests {
         assert!(app.setup_draft_dirty());
 
         send(&mut app, Message::SetupCancel);
-        assert_eq!(app.controller.document().setup(), &committed);
+        assert_eq!(app.controller.inspection_setup(), &committed);
         assert!(!app.setup_draft_dirty());
     }
 
@@ -14148,10 +14345,43 @@ mod multi_setup_draft_tests {
             issue.is_some(),
             "a stale edge reference should be visible as a field issue"
         );
-        let committed_name = app.controller.document().setup().name.clone();
+        let committed_name = app.controller.inspection_setup().name.clone();
         send(&mut app, Message::SetupCommit);
-        assert_eq!(app.controller.document().setup().name, committed_name);
+        assert_eq!(app.controller.inspection_setup().name, committed_name);
         assert!(app.setup_draft_dirty());
+    }
+
+    #[test]
+    fn setup_tool_change_editor_applies_wcs_height_and_restores_automatic_default() {
+        let mut app = blank_app();
+        let original = app.controller.inspection_setup().clone();
+        send(&mut app, Message::SetupToolChangeAutomatic(false));
+        send(&mut app, Message::SetupToolChangeHeightChanged("60".into()));
+        send(&mut app, Message::SetupOriginChanged(2, "12".into()));
+        assert_eq!(app.controller.inspection_setup(), &original);
+        send(&mut app, Message::SetupCommit);
+        assert!(app.setup_draft.is_none(), "{}", app.status);
+        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(72.));
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.inspection_setup(), &original);
+        assert!(app.controller.redo());
+
+        app.begin_setup_draft();
+        send(&mut app, Message::SetupToolChangeHeightChanged("NaN".into()));
+        send(&mut app, Message::SetupCommit);
+        assert!(app.setup_draft.is_some());
+        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(72.));
+        send(&mut app, Message::SetupToolChangeAutomatic(true));
+        assert!(!app.setup_values.contains_key(&41));
+        send(&mut app, Message::SetupCancel);
+        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(72.));
+
+        app.begin_setup_draft();
+        send(&mut app, Message::SetupToolChangeAutomatic(true));
+        send(&mut app, Message::SetupCommit);
+        let setup = app.controller.inspection_setup();
+        assert_eq!(setup.tool_change_height, None);
+        assert_eq!(setup.resolved_tool_change_height(50.), 62.);
     }
 
     #[test]
@@ -14191,12 +14421,12 @@ mod multi_setup_draft_tests {
     #[test]
     fn undo_redo_and_open_sample_cannot_abandon_a_dirty_setup_draft() {
         let mut app = blank_app();
-        let original = app.controller.document().setup().name.clone();
+        let original = app.controller.inspection_setup().name.clone();
         send(&mut app, Message::SetupNameChanged("Uncommitted".into()));
         send(&mut app, Message::Undo);
         send(&mut app, Message::Redo);
         send(&mut app, Message::OpenSample);
-        assert_eq!(app.controller.document().setup().name, original);
+        assert_eq!(app.controller.inspection_setup().name, original);
         assert_eq!(app.setup_draft.as_ref().unwrap().name, "Uncommitted");
         assert!(app.setup_draft_dirty());
     }
@@ -14204,7 +14434,7 @@ mod multi_setup_draft_tests {
     #[test]
     fn operation_cancel_discards_enum_numeric_and_staged_tool_edits() {
         let (mut app, id) = carve_app();
-        let committed = app.controller.document().setup().clone();
+        let committed = app.controller.inspection_setup().clone();
         send(&mut app, Message::CarveStayDownToggled(true));
         send(&mut app, Message::CarveClearToggled(true));
         send(&mut app, Message::FieldChanged(Field::Depth, "2.5".into()));
@@ -14212,7 +14442,7 @@ mod multi_setup_draft_tests {
         assert!(!app.operation_tools.is_empty());
 
         send(&mut app, Message::CancelOperationDraft);
-        assert_eq!(app.controller.document().setup(), &committed);
+        assert_eq!(app.controller.inspection_setup(), &committed);
         assert!(!app.operation_draft_dirty());
         assert!(
             matches!(app.controller.operation(id), Some(Operation::Carve(op)) if !op.stay_down && op.clear.is_none() && op.depth == 1.0)
@@ -14222,7 +14452,7 @@ mod multi_setup_draft_tests {
     #[test]
     fn operation_ok_commits_enum_numeric_and_staged_tool_in_one_undo_step() {
         let (mut app, id) = carve_app();
-        let before_commit = app.controller.document().setup().clone();
+        let before_commit = app.controller.inspection_setup().clone();
         send(&mut app, Message::CarveStayDownToggled(true));
         send(&mut app, Message::CarveClearToggled(true));
         send(&mut app, Message::FieldChanged(Field::Depth, "2.5".into()));
@@ -14232,14 +14462,14 @@ mod multi_setup_draft_tests {
             matches!(app.controller.operation(id), Some(Operation::Carve(op)) if op.stay_down && op.clear.is_some() && op.depth == 2.5)
         );
         assert_eq!(
-            app.controller.document().setup().tools.len(),
+            app.controller.inspection_setup().tools.len(),
             before_commit.tools.len() + 1
         );
         assert!(
             app.controller.undo(),
             "the operation and its staged cutter share one history edit"
         );
-        assert_eq!(app.controller.document().setup(), &before_commit);
+        assert_eq!(app.controller.inspection_setup(), &before_commit);
     }
 }
 
@@ -14785,30 +15015,14 @@ mod ribbon_tests {
     use super::*;
 
     #[test]
-    fn families_offered_match_what_each_operation_can_actually_cut() {
+    fn families_allow_deliberate_cutter_substitutions() {
         use ToolKindPick as F;
-        // The agreed table. Narrower than "whatever the guards would not reject":
-        // no ball-nose for facing, no face mill for profile/pocket, no end mill for
-        // drilling — those are possible but deliberately not offered.
-        assert_eq!(
-            families_for(OpKind::Profile),
-            &[F::EndMill, F::BallMill, F::BullNose]
-        );
-        assert_eq!(
-            families_for(OpKind::Pocket),
-            &[F::EndMill, F::BallMill, F::BullNose]
-        );
-        assert_eq!(families_for(OpKind::Adaptive), &[F::EndMill]);
-        assert_eq!(
-            families_for(OpKind::Face),
-            &[F::EndMill, F::BullNose, F::FaceMill]
-        );
-        assert_eq!(families_for(OpKind::Drill), &[F::Drill]);
+        for kind in [OpKind::Profile, OpKind::Pocket, OpKind::Bore, OpKind::Face,
+            OpKind::Drill, OpKind::Engrave, OpKind::Adaptive] {
+            assert_eq!(families_for(kind), &F::ALL, "{kind:?}");
+        }
         assert_eq!(families_for(OpKind::Thread), &[F::ThreadMill]);
         assert_eq!(families_for(OpKind::Chamfer), &[F::ChamferMill, F::VBit]);
-        assert_eq!(families_for(OpKind::Engrave), &[F::VBit]);
-        // Carving is a V-bit operation for the same reason engraving is: the cut's
-        // shape is the tool's own cone.
         assert_eq!(families_for(OpKind::Carve), &[F::VBit]);
     }
 
@@ -14915,21 +15129,14 @@ mod ribbon_tests {
     }
 
     #[test]
-    fn no_operation_offers_a_family_its_strategy_would_reject() {
+    fn geometric_cutter_requirements_are_separate_from_suitability() {
         use ToolKindPick as F;
-        // The hard floor: engraving needs a cutting tip, threading needs a thread
-        // mill, and side-milling needs a cylindrical flank. Offering any of these
-        // would hand the user a combination that cannot produce G-code.
-        assert!(!families_for(OpKind::Engrave).contains(&F::ChamferMill));
-        for op in [OpKind::Profile, OpKind::Pocket] {
-            assert!(!families_for(op).contains(&F::VBit), "{op:?}");
-            assert!(!families_for(op).contains(&F::ChamferMill), "{op:?}");
-            assert!(!families_for(op).contains(&F::Drill), "{op:?}");
-            assert!(!families_for(op).contains(&F::ThreadMill), "{op:?}");
-        }
+        assert!(families_for(OpKind::Engrave).contains(&F::ChamferMill));
+        assert!(families_for(OpKind::Bore).contains(&F::BallMill));
+        assert!(families_for(OpKind::Bore).contains(&F::VBit));
         assert_eq!(families_for(OpKind::Thread), &[F::ThreadMill]);
-        // Facing must not offer a tool whose tip does not cut.
-        assert!(!families_for(OpKind::Face).contains(&F::ChamferMill));
+        assert_eq!(families_for(OpKind::Chamfer), &[F::ChamferMill, F::VBit]);
+        assert_eq!(families_for(OpKind::Carve), &[F::VBit]);
     }
 
     #[test]

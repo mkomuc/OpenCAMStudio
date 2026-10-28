@@ -304,6 +304,8 @@ fn extract_impl(
                                 CadSurface::Cylinder { .. } | CadSurface::LinearExtrusion { .. } =>
                                     "wall axis is not parallel to setup Z".into(),
                                 CadSurface::Torus { .. } => "rounded torus surface".into(),
+                                CadSurface::Cone { .. } => "conical wall".into(),
+                                CadSurface::Sphere { .. } => "spherical wall".into(),
                                 CadSurface::Unsupported { description } =>
                                     format!("unsupported surface: {description}"),
                             };

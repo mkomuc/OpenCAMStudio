@@ -64,7 +64,7 @@ impl AppController {
 
     pub(super) fn restore_active_setup_view(&mut self) {
         if !self.setups().iter().any(|s| s.id == self.active_setup_id) {
-            self.active_setup_id = self.setups()[0].id;
+            self.active_setup_id = self.setups().first().map_or(0, |s| s.id);
         }
         let id = self.active_setup_id;
         self.document.update_view(|doc| doc.active_setup_id = id);
@@ -74,11 +74,22 @@ impl AppController {
     }
 
     pub fn add_setup(&mut self) -> u64 {
+        let selected = self.cad_selection.iter().map(|r| r.instance_id).collect();
+        self.add_setup_with_models(selected)
+    }
+
+    /// Seed a new setup with the selected body instances, without copying operations.
+    pub fn add_setup_with_models(&mut self, selected: Vec<cam_model::InstanceId>) -> u64 {
         let mut setup = self.setup().clone();
         setup.id = self.document().next_setup_id().max(self.setup_id_floor);
         setup.name = format!("Setup {}", setup.id);
         setup.program_name = format!("setup-{}", setup.id);
-        setup.model_instances.clear();
+        setup.model_instances = selected
+            .into_iter()
+            .filter(|id| self.geometry_state().instance(*id).is_some())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         setup.operations.clear();
         setup.patterns.clear();
         setup.operation_heights.clear();
@@ -102,6 +113,9 @@ impl AppController {
         copy.id = self.document().next_setup_id().max(self.setup_id_floor);
         copy.name = format!("{} (copy)", copy.name);
         copy.program_name = format!("setup-{}", copy.id);
+        // The copy is inserted immediately after its source and continues machining
+        // the same workpiece, including material already removed by that setup.
+        copy.stock = Stock::PreviousSetup;
         let mut next_id = self.next_op_id();
         let mut bindings = Vec::new();
         let mut linked = Vec::new();
@@ -161,6 +175,9 @@ impl AppController {
     }
 
     pub fn delete_setup(&mut self, id: u64) -> Result<(), String> {
+        if self.setups().is_empty() {
+            return Err("Setup no longer exists".into());
+        }
         if self.setups().len() == 1 {
             return Err("Keep at least one setup in the project".into());
         }
@@ -1090,6 +1107,9 @@ impl AppController {
     }
 
     pub fn setup_geometry_state(&self) -> Result<cam_model::GeometryState, String> {
+        if self.setups().is_empty() {
+            return Err("Create a setup and select its models before creating an operation.".into());
+        }
         self.validate_setup_frame(self.setup())?;
         crate::cad_operations::geometry_for_setup(self.document())
     }
@@ -1174,7 +1194,7 @@ mod tests {
     #[test]
     fn tree_order_uses_stable_ids_and_survives_undo_redo_and_reopen() {
         let mut app = AppController::new(crate::default_machine());
-        let first = app.active_setup_id();
+        let first = app.add_setup();
         for _ in 0..3 {
             app.add_operation(drill());
         }

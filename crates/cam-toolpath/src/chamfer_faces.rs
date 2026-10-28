@@ -10,6 +10,7 @@ pub(super) fn compute(
     included_angle: f64,
     cancel: &CancelToken,
 ) -> StrategyResult {
+    let mut diagnostics = Vec::new();
     let error = |reason: String| StrategyResult {
         diagnostics: vec![Diagnostic::error(format!("Operation {}: {reason}", op.id))],
         ..Default::default()
@@ -73,7 +74,7 @@ pub(super) fn compute(
                 .atan()
                 .to_degrees();
         if (modeled_angle - included_angle).abs() > 1e-3 {
-            return error(format!("Modeled chamfer requires a {modeled_angle:.3}° included-angle cutter; the selected cutter is {included_angle:.3}°"));
+            diagnostics.push(Diagnostic::warning(format!("Operation {}: modeled chamfer matches a {modeled_angle:.3}° included-angle cutter; the selected cutter is {included_angle:.3}°. The cut will follow the selected cutter's profile.", op.id)).for_op(op.id));
         }
         if op.top > face.top + 1e-5
             || bottom < face.bottom - 1e-5
@@ -95,6 +96,7 @@ pub(super) fn compute(
             if cancel.is_cancelled() {
                 return StrategyResult {
                     program,
+                    diagnostics,
                     cancelled: true,
                     ..Default::default()
                 };
@@ -176,6 +178,7 @@ pub(super) fn compute(
     }
     StrategyResult {
         program,
+        diagnostics,
         ..Default::default()
     }
 }

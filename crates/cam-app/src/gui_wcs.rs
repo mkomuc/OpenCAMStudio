@@ -427,7 +427,7 @@ impl App {
         let mut setup = self
             .setup_draft
             .as_ref()
-            .unwrap_or_else(|| self.controller.document().setup())
+            .unwrap_or_else(|| self.controller.inspection_setup())
             .clone();
         if let Some(axis) = self.setup_axis_pick.filter(|i| *i < 3) {
             if let Some(direction) = self
@@ -663,7 +663,7 @@ mod tests {
         let setup = app
             .setup_draft
             .as_ref()
-            .unwrap_or_else(|| app.controller.document().setup());
+            .unwrap_or_else(|| app.controller.inspection_setup());
         let picking = SetupPickGeometry::new(&app.controller, setup, &app.cad_hidden);
         app.workpiece_axes(&picking)
     }
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn orientation_modes_clear_hidden_references_and_preserve_the_world_datum() {
         let mut app = app();
-        let committed = app.controller.document().setup().clone();
+        let committed = app.controller.inspection_setup().clone();
         for (axis, value) in ["12", "23", "34"].into_iter().enumerate() {
             let _ = app.update(Message::SetupOriginChanged(axis, value.into()));
         }
@@ -708,9 +708,9 @@ mod tests {
             draft.frame.references.origin,
             cam_model::FrameOrigin::Explicit(draft.origin)
         );
-        assert_eq!(app.controller.document().setup(), &committed);
+        assert_eq!(app.controller.inspection_setup(), &committed);
         let _ = app.update(Message::SetupCancel);
-        assert_eq!(app.controller.document().setup(), &committed);
+        assert_eq!(app.controller.inspection_setup(), &committed);
     }
 
     #[test]
@@ -783,13 +783,13 @@ mod tests {
         close(axes(&app).unwrap().origin, [50., 60., 70.]);
         let draft = app.setup_draft.as_ref().unwrap().clone();
         let _ = app.update(Message::SetupCommit);
-        assert_eq!(app.controller.document().setup(), &draft, "{}", app.status);
+        assert_eq!(app.controller.inspection_setup(), &draft, "{}", app.status);
     }
 
     #[test]
     fn origin_source_changes_cancel_pending_picks_and_reset_model_origin() {
         let mut app = app();
-        let committed = app.controller.document().setup().clone();
+        let committed = app.controller.inspection_setup().clone();
         for mode in [
             SetupOriginMode::StockBox,
             SetupOriginMode::ModelBox,
@@ -810,7 +810,7 @@ mod tests {
         let _ = app.update(Message::SetupOriginModeChanged(SetupOriginMode::Model));
         close(app.setup_draft.as_ref().unwrap().origin, [0.; 3]);
         assert!(!app.setup_values.contains_key(&0));
-        assert_eq!(app.controller.document().setup(), &committed);
+        assert_eq!(app.controller.inspection_setup(), &committed);
     }
 
     #[test]
@@ -836,12 +836,12 @@ mod tests {
         let mut app = app();
         app.show_origin = false;
         assert!(axes(&app).is_some());
-        let committed = app.controller.document().setup().clone();
+        let committed = app.controller.inspection_setup().clone();
         for (i, value) in ["12.5", "23.5", "7.5"].into_iter().enumerate() {
             let _ = app.update(Message::SetupOriginChanged(i, value.into()));
         }
         close(axes(&app).unwrap().origin, [12.5, 23.5, 7.5]);
-        assert_eq!(app.controller.document().setup(), &committed);
+        assert_eq!(app.controller.inspection_setup(), &committed);
         let _ = app.update(Message::SetupCancel);
         close(
             axes(&app).unwrap().origin,
@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn first_edge_then_second_edge_and_flips_preview_without_applying() {
         let mut app = app();
-        let committed = app.controller.document().setup().clone();
+        let committed = app.controller.inspection_setup().clone();
         app.set_setup_stock_axis(0, [0., 1., 0.]);
         let first = axes(&app).unwrap();
         assert!(!first.provisional);
@@ -875,7 +875,7 @@ mod tests {
             flipped.directions,
             [[0., -1., 0.], [0., 0., -1.], [1., 0., 0.]]
         );
-        assert_eq!(app.controller.document().setup(), &committed);
+        assert_eq!(app.controller.inspection_setup(), &committed);
         let _ = app.update(Message::SetupCancel);
         assert_eq!(
             axes(&app).unwrap().directions,
@@ -886,7 +886,7 @@ mod tests {
     fn a_single_axis_can_apply_round_trip_and_undo_with_the_preview_orientation() {
         for axis in 0..3 {
             let mut app = app();
-            let committed = app.controller.document().setup().clone();
+            let committed = app.controller.inspection_setup().clone();
             for (index, value) in ["12", "23", "34"].into_iter().enumerate() {
                 let _ = app.update(Message::SetupOriginChanged(index, value.into()));
             }
@@ -896,8 +896,8 @@ mod tests {
             let draft = app.setup_draft.clone().unwrap();
             assert!(app.setup_frame_issue(&draft).is_none());
             let _ = app.update(Message::SetupCommit);
-            assert_eq!(app.controller.document().setup(), &draft, "{}", app.status);
-            let saved = app.controller.document().setup();
+            assert_eq!(app.controller.inspection_setup(), &draft, "{}", app.status);
+            let saved = app.controller.inspection_setup();
             for index in 0..3 {
                 close(
                     saved.frame.to_world_vector(std::array::from_fn(|i| {
@@ -915,9 +915,9 @@ mod tests {
             assert!(app.setup_frame_issue(loaded.setup()).is_none());
             assert_eq!(loaded.setup().frame, draft.frame);
             assert!(app.controller.undo());
-            assert_eq!(app.controller.document().setup(), &committed);
+            assert_eq!(app.controller.inspection_setup(), &committed);
             assert!(app.controller.redo());
-            assert_eq!(app.controller.document().setup(), &draft);
+            assert_eq!(app.controller.inspection_setup(), &draft);
         }
     }
     #[test]

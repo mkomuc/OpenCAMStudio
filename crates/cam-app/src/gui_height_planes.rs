@@ -23,7 +23,7 @@ pub(super) struct HeightOverlay {
 
 impl App {
     pub(super) fn preview_safety_heights(&self, id: u32) -> cam_model::Heights {
-        let saved = self.controller.document().setup().heights_for(id);
+        let saved = self.controller.inspection_setup().heights_for(id);
         let value = |field, fallback| {
             self.fields
                 .get(&field)
@@ -80,7 +80,7 @@ impl App {
             return None;
         };
         let heights = self.resolve_height_editor(id).ok()?;
-        let setup = self.controller.document().setup();
+        let setup = self.controller.inspection_setup();
         let (min, max) = self.controller.stock_box();
         let pad = (max[0] - min[0]).max(max[1] - min[1]).max(1.) * 0.08;
         let colors = [
@@ -244,9 +244,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -270,26 +268,22 @@ mod tests {
         assert_eq!(app.height_offsets[&P::Clearance], "20");
         let _ = app.update(Message::Apply);
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(P::Clearance)
                 .offset,
             20.
         );
         assert_eq!(
-            app.controller.document().setup().heights,
+            app.controller.inspection_setup().heights,
             original.setup().heights
         );
         assert!(app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .iter()
             .filter(|o| o.id() != id)
             .all(|o| !app
-                .controller
-                .document()
-                .setup()
+                .controller.inspection_setup()
                 .height_settings
                 .contains_key(&o.id())));
         let path = std::env::temp_dir().join(format!(
@@ -302,7 +296,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert_eq!(
             reopened.document().setup().height_settings[&id],
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
         );
         let _ = app.update(Message::Undo);
         assert_eq!(app.controller.document(), &original);
@@ -358,9 +352,7 @@ mod tests {
         let _ = app.update(Message::OperationTabChanged(OperationTab::Tool));
         assert!(app.height_preview(camera, 0.).is_none());
         assert!(app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .height_settings
             .contains_key(&id));
     }
@@ -390,7 +382,7 @@ mod tests {
         assert!(app.resolve_height_editor(id).unwrap().feed.is_none());
         let _ = app.update(Message::Apply);
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(P::Feed)
                 .reference,
             R::Disabled
@@ -418,7 +410,7 @@ mod tests {
         let _ = app.update(Message::HeightPickToggle(P::Top));
         let _ = app.update(Message::Apply);
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(P::Top)
                 .drawings
                 .len(),
@@ -441,9 +433,7 @@ mod tests {
         ] {
             app.controller.new_operation(kind);
             let id = app
-                .controller
-                .document()
-                .setup()
+                .controller.inspection_setup()
                 .operations
                 .last()
                 .unwrap()

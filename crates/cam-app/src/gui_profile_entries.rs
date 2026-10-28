@@ -190,9 +190,7 @@ impl App {
             .instances
             .iter()
             .filter(|i| {
-                self.controller
-                    .document()
-                    .setup()
+                self.controller.inspection_setup()
                     .model_instances
                     .contains(&i.id)
             })

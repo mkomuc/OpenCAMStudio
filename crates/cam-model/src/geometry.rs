@@ -485,6 +485,17 @@ pub enum CadSurface {
         radius: f64,
         inward: bool,
     },
+    /// Exact cone metadata; tapered machining requires an operation adapter.
+    Cone {
+        origin: [f64; 3],
+        axis: [f64; 3],
+        radius: f64,
+        semi_angle: f64,
+    },
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+    },
     /// Analytic fillet surface; inspectable, with no 3D surfacing adapter.
     Torus {
         origin: [f64; 3],
@@ -492,8 +503,8 @@ pub enum CadSurface {
         major_radius: f64,
         minor_radius: f64,
     },
-    /// Native extrusion, including a degree-one spline surface whose pole rows
-    /// are exact translations with identical rational weights.
+    /// Native extrusion, including spline surfaces whose complete pole rows
+    /// are axial translations with separable positive rational weights.
     LinearExtrusion {
         axis: [f64; 3],
         /// Local outward surface orientation at each boundary edge's midpoint.
@@ -503,6 +514,19 @@ pub enum CadSurface {
     Unsupported {
         description: String,
     },
+}
+impl CadSurface {
+    pub fn kind_name(&self) -> &str {
+        match self {
+            Self::Plane { .. } => "plane",
+            Self::Cylinder { .. } => "cylinder",
+            Self::Cone { .. } => "cone",
+            Self::Sphere { .. } => "sphere",
+            Self::Torus { .. } => "torus",
+            Self::LinearExtrusion { .. } => "linear extrusion",
+            Self::Unsupported { description } => description,
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CadWallEdgeSide {
@@ -630,6 +654,8 @@ pub enum ExtractionRecipe {
     AdaptiveClearing,
     ParallelFinishing,
     PocketFloor,
+    /// One closed planar loop or connected closed edge chain, at an operator-defined depth.
+    PocketBoundary,
     DrillHoles,
     /// One closed planar rim; the operation defines the bevel dimensions.
     ChamferLoop,
@@ -981,6 +1007,23 @@ impl TopologySnapshot {
                     radius,
                     ..
                 } => finite(*origin) && direction(*axis) && radius.is_finite() && *radius > 0.,
+                CadSurface::Cone {
+                    origin,
+                    axis,
+                    radius,
+                    semi_angle,
+                } => {
+                    finite(*origin)
+                        && direction(*axis)
+                        && radius.is_finite()
+                        && *radius >= 0.
+                        && semi_angle.is_finite()
+                        && semi_angle.abs() > 0.
+                        && semi_angle.abs() < std::f64::consts::FRAC_PI_2
+                }
+                CadSurface::Sphere { center, radius } => {
+                    finite(*center) && radius.is_finite() && *radius > 0.
+                }
                 CadSurface::Torus {
                     origin,
                     axis,
@@ -1276,6 +1319,73 @@ mod tests {
         }
     }
     #[test]
+    fn cone_and_sphere_metadata_round_trip_and_reject_invalid_dimensions() {
+        for (surface, valid) in [
+            (
+                CadSurface::Sphere {
+                    center: [1., 2., 3.],
+                    radius: 5.,
+                },
+                true,
+            ),
+            (
+                CadSurface::Sphere {
+                    center: [1., 2., 3.],
+                    radius: -5.,
+                },
+                false,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 0.,
+                    semi_angle: 0.3,
+                },
+                true,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 5.,
+                    semi_angle: -0.3,
+                },
+                true,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 5.,
+                    semi_angle: 0.,
+                },
+                false,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 5.,
+                    semi_angle: std::f64::consts::FRAC_PI_2,
+                },
+                false,
+            ),
+        ] {
+            let mut topology = (*state().assets[0].topology).clone();
+            topology.faces[0].surface = surface;
+            let encoded = serde_json::to_vec(&topology).unwrap();
+            let restored: TopologySnapshot = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(restored, topology);
+            assert_eq!(
+                restored.validate().is_ok(),
+                valid,
+                "{:?}",
+                restored.faces[0].surface
+            );
+        }
+    }
+    #[test]
     fn mismatched_embedded_source_and_invalid_import_budgets_are_rejected() {
         let mut s = state();
         std::sync::Arc::make_mut(&mut s.assets[0].source_data).push(0);
@@ -1295,21 +1405,31 @@ mod tests {
         let original = s.assets[0].topology.clone();
         assert_eq!(Arc::weak_count(&original), 1);
         s.validate().unwrap();
-        assert_eq!(Arc::weak_count(&original), 1, "reuse the existing cache entry");
+        assert_eq!(
+            Arc::weak_count(&original),
+            1,
+            "reuse the existing cache entry"
+        );
 
         Arc::make_mut(&mut s.assets[0].topology).version = 2;
         assert!(s.validate().unwrap_err().contains("snapshot version"));
         original.validate_cached().unwrap();
         let weak = Arc::downgrade(&original);
         drop(original);
-        assert!(weak.upgrade().is_none(), "validation must not retain deleted CAD data");
+        assert!(
+            weak.upgrade().is_none(),
+            "validation must not retain deleted CAD data"
+        );
 
         let mut sole_owner = state().assets.remove(0).topology;
         sole_owner.validate_cached().unwrap();
         let weak = Arc::downgrade(&sole_owner);
         Arc::make_mut(&mut sole_owner).mesh.triangles.push([999; 3]);
         assert!(weak.upgrade().is_none());
-        assert!(sole_owner.validate_cached().is_err(), "sole-owner edits must be revalidated");
+        assert!(
+            sole_owner.validate_cached().is_err(),
+            "sole-owner edits must be revalidated"
+        );
     }
     #[test]
     fn self_contained_geometry_roundtrip_keeps_identity_mesh_and_overrides() {
@@ -1376,7 +1496,10 @@ mod tests {
         edited.name.push_str(" renamed");
         assert_ne!(original, edited);
         let mut edited = original.clone();
-        Arc::make_mut(&mut edited.topology).mesh.vertices.push([1., 2., 3.]);
+        Arc::make_mut(&mut edited.topology)
+            .mesh
+            .vertices
+            .push([1., 2., 3.]);
         assert_ne!(original, edited);
         let mut edited = original.clone();
         Arc::make_mut(&mut edited.source_data).push(0);

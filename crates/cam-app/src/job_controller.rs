@@ -56,6 +56,7 @@ impl AppController {
             frame_error,
             preview_program: None,
             preview_resolution: None,
+            toolpath_preview: false,
             simulation_accuracy: self.simulation_accuracy,
         }
     }
@@ -92,6 +93,9 @@ impl AppController {
         recompute: bool,
         include_predecessors: bool,
     ) -> Result<JobStamp, String> {
+        if self.setups().is_empty() {
+            return Err("Create a setup before generating toolpaths.".into());
+        }
         let mut inputs = self.job_inputs();
         if let Some(id) = operation {
             let document = Arc::make_mut(&mut inputs.document);
@@ -127,6 +131,7 @@ impl AppController {
 
     /// Run exactly one pattern, retaining every included source at each instance.
     pub fn start_pattern_toolpath_run(&mut self, pattern_id: u64, recompute: bool) -> Result<JobStamp, String> {
+        if self.setups().is_empty() { return Err("Create a setup before generating toolpaths.".into()); }
         let mut inputs = self.job_inputs();
         let members: BTreeSet<u32> = inputs.document.setup().patterns.iter().find(|p| p.id == pattern_id)
             .ok_or_else(|| "Pattern no longer exists.".to_string())?.members.iter().copied().collect();

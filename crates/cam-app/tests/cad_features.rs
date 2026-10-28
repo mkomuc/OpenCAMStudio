@@ -790,6 +790,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         end: None,
         start: None,
         clear: ClearParams {
+            lift_height: 0.0,
             stepdown: 2.,
             overlap: 0.5,
             offset: 0.,
@@ -2091,4 +2092,116 @@ fn bore_cad_selection_regeneration_save_reopen_and_all_posts() {
     assert!(reopened
         .apply_operation_settings_with_geometry(invalid, None, vec![], None)
         .is_err());
+}
+
+#[test]
+fn pocket_boundary_chains_generate_at_the_selected_plane_and_survive_reopen() {
+    for edges in [false, true] {
+        let mut app = controller();
+        let floor = install_pocket(&mut app);
+        let wire = app.geometry_state().assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|wire| wire.face_id == floor.id && wire.is_outer)
+            .unwrap()
+            .clone();
+        let selected = if edges {
+            wire.edge_uses
+                .iter()
+                .rev()
+                .map(|edge| reference(edge.edge_id, EntityKind::Edge))
+                .collect()
+        } else {
+            vec![reference(wire.id, EntityKind::Loop)]
+        };
+        app.place_cad_instance(
+            1,
+            RigidTransform {
+                translation: [5., 7., 10.],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = app
+            .create_cad_operation(OpKind::Pocket, selected.clone())
+            .unwrap();
+        assert_eq!(
+            app.geometry_state().bindings[&id].recipe,
+            ExtractionRecipe::PocketBoundary
+        );
+        assert_eq!(app.geometry_state().bindings[&id].heights.top, 7.);
+        assert!(matches!(app.operation(id), Some(Operation::Pocket(op)) if op.islands.is_empty()));
+        app.edit_operation(id, |op| {
+            if let Operation::Pocket(p) = op {
+                p.depth = 2.;
+            }
+        });
+        app.edit_setup(|setup| {
+            setup
+                .height_settings
+                .get_mut(&id)
+                .unwrap()
+                .definition_mut(HeightPlaneKind::Bottom)
+                .offset = -2.;
+        });
+        let heights = app.document().setup().height_settings[&id]
+            .resolve(app.document(), app.operation(id).unwrap())
+            .unwrap();
+        assert_eq!(heights.top, 7.);
+        assert_eq!(heights.bottom, 5.);
+        let outcome = app.run(&CancelToken::new());
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            outcome.diagnostics
+        );
+        assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+        assert!(!outcome.program.is_empty());
+        let program = outcome.program.clone();
+        let path =
+            std::env::temp_dir().join(format!("pocket-chain-{edges}-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = controller();
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reopened.geometry_state().bindings[&id].selected, selected);
+        assert_eq!(reopened.run(&CancelToken::new()).program, program);
+    }
+}
+
+#[test]
+fn pocket_boundary_rejects_open_disconnected_and_nonplanar_edge_chains() {
+    let mut app = controller();
+    let floor = install_pocket(&mut app);
+    let topology = &app.geometry_state().assets[0].topology;
+    let wire = topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == floor.id && wire.is_outer)
+        .unwrap();
+    let edges: Vec<_> = wire
+        .edge_uses
+        .iter()
+        .map(|edge| reference(edge.edge_id, EntityKind::Edge))
+        .collect();
+    let nonplanar = topology
+        .edges
+        .iter()
+        .find(|edge| match edge.curve {
+            CadCurve::Line { start, end } => (start[2] - end[2]).abs() > 1.,
+            _ => false,
+        })
+        .unwrap()
+        .id;
+    let before = app.document().clone();
+    for selected in [
+        vec![edges[0].clone()],
+        vec![edges[0].clone(), edges[2].clone()],
+        vec![reference(nonplanar, EntityKind::Edge)],
+    ] {
+        assert!(app.create_cad_operation(OpKind::Pocket, selected).is_err());
+        assert_eq!(app.document(), &before);
+    }
 }

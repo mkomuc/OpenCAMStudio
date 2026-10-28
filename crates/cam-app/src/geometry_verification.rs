@@ -54,7 +54,7 @@ pub(crate) fn record(
             "body":topology.bodies.iter().find(|body| body.id == reference.body_id),
             "edges":edges,"faces":faces,"loops":loops})
     }).collect();
-    let setup = controller.document().setup();
+    let setup = controller.inspection_setup();
     let mut event = json!({"schema_version":1,"verifier_version":1,"app_version":crate::version_string(),
         "policy":"advisory", "project":controller.current_path(), "source_name":controller.source_name(),
         "setup":{"id":setup.id,"name":setup.name,"frame":setup.frame,"stock":setup.stock,"origin":setup.origin},

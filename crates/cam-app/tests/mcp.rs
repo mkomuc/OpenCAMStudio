@@ -70,7 +70,7 @@ fn protocol_initialization_tools_errors_and_notification_isolation() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        1
     );
     assert_eq!(response[7]["result"], json!({}));
 }

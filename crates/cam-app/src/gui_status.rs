@@ -102,7 +102,7 @@ impl App {
         if let Some(outcome) = self.controller.outcome() {
             self.status_messages.record(
                 outcome,
-                self.controller.document().setup(),
+                self.controller.inspection_setup(),
                 &self.controller.current_toolpath_fingerprints(),
                 self.controller.machine(),
                 self.settings.simulation.accuracy,
@@ -315,7 +315,7 @@ mod tests {
                 diagnostics,
                 ..Default::default()
             },
-            app.controller.document().setup(),
+            app.controller.inspection_setup(),
             &app.controller.current_toolpath_fingerprints(),
             app.controller.machine(),
             app.settings.simulation.accuracy,
@@ -330,9 +330,7 @@ mod tests {
     fn operation_click_scopes_messages_and_setup_click_collects_them() {
         let mut app = app();
         let ids: Vec<_> = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .iter()
             .map(Operation::id)
@@ -380,7 +378,7 @@ mod tests {
     fn messages_survive_setup_switches_but_follow_input_changes_and_suppression() {
         let mut app = app();
         let setup = app.controller.active_setup_id();
-        let id = app.controller.document().setup().operations[0].id();
+        let id = app.controller.inspection_setup().operations[0].id();
         let target = StatusTarget::Operation(id);
         record(
             &mut app,
@@ -403,9 +401,7 @@ mod tests {
     fn recalculating_one_operation_preserves_sibling_messages_and_clears_its_old_error() {
         let mut app = app();
         let ids: Vec<_> = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .iter()
             .map(Operation::id)
@@ -433,7 +429,7 @@ mod tests {
         });
         app.status_messages.record(
             &outcome,
-            app.controller.document().setup(),
+            app.controller.inspection_setup(),
             &app.controller.current_toolpath_fingerprints(),
             app.controller.machine(),
             app.settings.simulation.accuracy,
@@ -450,7 +446,7 @@ mod tests {
     #[test]
     fn collisions_are_errors_and_setup_failures_are_visible_to_operations() {
         let mut app = app();
-        let id = app.controller.document().setup().operations[0].id();
+        let id = app.controller.inspection_setup().operations[0].id();
         let mut outcome = crate::RunOutcome {
             completion: JobCompletion::Complete,
             ..Default::default()
@@ -467,7 +463,7 @@ mod tests {
         });
         app.status_messages.record(
             &outcome,
-            app.controller.document().setup(),
+            app.controller.inspection_setup(),
             &app.controller.current_toolpath_fingerprints(),
             app.controller.machine(),
             app.settings.simulation.accuracy,
@@ -494,7 +490,7 @@ mod tests {
         };
         app.status_messages.record(
             &outcome,
-            app.controller.document().setup(),
+            app.controller.inspection_setup(),
             &app.controller.current_toolpath_fingerprints(),
             app.controller.machine(),
             app.settings.simulation.accuracy,

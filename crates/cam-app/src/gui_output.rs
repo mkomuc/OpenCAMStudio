@@ -17,7 +17,7 @@ impl App {
         )
     }
     pub(super) fn output_context(&self) -> String {
-        let setup = self.controller.document().setup();
+        let setup = self.controller.inspection_setup();
         let operation =
             self.operation_draft
                 .as_ref()
@@ -296,7 +296,22 @@ impl App {
         }
         let output = lines.join("\n");
         if output != self.output_snapshot && self.output_content.selection().is_none() {
-            self.output_content = text_editor::Content::with_text(&output);
+            // Keep the editor and its unchanged line layouts. Recreating it
+            // shapes the whole growing history on every face-selection click.
+            // Replace only the changed suffix, including any diagnostics footer.
+            let mut prefix_bytes = 0;
+            let mut prefix_lines = 0;
+            for (old, new) in self.output_snapshot.split_inclusive('\n').zip(output.split_inclusive('\n')) {
+                if old != new || !old.ends_with('\n') { break; }
+                prefix_bytes += old.len();
+                prefix_lines += 1;
+            }
+            self.output_content.move_to(text_editor::Cursor {
+                position: text_editor::Position { line: prefix_lines, column: 0 },
+                selection: None,
+            });
+            self.output_content.perform(text_editor::Action::Select(text_editor::Motion::DocumentEnd));
+            self.output_content.perform(text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(output[prefix_bytes..].to_owned()))));
             self.output_snapshot = output;
         }
     }
@@ -311,6 +326,52 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_output_handles_appends_replacements_unicode_and_history_trimming() {
+        let (mut app, _) = App::new();
+        app.append_output("Selection", "Fläche 36\n边界 ✓");
+        app.sync_output();
+        assert_eq!(app.output_content.text(), app.output_snapshot);
+        app.append_output("Selection", "Fläche 37");
+        app.sync_output();
+        assert_eq!(app.output_content.text(), app.output_snapshot);
+        *app.output_history.back_mut().unwrap() = "Changed diagnostic: ✓".into();
+        app.sync_output();
+        assert_eq!(app.output_content.text(), app.output_snapshot);
+        assert!(app.output_content.text().ends_with("Changed diagnostic: ✓"));
+        app.output_history.pop_front();
+        app.sync_output();
+        assert_eq!(app.output_content.text(), "Changed diagnostic: ✓");
+
+        for index in 0..505 {
+            app.append_output("Selection", &format!("Face {index}"));
+            app.sync_output();
+        }
+        assert_eq!(app.output_history.len(), 500);
+        assert_eq!(app.output_content.text(), app.output_snapshot);
+        assert!(!app.output_content.text().contains("Face 0\n"));
+        assert!(app.output_content.text().ends_with("Face 504"));
+    }
+
+    #[test]
+    fn incremental_output_inserts_history_before_an_existing_diagnostics_footer() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        let cancel = cam_toolpath::CancelToken::new();
+        cancel.cancel();
+        app.controller.run(&cancel);
+        app.append_output("Selection", "Face 36");
+        app.sync_output();
+        assert!(app.output_content.text().contains("Simulation incomplete."));
+        app.append_output("Selection", "Face 37");
+        app.sync_output();
+        assert_eq!(app.output_content.text(), app.output_snapshot);
+        assert!(app.output_content.text().contains("Face 36\n"));
+        assert!(app.output_content.text().contains("Face 37\nToolpath diagnostics:"));
+        assert_eq!(app.output_content.text().matches("Toolpath diagnostics:").count(), 1);
+    }
+
     #[test]
     fn output_errors_retain_feature_context_after_the_status_changes_and_can_be_copied() {
         let (mut app, _) = App::new();
@@ -382,7 +443,7 @@ mod tests {
             .iter()
             .map(|i| i.id)
             .collect();
-        let mut setup = app.controller.document().setup().clone();
+        let mut setup = app.controller.inspection_setup().clone();
         setup.model_instances = instances;
         setup.name = "Mouth setup".into();
         setup.stock = cam_model::Stock::RelativeBox {

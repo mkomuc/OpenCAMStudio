@@ -129,6 +129,63 @@ fn supplied_project_bore_with_rounded_entrance_generates_and_posts() {
     assert!(app.export_nc().unwrap().contains("Bore"));
 }
 
+#[test]
+fn intentional_cutter_shape_mismatch_warns_but_simulates_and_exports() {
+    use cam_model::{Tool, ToolKind};
+    for kind in [
+        ToolKind::VBit {
+            included_angle_deg: 60.,
+            tip_radius: 0.2,
+        },
+        ToolKind::ChamferMill {
+            included_angle_deg: 90.,
+            tip_diameter: 1.,
+        },
+        ToolKind::BallMill,
+    ] {
+        let (mut app, face) = project();
+        let previous = app.document().setup().operations[0].id();
+        app.set_operation_excluded(previous, true);
+        prepare_thread_bore(&mut app);
+        let tool = app.use_tool(Tool {
+            number: 43,
+            diameter: 8.,
+            length: 62.,
+            flute_length: 32.,
+            kind,
+            ..Default::default()
+        });
+        let id = app
+            .create_cad_operation_with_tool(OpKind::Bore, vec![face], tool)
+            .unwrap();
+        let result = app.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{kind:?}: {:?}",
+            result.diagnostics
+        );
+        assert!(!result.has_errors(), "{kind:?}: {:?}", result.diagnostics);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.op == Some(id) && d.severity == cam_toolpath::Severity::Warning),
+            "{kind:?}"
+        );
+        assert!(
+            !result.stock_vertices.is_empty(),
+            "{kind:?}: simulation must still run"
+        );
+        assert!(result.program.steps().iter().any(|step| matches!(step,
+            Step::Arc { tag, .. } if tag.op_id == id && tag.kind == MoveKind::Cutting)));
+        assert!(app
+            .export_nc()
+            .unwrap_or_else(|error| panic!("{kind:?}: {error}"))
+            .contains("Bore"));
+    }
+}
+
 /// The same cylinder/torus with a deliberately prepared bore supports threading.
 #[test]
 fn rounded_bore_threads_regenerate_reopen_and_export_with_a_thread_mill() {

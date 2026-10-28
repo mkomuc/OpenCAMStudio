@@ -167,6 +167,14 @@ fn fallback(
             };
             vec![region]
         }
+        ExtractionRecipe::PocketBoundary => {
+            let (contours, z) = surface_geometry::unverified_path(state, refs, false)?;
+            if contours.len() != 1 || !contours[0].closed {
+                return Err("Pocket requires one closed boundary chain".into());
+            }
+            heights = CuttingHeights { top: z, bottom: z - binding.heights.depth() };
+            vec![Polygon::new(contours[0].chain.clone()).map_err(|e| e.to_string())?]
+        }
         ExtractionRecipe::ChamferLoop | ExtractionRecipe::EngravePath => {
             let (contours, z) = surface_geometry::unverified_path(
                 state,

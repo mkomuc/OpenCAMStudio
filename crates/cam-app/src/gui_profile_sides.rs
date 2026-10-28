@@ -253,7 +253,7 @@ impl App {
             camera,
             browser_width,
             z,
-            frame: self.controller.document().setup().frame.clone(),
+            frame: self.controller.inspection_setup().frame.clone(),
             radius: self.profile_tab_diameter(&profile).unwrap_or(0.) * 0.5 + profile.offset,
             contours: profile.contours().collect(),
             climb: profile.clearing.climb,
@@ -806,9 +806,7 @@ mod tests {
         }];
         app.controller.add_operation(op);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()

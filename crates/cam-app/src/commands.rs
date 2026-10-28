@@ -3,7 +3,13 @@ use super::*;
 impl AppController {
     /// Atomically group eligible operations into a new setup pattern.
     pub fn create_pattern(&mut self, setup_id: u64, requested: &[u32], name: String, kind: cam_model::PatternKind, order: cam_model::PatternOrder) -> Result<u64, String> {
-        kind.validate()?;
+        self.create_pattern_with_options(setup_id, requested, name, kind, order, Default::default())
+    }
+
+    /// Create the group and all placement options in one undo transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_pattern_with_options(&mut self, setup_id: u64, requested: &[u32], name: String, kind: cam_model::PatternKind, order: cam_model::PatternOrder, options: cam_model::PatternOptions) -> Result<u64, String> {
+        options.validate(kind)?;
         let setup = self.setups().iter().find(|s| s.id == setup_id).ok_or("setup not found")?;
         let members: Vec<u32> = setup.operations.iter().map(Operation::id).filter(|id| requested.contains(id)).collect();
         if members.is_empty() || members.len() != requested.iter().collect::<BTreeSet<_>>().len() { return Err("select one or more existing source operations".into()); }
@@ -23,7 +29,7 @@ impl AppController {
             let selected_ops: Vec<Operation> = setup.operations.iter().filter(|o| selected.contains(&o.id())).cloned().collect();
             setup.operations.retain(|o| !selected.contains(&o.id()));
             setup.operations.splice(first..first, selected_ops);
-            setup.patterns.push(cam_model::OperationPattern { id, name, members: members.clone(), kind, order, suppressed: false });
+            setup.patterns.push(cam_model::OperationPattern { id, name, members: members.clone(), kind, order, suppressed: false, options, });
             doc.pattern_id_floor = next_floor;
         });
         self.invalidate();
@@ -32,7 +38,16 @@ impl AppController {
 
     /// Edit a pattern and its ordered membership as one history transaction.
     pub fn edit_pattern(&mut self, setup_id: u64, pattern_id: u64, requested: &[u32], name: String, kind: cam_model::PatternKind, order: cam_model::PatternOrder) -> Result<(), String> {
-        kind.validate()?;
+        let options = self.setups().iter().find(|s| s.id == setup_id)
+            .and_then(|s| s.patterns.iter().find(|p| p.id == pattern_id))
+            .ok_or("pattern not found")?.options.clone();
+        self.edit_pattern_with_options(setup_id, pattern_id, requested, name, kind, order, options)
+    }
+
+    /// Apply the membership and placement options in one undo transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_pattern_with_options(&mut self, setup_id: u64, pattern_id: u64, requested: &[u32], name: String, kind: cam_model::PatternKind, order: cam_model::PatternOrder, options: cam_model::PatternOptions) -> Result<(), String> {
+        options.validate(kind)?;
         let setup = self.setups().iter().find(|s| s.id == setup_id).ok_or("setup not found")?;
         let pattern = setup.patterns.iter().find(|p| p.id == pattern_id).ok_or("pattern not found")?;
         let members: Vec<u32> = setup.operations.iter().map(Operation::id).filter(|id| requested.contains(id)).collect();
@@ -56,6 +71,7 @@ impl AppController {
         pattern.members = members;
         pattern.kind = kind;
         pattern.order = order;
+        pattern.options = options;
         candidate.validate_patterns()?;
         self.edit_document(|doc| {
             *doc.setups.iter_mut().find(|s| s.id == setup_id).unwrap() = candidate;
@@ -132,7 +148,6 @@ impl AppController {
     /// pass that is currently switched off) without tripping the warning.
     pub fn duplicate_operation_groups(&self) -> Vec<Vec<u32>> {
         let ops: Vec<&Operation> = self
-            .document()
             .setup()
             .operations
             .iter()

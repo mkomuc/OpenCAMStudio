@@ -251,11 +251,23 @@ impl Profile2D {
     ///
     /// Measured as the highest `z` reachable by walking the boundary from the tip
     /// through **contiguously cutting** segments, counting only the part at the full
-    /// [`max_radius`](Self::max_radius). A tool with no vertical flank at all — a
+    /// outer radius of the cutting end, independently of the shank diameter.
+    /// A tool with no vertical flank at all — a
     /// V-bit or chamfer mill, whose cone flares straight into the shank — returns `0`:
     /// it cannot cut a vertical wall at any depth.
     pub fn cutting_flank_height(&self) -> f64 {
-        let r = self.max_radius();
+        let mut r = 0.0_f64;
+        let mut previous = self.start;
+        let mut started = false;
+        for segment in &self.segs {
+            if segment.cutting {
+                started = true;
+                r = r.max(previous.x.max(segment.end.x));
+            } else if started {
+                break;
+            }
+            previous = segment.end;
+        }
         if r <= EPS {
             return 0.0;
         }
@@ -515,6 +527,15 @@ mod tests {
     fn flank_height_is_the_flute_length_for_a_plain_end_mill() {
         let p = generatrix(&spec_of(BottomShape::Flat, 3.0, 12.0, 3.0));
         assert!((p.cutting_flank_height() - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_wider_shank_does_not_hide_the_cutting_flank() {
+        for bottom in [BottomShape::Flat, BottomShape::Ball, BottomShape::BullNose { corner_radius: 0.3 }] {
+            let profile = generatrix(&spec_of(bottom, 1.5, 8., 3.));
+            assert_eq!(profile.max_radius(), 3.);
+            assert!((profile.cutting_flank_height() - 8.).abs() < 1e-9, "{bottom:?}");
+        }
     }
 
     #[test]

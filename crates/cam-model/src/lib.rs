@@ -36,6 +36,7 @@ pub use document::{
     DrillOp, EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp,
     ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, StockToLeave, ThreadOp, SCHEMA_VERSION,
     CircularDistribution, ExecutionItem, OperationPattern, PatternDirection, PatternKind, PatternOrder,
+    PatternOptions, PatternSpacing, LinearPatternDirection,
 };
 pub use geometry::*;
 pub use history::History;

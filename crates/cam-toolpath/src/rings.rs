@@ -144,6 +144,7 @@ fn enter_with_plunge(
     ring: &[Point],
     lead_path: Vec<Point>,
     guard: &[Polygon],
+    local_from: Option<Point>,
 ) -> Option<f64> {
     // The ramp never travels through air to reach the material: its height is measured
     // from the top of stock, or from the floor the previous level left.
@@ -155,14 +156,29 @@ fn enter_with_plunge(
         Some((path, _, top)) => (path[0], top.max(z)),
         None => (p, from_z),
     };
-    prog.push(Step::Rapid {
-        to: Point3::new(down_at.x, down_at.y, h.clearance),
-        tag: Tag::new(id, MoveKind::Link),
-    });
-    // The rapid stops short of `arrive_at` when that is a cut floor: what is under the
-    // tool decides the *strategy* (above), and the same question decides how the tool
-    // may arrive at all.
-    crate::emit::descend_to(prog, down_at, arrive_at, h, feed, id);
+    if let Some(from) = local_from {
+        // A short ring-to-ring link may still touch stock. Feed the lift and
+        // traverse, then use the requested entry strategy at the next ring.
+        let link = Tag::new(id, MoveKind::Link);
+        prog.push(Step::Linear {
+            to: Point3::new(from.x, from.y, from_z), feed, tag: link,
+        });
+        prog.push(Step::Linear {
+            to: Point3::new(down_at.x, down_at.y, from_z), feed, tag: link,
+        });
+        if arrive_at < from_z {
+            prog.push(Step::Linear {
+                to: Point3::new(down_at.x, down_at.y, arrive_at), feed, tag: link,
+            });
+        }
+    } else {
+        prog.push(Step::Rapid {
+            to: Point3::new(down_at.x, down_at.y, h.clearance),
+            tag: Tag::new(id, MoveKind::Link),
+        });
+        // Stop the rapid short of a cut floor; feed the rest of the approach.
+        crate::emit::descend_to(prog, down_at, arrive_at, h, feed, id);
+    }
     if let Some((path, on_ring, top)) = &ramp {
         crate::profile::emit_descending_path(
             prog,
@@ -207,6 +223,8 @@ fn cleared_normal(t: (f64, f64), reversed: bool) -> (f64, f64) {
 
 /// Move from `prev_end` to `p` at depth: a straight cut if the hop is short, else a
 /// lift-reposition-replunge (an island loop or pinched lobe too far to cut across).
+/// A local link with nonzero lift feeds above the level and re-enters with the
+/// requested plunge strategy; a zero lift preserves the original at-depth cut.
 #[allow(clippy::too_many_arguments)]
 fn approach(
     prog: &mut Program,
@@ -223,12 +241,13 @@ fn approach(
     entry_feeds: cam_model::EntryFeeds,
     id: u32,
     link_threshold: f64,
+    lift_height: f64,
     ring: &[Point],
     lead_path: Vec<Point>,
     guard: &[Polygon],
 ) -> Option<f64> {
     let hop = (p.x - prev_end.x).hypot(p.y - prev_end.y);
-    if hop <= link_threshold {
+    if hop <= link_threshold && (lift_height == 0.0 || hop <= 1e-9) {
         prog.push(Step::Linear {
             to: Point3::new(p.x, p.y, z),
             feed,
@@ -236,12 +255,19 @@ fn approach(
         });
         return None;
     }
+    if hop <= link_threshold {
+        return enter_with_plunge(
+            prog, p, tan, out, (z + lift_height).min(h.clearance), z, h,
+            plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path, guard,
+            Some(prev_end),
+        );
+    }
     prog.push(Step::Rapid {
         to: Point3::new(prev_end.x, prev_end.y, h.clearance),
         tag: Tag::new(id, MoveKind::Link),
     });
     enter_with_plunge(
-        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path, guard,
+        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path, guard, None,
     )
 }
 
@@ -273,6 +299,7 @@ fn emit_wall_ring(
     h: &Heights,
     plunge: Plunge,
     link_threshold: f64,
+    lift_height: f64,
     end: Option<[f64; 2]>,
 ) -> Point {
     let ri = crate::profile::rotate_to_start(pts, Some([prev_end.x, prev_end.y]));
@@ -308,6 +335,7 @@ fn emit_wall_ring(
         entry_feeds,
         id,
         link_threshold,
+        lift_height,
         &ri,
         crate::profile::lead_in_path(start, entry, cin, eff_in),
         guard,
@@ -395,6 +423,7 @@ pub(crate) fn emit_stay_down(
     plunge_feed: f64,
     entry_feeds: cam_model::EntryFeeds,
     plunge: Plunge,
+    lift_height: f64,
     lead_overlap: f64,
     lead_in: Lead,
     lead_out: Lead,
@@ -457,6 +486,7 @@ pub(crate) fn emit_stay_down(
                 crate::profile::lead_in_path(r0[0], entry, cin, eff)
             },
             guard,
+            None,
         );
         // A ramped entry begins its cut where the ramp ended, and goes a full perimeter
         // from there so the sloped stretch is re-machined at depth.
@@ -495,6 +525,7 @@ pub(crate) fn emit_stay_down(
                     h,
                     plunge,
                     link_threshold,
+                    lift_height,
                     exit_preference,
                 );
                 continue;
@@ -524,6 +555,7 @@ pub(crate) fn emit_stay_down(
                 entry_feeds,
                 id,
                 link_threshold,
+                lift_height,
                 &ri,
                 // An interior clearing ring has no lead of its own.
                 Vec::new(),

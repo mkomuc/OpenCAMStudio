@@ -29,7 +29,7 @@ A CAM application for CNC toolpath generation, built in Rust.
   limits](docs/3d-adaptive-clearing.md).
 - **3D Parallel finishing** — ball nose surface passes with scan angle, horizontal
   stepover, one-way or zigzag cutting, CAD body/face selection, bounding-box
-  containment and full-clearance links. See [controls and limits](docs/parallel.md).
+  containment and a Keep tool down option with separate Lift Height. See [controls and limits](docs/parallel.md).
 - **Stock to Leave** — shared radial and axial finishing allowances for Profile,
   Pocket, 3D Adaptive Clearing and 3D Parallel; axial allowance for Face. Disabled settings
   preserve existing toolpaths.
@@ -42,11 +42,10 @@ A CAM application for CNC toolpath generation, built in Rust.
   depth's width, so it roughs the taper as a staircase — and then hands over to
   the V-bit, which finishes the wall and cleans the corners a round cutter
   cannot reach.
-- **Tool suitability guards** — every operation checks that the surface doing the
-  cutting *is* a cutting surface, reading each tool's own profile rather than
-  matching on its type. Using a non-cutting surface (engraving with a chamfer
-  mill, whose tip is a flat that does not cut) or cutting past the flute length
-  onto the shank is refused; merely *poor* choices warn and proceed.
+- **Tool suitability warnings** — cutter shape, cutting surfaces and reach are
+  advisory. Deliberately different cutters can generate and simulate; stock
+  removal follows the selected cutter's actual profile. Numeric validity,
+  computable paths and simulation collision checks remain enforced.
 - **Geometry in** — DXF/DWG import with contour chaining and hole nesting,
   including **open paths** (lettering and decorative strokes, for engraving);
   a carved region's islands (the counters of letters) come from the drawing's own
@@ -65,8 +64,8 @@ A CAM application for CNC toolpath generation, built in Rust.
   mills. Each carries real flute/shank/neck geometry and a per-kind revolve
   profile shown in a **live 2D cross-section preview** as you edit; import/export
   `.ocam` libraries; gap-filling / swap / bulk tool numbering. Operations pick a
-  tool by **family, then tool**, with the families bounded by what the operation
-  can actually cut. [Material-linked cutting presets](docs/tool-presets.md)
+  tool by **family, then tool**, with deliberate cutter substitutions available
+  for general path operations. [Material-linked cutting presets](docs/tool-presets.md)
   automatically seed operations from a shared stock-material list; each operation
   can select another preset or override its cutting values.
 - **Setup** — workpiece origin (datum) + program start point; part-relative

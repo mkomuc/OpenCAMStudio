@@ -45,19 +45,17 @@ impl Strategy for PocketStrategy {
             }};
         }
 
+        if !op.clear.lift_height.is_finite() || op.clear.lift_height < 0.0 {
+            fail!("operation {}: lift height must be finite and nonnegative", op.id);
+        }
+
         let Some(tool) = env.tool(op.tool) else {
             fail!("operation {}: tool {} is not in the setup", op.id, op.tool);
         };
-        if !crate::guards::check_side_milling(op.id, "pocket", tool, op.depth, &mut diagnostics) {
-            return StrategyResult { diagnostics, ..Default::default() };
-        }
-        if !crate::guards::check_plunge(op.id, "pocket", tool, &mut diagnostics) {
-            return StrategyResult { diagnostics, ..Default::default() };
-        }
+        crate::guards::warn_side_milling(op.id, "pocket", tool, op.depth, &mut diagnostics);
+        crate::guards::warn_plunge(op.id, "pocket", tool, &mut diagnostics);
         // A pocket has a floor as well as walls; a non-flat tool only warns.
-        if !crate::guards::check_flat_floor(op.id, "pocket", tool, &mut diagnostics) {
-            return StrategyResult { diagnostics, ..Default::default() };
-        }
+        crate::guards::warn_flat_floor(op.id, "pocket", tool, &mut diagnostics);
         if !op.boundary.is_valid() {
             fail!("operation {}: pocket boundary is not a closed area", op.id);
         }
@@ -106,6 +104,7 @@ impl Strategy for PocketStrategy {
         // Clear through the shared engine: engagement-spaced, climb-oriented,
         // stay-down inside-out rings, with the finishing wall leads.
         let job = crate::clearing::ClearJob {
+            lift_height: op.clear.lift_height,
             id: op.id,
             simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: r,
@@ -225,6 +224,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
                 overlap: 0.5,
@@ -270,6 +270,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
                 overlap: 0.5,
@@ -330,6 +331,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
                 overlap: 0.5,
@@ -387,6 +389,7 @@ mod tests {
                 end: None,
                 start: None,
                 clear: ClearParams {
+                    lift_height: 0.0,
                     clearing: cam_model::Clearing::default(),
                     stepdown: 1.5,
                     overlap,
@@ -433,6 +436,7 @@ mod tests {
                 end: None,
                 start: None,
                 clear: ClearParams {
+                    lift_height: 0.0,
                     clearing: cam_model::Clearing::default(),
                     stepdown: 1.5,
                     overlap: 0.5,
@@ -498,6 +502,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
                 overlap: 0.5,
@@ -621,6 +626,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 clearing: Clearing { engagement: 2.0, climb: true },
                 // one depth level
                 stepdown: 2.0,
@@ -757,6 +763,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
                 overlap: 0.9,

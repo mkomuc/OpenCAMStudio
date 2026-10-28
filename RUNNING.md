@@ -173,10 +173,10 @@ right-to-left; a collapsed group opens as a popup under its button).
 1. Load geometry — **Home → Sample**, or **Home → Import** a `.dxf`/`.dwg`. A real
    import comes in as **geometry only**: no operations and no tools yet.
 2. **Operations** tab → pick a kind. The Inspector becomes the wizard.
-3. Choose a **Tool family**, then a **Tool** within it. The families offered are
-   bounded by the operation — a pocket lists only end mills, engraving only V-bits —
-   so a library of hundreds stays usable. If a family is empty the wizard says so and
-   points you at the Tools tab.
+3. Choose a **Tool family**, then a **Tool** within it. General path operations
+   allow deliberate cutter substitutions and report suitability as warnings.
+   Cone/thread-dependent strategies retain their required tool families. If a
+   family is empty the wizard says so and points you at the Tools tab.
 4. **Click the geometry** in the Viewport. Picking is line-based — click the outer
    contour, an inner hole, or an imported **open stroke** (engraving only); the click
    snaps to the nearest loop edge, and the picked vertex sets the toolpath start.

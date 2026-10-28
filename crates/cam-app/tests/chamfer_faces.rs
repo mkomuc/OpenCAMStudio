@@ -142,7 +142,7 @@ fn requested_stepdown_and_reopened_project_keep_all_face_bounds_and_passes() {
 }
 
 #[test]
-fn single_face_selection_does_not_machine_the_other_bevels_and_wrong_angles_are_rejected() {
+fn single_face_selection_stays_local_and_angle_mismatch_is_advisory() {
     let (mut app, references, tool) = setup(6., 90.);
     app.create_cad_operation_with_tool(OpKind::Chamfer, vec![references[0].clone()], tool)
         .unwrap();
@@ -159,12 +159,24 @@ fn single_face_selection_does_not_machine_the_other_bevels_and_wrong_angles_are_
         .create_cad_operation_with_tool(OpKind::Chamfer, references, tool)
         .unwrap();
     let outcome = wrong.run(&CancelToken::new());
-    assert!(outcome.has_errors());
+    assert_eq!(
+        outcome.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        outcome.diagnostics
+    );
+    assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+    assert!(!cuts(&outcome.program).is_empty());
+    assert!(
+        !outcome.stock_vertices.is_empty(),
+        "simulation must still run"
+    );
     assert!(
         outcome
             .diagnostics
             .iter()
-            .any(|d| d.message.contains("included-angle cutter")),
+            .any(|d| d.severity == cam_toolpath::Severity::Warning
+                && d.message.contains("included-angle cutter")),
         "{:?}",
         outcome.diagnostics
     );

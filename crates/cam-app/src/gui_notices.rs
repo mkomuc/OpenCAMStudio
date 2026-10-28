@@ -229,7 +229,7 @@ mod tests {
         assert!(app.controller.cad_import_preview().is_none());
         assert_eq!(app.controller.selection(), Selection::Setup);
         assert!(!app.setup_draft_dirty());
-        assert!(app.controller.document().setup().operations.is_empty());
+        assert!(app.controller.inspection_setup().operations.is_empty());
         assert!(app.status.starts_with("Imported "));
         assert!(app.controller.undo());
         assert_eq!(app.controller.document(), &before);

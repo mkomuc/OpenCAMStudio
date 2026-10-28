@@ -1387,7 +1387,8 @@ fn derive(
         ExtractionRecipe::ChamferFaces
         | ExtractionRecipe::ChamferLoop
         | ExtractionRecipe::EngravePath
-        | ExtractionRecipe::CarveRegion => unreachable!(),
+        | ExtractionRecipe::CarveRegion
+        | ExtractionRecipe::PocketBoundary => unreachable!(),
         ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileEntries { .. } => {
             unreachable!()
         }

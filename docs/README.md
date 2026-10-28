@@ -9,6 +9,7 @@ For installation and a feature overview, start with the [project README](../READ
 - [Bore milling](bore-operation.md): finishing accessible holes and bosses.
 - [3D Adaptive Clearing](3d-adaptive-clearing.md): roughing controls, boundaries and stock allowances.
 - [Entry and exit positions](lead-positions.md): preferred approach and departure points.
+- [Lift height and stay-down moves](lift-height.md): raised local links for Pocket, 3D Adaptive Clearing and 3D Parallel.
 - [Operation patterns](operation-patterns.md): rectangular and circular repetition.
 - [Tool presets and materials](tool-presets.md): reusable cutting data and cooling.
 - [Thread presets](thread-presets.md): standard sizes and prepared-bore matching.

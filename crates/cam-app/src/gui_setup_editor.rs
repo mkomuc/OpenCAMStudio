@@ -137,6 +137,34 @@ impl App {
                 list = list.push(inspector_section("Geometry"));
                 list = list.push(self.setup_geometry_list(draft));
                 list = list.push(self.setup_wcs_editor(draft));
+                list = list.push(inspector_section("Tool change"));
+                list = list.push(
+                    checkbox(draft.tool_change_height.is_none())
+                        .label("Use machine maximum Z")
+                        .text_size(12)
+                        .on_toggle(Message::SetupToolChangeAutomatic),
+                );
+                let height = draft
+                    .resolved_tool_change_height(self.controller.machine().envelope.max.z)
+                    - draft.origin[2];
+                if draft.tool_change_height.is_some() {
+                    let value = self.setup_value(41, fmt_num(height));
+                    list = list.push(inspector_value(
+                        "Tool-change height",
+                        &value,
+                        "mm",
+                        Message::SetupToolChangeHeightChanged,
+                    ));
+                } else {
+                    list = list.push(
+                        text(format!("Tool-change height: {} mm", fmt_num(height)))
+                            .size(12)
+                            .color(INSPECTOR_TEXT),
+                    );
+                }
+                list = list.push(text(
+                    "Z relative to the base WCS origin. Used before tool changes and re-fixturing; must be at or above all operation clearance planes."
+                ).size(11).color(INSPECTOR_MUTED));
             }
             SetupEditorTab::Stock => {
                 list = list.push(inspector_section("Material"));
@@ -302,7 +330,7 @@ impl App {
         let numbers_valid = self
             .setup_values
             .values()
-            .all(|v| v.trim().parse::<f64>().is_ok())
+            .all(|v| v.trim().parse::<f64>().is_ok_and(|n| n.is_finite()))
             && self
                 .setup_values
                 .get(&40)

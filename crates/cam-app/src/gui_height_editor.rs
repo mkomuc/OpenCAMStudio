@@ -19,9 +19,7 @@ impl App {
             .map_or(self.controller.active_origin(), Operation::work_offset);
         let value = value
             - self
-                .controller
-                .document()
-                .setup()
+                .controller.inspection_setup()
                 .origin_position(work_offset)[2];
         fn precision(text: &str) -> usize {
             let (mantissa, exponent) = text
@@ -86,9 +84,7 @@ impl App {
             return;
         };
         let settings = self
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .height_settings
             .get(&id)
             .cloned()
@@ -110,9 +106,7 @@ impl App {
             return false;
         };
         let baseline = self
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .height_settings
             .get(&id)
             .cloned()
@@ -437,16 +431,16 @@ mod tests {
         app.refresh_fields();
         assert_eq!(app.field_value(Field::ToolChangeHeight), Some(50.));
         assert_eq!(
-            app.controller.document().setup().resolved_tool_change_height(50.),
+            app.controller.inspection_setup().resolved_tool_change_height(50.),
             104.
         );
         app.fields.insert(Field::ToolChangeHeight, "40".into());
         app.apply_inspector();
-        assert_eq!(app.controller.document().setup().tool_change_height, Some(94.));
+        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(94.));
         assert_eq!(app.field_value(Field::ToolChangeHeight), Some(40.));
         // An explicit stored plane must not receive the datum offset twice.
         assert_eq!(
-            app.controller.document().setup().resolved_tool_change_height(50.),
+            app.controller.inspection_setup().resolved_tool_change_height(50.),
             94.
         );
     }
@@ -480,7 +474,7 @@ mod tests {
         assert!(!app.collapsed_heights.contains(&Plane::Feed));
         assert_eq!(app.height_offsets[&Plane::Feed], "unfinished");
         assert!(app.edited_height_settings().is_err());
-        assert!(app.controller.document().setup().height_settings.is_empty());
+        assert!(app.controller.inspection_setup().height_settings.is_empty());
     }
 
     #[test]

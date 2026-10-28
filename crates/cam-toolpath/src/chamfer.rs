@@ -181,9 +181,7 @@ impl Strategy for ChamferStrategy {
         // that whole section must still be cutting surface. This is the upper bound on
         // tip depth that was previously missing (there was no flank-length geometry to
         // check against); the generatrix now supplies it.
-        if !crate::guards::check_axial_reach(op.id, "chamfer", tool, tip_depth, &mut diagnostics) {
-            bail!();
-        }
+        crate::guards::warn_axial_reach(op.id, "chamfer", tool, tip_depth, &mut diagnostics);
 
         // Offset the tool axis to the air side by the deep-plunge shift plus the tip
         // radius (0 for a sharp V at the tip keeps it on the edge). Sign follows the

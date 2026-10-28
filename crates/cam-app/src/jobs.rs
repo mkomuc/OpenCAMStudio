@@ -72,6 +72,8 @@ pub(crate) struct JobInputs {
     pub simulation_accuracy: f32,
     /// Fixed from the full playback program so partial frames share one grid.
     pub preview_resolution: Option<f64>,
+    /// Generate editable source paths without simulating stock removal.
+    pub toolpath_preview: bool,
 }
 impl JobInputs {
     pub fn execute(
@@ -82,6 +84,14 @@ impl JobInputs {
         simulation: &mut simulation::StockSimulationCache,
     ) -> RunOutcome {
         cache.reset_stats();
+        if self.document.setups.is_empty() {
+            return RunOutcome {
+                completion: JobCompletion::Failed,
+                diagnostics: vec![Diagnostic::error("Create a setup before generating toolpaths.")
+                    .with_code(DiagnosticCode::InvalidInput)],
+                ..Default::default()
+            };
+        }
         if cancel.is_cancelled() {
             return RunOutcome {
                 completion: JobCompletion::Cancelled,
@@ -163,6 +173,21 @@ impl JobInputs {
             job
         };
         let mut completion = job.completion;
+        let stock = if !self.toolpath_preview
+            && completion == JobCompletion::Complete
+            && !cancel.is_cancelled()
+        {
+            match self.simulate_stock(&mut job.program, cancel, cache, progress, simulation) {
+                Ok(stock) => stock,
+                Err(error) => {
+                    completion = JobCompletion::Failed;
+                    job.diagnostics.push(error);
+                    simulation::StockSimulation::default()
+                }
+            }
+        } else {
+            simulation::StockSimulation::default()
+        };
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         let mut scene = if job.program.validate().is_ok() {
             Scene::from_program_controlled(&job.program, &|| cancel.is_cancelled())
@@ -207,18 +232,6 @@ impl JobInputs {
             }
             scene.add_open_path(path.points(), PART);
         }
-        let stock = if completion == JobCompletion::Complete && !cancel.is_cancelled() {
-            match self.simulate_stock(&job.program, cancel, cache, progress, simulation) {
-                Ok(stock) => stock,
-                Err(error) => {
-                    completion = JobCompletion::Failed;
-                    job.diagnostics.push(error);
-                    simulation::StockSimulation::default()
-                }
-            }
-        } else {
-            simulation::StockSimulation::default()
-        };
         if cancel.is_cancelled() {
             completion = JobCompletion::Cancelled;
         }

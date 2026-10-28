@@ -38,6 +38,9 @@ impl Strategy for AdaptiveStrategy {
         if let Err(reason) = op.entry_feeds.validate() {
             fail!("operation {}: {reason}", op.id);
         }
+        if !op.params.lift_height.is_finite() || op.params.lift_height < 0.0 {
+            fail!("operation {}: lift height must be finite and nonnegative", op.id);
+        }
         if !op.params.tolerance.is_finite() || op.params.tolerance <= 0.0 {
             fail!("operation {}: tolerance must be finite and positive", op.id);
         }
@@ -112,30 +115,15 @@ impl Strategy for AdaptiveStrategy {
             .iter()
             .map(|l| l.z)
             .fold(f64::INFINITY, f64::min);
-        if !crate::guards::check_side_milling(
+        crate::guards::warn_side_milling(
             op.id,
             "3D adaptive",
             tool,
             z_top - z_bottom,
             &mut diagnostics,
-        ) {
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
-        if !crate::guards::check_flat_floor(op.id, "3D adaptive", tool, &mut diagnostics) {
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
-        if !crate::guards::check_plunge(op.id, "3D adaptive", tool, &mut diagnostics) {
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
+        );
+        crate::guards::warn_flat_floor(op.id, "3D adaptive", tool, &mut diagnostics);
+        crate::guards::warn_plunge(op.id, "3D adaptive", tool, &mut diagnostics);
         if op.params.optimal_load > tool.diameter {
             fail!(
                 "operation {}: optimal load cannot exceed the tool diameter",
@@ -340,6 +328,7 @@ impl Strategy for AdaptiveStrategy {
                 }
                 let fine_pitch = op.params.fine_stepdown.min(op.params.stepdown);
                 let job = crate::clearing::ClearJob {
+                    lift_height: op.params.lift_height,
                     id: op.id,
                     simplification_tolerance: op.params.simplification_tolerance(),
                     radius,
@@ -524,6 +513,34 @@ mod tests {
             ),
             tool,
         )
+    }
+
+    #[test]
+    fn lift_height_changes_layer_links_and_keeps_model_safety_checks() {
+        let (mut strategy, tool) = fixture();
+        strategy.geometry.layers.truncate(1);
+        strategy.op.params.climb = false; // Exercise concentric layer links.
+        let env = JobEnv {
+            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 30.])), spindle: SpindleDir::Cw,
+        };
+        let baseline = strategy.compute(&env, &CancelToken::new());
+        assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+        strategy.op.params.lift_height = 2.;
+        let lifted = strategy.compute(&env, &CancelToken::new());
+        assert!(!lifted.has_errors(), "{:?}", lifted.diagnostics);
+        assert!(lifted.program.validate().is_ok());
+        assert_ne!(lifted.program, baseline.program);
+        assert!(lifted.program.steps().windows(2).any(|pair| matches!(pair,
+            [Step::Linear { to: a, tag, .. }, Step::Linear { to: b, .. }]
+                if tag.kind == cam_cldata::MoveKind::Link && a.z == 10. && b.z == 10.
+                    && (a.x != b.x || a.y != b.y))));
+        for lift in [-1., f64::NAN, f64::INFINITY] {
+            strategy.op.params.lift_height = lift;
+            let result = strategy.compute(&env, &CancelToken::new());
+            assert!(result.has_errors());
+            assert!(result.program.steps().is_empty());
+        }
     }
 
     #[test]
@@ -1168,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tools_that_cannot_side_mill_the_full_depth() {
+    fn warns_and_generates_for_tools_unsuited_to_side_milling_the_full_depth() {
         let (strategy, mut tool) = fixture();
         tool.kind = ToolKind::Drill {
             point_angle_deg: 118.,
@@ -1180,12 +1197,13 @@ mod tests {
             spindle: SpindleDir::Cw,
         };
         let result = strategy.compute(&env, &CancelToken::new());
-        assert!(result.has_errors());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.is_empty());
         assert!(
             result
             .diagnostics
             .iter()
-                .any(|d| d.message.contains("drill bit"))
+                .any(|d| d.severity == crate::Severity::Warning && d.message.contains("drill bit"))
         );
 
         let short_flute = Tool {
@@ -1198,12 +1216,13 @@ mod tests {
             ..env
         };
         let result = strategy.compute(&short_flute_env, &CancelToken::new());
-        assert!(result.has_errors());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.is_empty());
         assert!(
             result
             .diagnostics
             .iter()
-                .any(|d| d.message.contains("length of cut"))
+                .any(|d| d.severity == crate::Severity::Warning && d.message.contains("length of cut"))
         );
     }
 }

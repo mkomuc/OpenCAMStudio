@@ -168,6 +168,27 @@ fn a_tool_change_height_below_clearance_is_raised_and_reported() {
 }
 
 #[test]
+fn nearly_equal_tool_change_planes_are_clamped_without_a_spurious_warning() {
+    let mut d = doc(vec![profile(0, rect(10., 10., 70., 50.), Side::Outside, 1, 1)]);
+    let clearance = 50.0000001;
+    d.setups[0].heights.clearance = clearance;
+    for height in [clearance, 50., clearance - 2e-6] {
+        let result = build_job(&d, 1000., SpindleDir::Cw, None, height, &CancelToken::new());
+        assert_eq!(result.completion, cam_toolpath::JobCompletion::Complete);
+        assert_eq!(
+            result.diagnostics.iter().any(|d| d.message.contains("below the clearance plane")),
+            clearance - height > 1e-6,
+        );
+        let traverses: Vec<_> = result.program.steps().iter().filter_map(|step| match step {
+            Step::Rapid { to, tag } if tag.kind == cam_cldata::MoveKind::Traverse => Some(to.z),
+            _ => None,
+        }).collect();
+        assert!(!traverses.is_empty());
+        assert!(traverses.iter().all(|z| *z >= clearance));
+    }
+}
+
+#[test]
 fn a_same_datum_tool_change_is_a_full_planner_owned_transition() {
     use cam_cldata::MoveKind;
     // Two ops on the same datum, different tools. The planner owns the whole transition:

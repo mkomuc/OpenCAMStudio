@@ -233,10 +233,7 @@ impl Project {
     pub fn validate(&self) -> Result<(), String> {
         use std::collections::BTreeSet;
 
-        if self.document.setups.is_empty() {
-            return Err("project must contain at least one setup".into());
-        }
-        if self.document.setups[0].stock == cam_model::Stock::PreviousSetup {
+        if self.document.setups.first().is_some_and(|s| s.stock == cam_model::Stock::PreviousSetup) {
             return Err("The first setup has no previous setup; choose box stock".into());
         }
         let mut setup_ids = BTreeSet::new();
@@ -665,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn project_loader_rejects_no_setups_duplicate_global_operation_ids_and_orphan_bindings() {
+    fn project_loader_accepts_no_setups_and_rejects_duplicate_ids_and_orphan_bindings() {
         let OcamFile::Project(project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
             panic!("expected project");
         };
@@ -673,10 +670,10 @@ mod tests {
             serde_json::from_str(&OcamFile::Project(project.clone()).to_json().unwrap()).unwrap();
 
         value["document"]["setups"] = serde_json::json!([]);
-        assert!(OcamFile::from_json(&value.to_string())
-            .unwrap_err()
-            .to_string()
-            .contains("at least one setup"));
+        let OcamFile::Project(empty) = OcamFile::from_json(&value.to_string()).unwrap() else {
+            panic!("expected project");
+        };
+        assert!(empty.document.setups.is_empty());
 
         let mut value: serde_json::Value =
             serde_json::from_str(&OcamFile::Project(project.clone()).to_json().unwrap()).unwrap();
@@ -748,6 +745,7 @@ mod tests {
             kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
             order: cam_model::PatternOrder::ByInstance,
             suppressed: false,
+            options: Default::default(),
         });
         assert!(OcamFile::Project(project.clone()).to_json().unwrap_err().to_string().contains("missing operation 999"));
         let json = serde_json::to_string(&OcamFile::Project(project)).unwrap();

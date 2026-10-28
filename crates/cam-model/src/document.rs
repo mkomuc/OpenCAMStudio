@@ -92,12 +92,108 @@ use crate::{BoreOp, Tool};
 /// v29: helical Bore operations and cylindrical Bore geometry bindings.
 /// v30: 3D Parallel finishing and CAD surface bindings.
 /// v31: remaining stock inherited from the immediately preceding setup.
-pub const SCHEMA_VERSION: u32 = 31;
+/// v32: operation pattern spacing, directions and execution options.
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PatternOrder { #[default] ByInstance, ByOperation }
+pub enum PatternOrder { #[default] ByInstance, ByOperation, ByTool }
+
+/// Interpret a linear distance as an adjacent pitch or an overall extent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternSpacing { #[default] Spacing, Extent }
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LinearPatternDirection {
+    pub angle_degrees: f64,
+    #[serde(default)] pub reversed: bool,
+    #[serde(default)] pub symmetric: bool,
+    /// Selected edge, retained alongside the resolved setup-XY angle.
+    #[serde(default)] pub reference: Option<crate::EntityRef>,
+}
+
+/// Additive settings; defaults reproduce legacy X/Y patterns exactly.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PatternOptions {
+    pub spacing: PatternSpacing,
+    pub directions: [LinearPatternDirection; 2],
+    pub second_direction: bool,
+    pub keep_original: bool,
+    pub reverse: bool,
+    /// A picked circular edge or straight axis parallel to setup Z.
+    pub axis: Option<crate::EntityRef>,
+}
+
+impl Default for PatternOptions {
+    fn default() -> Self {
+        Self {
+            spacing: PatternSpacing::Spacing,
+            directions: [0.0, 90.0].map(|angle_degrees| LinearPatternDirection {
+                angle_degrees, reversed: false, symmetric: false, reference: None,
+            }),
+            second_direction: true,
+            keep_original: true,
+            reverse: false,
+            axis: None,
+        }
+    }
+}
+
+impl PatternOptions {
+    pub fn validate(&self, kind: PatternKind) -> Result<(), String> {
+        kind.validate()?;
+        if self.directions.iter().any(|d| !d.angle_degrees.is_finite()) {
+            return Err("pattern direction angles must be finite".into());
+        }
+        if let PatternKind::Rectangular { nx, ny, dx, dy } = kind {
+            if !self.second_direction && ny != 1 {
+                return Err("disabled second direction requires a count of one".into());
+            }
+            let angle = (self.directions[1].angle_degrees - self.directions[0].angle_degrees).to_radians();
+            if nx > 1 && ny > 1 && angle.sin().abs() < 1e-9 {
+                return Err("the two pattern directions must not be parallel".into());
+            }
+            let scale = |count: u32| if self.spacing == PatternSpacing::Extent { 1.0 } else { count.saturating_sub(1) as f64 };
+            if !(dx.abs() * scale(nx) + dy.abs() * scale(ny)).is_finite() {
+                return Err("pattern extent exceeds finite coordinate limits".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Stable placement IDs: zero is the source, even when execution is reversed.
+    pub fn instance_indices(&self, kind: PatternKind) -> Vec<usize> {
+        let count = kind.instance_count().unwrap_or(0).min(10_000);
+        let mut indices: Vec<_> = (usize::from(!self.keep_original)..count).collect();
+        if self.reverse { indices.reverse(); }
+        indices
+    }
+
+    pub fn transform_xy(&self, kind: PatternKind, index: usize) -> Option<([f64; 2], f64)> {
+        let PatternKind::Rectangular { nx, ny, dx, dy } = kind else {
+            return kind.transform_xy(index);
+        };
+        if nx == 0 || index >= (nx as usize).checked_mul(ny as usize)? { return None; }
+        let mut offset = [0.0; 2];
+        for (axis, (i, count, distance)) in [(index % nx as usize, nx, dx), (index / nx as usize, ny, dy)].into_iter().enumerate() {
+            let direction = &self.directions[axis];
+            let step = if direction.symmetric && i > 0 {
+                if i % 2 == 1 { i.div_ceil(2) as f64 } else { -(i as f64 / 2.0) }
+            } else { i as f64 };
+            let pitch = if self.spacing == PatternSpacing::Extent && count > 1 { distance / (count - 1) as f64 } else { distance };
+            let length = step * pitch * if direction.reversed { -1.0 } else { 1.0 };
+            let (sin, cos) = direction.angle_degrees.to_radians().sin_cos();
+            let sin = if sin.abs() < 1e-15 { 0.0 } else { sin };
+            let cos = if cos.abs() < 1e-15 { 0.0 } else { cos };
+            offset[0] += length * cos;
+            offset[1] += length * sin;
+        }
+        Some((offset, 0.0))
+    }
+}
 
 /// Radial wall allowance and axial floor allowance for an operation, in mm.
 /// Disabled settings are ignored; zero allowances preserve the operation's
@@ -141,7 +237,7 @@ pub enum PatternDirection { #[default] Ccw, Cw }
 /// Distribution of circular pattern instances.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CircularDistribution { Full, Partial { sweep_degrees: f64 } }
+pub enum CircularDistribution { Full, Partial { sweep_degrees: f64 }, Spacing { angle_degrees: f64 } }
 
 /// Geometry and placement parameters for setup XY operation repetition.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -161,6 +257,7 @@ pub struct OperationPattern {
     pub kind: PatternKind,
     #[serde(default)] pub order: PatternOrder,
     #[serde(default)] pub suppressed: bool,
+    #[serde(default)] pub options: PatternOptions,
 }
 
 impl PatternKind {
@@ -180,8 +277,9 @@ impl PatternKind {
             }
             Self::Circular { count, distribution, direction, .. } => {
                 if index >= count as usize { return None; }
-                let sweep = match distribution { CircularDistribution::Full => 360.0, CircularDistribution::Partial { sweep_degrees } => sweep_degrees };
-                let divisor = if matches!(distribution, CircularDistribution::Full) { count as f64 } else { (count - 1) as f64 };
+                let sweep = match distribution { CircularDistribution::Full => 360.0, CircularDistribution::Partial { sweep_degrees } => sweep_degrees, CircularDistribution::Spacing { angle_degrees } => angle_degrees };
+                let divisor = match distribution { CircularDistribution::Full => count as f64, CircularDistribution::Partial { .. } => count.saturating_sub(1) as f64, CircularDistribution::Spacing { .. } => 1.0 };
+                if divisor == 0.0 { return None; }
                 let sign = if direction == PatternDirection::Ccw { 1.0 } else { -1.0 };
                 Some(([0.0, 0.0], sign * sweep * index as f64 / divisor))
             }
@@ -198,6 +296,11 @@ impl PatternKind {
                 if !(2..=10_000).contains(&count) || !center_xy.iter().all(|v| v.is_finite()) { return Err("circular pattern requires 2..=10,000 instances and a finite center".into()); }
                 if let CircularDistribution::Partial { sweep_degrees } = distribution {
                     if !sweep_degrees.is_finite() || sweep_degrees <= 0.0 || sweep_degrees >= 360.0 { return Err("partial sweep must be greater than 0 and less than 360 degrees".into()); }
+                }
+                if let CircularDistribution::Spacing { angle_degrees } = distribution {
+                    if !angle_degrees.is_finite() || angle_degrees <= 0.0 || angle_degrees * (count - 1) as f64 >= 360.0 {
+                        return Err("angular spacing must be positive and span less than 360 degrees".into());
+                    }
                 }
             }
         }
@@ -715,6 +818,10 @@ impl Default for Clearing {
 /// out to*.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClearParams {
+    /// Vertical lift above the cutting level during local linking moves, mm.
+    /// Zero keeps transitions at depth; distant links still use clearance.
+    #[serde(default)]
+    pub lift_height: f64,
     /// Maximum depth removed per pass, mm. `0` clears the full depth in one pass.
     #[serde(default)]
     pub stepdown: f64,
@@ -759,6 +866,7 @@ pub struct ClearParams {
 impl Default for ClearParams {
     fn default() -> Self {
         Self {
+            lift_height: 0.0,
             stepdown: 0.0,
             // Half the diameter: the same spacing a pocket's own default overlap gives.
             overlap: 0.5,
@@ -888,6 +996,9 @@ pub struct AdaptiveOp {
 /// explicit; invalid or unsupported combinations stop generation with an error.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveParams {
+    /// Vertical lift above the cutting level during stay-down transitions, mm.
+    #[serde(default)]
+    pub lift_height: f64,
     /// Preferred entry and exit locations in setup XY.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<[f64; 2]>,
@@ -966,6 +1077,7 @@ impl AdaptiveParams {
 impl Default for AdaptiveParams {
     fn default() -> Self {
         Self {
+            lift_height: 0.0,
             start: None,
             end: None,
             tolerance: default_adaptive_tolerance(),
@@ -983,7 +1095,21 @@ impl Default for AdaptiveParams {
 
 #[cfg(test)]
 mod adaptive_params_tests {
-    use super::{AdaptiveContainment, AdaptiveParams};
+    use super::{AdaptiveContainment, AdaptiveParams, ClearParams};
+
+    #[test]
+    fn lift_height_defaults_to_zero_and_round_trips() {
+        let mut clear: ClearParams = serde_json::from_str("{}").unwrap();
+        let mut adaptive: AdaptiveParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(clear.lift_height, 0.0);
+        assert_eq!(adaptive.lift_height, 0.0);
+        clear.lift_height = 2.0;
+        adaptive.lift_height = 2.0;
+        let restored: ClearParams = serde_json::from_value(serde_json::to_value(clear).unwrap()).unwrap();
+        assert_eq!(restored, clear);
+        let restored: AdaptiveParams = serde_json::from_value(serde_json::to_value(adaptive).unwrap()).unwrap();
+        assert_eq!(restored, adaptive);
+    }
 
     #[test]
     fn simplification_follows_tolerance_and_ignores_legacy_override() {
@@ -1977,7 +2103,7 @@ impl Setup {
         let positions: std::collections::HashMap<u32, usize> = self.operations.iter().enumerate().map(|(i,o)|(o.id(),i)).collect();
         for p in &self.patterns {
             if p.id == 0 || !ids.insert(p.id) { return Err(format!("pattern ID {} is zero or duplicated", p.id)); }
-            p.kind.validate()?;
+            p.options.validate(p.kind)?;
             if p.members.is_empty() { return Err(format!("pattern '{}' has no source operations", p.name)); }
             let mut indices = Vec::new();
             let mut datum = None;
@@ -2124,9 +2250,18 @@ impl Document {
             setup.id = 1;
         }
         Self {
-            schema_version: SCHEMA_VERSION,
             active_setup_id: setup.id,
             setups: vec![setup],
+            ..Self::empty()
+        }
+    }
+
+    /// A geometry-only project, before its first machining setup is created.
+    pub fn empty() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            active_setup_id: 0,
+            setups: Vec::new(),
             geometry: crate::GeometryState::default(),
             cad_linked_operations: Default::default(),
             excluded_operations: Default::default(),
@@ -2138,12 +2273,14 @@ impl Document {
             pattern_id_floor: 0,
         }
     }
-    pub fn setup(&self) -> &Setup {
+    pub fn active_setup(&self) -> Option<&Setup> {
         self.setups
             .iter()
             .find(|s| s.id == self.active_setup_id)
             .or_else(|| self.setups.first())
-            .expect("document must contain a setup")
+    }
+    pub fn setup(&self) -> &Setup {
+        self.active_setup().expect("document must contain a setup")
     }
     pub fn setup_mut(&mut self) -> &mut Setup {
         let id = self.active_setup_id;
@@ -2204,6 +2341,63 @@ impl Document {
 #[cfg(test)]
 mod pattern_tests {
     use super::*;
+
+    #[test]
+    fn pattern_options_preserve_legacy_grid_and_deserialization() {
+        let pattern: OperationPattern = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "Legacy", "members": [3],
+            "kind": { "kind": "rectangular", "nx": 3, "ny": 2, "dx": 25.0, "dy": -10.0 }
+        })).unwrap();
+        pattern.options.validate(pattern.kind).unwrap();
+        for index in 0..6 {
+            assert_eq!(pattern.options.transform_xy(pattern.kind, index), pattern.kind.transform_xy(index));
+        }
+        assert_eq!(pattern.options.instance_indices(pattern.kind), vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn linear_extent_rotates_both_directions_and_reverses_independently() {
+        let kind = PatternKind::Rectangular { nx: 3, ny: 2, dx: 40.0, dy: 15.0 };
+        let mut options = PatternOptions { spacing: PatternSpacing::Extent, ..Default::default() };
+        options.directions[0].angle_degrees = 30.0;
+        options.directions[1].angle_degrees = 120.0;
+        options.directions[1].reversed = true;
+        options.validate(kind).unwrap();
+        let (offset, _) = options.transform_xy(kind, 5).unwrap();
+        assert!((offset[0] - (40.0 * 30f64.to_radians().cos() + 7.5)).abs() < 1e-10);
+        assert!((offset[1] - (20.0 - 15.0 * 120f64.to_radians().sin())).abs() < 1e-10);
+    }
+
+    #[test]
+    fn symmetric_pattern_keeps_source_identity_and_filters_before_reversing() {
+        let kind = PatternKind::Rectangular { nx: 5, ny: 1, dx: 40.0, dy: 0.0 };
+        let mut options = PatternOptions { spacing: PatternSpacing::Extent, keep_original: false, reverse: true, ..Default::default() };
+        options.directions[0].symmetric = true;
+        assert_eq!(options.instance_indices(kind), vec![4, 3, 2, 1]);
+        let offsets: Vec<_> = (0..5).map(|i| options.transform_xy(kind, i).unwrap().0[0]).collect();
+        assert_eq!(offsets, vec![0.0, 10.0, -10.0, 20.0, -20.0]);
+    }
+
+    #[test]
+    fn angular_spacing_and_extent_have_distinct_endpoints() {
+        let make = |distribution| PatternKind::Circular { center_xy: [5.0, -3.0], count: 4, distribution, direction: PatternDirection::Cw };
+        let spacing = make(CircularDistribution::Spacing { angle_degrees: 45.0 });
+        spacing.validate().unwrap();
+        assert_eq!(spacing.transform_xy(3).unwrap().1, -135.0);
+        assert_eq!(make(CircularDistribution::Partial { sweep_degrees: 45.0 }).transform_xy(3).unwrap().1, -45.0);
+        assert_eq!(make(CircularDistribution::Full).transform_xy(3).unwrap().1, -270.0);
+        assert!(make(CircularDistribution::Spacing { angle_degrees: 120.0 }).validate().is_err(), "duplicate full-circle endpoint is rejected");
+    }
+
+    #[test]
+    fn pattern_options_reject_parallel_directions_and_overflow() {
+        let kind = PatternKind::Rectangular { nx: 3, ny: 2, dx: 20.0, dy: 10.0 };
+        let mut options = PatternOptions::default();
+        options.directions[1].angle_degrees = 180.0;
+        assert!(options.validate(kind).is_err());
+        options.directions[1].angle_degrees = 90.0;
+        assert!(options.validate(PatternKind::Rectangular { nx: 3, ny: 2, dx: f64::MAX, dy: 10.0 }).is_err());
+    }
 
     #[test]
     fn circular_transform_keeps_identity_and_rotates_about_nonzero_center() {

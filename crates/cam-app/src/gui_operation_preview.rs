@@ -20,50 +20,140 @@ fn pattern_preview_world_point(
 }
 
 impl App {
-    /// Setup-frame placement anchors for a pattern draft. These are deliberately
-    /// distinct from generated paths: they remain available while a draft is dirty.
+    /// Reposition cached seed paths on every valid draft edit. Source calculation
+    /// runs separately, so changing placement never blocks the event loop.
     pub(super) fn pattern_placement_preview(&self) -> Scene {
         let mut scene = Scene::new();
-        let Some(draft) = &self.pattern_draft else { return scene; };
-        let Ok(kind) = super::pattern_editor_view::kind_from_draft(draft) else { return scene; };
-        let Some(count) = kind.instance_count() else { return scene; };
+        let Some(draft) = &self.pattern_draft else {
+            return scene;
+        };
+        let Ok((kind, options)) = super::pattern_editor_view::configuration_from_draft(draft)
+        else {
+            return scene;
+        };
+        let Some(setup) = self
+            .controller
+            .setups()
+            .iter()
+            .find(|setup| setup.id == draft.setup_id)
+        else {
+            return scene;
+        };
+        let frame = &setup.frame;
         let center = match kind {
             cam_model::PatternKind::Circular { center_xy, .. } => center_xy,
             _ => [0.0, 0.0],
         };
-        let frame = &self.controller.setups().iter().find(|setup| setup.id == draft.setup_id)
-            .unwrap_or_else(|| self.controller.document().setup()).frame;
-        for index in 0..count.min(1000) {
-            let Some((translation, degrees)) = kind.transform_xy(index) else { break; };
-            let radians = degrees.to_radians();
-            let (sin, cos) = radians.sin_cos();
-            // The source-frame origin transformed by this instance, useful as a
-            // placement marker when no generated seed path is available.
-            let x = center[0] - center[0] * cos + center[1] * sin + translation[0];
-            let y = center[1] - center[0] * sin - center[1] * cos + translation[1];
-            let color = if index == 0 { PICK_BOUNDARY } else { [0.50, 0.50, 0.50, 1.0] };
-            let size = 1.5;
-            let line = |a: [f64; 3], b: [f64; 3]| vec![
-                frame.to_world_vector(a).map(|v| v as f32),
-                frame.to_world_vector(b).map(|v| v as f32),
-            ];
-            scene.add_strip(line([x - size, y, 0.0], [x + size, y, 0.0]), color);
-            scene.add_strip(line([x, y - size, 0.0], [x, y + size, 0.0]), color);
-            // Reuse the current generated source paths when they are available;
-            // drafts with stale/missing paths still retain the placement crosses.
-            if let Some(outcome) = self.controller.outcome() {
-                for strip in outcome.scene.strips.iter().filter(|strip| {
-                    strip.op.is_some_and(|op| draft.members.contains(&op))
-                        && (strip.pattern_id.is_none() || strip.instance_index == Some(0))
-                }) {
-                    let points = strip.points.iter().map(|point| {
-                        pattern_preview_world_point(frame, point.map(f64::from), center, translation, degrees)
-                            .map(|v| v as f32)
-                    }).collect();
-                    let mut color = if index == 0 { strip.color } else { [0.95, 0.62, 0.18, 0.9] };
-                    if index > 0 { color[3] = 0.85; }
-                    scene.add_strip_with_owner(points, color, strip.op, strip.dashed, draft.pattern_id, Some(index as u32));
-                    if let Some(preview_strip) = scene.strips.last_mut() { preview_strip.width = strip.width; }
+        let existing = setup
+            .patterns
+            .iter()
+            .find(|pattern| Some(pattern.id) == draft.pattern_id);
+        let source_instance = existing.and_then(|pattern| {
+            pattern
+                .options
+                .instance_indices(pattern.kind)
+                .into_iter()
+                .next()
+        });
+        let mut sources = Scene::new();
+        if let Some(outcome) = self
+            .operation_preview_outcome()
+            .or_else(|| self.controller.outcome())
+        {
+            for strip in outcome.scene.strips.iter().filter(|strip| {
+                strip.op.is_some_and(|op| draft.members.contains(&op))
+                    && (strip.pattern_id.is_none()
+                        || (strip.pattern_id == draft.pattern_id
+                            && strip.instance_index == source_instance.map(|i| i as u32)))
+            }) {
+                let mut strip = strip.clone();
+                // A committed result may omit the original or begin at a reversed
+                // instance. Undo that placement once to recover the seed path.
+                if let Some(pattern) = existing.filter(|_| strip.pattern_id.is_some()) {
+                    let old_center = match pattern.kind {
+                        cam_model::PatternKind::Circular { center_xy, .. } => center_xy,
+                        _ => [0.0, 0.0],
+                    };
+                    if let Some((offset, angle)) =
+                        source_instance.and_then(|i| pattern.options.transform_xy(pattern.kind, i))
+                    {
+                        let (sin, cos) = (-angle).to_radians().sin_cos();
+                        let inverse = [
+                            -offset[0] * cos + offset[1] * sin,
+                            -offset[0] * sin - offset[1] * cos,
+                        ];
+                        for point in &mut strip.points {
+                            *point = pattern_preview_world_point(
+                                frame,
+                                point.map(f64::from),
+                                old_center,
+                                inverse,
+                                -angle,
+                            )
+                            .map(|v| v as f32);
+                        }
+                    }
+                }
+                sources.strips.push(strip);
+            }
+        }
+        let anchor = sources
+            .bounds()
+            .map(|(min, max)| std::array::from_fn(|i| (min[i] as f64 + max[i] as f64) / 2.0))
+            .unwrap_or_else(|| {
+                frame.to_world_vector(setup.origin_position(self.controller.active_origin()))
+            });
+        for index in options.instance_indices(kind).into_iter().take(1000) {
+            let Some((translation, degrees)) = options.transform_xy(kind, index) else {
+                break;
+            };
+            if sources.strips.is_empty() {
+                let at = pattern_preview_world_point(frame, anchor, center, translation, degrees);
+                let local = frame.to_setup_vector(at);
+                for axis in 0..2 {
+                    let mut a = local;
+                    let mut b = local;
+                    a[axis] -= 1.5;
+                    b[axis] += 1.5;
+                    scene.add_highlight(
+                        vec![
+                            frame.to_world_vector(a).map(|v| v as f32),
+                            frame.to_world_vector(b).map(|v| v as f32),
+                        ],
+                        PICK_BOUNDARY,
+                    );
+                }
+            }
+            for strip in &sources.strips {
+                let points = strip
+                    .points
+                    .iter()
+                    .map(|point| {
+                        pattern_preview_world_point(
+                            frame,
+                            point.map(f64::from),
+                            center,
+                            translation,
+                            degrees,
+                        )
+                        .map(|v| v as f32)
+                    })
+                    .collect();
+                let color = if index == 0 {
+                    strip.color
+                } else {
+                    [0.95, 0.62, 0.18, 0.9]
+                };
+                scene.add_strip_with_owner(
+                    points,
+                    color,
+                    strip.op,
+                    strip.dashed,
+                    draft.pattern_id,
+                    Some(index as u32),
+                );
+                if let Some(placed) = scene.strips.last_mut() {
+                    placed.width = strip.width;
                 }
             }
         }
@@ -81,6 +171,19 @@ impl App {
     }
 
     pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
+        if let Some(draft) = &self.pattern_draft {
+            return draft
+                .highlighted
+                .and_then(|axis| {
+                    if axis < 2 {
+                        draft.options.directions[axis].reference.clone()
+                    } else {
+                        draft.options.axis.clone()
+                    }
+                })
+                .into_iter()
+                .collect();
+        }
         if self.profile_entry_editor.is_some()
             || matches!(&self.operation_draft,Some(Operation::Profile(p)) if p.selections.is_some())
         {
@@ -132,7 +235,7 @@ impl App {
         let Some(op) = operation else {
             return scene;
         };
-        let frame = &self.controller.document().setup().frame;
+        let frame = &self.controller.inspection_setup().frame;
         let mut outlines = Vec::new();
         let mut centers = Vec::new();
         let mut z = 0.0;
@@ -158,6 +261,8 @@ impl App {
                         .any(|r| r.kind == EntityKind::Silhouette)
                     {
                         0.0
+                    } else if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary {
+                        resolved.heights.top
                     } else if matches!(
                         op,
                         Operation::Drill(_)
@@ -253,7 +358,7 @@ impl App {
         if self.operation_tab == OperationTab::Linking {
             use operation_positions::PositionKind::{Entry, Exit};
             let z = binding.as_ref().map_or(
-                self.controller.document().setup().heights.top_of_stock,
+                self.controller.inspection_setup().heights.top_of_stock,
                 |binding| binding.heights.top,
             );
             for (kind, point) in [
@@ -280,7 +385,7 @@ impl App {
     pub(super) fn profile_tab_diameter(&self, op: &cam_model::ProfileOp) -> Option<f64> {
         self.operation_tools
             .iter()
-            .chain(self.controller.document().setup().tools.iter())
+            .chain(self.controller.inspection_setup().tools.iter())
             .find(|tool| tool.number == op.tool)
             .map(|tool| tool.diameter)
             .or_else(|| self.wizard_tool().map(|tool| tool.diameter))
@@ -333,7 +438,7 @@ impl App {
         if !bottom.is_finite() {
             return (vertices, indices);
         }
-        let frame = &self.controller.document().setup().frame;
+        let frame = &self.controller.inspection_setup().frame;
         for (index, tab) in
             cam_toolpath::profile_tab_preview(&op, diameter, cam_cldata::SpindleDir::Cw)
                 .into_iter()
@@ -442,9 +547,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()

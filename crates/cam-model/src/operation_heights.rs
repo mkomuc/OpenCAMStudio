@@ -449,6 +449,7 @@ impl Document {
                 | crate::ExtractionRecipe::ChamferFaces
                 | crate::ExtractionRecipe::EngravePath
                 | crate::ExtractionRecipe::CarveRegion
+                | crate::ExtractionRecipe::PocketBoundary
                 | crate::ExtractionRecipe::BoreCylinders { .. }
                 | crate::ExtractionRecipe::ThreadCylinders { .. }
         ) {

@@ -244,6 +244,8 @@ pub struct AppController {
     active_origin: u32,
     /// Active physical setup is view state, separate from the undoable definitions.
     active_setup_id: u64,
+    /// Inspector defaults when there is no machining setup; never persisted.
+    setup_defaults: Setup,
     source_name: String,
     /// The `.ocam` path this project was last saved to / opened from.
     current_path: Option<PathBuf>,
@@ -552,11 +554,12 @@ impl AppController {
             provenance: Provenance::default(),
             regions: Vec::new(),
             open_paths: Vec::new(),
-            document: History::new(empty_document(&defaults)),
+            document: History::new(Document::empty()),
+            setup_defaults: default_setup(&defaults),
             defaults,
             selection: Selection::default(),
             active_origin: 1,
-            active_setup_id: 1,
+            active_setup_id: 0,
             source_name: String::new(),
             current_path: None,
             saved_project: None,
@@ -664,9 +667,15 @@ impl AppController {
         self.pattern_id_floor.max(self.document().pattern_id_floor).max(1)
     }
 
-    /// The current setup (shorthand for `document().setup()`).
+    /// The current setup, or read-only creation defaults before one exists.
     fn setup(&self) -> &Setup {
-        self.document.current().setup()
+        self.inspection_setup()
+    }
+
+    /// Read-only values for inspectors and the viewport before a setup exists.
+    /// Machining still requires an actual entry in `document.setups`.
+    pub fn inspection_setup(&self) -> &Setup {
+        self.document().active_setup().unwrap_or(&self.setup_defaults)
     }
 
     /// The seed defaults used when a document is generated on import.
@@ -719,9 +728,7 @@ impl AppController {
 
     /// The operation with `id`, if present.
     pub fn operation(&self, id: u32) -> Option<&Operation> {
-        self.document
-            .current()
-            .setup()
+        self.setup()
             .operations
             .iter()
             .find(|o| o.id() == id)
@@ -1119,7 +1126,7 @@ impl AppController {
         }
         let mut preview = self.document().clone();
         preview.geometry.bindings.insert(id, binding.clone());
-        let settings = if matches!(
+        let settings = if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary || matches!(
             kind,
             OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel
                 | OpKind::Bore
@@ -1149,11 +1156,15 @@ impl AppController {
         } else {
             crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
         }
+        let pocket_recipe = if matches!(self.operation(id), Some(Operation::Pocket(_))) {
+            Some(crate::cad_operations::recipe(OpKind::Pocket, &crate::cad_operations::geometry_for_setup(&doc)?, &entities)?)
+        } else { None };
         let binding = doc
             .geometry
             .bindings
             .get_mut(&id)
             .ok_or("Operation has explicit geometry")?;
+        if let Some(recipe) = pocket_recipe { binding.recipe = recipe; }
         binding.selected = entities;
         binding.status = cam_model::ResolutionStatus::Resolved;
         crate::cad_operations::validate_binding_edit(&mut doc, id)?;
@@ -1318,15 +1329,12 @@ impl AppController {
         self.operation_cache = Default::default();
         self.toolpath_fingerprints.clear();
         self.document = History::new(document);
-        self.active_setup_id = self.document.current().setup().id;
+        self.active_setup_id = self.setup().id;
         self.cad_selection.clear();
-        self.active_origin = self.document.current().setup().origin_index;
+        self.active_origin = self.setup().origin_index;
         self.pending_op = None;
         self.current_path = None;
-        self.selection = self
-            .document
-            .current()
-            .setup()
+        self.selection = self.setup()
             .operations
             .first()
             .map(|op| Selection::Operation(op.id()))
@@ -1343,9 +1351,10 @@ impl AppController {
         self.open_paths.clear();
         self.operation_cache = Default::default();
         self.toolpath_fingerprints.clear();
-        self.document = History::new(empty_document(&self.defaults));
-        self.active_setup_id = self.document.current().setup().id;
-        self.active_origin = self.document.current().setup().origin_index;
+        self.document = History::new(Document::empty());
+        self.setup_defaults = default_setup(&self.defaults);
+        self.active_setup_id = 0;
+        self.active_origin = 1;
         self.source_name.clear();
         self.current_path = None;
         self.pending_op = None;
@@ -1472,6 +1481,7 @@ impl AppController {
         self.regions = project.regions;
         self.open_paths = project.open_paths;
         self.defaults = project.defaults;
+        self.setup_defaults = default_setup(&self.defaults);
         self.source_name = project.source_name;
         // **Neither is adopted. Both are provenance.** (Andreas, 2026-08-01: "machine +
         // control local, ocam file as provenance".)
@@ -1498,8 +1508,8 @@ impl AppController {
         self.operation_cache = project.toolpaths.cache;
         self.toolpath_fingerprints = project.toolpaths.fingerprints;
         self.document = History::new(project.document);
-        self.active_setup_id = self.document.current().setup().id;
-        self.active_origin = self.document.current().setup().origin_index;
+        self.active_setup_id = self.document.current().active_setup().map_or(0, |s| s.id);
+        self.active_origin = self.setup().origin_index;
         self.pending_op = None;
         self.current_path = Some(path.to_path_buf());
         self.selection = Selection::Setup;
@@ -1511,13 +1521,13 @@ impl AppController {
 
     /// Edit the setup's heights as one undoable change.
     pub fn edit_heights(&mut self, f: impl FnOnce(&mut Heights)) {
-        self.edit_document(|doc| f(&mut doc.setup_mut().heights));
+        self.edit_setup_document(|doc| f(&mut doc.setup_mut().heights));
         self.invalidate();
     }
 
     /// Edit setup-level fields beyond [`Heights`] — e.g. the tool-change height.
     pub fn edit_setup(&mut self, f: impl FnOnce(&mut cam_model::Setup)) {
-        self.edit_document(|doc| f(doc.setup_mut()));
+        self.edit_setup_document(|doc| f(doc.setup_mut()));
         self.invalidate();
     }
 
@@ -1525,7 +1535,7 @@ impl AppController {
     /// posted G-code; the design/sim frame is unaffected, so no re-run is needed —
     /// but `invalidate` keeps the pipeline honest.
     pub fn edit_origin(&mut self, f: impl FnOnce(&mut [f64; 3])) {
-        self.edit_document(|doc| f(&mut doc.setup_mut().origin));
+        self.edit_setup_document(|doc| f(&mut doc.setup_mut().origin));
         self.invalidate();
     }
 
@@ -1567,7 +1577,7 @@ impl AppController {
     /// `extra_origins` entry.
     pub fn edit_active_origin(&mut self, f: impl FnOnce(&mut [f64; 3])) {
         let index = self.active_origin;
-        self.edit_document(|doc| {
+        self.edit_setup_document(|doc| {
             if doc.setup_mut().origin_index == index {
                 f(&mut doc.setup_mut().origin);
             } else if let Some(o) = doc
@@ -1587,7 +1597,7 @@ impl AppController {
     pub fn add_origin(&mut self) {
         let index = self.setup().next_origin_index();
         let position = self.setup().origin;
-        self.edit_document(move |doc| {
+        self.edit_setup_document(move |doc| {
             doc.setup_mut()
                 .extra_origins
                 .push(Origin { index, position })
@@ -1601,6 +1611,7 @@ impl AppController {
     /// `origin_index` — is never removed). Its operations are reassigned to the base,
     /// and it drops from the active / disabled sets.
     pub fn delete_origin(&mut self, index: u32) {
+        if self.setups().is_empty() { return; }
         let base = self.setup().origin_index;
         if index == base {
             return;
@@ -1632,7 +1643,7 @@ impl AppController {
             return;
         }
         let swap = self.setup().origin_indices().contains(&new_index);
-        self.edit_document(move |doc| {
+        self.edit_setup_document(move |doc| {
             let s = doc.setup_mut();
             if swap {
                 // Park the other origin at a temporary index so the two reindexes
@@ -1714,6 +1725,9 @@ impl AppController {
     /// reconciled state (there is no "undo the renumber" — the project simply opened
     /// this way). Returns the report so the shell can surface a summary.
     pub fn reconcile_tools(&mut self, shop: &[Tool]) -> ReconcileReport {
+        if self.setups().is_empty() {
+            return ReconcileReport::default();
+        }
         let mut doc = self.document.current().clone();
         let report = reconcile_tool_numbers(doc.setup_mut(), shop);
         if report.changed() {
@@ -1726,21 +1740,18 @@ impl AppController {
 
     /// Edit a tool as one undoable change. A no-op if the index is out of range.
     pub fn edit_tool(&mut self, index: usize, f: impl FnOnce(&mut Tool)) {
-        let in_range = index < self.document.current().setup().tools.len();
+        let in_range = index < self.setup().tools.len();
         if !in_range {
             return;
         }
-        self.edit_document(|doc| f(&mut doc.setup_mut().tools[index]));
+        self.edit_setup_document(|doc| f(&mut doc.setup_mut().tools[index]));
         self.invalidate();
     }
 
     /// Append a fresh default tool (numbered one past the highest existing tool)
     /// and select it, as one undoable change.
     pub fn add_tool(&mut self) {
-        let number = self
-            .document
-            .current()
-            .setup()
+        let number = self.setup()
             .tools
             .iter()
             .map(|t| t.number)
@@ -1755,8 +1766,8 @@ impl AppController {
             kind: ToolKind::EndMill,
             ..Default::default()
         };
-        self.edit_document(move |doc| doc.setup_mut().tools.push(tool));
-        let index = self.document.current().setup().tools.len() - 1;
+        self.edit_setup_document(move |doc| doc.setup_mut().tools.push(tool));
+        let index = self.setup().tools.len() - 1;
         self.selection = Selection::Tool(index);
         self.invalidate();
     }
@@ -1766,7 +1777,8 @@ impl AppController {
     /// tool's number are left as-is — they surface a "references tool N which is
     /// not in the setup" diagnostic on the next run rather than being rewritten.
     pub fn delete_tool(&mut self, index: usize) {
-        let count = self.document.current().setup().tools.len();
+        if self.setups().is_empty() { return; }
+        let count = self.setup().tools.len();
         if index >= count {
             return;
         }
@@ -1786,27 +1798,21 @@ impl AppController {
     /// number is reused; otherwise a copy is added with a fresh project-unique
     /// number. One undoable change when it adds.
     pub fn use_tool(&mut self, tool: Tool) -> u32 {
-        if let Some(existing) = self
-            .document
-            .current()
-            .setup()
+        if let Some(existing) = self.setup()
             .tools
             .iter()
             .find(|t| same_tool_geometry(t, &tool))
         {
             return existing.number;
         }
-        let number = self
-            .document
-            .current()
-            .setup()
+        let number = self.setup()
             .tools
             .iter()
             .map(|t| t.number)
             .max()
             .map_or(1, |m| m + 1);
         let embedded = Tool { number, ..tool };
-        self.edit_document(move |doc| doc.setup_mut().tools.push(embedded));
+        self.edit_setup_document(move |doc| doc.setup_mut().tools.push(embedded));
         self.invalidate();
         number
     }
@@ -1814,7 +1820,7 @@ impl AppController {
     /// The tools actually referenced by at least one operation, in setup order.
     /// This is what the read-only Project→Tools view shows.
     pub fn used_tools(&self) -> Vec<&Tool> {
-        let setup = self.document.current().setup();
+        let setup = self.setup();
         // Every tool an operation uses, not just its defining one — a carve's clearing
         // end mill is on the setup sheet and in the changer, so it belongs here.
         let used: BTreeSet<u32> = setup.operations.iter().flat_map(Operation::tools).collect();
@@ -1829,21 +1835,16 @@ impl AppController {
     /// and the saved `.ocam` — to just the tools in use). One undoable change if it
     /// removes anything.
     pub fn prune_unused_tools(&mut self) {
+        if self.setups().is_empty() { return; }
         // Must count EVERY tool an operation references: pruning on the defining tool
         // alone would drop a carve's clearing end mill out of the setup, leaving the
         // operation pointing at a tool that is no longer there.
-        let used: BTreeSet<u32> = self
-            .document
-            .current()
-            .setup()
+        let used: BTreeSet<u32> = self.setup()
             .operations
             .iter()
             .flat_map(Operation::tools)
             .collect();
-        let has_unused = self
-            .document
-            .current()
-            .setup()
+        let has_unused = self.setup()
             .tools
             .iter()
             .any(|t| !used.contains(&t.number));
@@ -1860,6 +1861,7 @@ impl AppController {
     /// rather than whatever is selected — e.g. changing an operation's tool from the
     /// inspector.
     pub fn edit_operation(&mut self, id: u32, f: impl FnOnce(&mut Operation)) {
+        if self.operation(id).is_none() { return; }
         let mut edited = false;
         self.edit_document(|doc| {
             let heights = doc.setup().heights;
@@ -1912,7 +1914,7 @@ impl AppController {
         set_op_id(&mut op, id);
         // A new operation joins the active origin's group (H<n>).
         op.set_work_offset(self.active_origin);
-        self.edit_document(move |doc| {
+        self.edit_setup_document(move |doc| {
             doc.setup_mut()
                 .height_settings
                 .insert(id, cam_model::OperationHeightSettings::default());
@@ -1932,7 +1934,7 @@ impl AppController {
             return;
         }
         set_op_id(&mut op, replaced);
-        self.edit_document(move |doc| {
+        self.edit_setup_document(move |doc| {
             if let Some(slot) = doc
                 .setup_mut()
                 .operations
@@ -2008,10 +2010,7 @@ impl AppController {
     /// finally committed comes back in via [`Self::confirm_operation`].
     pub fn seeded_cutting_for(&self, tool: u32) -> CuttingData {
         let p = self.defaults;
-        let td = self
-            .document
-            .current()
-            .setup()
+        let td = self.setup()
             .tools
             .iter()
             .find(|t| t.number == tool);
@@ -2178,6 +2177,7 @@ impl AppController {
                     start,
                     end: None,
                     clear: ClearParams {
+                        lift_height: 0.0,
                         clearing: cam_model::Clearing::default(),
                         stepdown: p.stepdown,
                         overlap: 0.5,
@@ -2432,9 +2432,7 @@ impl AppController {
 
     /// The lowest tool number in the setup (the default for a new operation), or 1.
     fn first_tool_number(&self) -> u32 {
-        self.document
-            .current()
-            .setup()
+        self.setup()
             .tools
             .iter()
             .map(|t| t.number)
@@ -2737,6 +2735,7 @@ impl AppController {
                             end: None,
                             start: None,
                             clear: ClearParams {
+                                lift_height: 0.0,
                                 clearing: cam_model::Clearing::default(),
                                 stepdown: p.stepdown,
                                 overlap: 0.5,
@@ -2794,7 +2793,7 @@ impl AppController {
 
     /// Edit the setup's stock definition as one undoable change.
     pub fn edit_stock(&mut self, f: impl FnOnce(&mut Stock)) {
-        self.edit_document(|doc| {
+        self.edit_setup_document(|doc| {
             f(&mut doc.setup_mut().stock);
             crate::cad_operations::refresh_binding_heights(doc);
         });
@@ -2859,6 +2858,20 @@ impl AppController {
             .instance_id_floor
             .max(self.document().instance_id_floor);
         self.pattern_id_floor = self.pattern_id_floor.max(self.document().pattern_id_floor);
+    }
+
+    /// A direct setup edit can create the first setup, in the same undo step.
+    fn edit_setup_document(&mut self, f: impl FnOnce(&mut Document)) {
+        let mut seed = default_setup(&self.defaults);
+        seed.id = self.document().next_setup_id().max(self.setup_id_floor);
+        self.edit_document(move |doc| {
+            if doc.setups.is_empty() {
+                doc.active_setup_id = seed.id;
+                doc.setups.push(seed);
+            }
+            f(doc);
+        });
+        self.restore_active_setup_view();
     }
 
     fn invalidate_export(&mut self) {
@@ -3202,10 +3215,10 @@ fn default_stock(top: f64, depth: f64) -> Stock {
     }
 }
 
-/// An empty starting document: model-relative stock, one default end mill, no
-/// operations.
-fn empty_document(p: &JobParams) -> Document {
-    Document::new(Setup {
+/// Creation defaults: model-relative stock, one default end mill, no operations.
+/// These values are not a saved setup until a setup is explicitly created or edited.
+fn default_setup(p: &JobParams) -> Setup {
+    Setup {
         id: 1,
         frame: Default::default(),
         material: String::new(),
@@ -3232,7 +3245,7 @@ fn empty_document(p: &JobParams) -> Document {
         height_settings: Default::default(),
         stock_to_leave: Default::default(),
         tool_change_height: None,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -3705,10 +3718,7 @@ mod tests {
     #[test]
     fn fresh_projects_drawings_and_new_setups_default_to_model_relative_stock() {
         let mut app = AppController::new(machine());
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert!(app.setups().is_empty());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         assert!(matches!(
             app.document().setup().stock,
@@ -3722,25 +3732,19 @@ mod tests {
         });
         let original = app.active_setup_id();
         let copy = app.duplicate_setup(original).unwrap();
-        assert!(
-            matches!(app.document().setup().stock, Stock::FixedBox { .. }),
-            "duplicates retain the specified stock"
-        );
+        assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
+        assert!(matches!(app.setups()[0].stock, Stock::FixedBox { .. }));
         app.add_setup();
         assert!(matches!(
             app.document().setup().stock,
             Stock::RelativeBox { .. }
         ));
         app.activate_setup(copy).unwrap();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::FixedBox { .. }
-        ));
+        assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
         app.new_project();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert!(app.setups().is_empty());
+        app.add_setup();
+        assert!(matches!(app.document().setup().stock, Stock::RelativeBox { .. }));
     }
 
     #[test]
@@ -4188,7 +4192,8 @@ mod tests {
             Selection::Operation(i) => i,
             other => panic!("{other:?}"),
         };
-        // Force a guard error: profile with a V-bit (no cylindrical cutting flank).
+        // Cutter suitability is advisory; use an invalid numeric setting to
+        // exercise a blocking diagnostic with operation context.
         let n = app.use_tool(Tool {
             number: 55,
             diameter: 6.0,
@@ -4202,13 +4207,18 @@ mod tests {
             ..Default::default()
         });
         app.edit_operation(id, |op| op.set_tool(n));
+        app.edit_operation(id, |op| {
+            if let Operation::Profile(profile) = op {
+                profile.stepdown = 0.;
+            }
+        });
         let out = app.run(&CancelToken::new());
         let errors: Vec<&Diagnostic> = out
             .diagnostics
             .iter()
             .filter(|d| d.severity == Severity::Error)
             .collect();
-        assert!(!errors.is_empty(), "the V-bit profile must error");
+        assert!(!errors.is_empty(), "zero stepdown must error");
         assert!(
             errors.iter().all(|d| d.op == Some(id)),
             "every error must name its operation: {errors:?}"
@@ -4470,6 +4480,7 @@ mod tests {
     #[test]
     fn a_completed_empty_job_is_distinct_from_a_cancelled_empty_job() {
         let mut app = AppController::new(machine());
+        app.add_setup();
         assert_eq!(
             app.run(&CancelToken::new()).completion,
             JobCompletion::Complete
@@ -4833,13 +4844,8 @@ mod tests {
         );
         // A real import brings in geometry only — no operations are fabricated
         // (unlike the bundled sample); selection falls back to the Setup.
-        assert!(
-            app.document().setup().operations.is_empty(),
-            "import must not auto-create operations"
-        );
+        assert!(app.setups().is_empty(), "import must not auto-create setups");
         assert_eq!(app.selection(), Selection::Setup);
-        // Additive imports preserve the existing setup, including its starter tool.
-        assert_eq!(app.document().setup().tools.len(), 1);
         assert!(app.undo());
         assert!(app.regions().is_empty());
         assert!(app.redo());

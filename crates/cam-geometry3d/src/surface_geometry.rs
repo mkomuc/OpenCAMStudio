@@ -8,6 +8,7 @@ pub(super) fn is_surface_recipe(recipe: &ExtractionRecipe) -> bool {
         ExtractionRecipe::ChamferLoop
             | ExtractionRecipe::EngravePath
             | ExtractionRecipe::CarveRegion
+            | ExtractionRecipe::PocketBoundary
     )
 }
 
@@ -218,7 +219,16 @@ pub(super) fn derive(
     binding: &GeometryBinding,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
     let refs = &binding.selected;
-    let (regions, z) = if binding.recipe == ExtractionRecipe::CarveRegion {
+    let (regions, z) = if binding.recipe == ExtractionRecipe::PocketBoundary {
+        let (profiles, z) = unverified_path(state, refs, false)?;
+        if profiles.len() != 1 || !profiles[0].closed {
+            return Err("Pocket requires one closed boundary chain".into());
+        }
+        (
+            vec![Polygon::new(profiles[0].chain.clone()).map_err(|e| e.to_string())?],
+            z,
+        )
+    } else if binding.recipe == ExtractionRecipe::CarveRegion {
         let view = View::new(state, refs)?;
         if refs.len() != 1 {
             return Err("Carve requires one planar face or closed boundary loop".into());

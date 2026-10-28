@@ -11,14 +11,21 @@ fn operation() -> BoreOp {
     }
 }
 fn run(op: BoreOp, spindle: SpindleDir) -> StrategyResult {
-    let tools = [Tool {
-        number: 1,
-        diameter: 6.,
-        length: 50.,
-        flute_length: 20.,
-        kind: ToolKind::EndMill,
-        ..Default::default()
-    }];
+    run_with_tool(
+        op,
+        spindle,
+        Tool {
+            number: 1,
+            diameter: 6.,
+            length: 50.,
+            flute_length: 20.,
+            kind: ToolKind::EndMill,
+            ..Default::default()
+        },
+    )
+}
+fn run_with_tool(op: BoreOp, spindle: SpindleDir, tool: Tool) -> StrategyResult {
+    let tools = [tool];
     let result = BoreStrategy::new(op).compute(
         &JobEnv {
             heights: Heights::new(10., 2., 0.),
@@ -32,6 +39,48 @@ fn run(op: BoreOp, spindle: SpindleDir) -> StrategyResult {
         validate_program(&result.program).unwrap();
     }
     result
+}
+
+#[test]
+fn cutter_suitability_warns_without_suppressing_bore_motion() {
+    for kind in [
+        ToolKind::VBit {
+            included_angle_deg: 60.,
+            tip_radius: 0.,
+        },
+        ToolKind::ChamferMill {
+            included_angle_deg: 90.,
+            tip_diameter: 1.,
+        },
+        ToolKind::BallMill,
+        ToolKind::ThreadMill { pitch: None },
+        ToolKind::Drill {
+            point_angle_deg: 118.,
+        },
+        ToolKind::EndMill,
+    ] {
+        let result = run_with_tool(
+            operation(),
+            SpindleDir::Cw,
+            Tool {
+                number: 1,
+                diameter: 6.,
+                length: 50.,
+                flute_length: 1.,
+                kind,
+                ..Default::default()
+            },
+        );
+        assert!(!result.has_errors(), "{kind:?}: {:?}", result.diagnostics);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == cam_toolpath::Severity::Warning),
+            "{kind:?}"
+        );
+        assert!(!cutting(&result).is_empty(), "{kind:?}");
+    }
 }
 fn cutting(result: &StrategyResult) -> Vec<(cam_cldata::Point3, ArcDir, f64)> {
     result
@@ -247,10 +296,6 @@ fn invalid_inputs_return_errors_without_motions() {
             ..operation()
         },
         BoreOp {
-            z_bottom: -30.,
-            ..operation()
-        },
-        BoreOp {
             taper_angle: -5.,
             ..operation()
         },
@@ -273,6 +318,14 @@ fn invalid_inputs_return_errors_without_motions() {
         assert!(result.has_errors(), "accepted {op:?}");
         assert!(result.program.steps().is_empty());
     }
+}
+
+#[test]
+fn depth_beyond_the_flutes_warns_without_clamping_the_requested_interval() {
+    let result = run(BoreOp { z_bottom: -30., ..operation() }, SpindleDir::Cw);
+    assert!(!result.has_errors(), "{:?}", result.diagnostics);
+    assert!(result.diagnostics.iter().any(|d| d.severity == cam_toolpath::Severity::Warning && d.message.contains("length of cut")));
+    assert_eq!(cutting(&result).last().unwrap().0.z, -30.);
 }
 
 #[test]

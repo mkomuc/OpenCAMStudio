@@ -255,7 +255,7 @@ desktop_catalog! {
         let message=match a.get::<String>("target")?.as_str() {
             "setup" if c.controller.setups().iter().any(|s|s.id==id)=>Message::EditSetup(id),
             "operation" if u32::try_from(id).ok().is_some_and(|id|c.controller.operation(id).is_some())=>Message::Select(Selection::Operation(id as u32)),
-            "pattern" if c.controller.document().setup().patterns.iter().any(|p|p.id==id)=>Message::EditPattern(id),
+            "pattern" if c.controller.inspection_setup().patterns.iter().any(|p|p.id==id)=>Message::EditPattern(id),
             "library_tool" if (id as usize)<c.library.tools.len()=>Message::SelectLibraryTool(id as usize),
             _=>return Err("editor target not found".into()),
         };
@@ -320,12 +320,13 @@ mod tests {
     #[test]
     fn desktop_mcp_edits_the_visible_controller_and_preserves_undo() {
         let (mut app, _) = App::new();
-        let original = app.controller.document().setup().name.clone();
+        app.controller.add_setup();
+        let original = app.controller.inspection_setup().name.clone();
         app.mcp_call("update_setup", json!({"patch":{"name":"MCP setup"}}))
             .unwrap();
-        assert_eq!(app.controller.document().setup().name, "MCP setup");
+        assert_eq!(app.controller.inspection_setup().name, "MCP setup");
         app.mcp_call("undo", json!({})).unwrap();
-        assert_eq!(app.controller.document().setup().name, original);
+        assert_eq!(app.controller.inspection_setup().name, original);
         app.mcp_call(
             "desktop_set_view",
             json!({"yaw":45.,"pitch":30.,"zoom":2.,"pan":[1.,2.,3.]}),
@@ -338,6 +339,7 @@ mod tests {
     #[test]
     fn desktop_mcp_keeps_drafts_until_explicitly_cancelled() {
         let (mut app, _) = App::new();
+        app.controller.add_setup();
         app.begin_setup_draft();
         app.setup_draft.as_mut().unwrap().name = "Uncommitted".into();
         let before = app.controller.document().clone();
@@ -360,7 +362,7 @@ mod tests {
         let (mut app, _) = App::new();
         app.mcp_call("open_dxf", json!({"text":SAMPLE_DXF,"name":"MCP sample"}))
             .unwrap();
-        let id = app.controller.document().setup().operations[0].id();
+        let id = app.controller.inspection_setup().operations[0].id();
         app.begin_operation_draft(id);
         app.mcp_call(
             "update_operation",
@@ -396,7 +398,7 @@ mod tests {
         .unwrap();
         let _ = app.poll_mcp();
         assert!(result.recv().unwrap().is_ok());
-        assert_eq!(app.controller.setups().len(), 2);
+        assert_eq!(app.controller.setups().len(), 1);
     }
 
     #[test]

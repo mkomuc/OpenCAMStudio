@@ -1,13 +1,20 @@
-//! Browser previews have their own worker: selecting an operation must neither
+//! Browser and pattern previews share a worker: previewing paths must neither
 //! publish a partial export program nor depend on the last simulation's scope.
 use super::*;
 use crate::jobs::JobService;
 
 #[derive(Clone, Debug, PartialEq)]
+enum PreviewScope {
+    Through(u32),
+    /// Only source identity changes require calculation; placement edits reuse paths.
+    PatternSources(Vec<u32>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct PreviewKey {
     revision: u64,
     setup: u64,
-    through: u32,
+    scope: PreviewScope,
     accuracy: f32,
     source: Option<crate::JobStamp>,
 }
@@ -29,27 +36,42 @@ pub(super) struct OperationPreview {
 impl App {
     fn operation_preview_key(&self) -> Option<PreviewKey> {
         if self.model_view.is_some()
-            || self.operation_preview_active()
-            || self.pattern_draft.is_some()
-            || self
-                .hidden_setups
-                .contains(&self.controller.active_setup_id())
+            || (self.pattern_draft.is_none()
+                && (self.operation_preview_active()
+                    || self
+                        .hidden_setups
+                        .contains(&self.controller.active_setup_id())))
         {
             return None;
         }
-        let through = self
-            .controller
-            .document()
-            .setup()
-            .operations
-            .iter()
-            .rev()
-            .map(Operation::id)
-            .find(|id| self.focus_ops.contains(id) && !self.hidden_ops.contains(id))?;
+        let scope = if let Some(draft) = &self.pattern_draft {
+            let members: Vec<_> = self
+                .controller
+                .inspection_setup()
+                .operations
+                .iter()
+                .map(Operation::id)
+                .filter(|id| draft.members.contains(id))
+                .collect();
+            if members.is_empty() {
+                return None;
+            }
+            PreviewScope::PatternSources(members)
+        } else {
+            let through = self
+                .controller
+                .inspection_setup()
+                .operations
+                .iter()
+                .rev()
+                .map(Operation::id)
+                .find(|id| self.focus_ops.contains(id) && !self.hidden_ops.contains(id))?;
+            PreviewScope::Through(through)
+        };
         Some(PreviewKey {
             revision: self.controller.revision(),
             setup: self.controller.active_setup_id(),
-            through,
+            scope,
             accuracy: self.settings.simulation.accuracy,
             source: self.controller.outcome().and_then(|o| o.stamp.clone()),
         })
@@ -104,18 +126,36 @@ impl App {
         let mut inputs = self.controller.job_inputs();
         inputs.simulation_accuracy = key.accuracy;
         let document = Arc::make_mut(&mut inputs.document);
-        let later: Vec<_> = document
-            .setup()
-            .operations
-            .iter()
-            .skip_while(|op| op.id() != key.through)
-            .skip(1)
-            .map(Operation::id)
-            .collect();
-        document.excluded_operations.extend(later);
+        match &key.scope {
+            PreviewScope::PatternSources(members) => {
+                let others: Vec<_> = document
+                    .setup()
+                    .operations
+                    .iter()
+                    .map(Operation::id)
+                    .filter(|id| !members.contains(id))
+                    .collect();
+                // Repeat the original seeds in the viewport, independently of the
+                // committed pattern's placement, ordering and suppression settings.
+                document.setup_mut().patterns.clear();
+                document.excluded_operations.extend(others);
+                inputs.toolpath_preview = true;
+            }
+            PreviewScope::Through(through) => {
+                let later: Vec<_> = document
+                    .setup()
+                    .operations
+                    .iter()
+                    .skip_while(|op| op.id() != *through)
+                    .skip(1)
+                    .map(Operation::id)
+                    .collect();
+                document.excluded_operations.extend(later);
+            }
+        }
         self.operation_preview.jobs.start(
             key.revision,
-            format!("operation-preview:{}:{}", key.setup, key.through),
+            format!("operation-preview:{}:{:?}", key.setup, key.scope),
             inputs,
             self.operation_preview.cache.clone().unwrap_or_default(),
         );
@@ -313,5 +353,182 @@ mod tests {
         assert!(app.operation_preview.completed.is_empty());
         assert!(app.operation_preview_outcome().is_none());
         app.drain_operation_preview();
+    }
+
+    fn has_hole(scene: &Scene, operation: u32, instance: u32, at: [f32; 2]) -> bool {
+        scene.strips.iter().any(|strip| {
+            strip.op == Some(operation)
+                && strip.instance_index == Some(instance)
+                && strip
+                    .points
+                    .iter()
+                    .all(|point| (point[0] - at[0]).abs() < 1e-4 && (point[1] - at[1]).abs() < 1e-4)
+                && strip.points.first().unwrap()[2] != strip.points.last().unwrap()[2]
+        })
+    }
+
+    #[test]
+    fn pattern_preview_calculates_sources_once_and_updates_live_without_committing() {
+        let (mut app, ids) = preview_app();
+        app.focus_ops = BTreeSet::from([ids[0]]);
+        let document = app.controller.document().clone();
+        let revision = app.controller.revision();
+        let _ = app.update(Message::BeginPattern(false));
+        let pending = app.machining_viewport();
+        app.drain_operation_preview();
+        let sources = app.operation_preview.outcome.clone().unwrap();
+        assert_eq!(
+            sources.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            sources.diagnostics
+        );
+        assert!(
+            sources.stock_vertices.is_empty(),
+            "placement previews do not simulate stock"
+        );
+        assert!(sources
+            .scene
+            .strips
+            .iter()
+            .filter_map(|strip| strip.op)
+            .all(|id| id == ids[0]));
+        let initial = app.pattern_placement_preview();
+        assert!(has_hole(&initial, ids[0], 0, [10., 10.]));
+        assert!(has_hole(&initial, ids[0], 1, [30., 10.]));
+        let initial_view = app.machining_viewport();
+        assert!(
+            !Arc::ptr_eq(&pending.vertices, &initial_view.vertices),
+            "a finished seed refreshes the cached viewport"
+        );
+        for message in [
+            Message::PatternValue(0, "3".into()),
+            Message::PatternValue(2, "40".into()),
+            Message::PatternSecondDirection(true),
+            Message::PatternValue(1, "2".into()),
+            Message::PatternValue(3, "15".into()),
+        ] {
+            let _ = app.update(message);
+        }
+        assert!(has_hole(
+            &app.pattern_placement_preview(),
+            ids[0],
+            5,
+            [90., 25.]
+        ));
+        let _ = app.update(Message::PatternAxisReversed(0, true));
+        assert!(has_hole(
+            &app.pattern_placement_preview(),
+            ids[0],
+            5,
+            [-70., 25.]
+        ));
+        let _ = app.update(Message::PatternKeepOriginal(false));
+        let _ = app.update(Message::PatternReverse(true));
+        let changed = app.pattern_placement_preview();
+        assert!(changed
+            .strips
+            .iter()
+            .all(|strip| strip.instance_index != Some(0)));
+        assert_eq!(changed.strips[0].instance_index, Some(5));
+        let changed_view = app.machining_viewport();
+        assert!(
+            !Arc::ptr_eq(&initial_view.vertices, &changed_view.vertices),
+            "parameter edits redraw the viewport before Apply"
+        );
+        assert!(
+            changed_view.frame_bounds.unwrap().0[0] <= -70.0,
+            "camera framing includes repeats beyond the original stock"
+        );
+        let _ = app.update(Message::PatternTypeChanged(true));
+        let _ = app.update(Message::PatternValue(1, "5".into()));
+        let _ = app.update(Message::PatternValue(2, "5".into()));
+        let _ = app.update(Message::PatternValue(3, "180".into()));
+        assert!(has_hole(
+            &app.pattern_placement_preview(),
+            ids[0],
+            3,
+            [0., 0.]
+        ));
+        assert!(Arc::ptr_eq(
+            app.operation_preview.outcome.as_ref().unwrap(),
+            &sources
+        ));
+        assert!(
+            !app.operation_preview.needs_poll(),
+            "placement edits reuse the source result synchronously"
+        );
+        assert_eq!(app.controller.document(), &document);
+        assert_eq!(app.controller.revision(), revision);
+        assert!(
+            app.controller.outcome().is_none(),
+            "draft preview cannot publish an export program"
+        );
+        let _ = app.update(Message::PatternCancel);
+        assert!(app.pattern_placement_preview().strips.is_empty());
+    }
+
+    #[test]
+    fn pattern_preview_refreshes_sources_and_removes_committed_instance_transforms() {
+        let (mut app, ids) = preview_app();
+        let setup = app.controller.active_setup_id();
+        let id = app
+            .controller
+            .create_pattern_with_options(
+                setup,
+                &[ids[0]],
+                "Repeats".into(),
+                cam_model::PatternKind::Rectangular {
+                    nx: 3,
+                    ny: 1,
+                    dx: 20.,
+                    dy: 0.,
+                },
+                cam_model::PatternOrder::ByInstance,
+                cam_model::PatternOptions {
+                    keep_original: false,
+                    reverse: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let _ = app.update(Message::EditPattern(id));
+        app.drain_operation_preview();
+        let sources = app.operation_preview.outcome.clone().unwrap();
+        assert_eq!(
+            sources.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            sources.diagnostics
+        );
+        assert!(sources
+            .scene
+            .strips
+            .iter()
+            .filter(|strip| strip.op.is_some())
+            .all(|strip| strip.pattern_id.is_none()));
+        assert!(has_hole(
+            &app.pattern_placement_preview(),
+            ids[0],
+            2,
+            [50., 10.]
+        ));
+        let _ = app.update(Message::PatternMember(ids[1], true));
+        app.drain_operation_preview();
+        assert!(!Arc::ptr_eq(
+            app.operation_preview.outcome.as_ref().unwrap(),
+            &sources
+        ));
+        assert!(has_hole(
+            &app.pattern_placement_preview(),
+            ids[1],
+            2,
+            [65., 10.]
+        ));
+        assert_eq!(
+            app.controller.inspection_setup().patterns[0].members,
+            vec![ids[0]],
+            "source edits stay in the draft"
+        );
     }
 }

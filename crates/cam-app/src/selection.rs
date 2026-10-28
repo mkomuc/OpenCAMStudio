@@ -188,7 +188,7 @@ impl AppController {
             }
         }
         self.selection = match selection {
-            Selection::Tool(i) if i < self.document.current().setup().tools.len() => selection,
+            Selection::Tool(i) if self.document().active_setup().is_some_and(|s| i < s.tools.len()) => selection,
             Selection::Operation(id) if self.operation(id).is_some() => selection,
             Selection::Setup | Selection::Origin | Selection::Stock | Selection::Machine => {
                 selection

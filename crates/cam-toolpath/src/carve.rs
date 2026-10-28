@@ -316,11 +316,11 @@ impl Strategy for CarveStrategy {
                 );
             };
             if ct == op.tool {
-                fail!(
+                diagnostics.push(Diagnostic::warning(format!(
                     "operation {}: the clearing tool and the carving tool are both {ct}. \
                      A V-bit cannot leave the flat floor the clearing pass exists for.",
                     op.id
-                );
+                )));
             }
             if flat.is_empty() {
                 diagnostics.push(Diagnostic::warning(format!(
@@ -330,41 +330,19 @@ impl Strategy for CarveStrategy {
                     op.id, op.depth
                 )));
             } else {
-                // The clearing tool exists for exactly one reason: to leave a flat
-                // floor where the cone cannot. A tool that cannot leave one has no
-                // purpose here — it is not "worse", it is the wrong tool for the job,
-                // and the V-bit alone would do as well. So this is an error, unlike the
-                // general flat-floor guard, which warns for a merely scalloped floor.
-                if !ctool.profile().cuts_flat_bottom() {
-                    if ctool.profile().has_cutting_tip() {
-                        fail!(
-                            "operation {}: tool {ct} ({}) is not flat-bottomed, so it                              would leave a scalloped floor, not the flat one the                              clearing pass exists for. Use an end mill or bull nose, or                              no clearing tool at all.",
-                            op.id,
-                            ctool.kind
-                        );
-                    }
-                    fail!(
-                        "operation {}: tool {ct} ({}) has a non-cutting tip - it would                          leave an uncut ridge under its axis instead of a floor.",
-                        op.id,
-                        ctool.kind
-                    );
-                }
+                crate::guards::warn_flat_floor(op.id, "carve clearing", ctool, &mut diagnostics);
                 // A straight drop into solid stock needs the axis to cut. Any other
                 // entry eases in along the path, so the rule does not apply.
-                if matches!(cp.plunge, Plunge::Straight)
-                    && !crate::guards::check_plunge(op.id, "carve clearing", ctool, &mut diagnostics)
-                {
-                    bail!();
+                if matches!(cp.plunge, Plunge::Straight) {
+                    crate::guards::warn_plunge(op.id, "carve clearing", ctool, &mut diagnostics);
                 }
-                if !crate::guards::check_axial_reach(
+                crate::guards::warn_axial_reach(
                     op.id,
                     "carve clearing",
                     ctool,
                     op.depth,
                     &mut diagnostics,
-                ) {
-                    bail!();
-                }
+                );
 
                 let r = ctool.radius();
                 // The same spacing rule a pocket uses, from the same field — and the
@@ -431,6 +409,7 @@ impl Strategy for CarveStrategy {
                             offset(std::slice::from_ref(area), -first, JoinStyle::Round)
                                 .unwrap_or_default();
                         let job = crate::clearing::ClearJob {
+                            lift_height: cp.lift_height,
                             id: op.id,
                             simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
                             radius: r,
@@ -2141,13 +2120,14 @@ mod tests {
     }
 
     #[test]
-    fn clearing_with_the_carving_tool_itself_is_an_error() {
+    fn clearing_with_the_carving_tool_itself_warns_and_generates() {
         // It would be a no-op tool change and a floor the cone cannot flatten.
         let mut o = op(1.0);
         o.clear = Some(clearing(1));
-        let e = errors(&run(o, vbit(90.0, 0.0)));
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("both"), "{e:?}");
+        let result = run(o, vbit(90.0, 0.0));
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.is_empty());
+        assert!(warnings(&result).iter().any(|message| message.contains("both")));
     }
 
     #[test]
@@ -2163,18 +2143,15 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_nose_clearing_tool_is_an_error_not_a_warning() {
-        // The clearing tool exists to leave a flat floor. A ball nose cuts, but leaves
-        // scallops -- which is what the V-bit already does, so it buys a tool change
-        // and nothing else. Wrong tool for the job, not merely a worse one.
+    fn a_ball_nose_clearing_tool_warns_and_generates() {
         let mut o = op(1.0);
         o.clear = Some(clearing(2));
         let mut ball = endmill(2, 4.0);
         ball.kind = ToolKind::BallMill;
-        let e = errors(&run_with(o, &[vbit(90.0, 0.0), ball]));
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("not flat-bottomed"), "{e:?}");
-        assert!(e[0].contains("scalloped"), "{e:?}");
+        let result = run_with(o, &[vbit(90.0, 0.0), ball]);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.is_empty());
+        assert!(warnings(&result).iter().any(|message| message.contains("not flat-bottomed") && message.contains("scallops")));
     }
 
     #[test]
@@ -2186,9 +2163,10 @@ mod tests {
             included_angle_deg: 90.0,
             tip_diameter: 0.2,
         };
-        let e = errors(&run_with(o, &[vbit(90.0, 0.0), cham]));
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("non-cutting tip"), "{e:?}");
+        let result = run_with(o, &[vbit(90.0, 0.0), cham]);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.is_empty());
+        assert!(warnings(&result).iter().any(|message| message.contains("non-cutting tip")));
     }
 
     #[test]
@@ -2479,16 +2457,15 @@ mod tests {
     }
 
     #[test]
-    fn a_clearing_tool_that_cannot_reach_the_depth_is_an_error() {
-        // 2 mm of flute cannot cut a 3 mm-deep floor: past that it is the shank in the
-        // pocket, which is a hard error, not a preference.
+    fn a_clearing_tool_that_cannot_reach_the_depth_warns_and_generates() {
         let mut o = op(2.5);
         o.clear = Some(clearing(2));
         let mut short = endmill(2, 4.0);
         short.flute_length = 2.0;
-        let e = errors(&run_with(o, &[vbit(90.0, 0.0), short]));
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("cutting edge"), "{e:?}");
+        let result = run_with(o, &[vbit(90.0, 0.0), short]);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.is_empty());
+        assert!(warnings(&result).iter().any(|message| message.contains("cutting edge")));
     }
 
     #[test]

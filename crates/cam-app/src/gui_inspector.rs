@@ -175,7 +175,7 @@ impl App {
         // The tool geometry class is an enum, so it gets a picker (committed
         // immediately) rather than a text field.
         if let Selection::Tool(i) = self.controller.selection() {
-            if let Some(tool) = self.controller.document().setup().tools.get(i) {
+            if let Some(tool) = self.controller.inspection_setup().tools.get(i) {
                 list = list.push(
                     row![
                         help_wrap(

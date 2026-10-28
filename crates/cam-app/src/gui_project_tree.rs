@@ -3,6 +3,7 @@ use super::*;
 use iced::widget::column;
 
 const TREE_ROW_H: f32 = 26.0;
+const TREE_TEXT_SIZE: u32 = 12;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum TreeNode {
@@ -36,6 +37,46 @@ pub(super) enum TreeMessage {
 }
 
 impl App {
+    pub(super) fn project_title(&self) -> String {
+        self.controller
+            .current_path()
+            .and_then(|path| path.file_stem())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Untitled")
+            .to_owned()
+    }
+
+    fn tree_body_selected(&self, id: InstanceId) -> bool {
+        self.model_view == Some(TreeNode::Model(id))
+            || (self.setup_draft.is_some() && self.setup_model_selection == Some(id))
+            || self.controller.cad_selection().iter().any(|r| r.instance_id == id)
+    }
+
+    pub(super) fn reveal_selected_bodies(&mut self) {
+        for entity in self.controller.cad_selection() {
+            self.collapsed_assets.remove(&entity.asset_id);
+        }
+    }
+
+    pub(super) fn selected_setup_models(&self) -> Vec<InstanceId> {
+        // Geometry selection takes precedence over the collection used to display it.
+        let selected: BTreeSet<_> = self.controller.cad_selection().iter()
+            .map(|r| r.instance_id)
+            .collect();
+        if !selected.is_empty() {
+            return selected.into_iter().collect();
+        }
+        self.controller.geometry_state().instances.iter()
+            .filter(|instance| match self.model_view {
+                Some(TreeNode::Model(id)) => instance.id == id,
+                Some(TreeNode::Asset(id)) => instance.asset_id == id,
+                _ => false,
+            })
+            .map(|instance| instance.id)
+            .collect()
+    }
+
     pub(super) fn clear_browser_selection(&mut self) {
         self.pending_simulation = None;
         self.pending_processing_time = None;
@@ -388,8 +429,8 @@ impl App {
         // node here — an origin *is* the datum a group of operations runs under.
         let mut list = column![self.tree_row(
             TreeNode::Models,
-            tree_header("Models"),
-            self.model_view == Some(TreeNode::Models),
+            text("Models").size(TREE_TEXT_SIZE).into(),
+            self.model_view == Some(TreeNode::Models) && self.controller.cad_selection().is_empty(),
         )]
         .spacing(2);
 
@@ -410,9 +451,9 @@ impl App {
                     .style(inspector_secondary)
                     .on_press(Message::ToggleAssetExpanded(asset.id)),
                 checkbox(!self.hidden_assets.contains(&asset.id))
-                    .size(14)
+                    .size(12)
                     .on_toggle(move |visible| Message::SetAssetVisible(asset.id, visible)),
-                text(&asset.name).size(12).width(Length::Fill),
+                text(&asset.name).size(TREE_TEXT_SIZE).width(Length::Fill),
             ]
             .spacing(4)
             .align_y(Alignment::Center);
@@ -428,17 +469,17 @@ impl App {
                 let hidden = !instance.visible || self.cad_hidden.contains(&instance.id);
                 let model_row = row![
                     Space::new().width(16),
-                    checkbox(!hidden).size(14).on_toggle(move |visible| {
+                    checkbox(!hidden).size(12).on_toggle(move |visible| {
                         Message::SetInstanceVisible(instance.id, visible)
                     }),
-                    text(&instance.name).size(12).width(Length::Fill),
+                    text(&instance.name).size(TREE_TEXT_SIZE).width(Length::Fill),
                 ]
                 .spacing(4)
                 .align_y(Alignment::Center);
                 list = list.push(self.tree_row(
                     TreeNode::Model(instance.id),
                     model_row.into(),
-                    self.model_view == Some(TreeNode::Model(instance.id)),
+                    self.tree_body_selected(instance.id),
                 ));
             }
         }
@@ -451,7 +492,7 @@ impl App {
             button(
                 row![
                     text(if self.tools_expanded { "▾" } else { "▸" }).size(11),
-                    text("Tools (in use)").size(12),
+                    text("Tools (in use)").size(TREE_TEXT_SIZE),
                 ]
                 .spacing(4),
             )
@@ -476,7 +517,7 @@ impl App {
                 } else {
                     format!("⌀{} {}", fmt_num(t.diameter), t.kind)
                 };
-                let row = container(text(label).size(13).color(if in_library {
+                let row = container(text(label).size(TREE_TEXT_SIZE).color(if in_library {
                     palette::LABEL_COLOR
                 } else {
                     palette::GROUP_LABEL
@@ -490,10 +531,11 @@ impl App {
                 }
             }
         }
-        list = list.push(
-            mouse_area(tree_header("Setups"))
-                .on_right_press(Message::Tree(TreeMessage::Open(TreeNode::Setups))),
-        );
+        list = list.push(self.tree_row(
+            TreeNode::Setups,
+            text("Setups").size(TREE_TEXT_SIZE).into(),
+            false,
+        ));
         let status_fingerprints = self.controller.current_toolpath_fingerprints();
         let toolpath_statuses = self.controller.toolpath_statuses_for(&status_fingerprints);
         for setup in self.controller.setups() {
@@ -510,7 +552,7 @@ impl App {
                 self.status_indicator(
                     StatusTarget::Setup(setup.id), &toolpath_statuses, &status_fingerprints,
                 ),
-                mouse_area(text(&setup.name).size(11).width(Length::Fill)).on_double_click(
+                mouse_area(text(&setup.name).size(TREE_TEXT_SIZE).width(Length::Fill)).on_double_click(
                     Message::Tree(TreeMessage::DoubleClick(TreeNode::Setup(setup.id))),
                 ),
             ]
@@ -549,7 +591,7 @@ impl App {
                 if let Some(pattern) = setup.patterns.iter().find(|pattern| pattern.members.first() == Some(&id)) {
                     let count = pattern.kind.instance_count().unwrap_or(0);
                     let expanded = self.expanded_patterns.contains(&pattern.id);
-                    let pattern_row = row![button(text(if expanded { "▾" } else { "▸" }).size(11)).padding(2).style(inspector_secondary).on_press(Message::TogglePatternExpanded(pattern.id)), text(format!("▦ {} · {count} instances{}", pattern.name, if pattern.suppressed { " · suppressed" } else { "" })).size(11).width(Length::Fill)].align_y(Alignment::Center);
+                    let pattern_row = row![button(text(if expanded { "▾" } else { "▸" }).size(11)).padding(2).style(inspector_secondary).on_press(Message::TogglePatternExpanded(pattern.id)), text(format!("▦ {} · {count} instances{}", pattern.name, if pattern.suppressed { " · suppressed" } else { "" })).size(TREE_TEXT_SIZE).width(Length::Fill)].align_y(Alignment::Center);
                     list = list.push(self.tree_row(TreeNode::Pattern(pattern.id), pattern_row.into(), false));
                 }
                 if let Some(pattern) = setup.patterns.iter().find(|p| p.members.contains(&id)) {
@@ -570,7 +612,7 @@ impl App {
                     ),
                     icon_svg(operation_icon(op), 18.0),
                     text(operation_label)
-                        .size(11)
+                        .size(TREE_TEXT_SIZE)
                         .width(Length::Fill)
                 ]
                 .spacing(3)
@@ -590,7 +632,7 @@ impl App {
                                 format!("T{} · ⌀{} {}", number, fmt_num(tool.diameter), tool.kind)
                             })
                             .unwrap_or_else(|| format!("T{number} · missing tool"));
-                        list = list.push(container(text(label).size(11)).padding(Padding {
+                        list = list.push(container(text(label).size(TREE_TEXT_SIZE)).padding(Padding {
                             left: 52.,
                             top: 2.,
                             bottom: 2.,
@@ -879,9 +921,7 @@ mod tests {
         }
         app.controller.select(Selection::Setup);
         let ids = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .iter()
             .map(Operation::id)
@@ -959,8 +999,9 @@ mod tests {
                 )
                 .unwrap();
         }
-        app.controller
-            .edit_setup(|setup| setup.model_instances = vec![1]);
+        if !app.controller.setups().is_empty() {
+            app.controller.edit_setup(|setup| setup.model_instances = vec![1]);
+        }
         app.end_setup_draft();
         app.refresh_fields();
     }
@@ -984,6 +1025,75 @@ mod tests {
                     .any(|candidate| candidate.entity.instance_id == *id)
             })
             .collect()
+    }
+
+    #[test]
+    fn body_picks_reveal_their_tree_rows_and_seed_the_first_setup() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        add_browser_models(&mut app);
+        app.reset_model_browser();
+        assert!(app.controller.setups().is_empty());
+        assert_eq!(visible_bodies(&app), [1, 2, 3, 4]);
+        app.collapsed_assets.insert(1);
+        let body = EntityRef {
+            asset_id: 1, revision: 1, instance_id: 2, body_id: 1,
+            kind: EntityKind::Body, id: 1,
+        };
+        send(&mut app, Message::CadPicked(vec![PickCandidate {
+            entity: body.clone(), depth: 0., occluded: false,
+        }]));
+        assert_eq!(app.controller.cad_selection(), &[body]);
+        assert!(app.tree_body_selected(2));
+        assert!(!app.tree_body_selected(1));
+        assert!(!app.collapsed_assets.contains(&1));
+        assert_eq!(visible_bodies(&app), [1, 2, 3, 4]);
+        let _ = app.project_tree();
+        send(&mut app, Message::SetupNew);
+        assert_eq!(app.controller.setups().len(), 1);
+        assert_eq!(app.setup_draft.as_ref().unwrap().model_instances, [2]);
+        assert_eq!(app.controller.document().setup().model_instances, [2]);
+        assert!(app.controller.undo());
+        assert!(app.controller.setups().is_empty());
+        app.end_setup_draft();
+        assert_eq!(visible_bodies(&app), [1, 2, 3, 4]);
+        assert!(app.controller.redo());
+        assert_eq!(app.controller.document().setup().model_instances, [2]);
+    }
+
+    #[test]
+    fn new_setups_use_tree_body_or_model_selection() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        add_browser_models(&mut app);
+        let _ = app.select_tree_node(&TreeNode::Model(4));
+        assert!(app.tree_body_selected(4));
+        send(&mut app, Message::SetupNew);
+        assert_eq!(app.controller.document().setup().model_instances, [4]);
+        send(&mut app, Message::SetupCancel);
+        let _ = app.select_tree_node(&TreeNode::Asset(1));
+        send(&mut app, Message::SetupNew);
+        assert_eq!(app.controller.document().setup().model_instances, [1, 2]);
+    }
+
+    #[test]
+    fn projects_without_setups_round_trip_and_use_the_filename_as_browser_title() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        assert_eq!(app.project_title(), "Untitled");
+        assert!(app.controller.setups().is_empty());
+        let _ = app.view();
+        add_browser_models(&mut app);
+        app.reset_model_browser();
+        let path = std::env::temp_dir().join(format!("Browser title {}.ocam", std::process::id()));
+        app.save_to(&path);
+        assert_eq!(app.project_title(), path.file_stem().unwrap().to_str().unwrap());
+        let (reopened, _) = App::new_with_setup(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(reopened.controller.setups().is_empty());
+        assert_eq!(reopened.controller.geometry_state().instances.len(), 4);
+        assert_eq!(visible_bodies(&reopened), [1, 2, 3, 4]);
+        let _ = reopened.view();
     }
 
     fn drain_context_job(app: &mut App) {
@@ -1240,9 +1350,9 @@ mod tests {
         app.operation_draft = None;
         app.show_stock = true;
         app.refresh_fields();
-        let parallel = app.controller.document().setup().operations.iter()
+        let parallel = app.controller.inspection_setup().operations.iter()
             .find(|op| matches!(op, Operation::Parallel(_))).unwrap().id();
-        let profile = app.controller.document().setup().operations.iter()
+        let profile = app.controller.inspection_setup().operations.iter()
             .find(|op| matches!(op, Operation::Profile(_))).unwrap().id();
         send(&mut app, Message::ClickOp(parallel));
         app.drain_operation_preview();
@@ -1440,9 +1550,7 @@ mod tests {
         );
         send(&mut app, Message::Tree(TreeMessage::Release));
         assert_eq!(
-            app.controller
-                .document()
-                .setup()
+            app.controller.inspection_setup()
                 .operations
                 .iter()
                 .map(Operation::id)

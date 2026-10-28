@@ -17,7 +17,7 @@ impl App {
             let number = self.controller.pending_op()?.tool?;
             self.operation_tools
                 .iter()
-                .chain(self.controller.document().setup().tools.iter())
+                .chain(self.controller.inspection_setup().tools.iter())
                 .find(|tool| tool.number == number)
                 .cloned()
         }
@@ -82,7 +82,7 @@ impl App {
             self.controller
                 .pending_op()
                 .and_then(|pending| pending.replacing)
-                .map(|id| self.controller.document().setup().stock_to_leave_for(id))
+                .map(|id| self.controller.inspection_setup().stock_to_leave_for(id))
                 .unwrap_or_default(),
         );
         self.height_draft_id = Some(0);
@@ -107,7 +107,7 @@ impl App {
     pub(super) fn sync_creation_geometry_heights(&mut self) {
         if !matches!(
             self.cad_pending_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel)
+            Some(OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel)
         ) {
             return;
         }
@@ -132,7 +132,13 @@ impl App {
                 document.setup_mut().tools.push(tool.clone());
             }
         }
-        let defaults = crate::cad_operations::selection_height_defaults(&document, &operation);
+        let defaults = if self.cad_pending_kind == Some(OpKind::Pocket)
+            && !self.controller.cad_selection().first().is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge))
+        {
+            cam_model::OperationHeightSettings::default()
+        } else {
+            crate::cad_operations::selection_height_defaults(&document, &operation)
+        };
         let previous = self
             .creation_geometry_height_defaults
             .clone()
@@ -284,7 +290,9 @@ impl App {
                 (Operation::Adaptive(_), Operation::Adaptive(_)) | (Operation::Parallel(_), Operation::Parallel(_)) => {}
                 _ => return Err("Geometry does not match operation".into()),
             }
-            if crate::cad_operations::surface_recipe(&binding.recipe) {
+            if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary {
+                binding.heights.bottom = binding.heights.top - document.operation_base_cutting_heights(&draft).depth();
+            } else if crate::cad_operations::surface_recipe(&binding.recipe) {
                 binding.heights = document.operation_base_cutting_heights(&draft);
             }
             Ok((draft, Some(binding)))

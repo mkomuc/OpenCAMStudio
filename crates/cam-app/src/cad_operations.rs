@@ -169,6 +169,7 @@ pub(crate) fn recipe(
     selected: &[EntityRef],
 ) -> Result<ExtractionRecipe, String> {
     Ok(match kind {
+        OpKind::Pocket if selected.first().is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge)) => ExtractionRecipe::PocketBoundary,
         OpKind::Pocket => ExtractionRecipe::PocketFloor,
         OpKind::Drill => ExtractionRecipe::DrillHoles,
         OpKind::Chamfer if selected.first().is_some_and(|r| r.kind == EntityKind::Face) => {
@@ -187,7 +188,7 @@ pub(crate) fn recipe(
                 .filter(|_| reference.kind == EntityKind::Face)
                 .ok_or("Thread/Bore requires cylindrical bore or boss faces")?;
             let CadSurface::Cylinder { inward, .. } = face.surface else {
-                return Err("Thread/Bore requires cylindrical bore or boss faces".into());
+                return Err(format!("Thread/Bore requires cylindrical bore or boss faces; selected face: {}", face.surface.kind_name()));
             };
             if kind == OpKind::Bore {
                 ExtractionRecipe::BoreCylinders { internal: inward }
@@ -253,7 +254,7 @@ pub(crate) fn profile_entries_from_selection(selected: &[EntityRef]) -> Vec<Prof
 /// Source topology stays immutable. Only instance placements are rotated into
 /// the setup axes, preserving semantic references and approximation budgets.
 pub(crate) fn geometry_for_setup(document: &Document) -> Result<GeometryState, String> {
-    let setup = document.setup();
+    let setup = document.active_setup().ok_or("Create a setup before evaluating machining geometry.")?;
     let mut geometry = document.geometry.geometry_in_setup(&setup.frame)?;
     let ids: std::collections::BTreeSet<_> = setup.operations.iter().map(Operation::id).collect();
     geometry.bindings.retain(|id, _| ids.contains(id));
@@ -457,7 +458,11 @@ pub(crate) fn create_operation(
         stock_top(document),
     )?;
     let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
-    let depth = resolved.heights.depth();
+    let depth = if binding.recipe == ExtractionRecipe::PocketBoundary {
+        defaults.depth
+    } else {
+        resolved.heights.depth()
+    };
     let boundary = || {
         resolved
             .regions
@@ -480,6 +485,7 @@ pub(crate) fn create_operation(
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 stepdown: defaults.stepdown,
                 overlap: 0.5,
                 offset: 0.0,
@@ -729,7 +735,9 @@ pub(crate) fn create_operation(
             },
         }),
     };
-    if surface_recipe(&binding.recipe) {
+    if binding.recipe == ExtractionRecipe::PocketBoundary {
+        binding.heights.bottom = binding.heights.top - depth;
+    } else if surface_recipe(&binding.recipe) {
         binding.heights = document.operation_base_cutting_heights(&op);
     }
     Ok((op, binding))
@@ -824,7 +832,7 @@ pub(crate) fn resolve_document_checked(
             let depth = input.heights.depth();
             let region = || input.regions.first().ok_or("No resolved machining region");
             match (operation, &binding.recipe) {
-                (Operation::Pocket(p), ExtractionRecipe::PocketFloor) => {
+                (Operation::Pocket(p), ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary) => {
                     p.boundary = region()?.outer().clone();
                     p.islands = region()?.holes().to_vec();
                     p.depth = depth;
@@ -1071,6 +1079,7 @@ pub(crate) fn surface_recipe(recipe: &ExtractionRecipe) -> bool {
         ExtractionRecipe::ChamferLoop
             | ExtractionRecipe::EngravePath
             | ExtractionRecipe::CarveRegion
+            | ExtractionRecipe::PocketBoundary
     )
 }
 
@@ -1105,6 +1114,7 @@ pub(crate) fn capture_height_override(
         _ => {}
     }
     let (before_depth, after_depth) = match operation {
+        Operation::Pocket(p) if binding.recipe == ExtractionRecipe::PocketBoundary => (before.depth(), p.depth),
         Operation::Pocket(p) => (-before.bottom, p.depth),
         Operation::Profile(p) => (-before.bottom, p.depth),
         Operation::Drill(p) => (before.depth(), p.depth),

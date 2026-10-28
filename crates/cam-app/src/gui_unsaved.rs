@@ -122,7 +122,7 @@ mod tests {
             .edit_setup(|setup| setup.name = "Keep me".into());
         send(&mut app, Message::NewProject);
         assert!(matches!(app.pending_discard, Some(DiscardAction::New)));
-        assert_eq!(app.controller.document().setup().name, "Keep me");
+        assert_eq!(app.controller.inspection_setup().name, "Keep me");
         assert!(app.unsaved_overlay().is_some());
         // Background clicks and repeated destructive actions cannot bypass the modal.
         send(&mut app, Message::OpenSample);
@@ -134,12 +134,16 @@ mod tests {
         send(&mut app, Message::DiscardConfirmed);
         assert!(app.pending_discard.is_none());
         assert!(!app.controller.has_unsaved_changes());
-        assert_ne!(app.controller.document().setup().name, "Keep me");
+        assert_ne!(app.controller.inspection_setup().name, "Keep me");
     }
 
     #[test]
     fn close_warns_for_uncommitted_editor_changes_in_a_clean_project() {
         let mut app = app();
+        app.controller.add_setup();
+        let path = std::env::temp_dir().join(format!("clean-setup-editor-{}.ocam", std::process::id()));
+        app.controller.save_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
         let id = iced::window::Id::unique();
         assert!(!app.has_changes_to_discard());
         app.begin_setup_draft();
@@ -167,7 +171,7 @@ mod tests {
             matches!(&app.pending_discard, Some(DiscardAction::Open(selected)) if selected == &path)
         );
         send(&mut app, Message::DiscardConfirmed);
-        assert_eq!(app.controller.document().setup().name, "Keep me");
+        assert_eq!(app.controller.inspection_setup().name, "Keep me");
         assert!(app.controller.has_unsaved_changes());
         assert!(app.status.starts_with("Open failed:"));
     }
@@ -182,7 +186,7 @@ mod tests {
         send(&mut app, Message::OpenSample);
         assert!(matches!(app.pending_discard, Some(DiscardAction::Sample)));
         send(&mut app, Message::DiscardCancelled);
-        assert_eq!(app.controller.document().setup().name, "Keep me");
+        assert_eq!(app.controller.inspection_setup().name, "Keep me");
         send(&mut app, Message::OpenSample);
         send(&mut app, Message::DiscardConfirmed);
         assert!(app.controller.has_geometry());

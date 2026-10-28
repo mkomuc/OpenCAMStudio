@@ -105,8 +105,8 @@ impl App {
         self.pending_processing_time = None;
         self.processing_time_dialog = None;
         self.simulation = None;
-        if self.controller.document().setup().operations.is_empty()
-            && self.controller.document().setup().stock != cam_model::Stock::PreviousSetup
+        if self.controller.inspection_setup().operations.is_empty()
+            && self.controller.inspection_setup().stock != cam_model::Stock::PreviousSetup
         {
             self.controller.cancel_run();
             self.status = "No operations to run.".into();

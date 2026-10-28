@@ -20,6 +20,15 @@ an incomplete closed chain can be assembled without opening an error dialog on
 every pick. Toolpath generation needs a computable path and valid numeric
 settings. Collision and NC-export checks continue to run.
 
+Cutter suitability is advisory too. A missing cylindrical flank, non-flat floor,
+non-cutting tip, or depth beyond the modeled cutting edge produces a warning
+without suppressing toolpaths or stock simulation. Modeled chamfer angle
+mismatches also warn. The actual selected tool profile determines simulated
+material removal, so using a pointed or rounded cutter can intentionally leave a
+different shape from the CAD feature. Warnings alone do not block NC export;
+reported rapid and non-cutting stock collisions still do. Strategies that derive
+their paths from a cutter's cone or thread form still need that geometric input.
+
 ## Local verification observations
 
 Selection changes, geometry configuration and operation creation record local
