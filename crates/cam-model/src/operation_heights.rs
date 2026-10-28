@@ -472,7 +472,11 @@ impl Document {
             crate::ExtractionRecipe::ProfileContours => binding.selected.clone(),
             _ => vec![],
         };
-        if references.is_empty() || references.iter().any(|r| r.kind != EntityKind::Edge) {
+        if references.is_empty()
+            || references
+                .iter()
+                .any(|r| !matches!(r.kind, EntityKind::Edge | EntityKind::Loop))
+        {
             return Ok(binding.heights.bottom);
         }
         let (min, max) = self.height_selection_bounds(&references)?;
