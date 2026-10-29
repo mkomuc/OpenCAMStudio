@@ -31,7 +31,7 @@ pub fn validate_adaptive_selection(
         if !instance.placement.is_rigid() {
             return Err("invalid machining placement".into());
         }
-        asset.topology.validate()?;
+        asset.topology.validate_cached()?;
         let body = asset
             .topology
             .bodies
@@ -120,7 +120,7 @@ pub fn adaptive_heights(
     Ok(heights)
 }
 
-fn checked_projection(topology: &TopologySnapshot) -> Result<&CadProjectionMesh, String> {
+pub(super) fn checked_projection(topology: &TopologySnapshot) -> Result<&CadProjectionMesh, String> {
     let projection = topology.projection.as_ref().ok_or(
         "This solid has no independent CAD machining projection; reimport it before 3D Adaptive",
     )?;
@@ -133,7 +133,7 @@ fn checked_projection(topology: &TopologySnapshot) -> Result<&CadProjectionMesh,
     Ok(projection)
 }
 
-fn triangles_for_faces(
+pub(super) fn triangles_for_faces(
     mesh: &CadMesh,
     faces: &[EntityId],
     placement: RigidTransform,
@@ -392,7 +392,7 @@ pub fn resolve_adaptive(
         let asset = state
             .asset(instance.asset_id)
             .ok_or("setup model asset missing")?;
-        asset.topology.validate()?;
+        asset.topology.validate_cached()?;
         let body = asset
             .topology
             .bodies

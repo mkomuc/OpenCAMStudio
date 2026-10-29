@@ -6,6 +6,7 @@
 //! enough to drive first light (a profile → G-code) — and grows toward the full
 //! `Project → Setup → Stock → Operation → Tool` tree as later phases need it.
 
+use crate::ParallelParams;
 use cam_geo::Contour;
 
 use crate::{BoreOp, Tool};
@@ -89,12 +90,110 @@ use crate::{BoreOp, Tool};
 /// member is now ignored; simplification is derived from the operation tolerance.
 /// v28: profile pass controls, tab shapes/counts, and one controller compensation method.
 /// v29: helical Bore operations and cylindrical Bore geometry bindings.
-pub const SCHEMA_VERSION: u32 = 29;
+/// v30: 3D Parallel finishing and CAD surface bindings.
+/// v31: remaining stock inherited from the immediately preceding setup.
+/// v32: operation pattern spacing, directions and execution options.
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PatternOrder { #[default] ByInstance, ByOperation }
+pub enum PatternOrder { #[default] ByInstance, ByOperation, ByTool }
+
+/// Interpret a linear distance as an adjacent pitch or an overall extent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternSpacing { #[default] Spacing, Extent }
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LinearPatternDirection {
+    pub angle_degrees: f64,
+    #[serde(default)] pub reversed: bool,
+    #[serde(default)] pub symmetric: bool,
+    /// Selected edge, retained alongside the resolved setup-XY angle.
+    #[serde(default)] pub reference: Option<crate::EntityRef>,
+}
+
+/// Additive settings; defaults reproduce legacy X/Y patterns exactly.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PatternOptions {
+    pub spacing: PatternSpacing,
+    pub directions: [LinearPatternDirection; 2],
+    pub second_direction: bool,
+    pub keep_original: bool,
+    pub reverse: bool,
+    /// A picked circular edge or straight axis parallel to setup Z.
+    pub axis: Option<crate::EntityRef>,
+}
+
+impl Default for PatternOptions {
+    fn default() -> Self {
+        Self {
+            spacing: PatternSpacing::Spacing,
+            directions: [0.0, 90.0].map(|angle_degrees| LinearPatternDirection {
+                angle_degrees, reversed: false, symmetric: false, reference: None,
+            }),
+            second_direction: true,
+            keep_original: true,
+            reverse: false,
+            axis: None,
+        }
+    }
+}
+
+impl PatternOptions {
+    pub fn validate(&self, kind: PatternKind) -> Result<(), String> {
+        kind.validate()?;
+        if self.directions.iter().any(|d| !d.angle_degrees.is_finite()) {
+            return Err("pattern direction angles must be finite".into());
+        }
+        if let PatternKind::Rectangular { nx, ny, dx, dy } = kind {
+            if !self.second_direction && ny != 1 {
+                return Err("disabled second direction requires a count of one".into());
+            }
+            let angle = (self.directions[1].angle_degrees - self.directions[0].angle_degrees).to_radians();
+            if nx > 1 && ny > 1 && angle.sin().abs() < 1e-9 {
+                return Err("the two pattern directions must not be parallel".into());
+            }
+            let scale = |count: u32| if self.spacing == PatternSpacing::Extent { 1.0 } else { count.saturating_sub(1) as f64 };
+            if !(dx.abs() * scale(nx) + dy.abs() * scale(ny)).is_finite() {
+                return Err("pattern extent exceeds finite coordinate limits".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Stable placement IDs: zero is the source, even when execution is reversed.
+    pub fn instance_indices(&self, kind: PatternKind) -> Vec<usize> {
+        let count = kind.instance_count().unwrap_or(0).min(10_000);
+        let mut indices: Vec<_> = (usize::from(!self.keep_original)..count).collect();
+        if self.reverse { indices.reverse(); }
+        indices
+    }
+
+    pub fn transform_xy(&self, kind: PatternKind, index: usize) -> Option<([f64; 2], f64)> {
+        let PatternKind::Rectangular { nx, ny, dx, dy } = kind else {
+            return kind.transform_xy(index);
+        };
+        if nx == 0 || index >= (nx as usize).checked_mul(ny as usize)? { return None; }
+        let mut offset = [0.0; 2];
+        for (axis, (i, count, distance)) in [(index % nx as usize, nx, dx), (index / nx as usize, ny, dy)].into_iter().enumerate() {
+            let direction = &self.directions[axis];
+            let step = if direction.symmetric && i > 0 {
+                if i % 2 == 1 { i.div_ceil(2) as f64 } else { -(i as f64 / 2.0) }
+            } else { i as f64 };
+            let pitch = if self.spacing == PatternSpacing::Extent && count > 1 { distance / (count - 1) as f64 } else { distance };
+            let length = step * pitch * if direction.reversed { -1.0 } else { 1.0 };
+            let (sin, cos) = direction.angle_degrees.to_radians().sin_cos();
+            let sin = if sin.abs() < 1e-15 { 0.0 } else { sin };
+            let cos = if cos.abs() < 1e-15 { 0.0 } else { cos };
+            offset[0] += length * cos;
+            offset[1] += length * sin;
+        }
+        Some((offset, 0.0))
+    }
+}
 
 /// Radial wall allowance and axial floor allowance for an operation, in mm.
 /// Disabled settings are ignored; zero allowances preserve the operation's
@@ -138,7 +237,7 @@ pub enum PatternDirection { #[default] Ccw, Cw }
 /// Distribution of circular pattern instances.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CircularDistribution { Full, Partial { sweep_degrees: f64 } }
+pub enum CircularDistribution { Full, Partial { sweep_degrees: f64 }, Spacing { angle_degrees: f64 } }
 
 /// Geometry and placement parameters for setup XY operation repetition.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -158,6 +257,7 @@ pub struct OperationPattern {
     pub kind: PatternKind,
     #[serde(default)] pub order: PatternOrder,
     #[serde(default)] pub suppressed: bool,
+    #[serde(default)] pub options: PatternOptions,
 }
 
 impl PatternKind {
@@ -177,8 +277,9 @@ impl PatternKind {
             }
             Self::Circular { count, distribution, direction, .. } => {
                 if index >= count as usize { return None; }
-                let sweep = match distribution { CircularDistribution::Full => 360.0, CircularDistribution::Partial { sweep_degrees } => sweep_degrees };
-                let divisor = if matches!(distribution, CircularDistribution::Full) { count as f64 } else { (count - 1) as f64 };
+                let sweep = match distribution { CircularDistribution::Full => 360.0, CircularDistribution::Partial { sweep_degrees } => sweep_degrees, CircularDistribution::Spacing { angle_degrees } => angle_degrees };
+                let divisor = match distribution { CircularDistribution::Full => count as f64, CircularDistribution::Partial { .. } => count.saturating_sub(1) as f64, CircularDistribution::Spacing { .. } => 1.0 };
+                if divisor == 0.0 { return None; }
                 let sign = if direction == PatternDirection::Ccw { 1.0 } else { -1.0 };
                 Some(([0.0, 0.0], sign * sweep * index as f64 / divisor))
             }
@@ -195,6 +296,11 @@ impl PatternKind {
                 if !(2..=10_000).contains(&count) || !center_xy.iter().all(|v| v.is_finite()) { return Err("circular pattern requires 2..=10,000 instances and a finite center".into()); }
                 if let CircularDistribution::Partial { sweep_degrees } = distribution {
                     if !sweep_degrees.is_finite() || sweep_degrees <= 0.0 || sweep_degrees >= 360.0 { return Err("partial sweep must be greater than 0 and less than 360 degrees".into()); }
+                }
+                if let CircularDistribution::Spacing { angle_degrees } = distribution {
+                    if !angle_degrees.is_finite() || angle_degrees <= 0.0 || angle_degrees * (count - 1) as f64 >= 360.0 {
+                        return Err("angular spacing must be positive and span less than 360 degrees".into());
+                    }
                 }
             }
         }
@@ -244,12 +350,9 @@ impl Heights {
     }
 }
 
-/// A description of the raw material. The first-light slice models only a
-/// rectangular block, defined **relative to the part** so it auto-fits: the
-/// part's XY bounding box grown by per-axis offsets, hanging `thickness` below
-/// an explicit top Z. The app resolves it to a concrete box with the loaded
-/// geometry's bounds ([`Stock::resolve`]). `from-model` stock arrives with the
-/// kernel as a further variant.
+/// Input material for a setup: a model-relative box, or the remaining solid
+/// simulated from the preceding setup. Document-level bounds resolution accounts
+/// for both model selection and the work axes of inherited stock.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Stock {
     /// A block sized from the part's XY bounding box: grown by `x_offset` on both
@@ -268,6 +371,10 @@ pub enum Stock {
     },
     /// A box grown independently on the negative and positive side of each axis.
     RelativeBox { offsets: [[f64; 3]; 2] },
+    /// Remaining material after the preceding setup in document execution order.
+    /// Resolve its enclosing bounds through `Document::stock_bounds_for`; the
+    /// machining worker supplies the actual simulated solid.
+    PreviousSetup,
 }
 
 impl Stock {
@@ -289,7 +396,9 @@ impl Stock {
         }
     }
 
-    /// Resolve stock against all three model bounds in setup coordinates.
+    /// Resolve box stock against all three model bounds in setup coordinates.
+    /// `PreviousSetup` needs `Document::stock_bounds_for`; this local method
+    /// can only return the supplied bounds for that document-dependent mode.
     pub fn resolve_bounds(&self, min: [f64; 3], max: [f64; 3]) -> ([f64; 3], [f64; 3]) {
         match *self {
             Self::BoundingBox {
@@ -310,6 +419,7 @@ impl Stock {
                 });
                 (lo, std::array::from_fn(|i| lo[i] + size[i]))
             }
+            Self::PreviousSetup => (min, max),
             Self::RelativeBox { offsets } => (
                 std::array::from_fn(|i| min[i] - offsets[0][i]),
                 std::array::from_fn(|i| max[i] + offsets[1][i]),
@@ -708,6 +818,10 @@ impl Default for Clearing {
 /// out to*.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClearParams {
+    /// Vertical lift above the cutting level during local linking moves, mm.
+    /// Zero keeps transitions at depth; distant links still use clearance.
+    #[serde(default)]
+    pub lift_height: f64,
     /// Maximum depth removed per pass, mm. `0` clears the full depth in one pass.
     #[serde(default)]
     pub stepdown: f64,
@@ -752,6 +866,7 @@ pub struct ClearParams {
 impl Default for ClearParams {
     fn default() -> Self {
         Self {
+            lift_height: 0.0,
             stepdown: 0.0,
             // Half the diameter: the same spacing a pocket's own default overlap gives.
             overlap: 0.5,
@@ -837,11 +952,31 @@ pub struct PocketOp {
     /// broken operation rather than a refusal. Requiring the field means a document that
     /// reached the deserializer un-migrated fails there, loudly, with the field named.
     pub clear: ClearParams,
+    /// Optional radial wall finishing, with compensation computed in the toolpath.
+    #[serde(default)]
+    pub finishing: crate::PocketFinishing,
 }
 
-/// A 3D adaptive roughing operation over a CAD solid. Its geometry is resolved
-/// from the operation's `AdaptiveClearing` geometry binding; no display mesh is
-/// stored or consulted by the toolpath generator.
+/// 3D surface finishing over a CAD solid or selected faces.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParallelOp {
+    pub id: u32,
+    pub tool: u32,
+    #[serde(default)]
+    pub spindle_rpm: f64,
+    #[serde(default)]
+    pub tool_preset: Option<crate::ToolPreset>,
+    #[serde(default)]
+    pub cooling: crate::Cooling,
+    #[serde(default)]
+    pub entry_feeds: crate::EntryFeeds,
+    #[serde(default = "default_work_offset")]
+    pub work_offset: u32,
+    #[serde(default)]
+    pub params: ParallelParams,
+}
+
+/// 3D adaptive roughing resolved from an independent CAD machining projection.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveOp {
     pub id: u32,
@@ -864,6 +999,9 @@ pub struct AdaptiveOp {
 /// explicit; invalid or unsupported combinations stop generation with an error.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveParams {
+    /// Vertical lift above the cutting level during stay-down transitions, mm.
+    #[serde(default)]
+    pub lift_height: f64,
     /// Preferred entry and exit locations in setup XY.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<[f64; 2]>,
@@ -942,6 +1080,7 @@ impl AdaptiveParams {
 impl Default for AdaptiveParams {
     fn default() -> Self {
         Self {
+            lift_height: 0.0,
             start: None,
             end: None,
             tolerance: default_adaptive_tolerance(),
@@ -959,7 +1098,21 @@ impl Default for AdaptiveParams {
 
 #[cfg(test)]
 mod adaptive_params_tests {
-    use super::{AdaptiveContainment, AdaptiveParams};
+    use super::{AdaptiveContainment, AdaptiveParams, ClearParams};
+
+    #[test]
+    fn lift_height_defaults_to_zero_and_round_trips() {
+        let mut clear: ClearParams = serde_json::from_str("{}").unwrap();
+        let mut adaptive: AdaptiveParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(clear.lift_height, 0.0);
+        assert_eq!(adaptive.lift_height, 0.0);
+        clear.lift_height = 2.0;
+        adaptive.lift_height = 2.0;
+        let restored: ClearParams = serde_json::from_value(serde_json::to_value(clear).unwrap()).unwrap();
+        assert_eq!(restored, clear);
+        let restored: AdaptiveParams = serde_json::from_value(serde_json::to_value(adaptive).unwrap()).unwrap();
+        assert_eq!(restored, adaptive);
+    }
 
     #[test]
     fn simplification_follows_tolerance_and_ignores_legacy_override() {
@@ -1595,6 +1748,8 @@ pub enum Operation {
     Pocket(PocketOp),
     /// 3D adaptive roughing over a CAD solid.
     Adaptive(AdaptiveOp),
+    /// Equally spaced, surface-following 3D finishing passes.
+    Parallel(ParallelOp),
     /// A facing operation.
     Face(FaceOp),
     /// A chamfering operation.
@@ -1617,6 +1772,7 @@ impl Operation {
             Operation::Drill(op) => op.id,
             Operation::Pocket(op) => op.id,
             Operation::Adaptive(op) => op.id,
+            Operation::Parallel(op) => op.id,
             Operation::Face(op) => op.id,
             Operation::Chamfer(op) => op.id,
             Operation::Bore(op) => op.id,
@@ -1634,6 +1790,7 @@ impl Operation {
             Operation::Drill(op) => op.tool,
             Operation::Pocket(op) => op.tool,
             Operation::Adaptive(op) => op.tool,
+            Operation::Parallel(op) => op.tool,
             Operation::Face(op) => op.tool,
             Operation::Chamfer(op) => op.tool,
             Operation::Bore(op) => op.tool,
@@ -1669,6 +1826,7 @@ impl Operation {
             Operation::Drill(op) => op.spindle_rpm,
             Operation::Pocket(op) => op.spindle_rpm,
             Operation::Adaptive(op) => op.spindle_rpm,
+            Operation::Parallel(op) => op.spindle_rpm,
             Operation::Face(op) => op.spindle_rpm,
             Operation::Chamfer(op) => op.spindle_rpm,
             Operation::Bore(op) => op.spindle_rpm,
@@ -1685,6 +1843,7 @@ impl Operation {
             Operation::Drill(op) => op.spindle_rpm = rpm,
             Operation::Pocket(op) => op.spindle_rpm = rpm,
             Operation::Adaptive(op) => op.spindle_rpm = rpm,
+            Operation::Parallel(op) => op.spindle_rpm = rpm,
             Operation::Face(op) => op.spindle_rpm = rpm,
             Operation::Chamfer(op) => op.spindle_rpm = rpm,
             Operation::Bore(op) => op.spindle_rpm = rpm,
@@ -1703,6 +1862,7 @@ impl Operation {
             Operation::Drill(op) => op.work_offset,
             Operation::Pocket(op) => op.work_offset,
             Operation::Adaptive(op) => op.work_offset,
+            Operation::Parallel(op) => op.work_offset,
             Operation::Face(op) => op.work_offset,
             Operation::Chamfer(op) => op.work_offset,
             Operation::Bore(op) => op.work_offset,
@@ -1719,6 +1879,7 @@ impl Operation {
             Operation::Drill(op) => op.work_offset = work_offset,
             Operation::Pocket(op) => op.work_offset = work_offset,
             Operation::Adaptive(op) => op.work_offset = work_offset,
+            Operation::Parallel(op) => op.work_offset = work_offset,
             Operation::Face(op) => op.work_offset = work_offset,
             Operation::Chamfer(op) => op.work_offset = work_offset,
             Operation::Bore(op) => op.work_offset = work_offset,
@@ -1735,6 +1896,7 @@ impl Operation {
             Operation::Drill(op) => op.id = id,
             Operation::Pocket(op) => op.id = id,
             Operation::Adaptive(op) => op.id = id,
+            Operation::Parallel(op) => op.id = id,
             Operation::Face(op) => op.id = id,
             Operation::Chamfer(op) => op.id = id,
             Operation::Bore(op) => op.id = id,
@@ -1753,6 +1915,7 @@ impl Operation {
             Operation::Drill(op) => op.tool = tool,
             Operation::Pocket(op) => op.tool = tool,
             Operation::Adaptive(op) => op.tool = tool,
+            Operation::Parallel(op) => op.tool = tool,
             Operation::Face(op) => op.tool = tool,
             Operation::Chamfer(op) => op.tool = tool,
             Operation::Bore(op) => op.tool = tool,
@@ -1880,12 +2043,13 @@ pub struct Setup {
     /// `1` by default; editable and swappable like an extra origin's index.
     #[serde(default = "default_origin_index")]
     pub origin_index: u32,
-    /// Optional **tool-change height** (absolute Z, mm): the plane the planner lifts to
+    /// Optional **tool-change height** (absolute setup Z, mm): the plane the planner lifts to
     /// before a tool change (`M6`) or a manual reorientation (`M00`), then descends from
     /// once the next operation takes over. It sits **above** the toolpath
     /// [`clearance`](Heights::clearance) plane — a tool change wants maximum clearance
     /// (an ATC swing, an operator's hands during a re-fixture), not the cutting-traverse
-    /// height. `None` (the default) resolves to the machine's max Z travel at plan time
+    /// height. The editor presents this relative to the base workpiece origin.
+    /// `None` (the default) resolves to the machine's max WCS Z at plan time
     /// via [`resolved_tool_change_height`](Self::resolved_tool_change_height).
     #[serde(default)]
     pub tool_change_height: Option<f64>,
@@ -1905,7 +2069,7 @@ impl Setup {
             allowances.validate()?;
             let (radial, axial) = allowances.effective();
             let supported = match operation {
-                Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) => true,
+                Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) | Operation::Parallel(_) => true,
                 Operation::Face(_) => {
                     if radial > 0.0 {
                         return Err(format!("operation {operation_id}: Face supports axial stock to leave only; radial allowance must be 0 mm"));
@@ -1916,7 +2080,7 @@ impl Setup {
                 | Operation::Engrave(_) | Operation::Carve(_) => false,
             };
             if !supported && (radial > 0.0 || axial > 0.0) {
-                return Err(format!("operation {operation_id}: stock to leave is supported for Profile, Pocket, Face, and Adaptive only"));
+                return Err(format!("operation {operation_id}: stock to leave is supported for Profile, Pocket, Face, Adaptive, and Parallel only"));
             }
         }
         Ok(())
@@ -1942,7 +2106,7 @@ impl Setup {
         let positions: std::collections::HashMap<u32, usize> = self.operations.iter().enumerate().map(|(i,o)|(o.id(),i)).collect();
         for p in &self.patterns {
             if p.id == 0 || !ids.insert(p.id) { return Err(format!("pattern ID {} is zero or duplicated", p.id)); }
-            p.kind.validate()?;
+            p.options.validate(p.kind)?;
             if p.members.is_empty() { return Err(format!("pattern '{}' has no source operations", p.name)); }
             let mut indices = Vec::new();
             let mut datum = None;
@@ -1970,10 +2134,11 @@ impl Setup {
 
     /// The tool-change height to plan with: the explicit
     /// [`tool_change_height`](Self::tool_change_height) if set, else `machine_max_z`
-    /// (the top of the machine's Z envelope). The caller supplies `machine_max_z`
-    /// because the setup does not carry the machine.
+    /// (the top of the machine's Z envelope, relative to the base work datum).
+    /// The result is in setup coordinates, like the planner's clearance planes.
+    /// Explicit heights are already stored in setup coordinates.
     pub fn resolved_tool_change_height(&self, machine_max_z: f64) -> f64 {
-        self.tool_change_height.unwrap_or(machine_max_z)
+        self.tool_change_height.unwrap_or(machine_max_z + self.origin[2])
     }
 
     /// The part-space position of the origin with the given `index`: the base
@@ -2088,9 +2253,18 @@ impl Document {
             setup.id = 1;
         }
         Self {
-            schema_version: SCHEMA_VERSION,
             active_setup_id: setup.id,
             setups: vec![setup],
+            ..Self::empty()
+        }
+    }
+
+    /// A geometry-only project, before its first machining setup is created.
+    pub fn empty() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            active_setup_id: 0,
+            setups: Vec::new(),
             geometry: crate::GeometryState::default(),
             cad_linked_operations: Default::default(),
             excluded_operations: Default::default(),
@@ -2102,12 +2276,14 @@ impl Document {
             pattern_id_floor: 0,
         }
     }
-    pub fn setup(&self) -> &Setup {
+    pub fn active_setup(&self) -> Option<&Setup> {
         self.setups
             .iter()
             .find(|s| s.id == self.active_setup_id)
             .or_else(|| self.setups.first())
-            .expect("document must contain a setup")
+    }
+    pub fn setup(&self) -> &Setup {
+        self.active_setup().expect("document must contain a setup")
     }
     pub fn setup_mut(&mut self) -> &mut Setup {
         let id = self.active_setup_id;
@@ -2168,6 +2344,63 @@ impl Document {
 #[cfg(test)]
 mod pattern_tests {
     use super::*;
+
+    #[test]
+    fn pattern_options_preserve_legacy_grid_and_deserialization() {
+        let pattern: OperationPattern = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "Legacy", "members": [3],
+            "kind": { "kind": "rectangular", "nx": 3, "ny": 2, "dx": 25.0, "dy": -10.0 }
+        })).unwrap();
+        pattern.options.validate(pattern.kind).unwrap();
+        for index in 0..6 {
+            assert_eq!(pattern.options.transform_xy(pattern.kind, index), pattern.kind.transform_xy(index));
+        }
+        assert_eq!(pattern.options.instance_indices(pattern.kind), vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn linear_extent_rotates_both_directions_and_reverses_independently() {
+        let kind = PatternKind::Rectangular { nx: 3, ny: 2, dx: 40.0, dy: 15.0 };
+        let mut options = PatternOptions { spacing: PatternSpacing::Extent, ..Default::default() };
+        options.directions[0].angle_degrees = 30.0;
+        options.directions[1].angle_degrees = 120.0;
+        options.directions[1].reversed = true;
+        options.validate(kind).unwrap();
+        let (offset, _) = options.transform_xy(kind, 5).unwrap();
+        assert!((offset[0] - (40.0 * 30f64.to_radians().cos() + 7.5)).abs() < 1e-10);
+        assert!((offset[1] - (20.0 - 15.0 * 120f64.to_radians().sin())).abs() < 1e-10);
+    }
+
+    #[test]
+    fn symmetric_pattern_keeps_source_identity_and_filters_before_reversing() {
+        let kind = PatternKind::Rectangular { nx: 5, ny: 1, dx: 40.0, dy: 0.0 };
+        let mut options = PatternOptions { spacing: PatternSpacing::Extent, keep_original: false, reverse: true, ..Default::default() };
+        options.directions[0].symmetric = true;
+        assert_eq!(options.instance_indices(kind), vec![4, 3, 2, 1]);
+        let offsets: Vec<_> = (0..5).map(|i| options.transform_xy(kind, i).unwrap().0[0]).collect();
+        assert_eq!(offsets, vec![0.0, 10.0, -10.0, 20.0, -20.0]);
+    }
+
+    #[test]
+    fn angular_spacing_and_extent_have_distinct_endpoints() {
+        let make = |distribution| PatternKind::Circular { center_xy: [5.0, -3.0], count: 4, distribution, direction: PatternDirection::Cw };
+        let spacing = make(CircularDistribution::Spacing { angle_degrees: 45.0 });
+        spacing.validate().unwrap();
+        assert_eq!(spacing.transform_xy(3).unwrap().1, -135.0);
+        assert_eq!(make(CircularDistribution::Partial { sweep_degrees: 45.0 }).transform_xy(3).unwrap().1, -45.0);
+        assert_eq!(make(CircularDistribution::Full).transform_xy(3).unwrap().1, -270.0);
+        assert!(make(CircularDistribution::Spacing { angle_degrees: 120.0 }).validate().is_err(), "duplicate full-circle endpoint is rejected");
+    }
+
+    #[test]
+    fn pattern_options_reject_parallel_directions_and_overflow() {
+        let kind = PatternKind::Rectangular { nx: 3, ny: 2, dx: 20.0, dy: 10.0 };
+        let mut options = PatternOptions::default();
+        options.directions[1].angle_degrees = 180.0;
+        assert!(options.validate(kind).is_err());
+        options.directions[1].angle_degrees = 90.0;
+        assert!(options.validate(PatternKind::Rectangular { nx: 3, ny: 2, dx: f64::MAX, dy: 10.0 }).is_err());
+    }
 
     #[test]
     fn circular_transform_keeps_identity_and_rotates_about_nonzero_center() {

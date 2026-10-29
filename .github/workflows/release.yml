@@ -70,7 +70,7 @@ jobs:
       # `--features gui` is the whole point: cam-app's `default = []`, so without it
       # the packaged binary is the headless stub that prints "run cargo run" and exits.
       - name: Build the desktop app
-        run: cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio
+        run: cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio --bin opencamstudio-mcp
       - name: Build the AppImage
         run: |
           set -euo pipefail
@@ -80,6 +80,7 @@ jobs:
                    $APP/usr/share/applications \
                    $APP/usr/share/icons/hicolor/256x256/apps
           cp target/release/opencamstudio $APP/usr/bin/
+          cp target/release/opencamstudio-mcp $APP/usr/bin/
           python .github/scripts/package-occt.py stage "$APP"
           cp crates/cam-app/assets/opencamstudio-256.png \
              $APP/usr/share/icons/hicolor/256x256/apps/opencamstudio.png
@@ -171,7 +172,7 @@ jobs:
           cargo build --locked --release -p cam-kernel --features occt --example occt_smoke --target aarch64-apple-darwin
       - name: Build the desktop app
         run: >
-          cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio
+          cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio --bin opencamstudio-mcp
           --target aarch64-apple-darwin
       - name: Build the .app bundle and .dmg
         run: |
@@ -182,6 +183,7 @@ jobs:
           BUNDLE_VERSION=${BUNDLE_VERSION%-dev}
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/aarch64-apple-darwin/release/opencamstudio "$APP/Contents/MacOS/"
+          cp target/aarch64-apple-darwin/release/opencamstudio-mcp "$APP/Contents/MacOS/"
           python .github/scripts/package-occt.py stage "$APP"
           # .icns from the committed 1024 PNG. sips and iconutil are part of macOS, so
           # this needs no rasteriser and no third-party tool.
@@ -272,7 +274,7 @@ jobs:
             --skip silhouette_projection_is_independent_of_display_quality_on_curved_step_models
           cargo build --locked --release -p cam-kernel --features occt --example occt_smoke
       - name: Build the desktop app
-        run: cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio
+        run: cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio --bin opencamstudio-mcp
       # The portable application now needs OCCT DLLs beside the executable.
       - name: Stage portable app and installer dependencies
         shell: bash
@@ -280,6 +282,7 @@ jobs:
           set -euo pipefail
           mkdir -p target/occt-windows
           cp target/release/opencamstudio.exe target/occt-windows/
+          cp target/release/opencamstudio-mcp.exe target/occt-windows/
           python .github/scripts/package-occt.py stage target/occt-windows
           python .github/scripts/package-occt.py verify target/occt-windows \
             --smoke target/release/examples/occt_smoke.exe

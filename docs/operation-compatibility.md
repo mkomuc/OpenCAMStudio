@@ -6,13 +6,13 @@ alone does not establish a suitable cutter, cutting depth or safe approach.
 | Operation | Use it for | Main limits |
 | --- | --- | --- |
 | Profile | Cutting along drawing contours, planar CAD chains, face contours or body silhouettes. | Auto/Closed CAD chains need supported vertical walls. Explicit Open mode uses operator-defined depth and does not finish adjoining blends. Linked CAD excludes radial roughing, controller compensation and taper. |
-| Pocket / 2D adaptive | Clearing a closed region with islands. | CAD needs an upward floor and complete vertical walls of constant section. Slopes, blended walls/floors, intermediate openings and holes through the floor are rejected. |
+| Pocket / 2D adaptive | Clearing a closed region with islands, or inside a closed planar CAD chain. | Choose a floor face to infer the pocket and its islands, or Add Chain to select a boundary loop or connected closed edges. For a chain, set the cutting depth in Heights; the selected chain defines the top plane and does not infer islands. |
 | Drill | Drawing circles or cylindrical CAD bores aligned with setup Z; pecking and dwell. | Grouped holes need equal diameters and heights. Cutter diameter must match. Conical tips, counterbore stacks and breakthrough are not inferred. |
 | Face | Facing a drawing boundary, upward planar CAD target or body silhouette. | CAD target must be the highest accessible plane; raised protected material blocks lower facing. Stock to Leave is axial only. |
-| Chamfer | Planar paths or modeled inclined planar bevel faces. | Cutter angle must match modeled bevels. Rounded fillets, general conical/freeform bevels and nonplanar edge following are unsupported. |
+| Chamfer | Planar paths or modeled inclined planar bevel faces. | A modeled bevel/cutter angle mismatch warns. The strategy needs a conical cutter; rounded fillets, general conical/freeform bevels and nonplanar edge following are unsupported. |
 | Bore | Helically milling an accessible circular hole or boss with an end mill. | It finishes walls rather than clearing solid holes. CAD supports certified cylinders; drawing taper is limited to reachable slopes. Mixed sizes/depths need separate operations. |
 | Thread | Milling a cylindrical internal or external 60° thread. | Requires a suitable thread mill, explicit major diameter/pitch and adequate prepared-bore clearance. Full-profile cutter pitch must match. No taper or other thread forms. |
-| Engrave | Following open or closed planar paths with a cutting V-bit tip. | Groove width follows tool shape and depth. Flat noncutting tips and end mills are rejected. No text generation or nonplanar surface following. |
+| Engrave | Following open or closed planar paths with the tool axis. | Groove width follows tool shape and depth; cutter suitability and reach warn. No text generation or nonplanar surface following. |
 | Carve | Variable-depth V-carving within a closed region, optionally with a separate clearing cutter. | Depth is a maximum; narrow areas may remain shallower. No arbitrary sculpted-surface or multi-plane carving. |
 | 3D Adaptive Clearing | Roughing selected CAD bodies or projected face areas at changing Z levels. | Conservative three-axis roughing; undercuts stay protected. No general freeform finishing, rest machining or pattern repetition. |
 

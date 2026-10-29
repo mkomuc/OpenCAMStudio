@@ -17,7 +17,7 @@ impl App {
             let number = self.controller.pending_op()?.tool?;
             self.operation_tools
                 .iter()
-                .chain(self.controller.document().setup().tools.iter())
+                .chain(self.controller.inspection_setup().tools.iter())
                 .find(|tool| tool.number == number)
                 .cloned()
         }
@@ -82,7 +82,7 @@ impl App {
             self.controller
                 .pending_op()
                 .and_then(|pending| pending.replacing)
-                .map(|id| self.controller.document().setup().stock_to_leave_for(id))
+                .map(|id| self.controller.inspection_setup().stock_to_leave_for(id))
                 .unwrap_or_default(),
         );
         self.height_draft_id = Some(0);
@@ -107,7 +107,7 @@ impl App {
     pub(super) fn sync_creation_geometry_heights(&mut self) {
         if !matches!(
             self.cad_pending_kind,
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive)
+            Some(OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel)
         ) {
             return;
         }
@@ -132,7 +132,13 @@ impl App {
                 document.setup_mut().tools.push(tool.clone());
             }
         }
-        let defaults = crate::cad_operations::selection_height_defaults(&document, &operation);
+        let defaults = if self.cad_pending_kind == Some(OpKind::Pocket)
+            && !self.controller.cad_selection().first().is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge))
+        {
+            cam_model::OperationHeightSettings::default()
+        } else {
+            crate::cad_operations::selection_height_defaults(&document, &operation)
+        };
         let previous = self
             .creation_geometry_height_defaults
             .clone()
@@ -193,6 +199,9 @@ impl App {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
         if let Operation::Profile(profile) = &mut draft {
+            if profile.selections.is_none() {
+                profile.selections = self.active_profile_geometry_entries();
+            }
             if profile.selections.is_some() {
                 let binding = crate::cad_operations::resolve_profile_entries(
                     self.controller.document(),
@@ -278,10 +287,12 @@ impl App {
                     op.z_top = new.z_top;
                     op.z_bottom = new.z_bottom;
                 }
-                (Operation::Adaptive(_), Operation::Adaptive(_)) => {}
+                (Operation::Adaptive(_), Operation::Adaptive(_)) | (Operation::Parallel(_), Operation::Parallel(_)) => {}
                 _ => return Err("Geometry does not match operation".into()),
             }
-            if crate::cad_operations::surface_recipe(&binding.recipe) {
+            if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary {
+                binding.heights.bottom = binding.heights.top - document.operation_base_cutting_heights(&draft).depth();
+            } else if crate::cad_operations::surface_recipe(&binding.recipe) {
                 binding.heights = document.operation_base_cutting_heights(&draft);
             }
             Ok((draft, Some(binding)))
@@ -352,19 +363,11 @@ impl App {
         if self.cad_pending_kind.is_some() {
             col =
                 col.push(self.geometry_list(cad_geometry_labels(self.controller.cad_selection())));
-            for candidate in &self.cad_candidates {
-                col = col.push(
-                    inspector_button(format!(
-                        "{:?} {}",
-                        candidate.entity.kind, candidate.entity.id
-                    ))
-                    .on_press(Message::CadSelect(candidate.entity.clone())),
-                );
-            }
-            if let Err(reason) = self
-                .controller
-                .preview_cad_operation(kind, self.controller.cad_selection())
-            {
+            let valid = self.validate_active_profile_geometry().unwrap_or_else(|| {
+                self.controller.preview_cad_operation(kind, self.controller.cad_selection())
+                    .map(|_| ())
+            });
+            if let Err(reason) = valid {
                 if !self.controller.cad_selection().is_empty() {
                     col = col.push(text(reason).size(12).color(palette::WARN));
                 }

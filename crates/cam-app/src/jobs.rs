@@ -14,7 +14,7 @@ use cam_toolpath::{
 use std::sync::{mpsc, Arc, Mutex};
 
 #[path = "job_simulation.rs"]
-mod simulation;
+pub(crate) mod simulation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobStamp {
@@ -72,6 +72,8 @@ pub(crate) struct JobInputs {
     pub simulation_accuracy: f32,
     /// Fixed from the full playback program so partial frames share one grid.
     pub preview_resolution: Option<f64>,
+    /// Generate editable source paths without simulating stock removal.
+    pub toolpath_preview: bool,
 }
 impl JobInputs {
     pub fn execute(
@@ -79,16 +81,24 @@ impl JobInputs {
         cancel: &CancelToken,
         cache: &mut OperationCache,
         progress: &Progress,
-        simulation: &mut SimulationCache,
+        simulation: &mut simulation::StockSimulationCache,
     ) -> RunOutcome {
         cache.reset_stats();
+        if self.document.setups.is_empty() {
+            return RunOutcome {
+                completion: JobCompletion::Failed,
+                diagnostics: vec![Diagnostic::error("Create a setup before generating toolpaths.")
+                    .with_code(DiagnosticCode::InvalidInput)],
+                ..Default::default()
+            };
+        }
         if cancel.is_cancelled() {
             return RunOutcome {
                 completion: JobCompletion::Cancelled,
                 ..Default::default()
             };
         }
-        let job = if let Some(program) = &self.preview_program {
+        let mut job = if let Some(program) = &self.preview_program {
             cam_toolpath::JobResult {
                 program: program.clone(),
                 diagnostics: Vec::new(),
@@ -163,6 +173,21 @@ impl JobInputs {
             job
         };
         let mut completion = job.completion;
+        let stock = if !self.toolpath_preview
+            && completion == JobCompletion::Complete
+            && !cancel.is_cancelled()
+        {
+            match self.simulate_stock(&mut job.program, cancel, cache, progress, simulation) {
+                Ok(stock) => stock,
+                Err(error) => {
+                    completion = JobCompletion::Failed;
+                    job.diagnostics.push(error);
+                    simulation::StockSimulation::default()
+                }
+            }
+        } else {
+            simulation::StockSimulation::default()
+        };
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         let mut scene = if job.program.validate().is_ok() {
             Scene::from_program_controlled(&job.program, &|| cancel.is_cancelled())
@@ -207,11 +232,6 @@ impl JobInputs {
             }
             scene.add_open_path(path.points(), PART);
         }
-        let stock = if completion == JobCompletion::Complete && !cancel.is_cancelled() {
-            self.simulate_stock(&job.program, cancel, progress, simulation)
-        } else {
-            simulation::StockSimulation::default()
-        };
         if cancel.is_cancelled() {
             completion = JobCompletion::Cancelled;
         }
@@ -224,6 +244,7 @@ impl JobInputs {
             program: job.program,
             diagnostics: job.diagnostics,
             scene,
+            initial_stock: stock.initial,
             stock_vertices: stock.vertices,
             stock_machined: stock.machined,
             stock_operations: stock.operations,
@@ -252,7 +273,7 @@ pub(crate) struct JobOutput {
 type TestHook = Arc<dyn Fn(&CancelToken) + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct JobService {
-    simulation: Arc<Mutex<SimulationCache>>,
+    simulation: Arc<Mutex<simulation::StockSimulationCache>>,
     serial: u64,
     expected: Option<JobStamp>,
     running: Option<Running>,

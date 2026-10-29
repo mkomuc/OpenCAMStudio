@@ -23,7 +23,7 @@ pub(super) struct HeightOverlay {
 
 impl App {
     pub(super) fn preview_safety_heights(&self, id: u32) -> cam_model::Heights {
-        let saved = self.controller.document().setup().heights_for(id);
+        let saved = self.controller.inspection_setup().heights_for(id);
         let value = |field, fallback| {
             self.fields
                 .get(&field)
@@ -80,7 +80,7 @@ impl App {
             return None;
         };
         let heights = self.resolve_height_editor(id).ok()?;
-        let setup = self.controller.document().setup();
+        let setup = self.controller.inspection_setup();
         let (min, max) = self.controller.stock_box();
         let pad = (max[0] - min[0]).max(max[1] - min[1]).max(1.) * 0.08;
         let colors = [
@@ -105,7 +105,7 @@ impl App {
                 Some(HeightPlane {
                     name: names[plane.index()],
                     z,
-                    value_label: self.height_display_value(plane, z),
+                    value_label: self.height_display_value(id, plane, z),
                     color: colors[plane.index()],
                     active: focused.as_deref()
                         == Some(super::height_editor::plane_input_id(plane).as_str()),
@@ -244,9 +244,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -270,26 +268,22 @@ mod tests {
         assert_eq!(app.height_offsets[&P::Clearance], "20");
         let _ = app.update(Message::Apply);
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(P::Clearance)
                 .offset,
             20.
         );
         assert_eq!(
-            app.controller.document().setup().heights,
+            app.controller.inspection_setup().heights,
             original.setup().heights
         );
         assert!(app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .iter()
             .filter(|o| o.id() != id)
             .all(|o| !app
-                .controller
-                .document()
-                .setup()
+                .controller.inspection_setup()
                 .height_settings
                 .contains_key(&o.id())));
         let path = std::env::temp_dir().join(format!(
@@ -302,7 +296,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert_eq!(
             reopened.document().setup().height_settings[&id],
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
         );
         let _ = app.update(Message::Undo);
         assert_eq!(app.controller.document(), &original);
@@ -358,9 +352,7 @@ mod tests {
         let _ = app.update(Message::OperationTabChanged(OperationTab::Tool));
         assert!(app.height_preview(camera, 0.).is_none());
         assert!(app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .height_settings
             .contains_key(&id));
     }
@@ -390,7 +382,7 @@ mod tests {
         assert!(app.resolve_height_editor(id).unwrap().feed.is_none());
         let _ = app.update(Message::Apply);
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(P::Feed)
                 .reference,
             R::Disabled
@@ -418,7 +410,7 @@ mod tests {
         let _ = app.update(Message::HeightPickToggle(P::Top));
         let _ = app.update(Message::Apply);
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(P::Top)
                 .drawings
                 .len(),
@@ -441,9 +433,7 @@ mod tests {
         ] {
             app.controller.new_operation(kind);
             let id = app
-                .controller
-                .document()
-                .setup()
+                .controller.inspection_setup()
                 .operations
                 .last()
                 .unwrap()
@@ -481,6 +471,34 @@ mod tests {
         }
     }
     #[test]
+    fn height_labels_use_the_operation_datum_while_planes_stay_in_model_space() {
+        use cam_model::HeightPlaneKind as P;
+        let (mut app, id) = operation_editor();
+        app.controller.edit_setup(|setup| {
+            setup.origin = [-476.8, 367., 54.];
+            setup.extra_origins.push(cam_model::Origin {
+                index: 2,
+                position: [-476.8, 367., 50.],
+            });
+            setup.frame.world_from_setup.rotation =
+                [[-1., 0., 0.], [0., 0., 1.], [0., 1., 0.]];
+        });
+        // The editor may be editing a different datum than the tree selection.
+        app.operation_draft.as_mut().unwrap().set_work_offset(2);
+        assert_eq!(app.height_display_value(id, P::Top, 74.), "24");
+        assert_eq!(app.height_display_value(id, P::Bottom, 55.), "5");
+        let camera = OrbitCamera::framed([0., 0., 0.], [100., 100., 100.]);
+        let preview = app.height_preview(camera, 0.).unwrap();
+        for plane in preview.planes {
+            assert!(plane.corners.iter().all(|p| p[1] == plane.z as f32));
+            assert_eq!(plane.value_label.parse::<f64>().unwrap(), plane.z - 50.);
+        }
+        app.operation_draft.as_mut().unwrap().set_work_offset(1);
+        assert_eq!(app.height_display_value(id, P::Top, 74.), "20");
+        assert_eq!(app.height_display_value(id, P::Bottom, 55.), "1");
+    }
+
+    #[test]
     fn height_labels_keep_entered_precision_without_float_tails() {
         use cam_model::{HeightPlaneKind as P, HeightReference as R};
         let (mut app, id) = operation_editor();
@@ -489,18 +507,18 @@ mod tests {
         let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "0.20".into()));
         let _ = app.update(Message::HeightReferenceChanged(P::Feed, R::Disabled));
         let z = app.resolve_height_editor(id).unwrap().clearance;
-        assert_eq!(app.height_display_value(P::Clearance, z), "0.30");
+        assert_eq!(app.height_display_value(id, P::Clearance, z), "0.30");
         assert_eq!(app.height_offsets[&P::Clearance], "0.20");
-        assert_eq!(app.height_display_value(P::Bottom, -0.00000000001), "0");
+        assert_eq!(app.height_display_value(id, P::Bottom, -0.00000000001), "0");
         let _ = app.update(Message::HeightOffsetChanged(
             P::Clearance,
             "0.12345678".into(),
         ));
         assert_eq!(
-            app.height_display_value(P::Clearance, 0.22345678),
+            app.height_display_value(id, P::Clearance, 0.22345678),
             "0.22345678"
         );
         let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "2e-4".into()));
-        assert_eq!(app.height_display_value(P::Clearance, 0.1002), "0.1002");
+        assert_eq!(app.height_display_value(id, P::Clearance, 0.1002), "0.1002");
     }
 }

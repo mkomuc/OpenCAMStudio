@@ -18,6 +18,7 @@ pub(super) enum EntryMessage {
     Curves(ProfileCurves),
     Side(ProfileSideRule),
     ChainMode(ProfileChainMode),
+    IndividualEdges(bool),
     Reverse(bool),
     SetupModels(bool),
     Tolerance(String),
@@ -51,6 +52,32 @@ fn kind_icon(kind: ProfileGeometryKind) -> &'static str {
 }
 
 impl App {
+    /// Direct picks and named entries share geometry extraction and advisory verification.
+    pub(super) fn active_profile_geometry_entries(&self) -> Option<Vec<ProfileGeometryEntry>> {
+        let Some(Operation::Profile(profile)) = &self.operation_draft else {
+            return None;
+        };
+        let selected = self.controller.cad_selection();
+        let direct_selection =
+            self.cad_pending_kind == Some(OpKind::Profile) && !selected.is_empty();
+        (profile.selections.is_some() || direct_selection).then(|| self.preview_profile_entries())
+    }
+
+    pub(super) fn validate_active_profile_geometry(&self) -> Option<Result<(), String>> {
+        let entries = self.active_profile_geometry_entries()?;
+        let Some(Operation::Profile(mut profile)) = self.operation_draft.clone() else {
+            return None;
+        };
+        profile.selections = Some(entries);
+        Some(
+            crate::cad_operations::resolve_profile_entries(
+                self.controller.document(),
+                &mut profile,
+            )
+            .map(|_| ()),
+        )
+    }
+
     pub(super) fn profile_entries(&self) -> Vec<ProfileGeometryEntry> {
         let Some(Operation::Profile(profile)) = &self.operation_draft else {
             return Vec::new();
@@ -67,32 +94,21 @@ impl App {
                 .map(|b| b.selected.clone())
                 .unwrap_or_default()
         };
-        let mut entries = Vec::new();
-        for reference in refs {
-            let kind = match reference.kind {
-                EntityKind::Face => ProfileGeometryKind::FaceContours,
-                EntityKind::Silhouette | EntityKind::Body => ProfileGeometryKind::Silhouette,
-                _ => ProfileGeometryKind::Chain,
-            };
-            let mut entry = ProfileGeometryEntry::new(
-                kind,
-                format!("{} {}", kind_name(kind), entries.len() + 1),
-            );
-            entry.use_setup_models = false;
-            // The older silhouette recipe contained only the body envelope.
-            // Configuring it must not silently add through-hole contours.
-            if kind == ProfileGeometryKind::Silhouette
+        let mut entries = crate::cad_operations::profile_entries_from_selection(&refs);
+        for entry in &mut entries {
+            // Preserve the older envelope-only recipe when opening its settings.
+            if entry.kind == ProfileGeometryKind::Silhouette
                 && self
                     .controller
                     .geometry_state()
                     .bindings
                     .get(&profile.id)
-                    .is_some_and(|b| matches!(b.recipe, ExtractionRecipe::ProfileLoop { .. }))
+                    .is_some_and(|binding| {
+                        matches!(binding.recipe, ExtractionRecipe::ProfileLoop { .. })
+                    })
             {
                 entry.curves = ProfileCurves::Outer;
             }
-            entry.source = ProfileGeometrySource::Cad(vec![reference]);
-            entries.push(entry);
         }
         if entries.is_empty() && (self.cad_pending_kind.is_some() || self.cad_editing_op.is_some())
         {
@@ -174,9 +190,7 @@ impl App {
             .instances
             .iter()
             .filter(|i| {
-                self.controller
-                    .document()
-                    .setup()
+                self.controller.inspection_setup()
                     .model_instances
                     .contains(&i.id)
             })
@@ -199,6 +213,7 @@ impl App {
                 if self.profile_entry_editor.is_some() {
                     return;
                 }
+                self.profile_chain_edges = false;
                 let previous = match &self.operation_draft {
                     Some(Operation::Profile(p)) => p.selections.clone(),
                     _ => None,
@@ -208,6 +223,9 @@ impl App {
                 let index = entries.len();
                 let mut entry =
                     ProfileGeometryEntry::new(kind, format!("{} {}", kind_name(kind), index + 1));
+                if kind == ProfileGeometryKind::Chain {
+                    entry.chain_mode = ProfileChainMode::Closed;
+                }
                 if kind == ProfileGeometryKind::Silhouette {
                     entry.source = ProfileGeometrySource::Cad(self.setup_profile_bodies());
                 }
@@ -247,6 +265,10 @@ impl App {
                     .unwrap_or(0);
                 let previous_row = self.geometry_row_selection;
                 if let Some(entry) = entries.get(index).cloned() {
+                    self.profile_chain_edges = entry.kind == ProfileGeometryKind::Chain
+                        && (entry.chain_mode == ProfileChainMode::Open
+                            || matches!(&entry.source, ProfileGeometrySource::Cad(refs)
+                                if refs.iter().any(|reference| reference.kind == EntityKind::Edge)));
                     let tolerance = fmt_num(entry.tolerance);
                     self.edit_operation_draft(|op| {
                         if let Operation::Profile(p) = op {
@@ -380,8 +402,11 @@ impl App {
                         }
                         EntryMessage::ChainMode(value) => {
                             editor.draft.chain_mode = value;
-                            self.profile_chain_edges = value == ProfileChainMode::Open;
+                            if value == ProfileChainMode::Open {
+                                self.profile_chain_edges = true;
+                            }
                         }
+                        EntryMessage::IndividualEdges(value) => self.profile_chain_edges = value,
                         EntryMessage::Reverse(value) => editor.draft.reversed = value,
                         EntryMessage::Tolerance(value) => editor.tolerance = value,
                         _ => {}
@@ -398,8 +423,9 @@ impl App {
                 ProfileGeometryKind::Chain => ProfileSelectionMode::Chain,
                 ProfileGeometryKind::Silhouette => ProfileSelectionMode::Silhouette,
             };
-            self.profile_chain_edges = editor.draft.kind == ProfileGeometryKind::Chain
-                && editor.draft.chain_mode == ProfileChainMode::Open;
+            if editor.draft.kind != ProfileGeometryKind::Chain {
+                self.profile_chain_edges = false;
+            }
             self.cad_filter_explicit = true;
             self.profile_tab_picking = false;
             self.geometry_additive = true;
@@ -537,15 +563,19 @@ impl App {
                     || !self.controller.geometry_state().instances.is_empty());
             let description = match kind {
                 ProfileGeometryKind::FaceContours => "Select a planar face to include its outer boundary and holes. Optionally include coplanar faces.",
-                ProfileGeometryKind::Chain => "Select an open or closed contour and configure its direction and cutter side.",
+                ProfileGeometryKind::Chain => "Select an open or closed contour and configure its direction and cutter side. Use Closed mode for a planar loop along rounded walls; set its cutting depth in Heights.",
                 ProfileGeometryKind::Silhouette => "Select bodies to use their outlines and through openings viewed along the setup Z axis.",
             };
             toolbar = toolbar.push(hint(
                 button(icon(kind_icon(kind), 28.))
                     .padding(4)
                     .style(inspector_secondary)
-                    .on_press_maybe(available.then_some(Message::ProfileEntry(EntryMessage::Add(kind)))),
-                format!("Add {}. {description}", kind_name(kind)), self.tooltips));
+                    .on_press_maybe(
+                        available.then_some(Message::ProfileEntry(EntryMessage::Add(kind))),
+                    ),
+                format!("Add {}. {description}", kind_name(kind)),
+                self.tooltips,
+            ));
         }
         toolbar = toolbar.push(hint(
             button(icon("remove", 28.))
@@ -555,7 +585,9 @@ impl App {
                     (!editing && selected.is_some())
                         .then_some(Message::ProfileEntry(EntryMessage::RemoveSelected)),
                 ),
-            "Delete the selected geometry entry.", self.tooltips));
+            "Delete the selected geometry entry.",
+            self.tooltips,
+        ));
         toolbar = toolbar.push(hint(
             button(icon("settings", 28.))
                 .padding(4)
@@ -564,7 +596,9 @@ impl App {
                     (!editing && selected.is_some())
                         .then_some(Message::ProfileEntry(EntryMessage::EditSelected)),
                 ),
-            "Configure the selected geometry entry.", self.tooltips));
+            "Configure the selected geometry entry.",
+            self.tooltips,
+        ));
         geometry_collection(
             "Contour selection",
             rows,
@@ -620,15 +654,21 @@ impl App {
             .align_y(Alignment::Center)
         ]
         .spacing(9);
-        let count = match &entry.source {
-            ProfileGeometrySource::Cad(refs) => refs.len(),
-            ProfileGeometrySource::Contours(contours) => contours.len(),
+        let labels = match &entry.source {
+            ProfileGeometrySource::Cad(refs) => cad_geometry_labels(refs),
+            ProfileGeometrySource::Contours(contours) => contours
+                .iter()
+                .enumerate()
+                .map(|(index, contour)| {
+                    format!(
+                        "{} contour {}",
+                        if contour.closed { "Closed" } else { "Open" },
+                        index + 1
+                    )
+                })
+                .collect(),
         };
-        body = body.push(
-            text(format!("{count} source feature(s) selected"))
-                .size(11)
-                .color(INSPECTOR_MUTED),
-        );
+        body = body.push(geometry_selection::selected_feature_names(labels));
         if entry.kind == ProfileGeometryKind::FaceContours {
             body = body.push(hint(
                 checkbox(entry.coplanar)
@@ -636,14 +676,27 @@ impl App {
                     .size(15)
                     .text_size(12)
                     .on_toggle(|v| Message::ProfileEntry(EntryMessage::Coplanar(v))),
-                "Include upward planar faces on the same plane in each selected body.", self.tooltips));
+                "Include upward planar faces on the same plane in each selected body.",
+                self.tooltips,
+            ));
         }
         if entry.kind == ProfileGeometryKind::Chain {
+            if !self.controller.geometry_state().instances.is_empty() {
+                body = body.push(
+                    checkbox(self.profile_chain_edges)
+                        .label("Select individual edges")
+                        .size(15)
+                        .text_size(12)
+                        .on_toggle(|value| {
+                            Message::ProfileEntry(EntryMessage::IndividualEdges(value))
+                        }),
+                );
+            }
             let mut modes = row![text("Mode").size(12).width(90)]
                 .spacing(6)
                 .align_y(Alignment::Center);
             for (mode, name, label) in [
-                (ProfileChainMode::Closed, "closed", "Closed chain"),
+                (ProfileChainMode::Closed, "closed", "Closed chain: use a closed planar boundary. Along rounded walls, the operation's Top and Bottom heights define the cut depth."),
                 (ProfileChainMode::Open, "open", "Open chain: follow planar edges at the operation's Top and Bottom heights, including edges beside rounded surfaces. The cut extends the selected curve vertically."),
             ] {
                 let active = entry.chain_mode == mode
@@ -686,7 +739,9 @@ impl App {
                         .padding(4)
                         .style(move |theme, status| inspector_tab(theme, status, active))
                         .on_press(Message::ProfileEntry(EntryMessage::Curves(value))),
-                    label, self.tooltips));
+                    label,
+                    self.tooltips,
+                ));
             }
             body = body.push(filters);
         }
@@ -697,9 +752,23 @@ impl App {
             ProfileSideRule::AlwaysInside,
             ProfileSideRule::On,
         ];
-        body=body.push(profile_picker("Side",illustrated_help::PROFILE_ENTRY_SIDES,self.tooltips,entry.side_rule,&SIDES,|v|Message::ProfileEntry(EntryMessage::Side(v))));
+        body = body.push(profile_picker(
+            "Side",
+            illustrated_help::PROFILE_ENTRY_SIDES,
+            self.tooltips,
+            entry.side_rule,
+            &SIDES,
+            |v| Message::ProfileEntry(EntryMessage::Side(v)),
+        ));
         if let Some(error) = &editor.error {
             body = body.push(text(error).size(11).color(palette::WARN));
+        }
+        if let Some(info) = crate::cad_operations::geometry_for_setup(self.controller.document())
+            .ok()
+            .and_then(|geometry| cam_geometry3d::verify_profile_entry(&geometry, entry))
+        {
+            body = body.push(text(format!("Info: Automatic verification: {info}. The selected geometry and operation settings are used."))
+                .size(11).color(INSPECTOR_MUTED));
         }
         let footer = inspector_footer(
             row![
@@ -738,6 +807,16 @@ impl App {
         }
     }
     pub(super) fn set_profile_entry_contour_side(&mut self, index: usize, side: Side) {
+        if let Some(entries) = self.active_profile_geometry_entries() {
+            if matches!(&self.operation_draft, Some(Operation::Profile(p)) if p.selections.is_none())
+            {
+                self.edit_operation_draft(|operation| {
+                    if let Operation::Profile(profile) = operation {
+                        profile.selections = Some(entries);
+                    }
+                });
+            }
+        }
         let Ok(geometry) = crate::cad_operations::geometry_for_setup(self.controller.document())
         else {
             return;
@@ -783,6 +862,250 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cad_loop_app(file: &str, loop_id: u64) -> (App, EntityRef) {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testfiles")
+                    .join(file),
+            )
+            .unwrap();
+        app.controller.select(Selection::Setup);
+        app.setup_draft = None;
+        app.operation_draft = None;
+        app.refresh_fields();
+        let geometry = app.controller.geometry_state();
+        let instance = &geometry.instances[0];
+        let asset = geometry.asset(instance.asset_id).unwrap();
+        let reference = EntityRef {
+            asset_id: asset.id,
+            revision: asset.revision,
+            instance_id: instance.id,
+            body_id: instance.body_id,
+            kind: EntityKind::Loop,
+            id: loop_id,
+        };
+        (app, reference)
+    }
+
+    fn check_direct_loop_creation(file: &str, loop_id: u64, feature_first: bool) {
+        let (mut app, reference) = cad_loop_app(file, loop_id);
+        assert!(
+            cam_geometry3d::resolve_selection(
+                &app.controller.setup_geometry_state().unwrap(),
+                &[reference.clone()],
+                ExtractionRecipe::ProfileContours,
+                0.
+            )
+            .is_err(),
+            "the fixture must exercise a loop without an automatic wall-depth certificate"
+        );
+        if feature_first {
+            let _ = app.update(Message::CadSelect(reference.clone()));
+        }
+        let _ = app.update(Message::BeginOp(OpKind::Profile));
+        if !feature_first {
+            let _ = app.update(Message::CadSelect(reference.clone()));
+        }
+        assert!(app.profile_entry_editor.is_none());
+        assert!(
+            app.profile_selection_geometry().is_some(),
+            "source contour preview must work"
+        );
+        let (Operation::Profile(profile), Some(binding)) = app.creation_operation().unwrap() else {
+            panic!("linked profile")
+        };
+        assert!(profile.closed);
+        assert_eq!(binding.selected, vec![reference]);
+        assert_eq!(
+            profile.selections.unwrap()[0].chain_mode,
+            ProfileChainMode::Closed
+        );
+        app.set_profile_contour_side(0, Side::On);
+        let (Operation::Profile(profile), _) = app.creation_operation().unwrap() else {
+            panic!("profile")
+        };
+        assert_eq!(
+            profile.side,
+            Side::On,
+            "direct loop cutter-side edits must survive resolution"
+        );
+        app.log_geometry_validation();
+        assert!(
+            app.output_last_geometry_error.is_none(),
+            "{:?}",
+            app.output_last_geometry_error
+        );
+        assert!(
+            !app.output_content
+                .text()
+                .contains("Geometry validation error"),
+            "{}",
+            app.output_content.text()
+        );
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("operation")
+        };
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Profile(p)) if p.side == Side::On)
+        );
+    }
+
+    #[test]
+    fn direct_closed_loop_picks_use_chain_resolution_in_both_creation_orders() {
+        for feature_first in [false, true] {
+            check_direct_loop_creation("chamfer_test.ocam", 50, feature_first);
+        }
+    }
+
+    #[test]
+    fn confirmed_named_chain_does_not_log_a_legacy_wall_error() {
+        let (mut app, reference) = cad_loop_app("chamfer_test.ocam", 50);
+        let _ = app.update(Message::BeginOp(OpKind::Profile));
+        app.profile_entry_message(EntryMessage::Add(ProfileGeometryKind::Chain));
+        assert!(app.profile_entry_cad_pick(reference.clone()));
+        // A previous inspection pick may still exist independently of entries.
+        app.controller.set_cad_selection(vec![reference]);
+        let _ = app.update(Message::ProfileEntry(EntryMessage::Confirm));
+        assert!(app.profile_entry_editor.is_none(), "{}", app.status);
+        assert!(app.creation_operation().is_ok());
+        assert!(
+            app.output_last_geometry_error.is_none(),
+            "{:?}",
+            app.output_last_geometry_error
+        );
+        assert!(
+            !app.output_content
+                .text()
+                .contains("Geometry validation error"),
+            "{}",
+            app.output_content.text()
+        );
+    }
+
+    fn select_closed_edges(mut app: App, references: Vec<EntityRef>) -> App {
+        let _ = app.update(Message::BeginOp(OpKind::Profile));
+        let _ = app.update(Message::ProfileEntry(EntryMessage::Add(
+            ProfileGeometryKind::Chain,
+        )));
+        let _ = app.update(Message::ProfileEntry(EntryMessage::IndividualEdges(true)));
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Edge);
+        for reference in &references {
+            let _ = app.update(Message::CadSelect(reference.clone()));
+            assert!(
+                app.output_last_geometry_error.is_none(),
+                "building a chain is not a verification error"
+            );
+        }
+        let selected = app.profile_entry_editor.as_ref().unwrap().draft.clone();
+        let geometry = app.controller.setup_geometry_state().unwrap();
+        let (contours, _) = cam_geometry3d::profile_entry_contours(&geometry, &selected).unwrap();
+        assert!(contours[0].closed);
+        assert!(cam_geometry3d::verify_profile_entry(&geometry, &selected).is_some());
+        let _ = app.update(Message::ProfileEntry(EntryMessage::ChainMode(
+            ProfileChainMode::Open,
+        )));
+        let open = app.profile_entry_editor.as_ref().unwrap().draft.clone();
+        let (open_contours, _) = cam_geometry3d::profile_entry_contours(&geometry, &open).unwrap();
+        assert!(!open_contours[0].closed);
+        let _ = app.update(Message::ProfileEntry(EntryMessage::ChainMode(
+            ProfileChainMode::Closed,
+        )));
+        assert!(
+            app.profile_chain_edges,
+            "chain mode must not change the picking granularity"
+        );
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Edge);
+        let _ = app.update(Message::ProfileEntry(EntryMessage::Pick));
+        assert!(app.profile_chain_edges);
+        let _ = app.update(Message::ProfileEntry(EntryMessage::Confirm));
+        assert!(app.profile_entry_editor.is_none(), "{}", app.status);
+        let (Operation::Profile(profile), Some(binding)) = app.creation_operation().unwrap() else {
+            panic!("profile")
+        };
+        assert!(profile.closed);
+        assert_eq!(binding.selected, references);
+        assert!(app
+            .output_content
+            .text()
+            .contains("Geometry verification (info)"));
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        app
+    }
+
+    #[test]
+    fn individual_edges_can_make_a_closed_chain_without_an_upward_face_certificate() {
+        let (app, reference) = cad_loop_app("chamfer_test.ocam", 53);
+        let asset = app
+            .controller
+            .geometry_state()
+            .asset(reference.asset_id)
+            .unwrap();
+        let wire = asset
+            .topology
+            .loops
+            .iter()
+            .find(|wire| wire.id == reference.id)
+            .unwrap();
+        let references = wire
+            .edge_uses
+            .iter()
+            .map(|usage| EntityRef {
+                kind: EntityKind::Edge,
+                id: usage.edge_id,
+                ..reference.clone()
+            })
+            .collect();
+        select_closed_edges(app, references);
+    }
+
+    #[test]
+    #[ignore = "qualification against the supplied test2.ocam edge selection"]
+    fn supplied_test2_eight_edges_create_a_closed_chain_with_advisory_verification() {
+        let (app, reference) = cad_loop_app("test2.ocam", 0);
+        let references: Vec<_> = [209, 211, 207, 213, 215, 200, 203, 205]
+            .into_iter()
+            .map(|id| EntityRef {
+                kind: EntityKind::Edge,
+                id,
+                ..reference.clone()
+            })
+            .collect();
+        let mut app = select_closed_edges(app, references.clone());
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("operation")
+        };
+        let Some(Operation::Profile(profile)) = app.controller.operation(id) else {
+            panic!("profile")
+        };
+        assert!(profile.chain.area() > 6800. && profile.chain.area() < 6820.);
+        let path = std::env::temp_dir().join(format!("advisory-test2-{}.ocam", std::process::id()));
+        app.controller.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reopened.geometry_state().bindings[&id].selected, references);
+        assert!(
+            matches!(reopened.operation(id), Some(Operation::Profile(profile)) if profile.closed)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the supplied local tray projects"]
+    fn supplied_tray_loop_234_creates_without_wall_trim_errors() {
+        for file in ["tray.ocam", "tray-fixed.ocam"] {
+            for feature_first in [false, true] {
+                check_direct_loop_creation(file, 234, feature_first);
+            }
+        }
+    }
+
     fn app() -> App {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());

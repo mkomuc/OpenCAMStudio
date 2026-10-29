@@ -55,6 +55,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
         }
         Operation::Pocket(p) => {
             let mut fields = vec![
+                Field::LiftHeight,
                 Field::Depth,
                 Field::Stepdown,
                 Field::Overlap,
@@ -65,6 +66,9 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 Field::PlungeFeed,
                 Field::LeadOverlap,
             ];
+            if p.finishing.enabled {
+                fields.extend(pocket_parameters::Number::ALL.map(Field::PocketFinish));
+            }
             if p.clear.lead_in != Lead::None {
                 fields.push(Field::LeadInSize);
             }
@@ -187,7 +191,9 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
+        Operation::Parallel(_) => vec![Field::LiftHeight, Field::ParallelStepover, Field::ParallelAngle, Field::AdaptiveTolerance, Field::AdaptiveOffset, Field::SpindleRpm, Field::Feed, Field::PlungeFeed],
         Operation::Adaptive(_) => vec![
+            Field::LiftHeight,
             Field::AdaptiveTolerance,
             Field::AdaptiveOptimalLoad,
             Field::Stepdown,

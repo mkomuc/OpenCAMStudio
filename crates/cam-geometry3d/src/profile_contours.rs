@@ -17,7 +17,89 @@ pub(super) fn open_chain(
     if refs.iter().any(|r| r.kind != EntityKind::Edge) {
         return Err("Open Chain requires connected planar edges".into());
     }
-    Ok(extract_impl(state, refs, true)?.0)
+    match extract_impl(state, refs, true) {
+        Ok(input) => Ok(input.0),
+        Err(reason) => surface_geometry::unverified_path(state, refs, false)
+            .map(|input| input.0)
+            .map_err(|_| reason),
+    }
+}
+
+/// A closed Chain selects an exact planar path, independently of the shape of
+/// its supporting face or wall trims. Cutting heights belong to the operation.
+pub(super) fn closed_chain(
+    state: &GeometryState,
+    refs: &[EntityRef],
+) -> Result<Vec<ProfileContour>, String> {
+    let view = View::for_path(state, refs)?;
+    if refs.len() > 1
+        && refs
+            .iter()
+            .all(|reference| reference.kind == EntityKind::Loop)
+    {
+        return unverified_contours(state, refs);
+    }
+    if refs.len() == 1 && refs[0].kind == EntityKind::Loop {
+        let wire = view.wire(refs[0].id)?;
+        let (chain, _) = view.contour(wire)?;
+        Polygon::new(chain.clone()).map_err(|error| error.to_string())?;
+        return Ok(vec![ProfileContour {
+            chain,
+            closed: true,
+            side: if wire.is_outer {
+                Side::Outside
+            } else {
+                Side::Inside
+            },
+        }]);
+    }
+    let (contours, _) = surface_geometry::unverified_path(state, refs, false)?;
+    if contours.iter().any(|contour| !contour.closed) {
+        return Err("Complete the chain before selecting Closed mode".into());
+    }
+    Ok(contours)
+}
+
+pub(super) fn unverified_contours(
+    state: &GeometryState,
+    refs: &[EntityRef],
+) -> Result<Vec<ProfileContour>, String> {
+    if refs
+        .iter()
+        .all(|reference| reference.kind == EntityKind::Edge)
+    {
+        return surface_geometry::unverified_path(state, refs, false).map(|input| input.0);
+    }
+    let view = View::for_path(state, refs)?;
+    let mut loops = BTreeSet::new();
+    for reference in refs {
+        match reference.kind {
+            EntityKind::Loop => {
+                loops.insert(reference.id);
+            }
+            EntityKind::Face => {
+                loops.extend(view.face(reference.id)?.loop_ids.iter().copied());
+            }
+            _ => return Err("Select boundary loops, faces, or connected edges".into()),
+        }
+    }
+    loops
+        .into_iter()
+        .map(|id| {
+            let wire = view.wire(id)?;
+            let (chain, _) = view.contour(wire)?;
+            Polygon::new(chain.clone()).map_err(|error| error.to_string())?;
+            Ok(ProfileContour {
+                chain,
+                closed: true,
+                side: if wire.is_outer {
+                    Side::Outside
+                } else {
+                    Side::Inside
+                },
+            })
+        })
+        .collect()
 }
 
 fn extract_impl(
@@ -222,6 +304,8 @@ fn extract_impl(
                                 CadSurface::Cylinder { .. } | CadSurface::LinearExtrusion { .. } =>
                                     "wall axis is not parallel to setup Z".into(),
                                 CadSurface::Torus { .. } => "rounded torus surface".into(),
+                                CadSurface::Cone { .. } => "conical wall".into(),
+                                CadSurface::Sphere { .. } => "spherical wall".into(),
                                 CadSurface::Unsupported { description } =>
                                     format!("unsupported surface: {description}"),
                             };

@@ -121,7 +121,13 @@ fn build_job_with_compute(
     cancel: &CancelToken,
     mut compute: impl FnMut(&Operation, &JobEnv, &CancelToken, cam_model::StockToLeave, &cam_model::GeometryState, Option<cam_model::CuttingHeights>) -> StrategyResult,
 ) -> JobResult {
-    let setup = doc.setup();
+    let Some(setup) = doc.active_setup() else {
+        return JobResult {
+            program: Program::new(),
+            diagnostics: vec![Diagnostic::error("Create a setup before generating toolpaths.")],
+            completion: JobCompletion::Failed,
+        };
+    };
     let mut env = JobEnv {
         heights: setup.heights,
         tools: &setup.tools,
@@ -143,7 +149,7 @@ fn build_job_with_compute(
     }
     let adaptive_operation_ids: std::collections::HashSet<_> = setup.operations.iter()
         .filter(|operation| doc.operation_is_included(setup.id, operation.id()))
-        .filter(|operation| matches!(operation, Operation::Adaptive(_)))
+        .filter(|operation| matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)))
         .map(Operation::id)
         .collect();
     if let Some(pattern) = setup.patterns.iter().find(|pattern| {
@@ -154,7 +160,7 @@ fn build_job_with_compute(
         return JobResult {
             program,
             diagnostics: vec![Diagnostic::error(
-                "3D Adaptive cannot be repeated in an operation pattern because its path is resolved against the setup's actual model instances; create separate adaptive operations for each machining location",
+                "3D surface strategies cannot be repeated in an operation pattern because its path is resolved against the setup's actual model instances; create separate adaptive operations for each machining location",
             ).for_setup(setup.id).for_pattern(pattern.id, 1)],
             completion: JobCompletion::Failed,
         };
@@ -187,17 +193,19 @@ fn build_job_with_compute(
                 })
         })
         .fold(setup.heights.clearance, f64::max);
-    let tool_change_height = if tool_change_height < max_clearance {
+    // CAD bounds can include sub-micron padding. Always clamp to clearance,
+    // but do not warn about numerical noise in otherwise equal safety planes.
+    if max_clearance - tool_change_height > 1e-6 {
+        let origin_z = setup.origin[2];
         diagnostics.push(Diagnostic::warning(format!(
-            "tool-change height {tool_change_height:.3} mm is below the clearance plane \
-             {:.3} mm; using the clearance plane instead — a tool change or re-fixture \
+            "tool-change height {:.6} mm is below the clearance plane \
+             {:.6} mm (base WCS Z); using the clearance plane instead — a tool change or re-fixture \
              must not bring the tool down.",
-            max_clearance
+            tool_change_height - origin_z,
+            max_clearance - origin_z
         )));
-        max_clearance
-    } else {
-        tool_change_height
-    };
+    }
+    let tool_change_height = tool_change_height.max(max_clearance);
 
     program.push(Step::Comment(setup.name.clone()));
 
@@ -300,7 +308,11 @@ fn build_job_with_compute(
         };
         if let Some(Ok(heights)) = configured {
             if let Some(feed_z) = heights.feed {
-                match apply_feed_height(&result.program, feed_z, operation) {
+                // A contour can be below the stock top (for example an underside
+                // loop). Its feed plane does not prove the material above it is
+                // clear. Only turn the approach into a rapid through known air.
+                let air_floor = feed_z.max(heights.stock_top);
+                match apply_feed_height(&result.program, air_floor, operation) {
                     Ok(program) => result.program = program,
                     Err(reason) => {
                         result.program = Program::new();
@@ -383,6 +395,8 @@ fn build_job_with_compute(
                 cam_model::ExecutionItem::Pattern(pattern) => {
                     if pattern.suppressed { continue; }
                     let count = match pattern.kind.instance_count() { Some(n) if n <= 10_000 => n, _ => { diagnostics.push(Diagnostic::error("pattern instance count exceeds the supported limit").for_setup(setup.id)); completion = JobCompletion::Failed; continue; } };
+                    let indices = pattern.options.instance_indices(pattern.kind);
+                    let count = count - usize::from(!pattern.options.keep_original);
                     let required = pattern.members.iter().filter_map(|id| seeds_by_id.get(id)).try_fold(0usize, |sum, seed| seed.fragment.steps().len().checked_mul(count)?.checked_add(sum));
                     let current = planned.iter().try_fold(0usize, |sum, p| sum.checked_add(p.fragment.steps().len()));
                     if required.is_none() || current.and_then(|n| n.checked_add(required.unwrap_or(usize::MAX))).is_none_or(|n| n > 5_000_000) {
@@ -394,13 +408,19 @@ fn build_job_with_compute(
                     let mut append = |op_id: u32, index: usize| {
                         if cancel.is_cancelled() { return; }
                         let Some(seed) = seeds_by_id.get(&op_id) else { return; };
-                        let Some((translation, degrees)) = pattern.kind.transform_xy(index) else { completion = JobCompletion::Failed; return; };
+                        let Some((translation, degrees)) = pattern.options.transform_xy(pattern.kind, index) else { completion = JobCompletion::Failed; return; };
                         let fragment = seed.fragment.transformed_xy(center, translation, degrees).with_pattern_owner(pattern.id, index as u32);
                         planned.push(Planned { fragment, pattern_id: Some(pattern.id), instance_index: Some(index as u32), ..seed.clone() });
                     };
                     match pattern.order {
-                        cam_model::PatternOrder::ByInstance => for index in 0..count { for member in &pattern.members { append(*member, index); } },
-                        cam_model::PatternOrder::ByOperation => for member in &pattern.members { for index in 0..count { append(*member, index); } },
+                        cam_model::PatternOrder::ByInstance => for index in &indices { for member in &pattern.members { append(*member, *index); } },
+                        cam_model::PatternOrder::ByOperation | cam_model::PatternOrder::ByTool => {
+                            let mut members = pattern.members.clone();
+                            if pattern.order == cam_model::PatternOrder::ByTool {
+                                members.sort_by_key(|id| seeds_by_id.get(id).map(|seed| seed.tool));
+                            }
+                            for member in &members { for index in &indices { append(*member, *index); } }
+                        },
                     }
                     drop(append);
                     if cancel.is_cancelled() { completion = JobCompletion::Cancelled; }
@@ -574,7 +594,7 @@ fn compute_at_heights(
             p.depth = depth;
             0.0
         }
-        Operation::Adaptive(_) => 0.0,
+        Operation::Adaptive(_) | Operation::Parallel(_) => 0.0,
         Operation::Carve(p) => {
             p.top = heights.top;
             p.depth = depth;
@@ -635,6 +655,7 @@ fn apply_feed_height(
         Operation::Pocket(o) => o.clear.plunge_feed,
         Operation::Face(o) => o.plunge_feed,
         Operation::Adaptive(o) => o.params.plunge_feed,
+        Operation::Parallel(o) => o.params.plunge_feed,
         Operation::Drill(o) => o.feed,
         Operation::Bore(o) => o.plunge_feed,
         Operation::Thread(o) => o.plunge_feed,
@@ -1001,6 +1022,15 @@ fn compute_with_stock(
 ) -> StrategyResult {
     let (radial, axial) = stock_to_leave.effective();
     match operation {
+        Operation::Parallel(op) => {
+            let resolved = geometry_state.bindings.get(&op.id)
+                .ok_or_else(|| "Parallel geometry binding is missing".to_string())
+                .and_then(|binding| cam_geometry3d::resolve_parallel(geometry_state, binding));
+            match resolved {
+                Ok(mut geometry) => { geometry.heights = cutting_heights.unwrap_or(geometry.heights); crate::ParallelStrategy::new(op.clone(), stock_to_leave, geometry).compute(env, cancel) },
+                Err(reason) => StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() },
+            }
+        }
         Operation::Adaptive(op) => {
             let Some(binding) = geometry_state.bindings.get(&op.id) else {
                 return StrategyResult { diagnostics: vec![Diagnostic::error(format!("operation {}: adaptive geometry binding is missing", op.id))], ..Default::default() };
@@ -1262,10 +1292,12 @@ mod tests {
             Point::new(30.0, 30.0), Point::new(0.0, 30.0),
         ]);
         let pocket = Operation::Pocket(cam_model::PocketOp {
+            finishing: Default::default(),
             id: 2, tool: 1, boundary: square(), islands: Vec::new(), depth: 2.0,
             spindle_rpm: 1000.0, tool_preset: None, cooling: Default::default(),
             entry_feeds: Default::default(), work_offset: 1, start: None, end: None,
             clear: cam_model::ClearParams {
+                lift_height: 0.0,
                 stepdown: 2.0, overlap: 0.5, offset: 0.2, feed: 300.0,
                 plunge_feed: 100.0, plunge: cam_model::Plunge::Straight,
                 lead_in: cam_model::Lead::None, lead_out: cam_model::Lead::None,
@@ -1317,7 +1349,7 @@ mod tests {
         });
         let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
         assert_eq!(result.completion, JobCompletion::Failed);
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("supported for Profile, Pocket, Face, and Adaptive only")));
+        assert!(result.diagnostics.iter().any(|d| d.message.contains("supported for Profile, Pocket, Face, Adaptive, and Parallel only")));
     }
 
     #[test]
@@ -1327,6 +1359,7 @@ mod tests {
             id: 77, name: "Grid".into(), members: vec![0, 1],
             kind: cam_model::PatternKind::Rectangular { nx: 3, ny: 2, dx: 20.0, dy: -15.0 },
             order: cam_model::PatternOrder::ByInstance, suppressed: false,
+            options: Default::default(),
         });
         let mut cache = crate::OperationCache::default();
         let request = crate::PlanRequest { document: &doc, spindle_rpm: 1000.0, dir: SpindleDir::Cw, stock: None, tool_change_height: 50.0 };
@@ -1341,6 +1374,37 @@ mod tests {
             assert_eq!(tag.pattern_id, Some(77));
             assert!(tag.instance_index.is_some());
         }
+    }
+
+    #[test]
+    fn configured_pattern_applies_extent_direction_original_filter_and_tool_order() {
+        let mut doc = document(3);
+        let mut second_tool = doc.setup().tools[0].clone();
+        second_tool.number = 2;
+        doc.setup_mut().tools.push(second_tool);
+        if let Operation::Drill(op) = &mut doc.setup_mut().operations[0] { op.tool = 2; }
+        if let Operation::Drill(op) = &mut doc.setup_mut().operations[2] { op.tool = 2; }
+        let mut options = cam_model::PatternOptions {
+            spacing: cam_model::PatternSpacing::Extent, keep_original: false, reverse: true,
+            second_direction: false, ..Default::default()
+        };
+        options.directions[0].angle_degrees = 90.0;
+        options.directions[0].reversed = true;
+        doc.setup_mut().patterns.push(cam_model::OperationPattern {
+            id: 81, name: "Configured".into(), members: vec![0, 1, 2],
+            kind: cam_model::PatternKind::Rectangular { nx: 3, ny: 1, dx: 40.0, dy: 0.0 },
+            order: cam_model::PatternOrder::ByTool, suppressed: false, options,
+        });
+        let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Complete, "{:?}", result.diagnostics);
+        let cycles: Vec<_> = result.program.steps().iter().filter_map(|step| match step {
+            Step::Drill(cycle) => Some((cycle.tag.op_id, cycle.tag.instance_index, cycle.points[0])), _ => None,
+        }).collect();
+        assert_eq!(cycles, vec![
+            (1, Some(2), [11.0, -30.0]), (1, Some(1), [11.0, -10.0]),
+            (0, Some(2), [10.0, -30.0]), (0, Some(1), [10.0, -10.0]),
+            (2, Some(2), [12.0, -30.0]), (2, Some(1), [12.0, -10.0]),
+        ]);
     }
 
     #[test]
@@ -1363,6 +1427,7 @@ mod tests {
             kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 20.0, dy: 0.0 },
             order: cam_model::PatternOrder::ByInstance,
             suppressed: false,
+            options: Default::default(),
         });
         let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
         assert_eq!(result.completion, JobCompletion::Failed);
@@ -1376,6 +1441,7 @@ mod tests {
             id: 78, name: "Off".into(), members: vec![0],
             kind: cam_model::PatternKind::Circular { center_xy: [1.0, 1.0], count: 4, distribution: cam_model::CircularDistribution::Full, direction: cam_model::PatternDirection::Ccw },
             order: cam_model::PatternOrder::ByInstance, suppressed: true,
+            options: Default::default(),
         });
         let mut cache = crate::OperationCache::default();
         let request = crate::PlanRequest { document: &doc, spindle_rpm: 1000.0, dir: SpindleDir::Cw, stock: None, tool_change_height: 50.0 };
@@ -1399,6 +1465,7 @@ mod tests {
                 direction: cam_model::PatternDirection::Ccw,
             },
             order: cam_model::PatternOrder::ByInstance, suppressed: false,
+            options: Default::default(),
         });
         let result = build_job(&doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
         assert_eq!(result.completion, JobCompletion::Complete, "{:?}", result.diagnostics);
@@ -1416,6 +1483,7 @@ mod tests {
             id: 80, name: "Operations".into(), members: vec![0, 1],
             kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 3.0, dy: 0.0 },
             order: cam_model::PatternOrder::ByOperation, suppressed: false,
+            options: Default::default(),
         });
         let result = build_job(&ordered, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
         let ownership: Vec<_> = result.program.steps().iter().filter_map(|step| match step {

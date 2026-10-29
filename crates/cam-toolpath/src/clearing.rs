@@ -24,6 +24,8 @@ use crate::CancelToken;
 
 /// Everything the clearing pass needs beyond the region geometry itself.
 pub(crate) struct ClearJob<'a> {
+    /// Lift above each cutting level for local links, limited to clearance.
+    pub lift_height: f64,
     /// Operation id, stamped onto emitted tags.
     pub id: u32,
     /// Frontier and corner-detection simplification tolerance, mm; 0 disables it.
@@ -133,6 +135,9 @@ pub(crate) fn clear_validated(
     prefer_stay_down: bool,
     accept: impl Fn(&Program) -> bool,
 ) -> Result<ClearResult, RingsError> {
+    if !job.lift_height.is_finite() || job.lift_height < 0.0 {
+        return Err(RingsError::Limit("Lift height must be finite and nonnegative".into()));
+    }
     let mut adaptive_candidate = None;
     // **Adaptive dispatch: the front-advance clearer, behind the exact oracle.**
     //
@@ -347,6 +352,12 @@ fn clear_concentric(
         let mut previous=heights.top_of_stock;
         for &z in levels {
             crate::profile::validate_ramp_travel(job.plunge,previous-z,crate::profile::loop_perimeter(&ring.pts)).map_err(RingsError::Limit)?;
+            if job.lift_height > 0.0 {
+                let top = (z + job.lift_height).min(heights.clearance).min(heights.top_of_stock);
+                crate::profile::validate_ramp_travel(
+                    job.plunge, (top - z).max(0.0), crate::profile::loop_perimeter(&ring.pts),
+                ).map_err(RingsError::Limit)?;
+            }
             previous=z;
         }
     }
@@ -373,6 +384,7 @@ fn clear_concentric(
         job.plunge_feed,
         job.entry_feeds,
         job.plunge,
+        job.lift_height,
         job.lead_overlap,
         job.lead_in,
         job.lead_out,
@@ -457,9 +469,26 @@ fn emit_adaptive_moves(
             ),
         }
 
+        let link_z = (z + job.lift_height).min(h.clearance);
+        let mut lifted = false;
         for i in 1..moves.len() {
             let (p, is_cut) = moves[i];
-            if is_cut && air.get(i).copied().unwrap_or(false) {
+            // Air flags certify the clearing region. With wall stock reserved,
+            // the cutter can still graze material just outside that region, so
+            // these transitions must remain feed moves rather than rapids.
+            let is_air = is_cut && job.finish == 0.0 && air.get(i).copied().unwrap_or(false);
+            if lifted && !is_air {
+                if is_cut {
+                    let from = moves[i - 1].0;
+                    prog.push(Step::Linear {
+                        to: Point3::new(from.x, from.y, z),
+                        feed: job.plunge_feed,
+                        tag: plunge_tag,
+                    });
+                }
+                lifted = false;
+            }
+            if is_air {
                 // **A move that removes nothing is a traverse, not a cut.** A third of a
                 // steered path is the tool crossing stock it has already removed to reach the
                 // next front, and feeding it at cutting rate is the single largest remaining
@@ -473,8 +502,16 @@ fn emit_adaptive_moves(
                 // way put 776 `RapidThroughStock` collisions past this line. Nor is a
                 // *starving* step enough: it may still shave a fraction of the target, and
                 // that is a cut.
+                if job.lift_height > 0.0 && !lifted {
+                    let from = moves[i - 1].0;
+                    prog.push(Step::Rapid {
+                        to: Point3::new(from.x, from.y, link_z),
+                        tag: link,
+                    });
+                    lifted = true;
+                }
                 prog.push(Step::Rapid {
-                    to: Point3::new(p.x, p.y, z),
+                    to: Point3::new(p.x, p.y, if lifted { link_z } else { z }),
                     tag: link,
                 });
             } else if is_cut {
@@ -549,6 +586,13 @@ fn emit_adaptive_moves(
             }
         }
         let mut last = moves[moves.len() - 1].0;
+        if lifted && job.end.is_some() {
+            prog.push(Step::Linear {
+                to: Point3::new(last.x, last.y, z),
+                feed: job.plunge_feed,
+                tag: plunge_tag,
+            });
+        }
         if let Some(preferred) = job.end.filter(|p| p.iter().all(|v| v.is_finite())) {
             // Retrace only the final connected run. Every segment has already been
             // swept by the cutter at this depth; never shortcut across a protected
@@ -622,6 +666,7 @@ mod tests {
 
     fn frame_clearjob(clearing: Clearing) -> ClearJob<'static> {
         ClearJob {
+            lift_height: 0.0,
             id: 7,
             simplification_tolerance: crate::frontadvance::SIMPLIFY_EPS,
             radius: 3.0,
@@ -640,6 +685,73 @@ mod tests {
             end: None,
             guard: &[],
             spindle: cam_cldata::SpindleDir::Cw,
+        }
+    }
+
+    #[test]
+    fn adaptive_lift_spans_an_air_run_and_returns_to_depth_before_cutting() {
+        let moves = [
+            (Point::new(10., 10.), true),
+            (Point::new(11., 10.), true),
+            (Point::new(12., 10.), true),
+            (Point::new(13., 10.), true),
+        ];
+        let air = [false, true, true, false];
+        let h = Heights::new(5., 2., 0.);
+        for lift in [0., 2., 100.] {
+            let mut job = frame_clearjob(frame_job());
+            job.lift_height = lift;
+            let mut program = Program::new();
+            emit_adaptive_moves(&mut program, &moves, &air, &job, &h, &[-3., -6.]);
+            for z in [-3., -6.] {
+                let raised = (z + lift).min(h.clearance);
+                for x in [11., 12.] {
+                    assert!(program.steps().iter().any(|s| matches!(s,
+                        Step::Rapid { to, tag } if tag.kind == MoveKind::Link
+                            && *to == Point3::new(x, 10., raised))));
+                }
+                let cutting = program.steps().iter().position(|s| matches!(s,
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting
+                        && *to == Point3::new(13., 10., z))).unwrap();
+                if lift > 0. {
+                    assert!(matches!(&program.steps()[cutting - 1],
+                        Step::Linear { to, feed, tag } if tag.kind == MoveKind::Plunge
+                            && *to == Point3::new(12., 10., z) && *feed == job.plunge_feed));
+                    assert!(matches!(&program.steps()[cutting - 2],
+                        Step::Rapid { to, .. } if *to == Point3::new(12., 10., raised)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_lifted_air_run_retracts_without_touching_the_floor_again() {
+        let moves = [
+            (Point::new(10., 10.), true),
+            (Point::new(11., 10.), true),
+            (Point::new(30., 30.), false),
+            (Point::new(31., 30.), true),
+        ];
+        let mut job = frame_clearjob(frame_job());
+        job.lift_height = 2.;
+        let h = Heights::new(5., 2., 0.);
+        let mut program = Program::new();
+        emit_adaptive_moves(&mut program, &moves, &[false, true, false, false], &job, &h, &[-3.]);
+        assert!(!program.steps().iter().any(|s| matches!(s,
+            Step::Linear { to, .. } if *to == Point3::new(11., 10., -3.))));
+        assert!(program.steps().iter().any(|s| matches!(s,
+            Step::Rapid { to, .. } if *to == Point3::new(11., 10., 5.))));
+    }
+
+    #[test]
+    fn invalid_lift_height_emits_no_motion() {
+        for lift in [-1., f64::NAN, f64::INFINITY] {
+            let mut job = frame_clearjob(frame_job());
+            job.lift_height = lift;
+            let mut program = Program::new();
+            assert!(clear(&mut program, &frame_region(), &job,
+                &Heights::new(5., 2., 0.), &[-1.], &CancelToken::new()).is_err());
+            assert!(program.steps().is_empty());
         }
     }
 

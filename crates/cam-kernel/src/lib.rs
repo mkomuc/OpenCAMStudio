@@ -261,11 +261,9 @@ mod multi_body_tests {
                 .all(|face| covered.contains(&face.id)),
             "every face of every body must contribute to the projection"
         );
-        assert!(
-            import.warnings.is_empty(),
-            "{:?}",
-            import.warnings
-        );
+        assert_eq!(import.warnings, [
+            "4 CAD faces have no analytic feature representation; their CAD mesh is retained."
+        ]);
         eprintln!(
             "Tigerente projection: {} triangles",
             projection.mesh.triangles.len()

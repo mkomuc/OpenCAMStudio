@@ -163,9 +163,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()

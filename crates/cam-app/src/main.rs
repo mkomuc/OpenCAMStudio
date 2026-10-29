@@ -35,13 +35,38 @@ fn main() -> std::process::ExitCode {
         println!("{}", cli::USAGE);
         return std::process::ExitCode::SUCCESS;
     }
-    match launch(args.setup) {
+    let result = if args.mcp {
+        serve_mcp(args.setup)
+    } else if args.mcp_gui {
+        launch_mcp_gui(args.setup)
+    } else {
+        launch(args.setup)
+    };
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Open CAM Studio: {error}");
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+fn serve_mcp(setup: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = cam_app::mcp::Session::from_user_settings();
+    if let Some(path) = setup { session.controller.open_project(path)?; }
+    cam_app::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(),
+        cam_app::mcp::tools(), |name, args| session.call(name, args))?;
+    Ok(())
+}
+
+#[cfg(feature = "gui")]
+fn launch_mcp_gui(setup: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    cam_app::gui::run_with_mcp(setup.as_deref())
+}
+
+#[cfg(not(feature = "gui"))]
+fn launch_mcp_gui(_setup: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    Err("--mcp-gui requires a build with --features gui; use --mcp for headless operation".into())
 }
 
 #[cfg(feature = "gui")]

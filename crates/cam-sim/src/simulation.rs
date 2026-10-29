@@ -9,6 +9,7 @@ struct Config {
     max: [f64; 3],
     options: SimOptions,
     tools: Vec<SimTool>,
+    initial_key: Option<String>,
 }
 #[derive(Clone)]
 struct State {
@@ -245,6 +246,48 @@ impl SimulationCache {
         options: &SimOptions,
         tools: &[SimTool],
         cancelled: &dyn Fn() -> bool,
+        progress: impl FnMut(usize, usize),
+    ) -> Option<SimResult> {
+        self.simulate_seeded(program, min, max, options, tools, None, cancelled, progress)
+    }
+
+    /// Continue machining an already processed blank. The caller's key must
+    /// identify all inputs that produced `initial`, including its grid and axes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn simulate_from_stock_controlled(
+        &mut self,
+        program: &Program,
+        min: [f64; 3],
+        max: [f64; 3],
+        options: &SimOptions,
+        tools: &[SimTool],
+        initial: &Heightfield,
+        key: &str,
+        cancelled: &dyn Fn() -> bool,
+        progress: impl FnMut(usize, usize),
+    ) -> Option<SimResult> {
+        self.simulate_seeded(
+            program,
+            min,
+            max,
+            options,
+            tools,
+            Some((key, initial)),
+            cancelled,
+            progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn simulate_seeded(
+        &mut self,
+        program: &Program,
+        min: [f64; 3],
+        max: [f64; 3],
+        options: &SimOptions,
+        tools: &[SimTool],
+        initial: Option<(&str, &Heightfield)>,
+        cancelled: &dyn Fn() -> bool,
         mut progress: impl FnMut(usize, usize),
     ) -> Option<SimResult> {
         if cancelled() {
@@ -255,6 +298,7 @@ impl SimulationCache {
             max,
             options: *options,
             tools: tools.to_vec(),
+            initial_key: initial.map(|(key, _)| key.to_owned()),
         };
         if self.config.as_ref() != Some(&config) {
             *self = Self {
@@ -277,7 +321,13 @@ impl SimulationCache {
             self.state = None;
             self.checkpoints.retain(|(count, _)| *count <= common);
             self.checkpoints.last().map_or_else(
-                || (State::new(&config), 0),
+                || {
+                    let mut state = State::new(&config);
+                    if let Some((_, field)) = initial {
+                        state.field = field.clone();
+                    }
+                    (state, 0)
+                },
                 |(count, state)| (state.clone(), *count),
             )
         };
@@ -351,6 +401,7 @@ pub fn simulate_controlled(
         max,
         options: *options,
         tools: tools.to_vec(),
+        initial_key: None,
     };
     let mut state = State::new(&config);
     let mut progress = progress;

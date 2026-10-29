@@ -16,7 +16,13 @@ impl App {
         use crate::JobPhase;
         use iced::widget::progress_bar;
 
-        let progress = self.controller.run_progress()?;
+        let cancel = if self.controller.run_progress().is_some() {
+            Message::CancelRun
+        } else {
+            Message::CancelOperationPreview
+        };
+        let progress = self.controller.run_progress()
+            .or_else(|| self.operation_preview.progress())?;
         let label = match progress.phase {
             JobPhase::Queued => "Waiting to calculate…".into(),
             JobPhase::GeometryResolution => "Resolving machining geometry…".into(),
@@ -69,7 +75,7 @@ impl App {
                 column![
                     row![
                         text(label).size(12).width(Length::Fill),
-                        inspector_button("Cancel").on_press(Message::CancelRun),
+                        inspector_button("Cancel").on_press(cancel),
                     ]
                     .align_y(Alignment::Center)
                     .spacing(12),
@@ -99,7 +105,9 @@ impl App {
         self.pending_processing_time = None;
         self.processing_time_dialog = None;
         self.simulation = None;
-        if self.controller.document().setup().operations.is_empty() {
+        if self.controller.inspection_setup().operations.is_empty()
+            && self.controller.inspection_setup().stock != cam_model::Stock::PreviousSetup
+        {
             self.controller.cancel_run();
             self.status = "No operations to run.".into();
             return;

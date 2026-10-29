@@ -106,14 +106,8 @@ impl Strategy for BoreStrategy {
             return fail("negative radial stock must be smaller than the tool radius");
         }
         let mut diagnostics = Vec::new();
-        if !crate::guards::check_side_milling(op.id, "bore", tool, depth, &mut diagnostics)
-            || !crate::guards::check_flat_floor(op.id, "bore", tool, &mut diagnostics)
-        {
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
+        crate::guards::warn_side_milling(op.id, "bore", tool, depth, &mut diagnostics);
+        crate::guards::warn_flat_floor(op.id, "bore", tool, &mut diagnostics);
         // Material is outside a hole and inside a boss. All radial allowances
         // use this same sign, including tool-centre compensation.
         let side = if op.internal { -1. } else { 1. };

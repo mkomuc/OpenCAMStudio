@@ -16,6 +16,8 @@
 //!   ([`JobEnv`] in, [`StrategyResult`] out), so extracting the trait into a
 //!   `cdylib` plugin ABI later is cheap.
 
+mod parallel;
+pub use parallel::ParallelStrategy;
 mod bore;
 pub use bore::BoreStrategy;
 mod carve;

@@ -251,6 +251,82 @@ fn select_all_models(app: &mut AppController) {
         .collect();
     app.edit_setup(|setup| setup.model_instances = ids);
 }
+
+#[test]
+fn closed_spline_boundary_profiles_keep_explicit_depth_after_save_and_reopen() {
+    let (mut state, face) = pocket();
+    let wire = state.assets[0]
+        .topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == face.id && wire.is_outer)
+        .unwrap()
+        .id;
+    for face in &mut std::sync::Arc::make_mut(&mut state.assets[0].topology).faces {
+        face.surface = CadSurface::Unsupported {
+            description: "IGES spline".into(),
+        };
+    }
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let selected = vec![reference(wire, EntityKind::Loop)];
+    let mut entry =
+        ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Closed spline rim".into());
+    entry.chain_mode = ProfileChainMode::Closed;
+    entry.source = ProfileGeometrySource::Cad(selected.clone());
+    let binding = cam_geometry3d::resolve_selection(
+        &app.setup_geometry_state().unwrap(),
+        &selected,
+        ExtractionRecipe::ProfileEntries {
+            entries: vec![entry.clone()],
+        },
+        0.,
+    )
+    .unwrap();
+    let mut operation = app.operation_template(OpKind::Profile, 1);
+    let Operation::Profile(profile) = &mut operation else {
+        panic!("profile")
+    };
+    profile.selections = Some(vec![entry]);
+    let id = app
+        .commit_operation_creation(
+            operation,
+            Some(binding),
+            OperationHeightSettings::default(),
+            vec![],
+            StockToLeave::default(),
+        )
+        .unwrap();
+    let mut operation = app.operation(id).unwrap().clone();
+    let Operation::Profile(profile) = &mut operation else {
+        panic!("profile")
+    };
+    profile.depth = 3.;
+    app.apply_operation_settings(
+        operation,
+        Some(GeometryOverrides {
+            top: Some(0.),
+            bottom: Some(-3.),
+        }),
+    )
+    .unwrap();
+    let before = app.operation(id).unwrap().clone();
+    assert!(
+        matches!(&before, Operation::Profile(p) if p.closed && p.depth == 3.),
+        "{before:?}"
+    );
+    let path =
+        std::env::temp_dir().join(format!("closed-spline-profile-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = controller();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(reopened.operation(id), Some(&before));
+    assert_eq!(reopened.geometry_state().bindings[&id].selected, selected);
+    assert!(!reopened.has_unsaved_changes());
+}
 fn install_pocket(app: &mut AppController) -> EntityRef {
     let (state, r) = pocket();
     app.add_cad_asset(state.assets[0].clone(), state.instances)
@@ -393,7 +469,10 @@ fn profile_can_be_created_from_a_certified_inner_loop() {
         .unwrap();
     select_all_models(&mut app);
     let id = app
-        .create_cad_operation(OpKind::Profile, vec![reference(inner_loop, EntityKind::Loop)])
+        .create_cad_operation(
+            OpKind::Profile,
+            vec![reference(inner_loop, EntityKind::Loop)],
+        )
         .unwrap();
     assert!(matches!(
         app.operation(id),
@@ -459,7 +538,7 @@ fn cad_face_contours_preserve_independent_sides_through_resolution_save_and_undo
 }
 
 #[test]
-fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
+fn inside_profile_uses_local_geometry_and_keeps_depth_verification_advisory() {
     let (state, selected) = blind_bore_with_unrelated_surface();
     let mut app = controller();
     app.edit_tool(0, |t| t.flute_length = 10.);
@@ -480,10 +559,19 @@ fn inside_profile_uses_local_bore_geometry_and_preserves_depth_guards() {
         .unwrap();
     assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.side == Side::Inside));
     let before = app.document().clone();
-    assert!(app
-        .override_cad_heights(id, None, Some(-6.))
+    app.override_cad_heights(id, None, Some(-6.)).unwrap();
+    let binding = &app.geometry_state().bindings[&id];
+    assert_eq!(binding.effective_heights().bottom, -6.);
+    let geometry = app.setup_geometry_state().unwrap();
+    assert!(cam_geometry3d::resolve_binding(&geometry, binding)
         .unwrap_err()
         .contains("certified"));
+    assert!(cam_geometry3d::resolve_binding_advisory(&geometry, binding)
+        .unwrap()
+        .diagnostics
+        .iter()
+        .any(|message| message.contains("verification (info)")));
+    assert!(app.undo());
     assert_eq!(app.document(), &before);
 }
 
@@ -507,13 +595,16 @@ fn inside_profile_accepts_a_certified_top_entry_rim() {
         .unwrap();
     select_all_models(&mut app);
     let id = app
-        .create_cad_operation(OpKind::Profile, vec![reference(entry_loop, EntityKind::Loop)])
+        .create_cad_operation(
+            OpKind::Profile,
+            vec![reference(entry_loop, EntityKind::Loop)],
+        )
         .unwrap();
     assert!(matches!(app.operation(id), Some(Operation::Profile(profile)) if profile.side == Side::Inside));
 }
 
 #[test]
-fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() {
+fn inside_profile_reports_recognition_findings_and_rejects_unusable_curve_data() {
     for defect in [
         "blocked entry",
         "invalid solid",
@@ -585,11 +676,33 @@ fn inside_profile_rejects_blocked_entries_invalid_solids_and_incomplete_bores() 
             .unwrap();
         select_all_models(&mut app);
         let before = app.document().clone();
-        let error = app
-            .create_cad_operation(OpKind::Profile, vec![selected])
-            .expect_err(defect);
-        assert!(error.contains(reason), "{defect}: {error}");
-        assert_eq!(app.document(), &before);
+        let geometry = app.setup_geometry_state().unwrap();
+        let finding = cam_geometry3d::verify_selection(
+            &geometry,
+            std::slice::from_ref(&selected),
+            ExtractionRecipe::ProfileContours,
+            0.,
+        )
+        .unwrap();
+        assert!(finding.contains(reason), "{defect}: {finding}");
+        if ["blocked entry", "invalid solid", "ambiguous floor"].contains(&defect) {
+            let preview = app
+                .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&selected))
+                .unwrap();
+            assert!(preview
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("verification (info)")));
+            app.create_cad_operation(OpKind::Profile, vec![selected])
+                .unwrap();
+        } else {
+            assert!(
+                app.create_cad_operation(OpKind::Profile, vec![selected])
+                    .is_err(),
+                "{defect}"
+            );
+            assert_eq!(app.document(), &before);
+        }
     }
 }
 
@@ -664,6 +777,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         ])
     };
     planar.add_operation(Operation::Pocket(PocketOp {
+        finishing: Default::default(),
         id,
         tool: 1,
         work_offset: 1,
@@ -677,6 +791,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         end: None,
         start: None,
         clear: ClearParams {
+            lift_height: 0.0,
             stepdown: 2.,
             overlap: 0.5,
             offset: 0.,
@@ -1211,7 +1326,7 @@ fn cad_feature_and_operation_first_resolve_and_create_equivalent_inputs() {
 }
 
 #[test]
-fn cad_multi_selection_is_homogeneous_and_rejections_preserve_every_reference() {
+fn cad_selection_keeps_mixed_features_and_only_rejects_stale_references() {
     let mut app = controller();
     let floor = install_pocket(&mut app);
     let topology = &app.geometry_state().assets[0].topology;
@@ -1221,18 +1336,16 @@ fn cad_multi_selection_is_homogeneous_and_rejections_preserve_every_reference() 
     );
     let edge = reference(topology.edges[0].id, EntityKind::Edge);
     app.toggle_cad_selection(floor.clone(), false).unwrap();
-    assert!(app
-        .toggle_cad_selection(edge, true)
-        .unwrap_err()
-        .contains("same kind"));
-    assert_eq!(app.cad_selection(), std::slice::from_ref(&floor));
+    app.toggle_cad_selection(edge.clone(), true).unwrap();
+    assert_eq!(app.cad_selection(), &[floor.clone(), edge.clone()]);
+    app.toggle_cad_selection(edge, true).unwrap();
     app.toggle_cad_selection(other.clone(), true).unwrap();
     assert_eq!(app.cad_selection(), &[floor.clone(), other]);
     let before = app.document().clone();
     assert!(app
         .cad_operation_eligibility(OpKind::Pocket)
         .unwrap_err()
-        .contains("one planar floor"));
+        .contains("one region"));
     assert!(app
         .create_cad_operation(OpKind::Pocket, app.cad_selection().to_vec())
         .is_err());
@@ -1265,7 +1378,7 @@ fn cad_multi_selection_is_homogeneous_and_rejections_preserve_every_reference() 
 }
 
 #[test]
-fn a_different_body_instance_cannot_be_added_to_the_geometry_field() {
+fn selections_can_include_features_from_different_body_instances() {
     let mut app = controller();
     let floor = install_pocket(&mut app);
     let mut second = app.geometry_state().instances[0].clone();
@@ -1279,11 +1392,13 @@ fn a_different_body_instance_cannot_be_added_to_the_geometry_field() {
     second_floor.asset_id = 2;
     second_floor.instance_id = 2;
     app.toggle_cad_selection(floor.clone(), false).unwrap();
-    assert!(app
-        .toggle_cad_selection(second_floor, true)
-        .unwrap_err()
-        .contains("one body instance"));
-    assert_eq!(app.cad_selection(), &[floor]);
+    app.toggle_cad_selection(second_floor.clone(), true)
+        .unwrap();
+    assert_eq!(app.cad_selection(), &[floor, second_floor]);
+    let profile = app
+        .preview_cad_operation(OpKind::Profile, app.cad_selection())
+        .unwrap();
+    assert_eq!(profile.profiles.len(), 4);
 }
 
 #[test]
@@ -1319,7 +1434,7 @@ fn persisted_mixed_geometry_cannot_generate_or_export_using_cached_contours() {
     assert!(outcome
         .diagnostics
         .iter()
-        .any(|d| d.message.contains("same kind")));
+        .any(|d| d.message.contains("one region")));
     assert!(cuts(&outcome.program).is_empty());
     assert!(matches!(reopened.export_nc(), Err(ExportError::HasErrors)));
 }
@@ -1476,7 +1591,7 @@ fn single_model_edge_uses_current_orientation_and_applies_without_other_axis_pic
 }
 
 #[test]
-fn pocket_and_drill_ignore_unrelated_blends_but_reject_obstructed_approaches() {
+fn pocket_and_drill_report_obstructed_approaches_as_advisory_findings() {
     for kind in [OpKind::Pocket, OpKind::Drill] {
         let (state, floor_loop) = blind_bore_with_unrelated_surface();
         let wire = state.assets[0]
@@ -1559,7 +1674,11 @@ fn pocket_and_drill_ignore_unrelated_blends_but_reject_obstructed_approaches() {
             select_all_models(&mut app);
             let result = app.preview_cad_operation(kind, std::slice::from_ref(&selected));
             if blocked {
-                assert!(result.unwrap_err().contains("blocks vertical access"));
+                let preview = result.unwrap();
+                assert!(preview
+                    .diagnostics
+                    .iter()
+                    .any(|message| message.contains("blocks vertical access")));
             } else {
                 assert!(result.is_ok(), "{result:?}");
             }
@@ -1974,4 +2093,116 @@ fn bore_cad_selection_regeneration_save_reopen_and_all_posts() {
     assert!(reopened
         .apply_operation_settings_with_geometry(invalid, None, vec![], None)
         .is_err());
+}
+
+#[test]
+fn pocket_boundary_chains_generate_at_the_selected_plane_and_survive_reopen() {
+    for edges in [false, true] {
+        let mut app = controller();
+        let floor = install_pocket(&mut app);
+        let wire = app.geometry_state().assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|wire| wire.face_id == floor.id && wire.is_outer)
+            .unwrap()
+            .clone();
+        let selected = if edges {
+            wire.edge_uses
+                .iter()
+                .rev()
+                .map(|edge| reference(edge.edge_id, EntityKind::Edge))
+                .collect()
+        } else {
+            vec![reference(wire.id, EntityKind::Loop)]
+        };
+        app.place_cad_instance(
+            1,
+            RigidTransform {
+                translation: [5., 7., 10.],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = app
+            .create_cad_operation(OpKind::Pocket, selected.clone())
+            .unwrap();
+        assert_eq!(
+            app.geometry_state().bindings[&id].recipe,
+            ExtractionRecipe::PocketBoundary
+        );
+        assert_eq!(app.geometry_state().bindings[&id].heights.top, 7.);
+        assert!(matches!(app.operation(id), Some(Operation::Pocket(op)) if op.islands.is_empty()));
+        app.edit_operation(id, |op| {
+            if let Operation::Pocket(p) = op {
+                p.depth = 2.;
+            }
+        });
+        app.edit_setup(|setup| {
+            setup
+                .height_settings
+                .get_mut(&id)
+                .unwrap()
+                .definition_mut(HeightPlaneKind::Bottom)
+                .offset = -2.;
+        });
+        let heights = app.document().setup().height_settings[&id]
+            .resolve(app.document(), app.operation(id).unwrap())
+            .unwrap();
+        assert_eq!(heights.top, 7.);
+        assert_eq!(heights.bottom, 5.);
+        let outcome = app.run(&CancelToken::new());
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            outcome.diagnostics
+        );
+        assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+        assert!(!outcome.program.is_empty());
+        let program = outcome.program.clone();
+        let path =
+            std::env::temp_dir().join(format!("pocket-chain-{edges}-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = controller();
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reopened.geometry_state().bindings[&id].selected, selected);
+        assert_eq!(reopened.run(&CancelToken::new()).program, program);
+    }
+}
+
+#[test]
+fn pocket_boundary_rejects_open_disconnected_and_nonplanar_edge_chains() {
+    let mut app = controller();
+    let floor = install_pocket(&mut app);
+    let topology = &app.geometry_state().assets[0].topology;
+    let wire = topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == floor.id && wire.is_outer)
+        .unwrap();
+    let edges: Vec<_> = wire
+        .edge_uses
+        .iter()
+        .map(|edge| reference(edge.edge_id, EntityKind::Edge))
+        .collect();
+    let nonplanar = topology
+        .edges
+        .iter()
+        .find(|edge| match edge.curve {
+            CadCurve::Line { start, end } => (start[2] - end[2]).abs() > 1.,
+            _ => false,
+        })
+        .unwrap()
+        .id;
+    let before = app.document().clone();
+    for selected in [
+        vec![edges[0].clone()],
+        vec![edges[0].clone(), edges[2].clone()],
+        vec![reference(nonplanar, EntityKind::Edge)],
+    ] {
+        assert!(app.create_cad_operation(OpKind::Pocket, selected).is_err());
+        assert_eq!(app.document(), &before);
+    }
 }

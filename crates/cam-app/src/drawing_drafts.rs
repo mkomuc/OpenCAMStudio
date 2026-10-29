@@ -13,6 +13,7 @@ impl AppController {
             Operation::Engrave(_) => OpKind::Engrave,
             Operation::Carve(_) => OpKind::Carve,
             Operation::Adaptive(_) => OpKind::Adaptive,
+        Operation::Parallel(_) => OpKind::Parallel,
         }
     }
     /// Resolve a drawing geometry field without committing or resetting cutting data.

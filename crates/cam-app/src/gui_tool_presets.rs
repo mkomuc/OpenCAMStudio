@@ -706,7 +706,7 @@ impl App {
         }
         self.operation_tools
             .iter()
-            .chain(self.controller.document().setup().tools.iter())
+            .chain(self.controller.inspection_setup().tools.iter())
             .find(|t| t.number == op.tool())
     }
     pub(super) fn auto_operation_preset(&mut self) {
@@ -715,7 +715,7 @@ impl App {
         }
         let preset = self
             .operation_preset_tool()
-            .and_then(|t| t.preset_for_material(self.controller.document().setup().material_id))
+            .and_then(|t| t.preset_for_material(self.controller.inspection_setup().material_id))
             .cloned();
         if let Some(preset) = preset {
             self.apply_operation_preset(&preset);
@@ -909,7 +909,7 @@ mod tests {
         assert_eq!(app.fields[&Field::Feed], "321");
         assert!(app.creation_ready(), "{}", app.status);
         send(&mut app, Message::ConfirmOp);
-        let operation = app.controller.document().setup().operations.last().unwrap();
+        let operation = app.controller.inspection_setup().operations.last().unwrap();
         let Operation::Pocket(o) = operation else {
             panic!()
         };
@@ -931,9 +931,7 @@ mod tests {
             .unwrap();
         send(&mut app, Message::ConfirmOp);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -959,9 +957,7 @@ mod tests {
             650.
         );
         assert_eq!(
-            app.controller
-                .document()
-                .setup()
+            app.controller.inspection_setup()
                 .tools
                 .iter()
                 .find(|t| t.number == app.controller.operation(id).unwrap().tool())
@@ -1290,7 +1286,7 @@ mod tests {
             Message::FieldChanged(Field::LeadOutFeed, "230".into()),
         );
         send(&mut app, Message::ConfirmOp);
-        let op = app.controller.document().setup().operations.last().unwrap();
+        let op = app.controller.inspection_setup().operations.last().unwrap();
         assert_eq!(
             *op.entry_feeds(),
             cam_model::EntryFeeds {

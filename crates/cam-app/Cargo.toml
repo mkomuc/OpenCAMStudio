@@ -1,5 +1,6 @@
 [package]
 name = "cam-app"
+default-run = "opencamstudio"
 description = "OpenCAMStudio — CAM application for CNC toolpath generation"
 version.workspace = true
 edition.workspace = true
@@ -11,6 +12,11 @@ repository.workspace = true
 [[bin]]
 name = "opencamstudio"
 path = "src/main.rs"
+
+# Console subsystem on Windows, even when the desktop binary is built without one.
+[[bin]]
+name = "opencamstudio-mcp"
+path = "src/mcp_main.rs"
 
 [features]
 # The headless app controller builds and tests with no default features. The

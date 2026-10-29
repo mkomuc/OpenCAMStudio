@@ -16,17 +16,9 @@
 //! the cone flank (see [`cam_geo::vtip_half_width`]). At engraving depths a tipped bit
 //! is usually still in the *ball*, where the naive `depth·tan α` is badly wrong.
 //!
-//! ## Why a chamfer mill is rejected
-//!
-//! A chamfer mill's bottom is a **flat, non-cutting** tip: only its flank cuts. Plunge
-//! one into the material and the flat rubs instead of cutting — a path that backplots
-//! perfectly and burns the tool. That is a hard error here, not a warning.
-//!
-//! ## Depth limit
-//!
-//! A V-bit's cone flares out to the shank at its full cutting radius. Past that depth
-//! the shank — not a cutting edge — is against the groove wall, so
-//! [`cam_geo::vtip_max_depth`] is a hard gate too.
+//! Cutter shape and reach findings are advisory. Other cutters can follow the
+//! same centre path; simulation uses their actual profiles. V-bit groove width
+//! is reported only when its conical geometry is available.
 
 use cam_cldata::{MoveKind, Point3, Program, Step, Tag};
 use cam_geo::{vtip_half_width, vtip_max_depth};
@@ -72,31 +64,31 @@ impl Strategy for EngraveStrategy {
             )));
             bail!();
         };
+        if [op.depth, op.top, op.stepdown, op.feed, op.plunge_feed, tool.diameter, tool.length]
+            .iter().any(|v| !v.is_finite())
+            || op.chain.points().iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+            || tool.diameter <= 0. || tool.length <= 0. || op.feed <= 0. || op.plunge_feed <= 0.
+        {
+            diagnostics.push(Diagnostic::error("Engraving coordinates and dimensions must be finite; tool dimensions and feeds must be positive"));
+            bail!();
+        }
+        if op.stepdown > 0. && (op.depth / op.stepdown).ceil() * op.chain.len() as f64 > cam_model::MAX_PROFILE_MOVES as f64 {
+            diagnostics.push(Diagnostic::error("Engraving motion budget exceeded; increase stepdown or simplify the path"));
+            bail!();
+        }
 
-        // GATE 1 — the tool must be a V-bit. A chamfer mill is the near miss worth
-        // naming explicitly: it looks right (it is conical) but its tip does not cut.
-        let (included_angle_deg, tip_radius) = match tool.kind {
-            ToolKind::VBit {
-                included_angle_deg,
-                tip_radius,
-            } => (included_angle_deg, tip_radius),
-            ToolKind::ChamferMill { .. } => {
-                diagnostics.push(Diagnostic::error(format!(
-                    "operation {}: tool {} is a chamfer mill, whose tip is a flat \
-                     non-cutting face — it would rub, not cut. Engraving needs a V-bit.",
-                    op.id, op.tool
-                )));
-                bail!();
-            }
+        let v_shape = match tool.kind {
+            ToolKind::VBit { included_angle_deg, tip_radius } => Some((included_angle_deg, tip_radius)),
             _ => {
-                diagnostics.push(Diagnostic::error(format!(
-                    "operation {}: tool {} is a {}; engraving needs a V-bit \
-                     (the groove's V comes from the tool's point)",
+                diagnostics.push(Diagnostic::warning(format!(
+                    "operation {}: tool {} is a {}; the engraved groove will follow the selected cutter's profile",
                     op.id, op.tool, tool.kind
                 )));
-                bail!();
+                None
             }
         };
+        crate::guards::warn_plunge(op.id, "engrave", tool, &mut diagnostics);
+        crate::guards::warn_axial_reach(op.id, "engrave", tool, op.depth, &mut diagnostics);
 
         if op.chain.len() < 2 {
             diagnostics.push(Diagnostic::error(format!(
@@ -120,34 +112,19 @@ impl Strategy for EngraveStrategy {
             bail!();
         }
 
-        // Half the included V angle, from the tool axis.
-        let alpha = 0.5 * included_angle_deg.to_radians();
-        if !(alpha > 0.0 && alpha < std::f64::consts::FRAC_PI_2) {
-            diagnostics.push(Diagnostic::error(format!(
-                "operation {}: tool included angle {} is not a valid V (0–180°)",
-                op.id, included_angle_deg
-            )));
-            bail!();
-        }
-
-        // GATE 2 — depth must keep a cutting edge in contact: past the point where the
-        // cone reaches the full cutting radius, the shank rubs the groove walls.
-        let max_depth = vtip_max_depth(alpha, tip_radius, tool.radius());
-        if op.depth > max_depth + 1e-9 {
-            diagnostics.push(Diagnostic::error(format!(
-                "operation {}: depth {:.3} mm exceeds the {:.3} mm at which tool {}'s \
-                 cone reaches its full cutting ⌀ {:.3} — deeper, the shank rubs instead \
-                 of cutting. Use a larger-⌀ or narrower-angle V-bit.",
-                op.id,
-                op.depth,
-                max_depth,
-                op.tool,
-                tool.diameter
-            )));
-            bail!();
-        }
-
-        let half_width = vtip_half_width(alpha, tip_radius, op.depth);
+        let groove = if let Some((included_angle_deg, tip_radius)) = v_shape {
+            let alpha = 0.5 * included_angle_deg.to_radians();
+            if !(alpha > 0.0 && alpha < std::f64::consts::FRAC_PI_2) {
+                diagnostics.push(Diagnostic::error(format!(
+                    "operation {}: tool included angle {} is not a valid V (0–180°)", op.id, included_angle_deg
+                )));
+                bail!();
+            }
+            let max_depth = vtip_max_depth(alpha, tip_radius, tool.radius());
+            if op.depth <= max_depth + 1e-9 {
+                Some((included_angle_deg, 2. * vtip_half_width(alpha, tip_radius, op.depth)))
+            } else { None }
+        } else { None };
 
         let link = Tag::new(op.id, MoveKind::Link);
         let plunge = Tag::new(op.id, MoveKind::Plunge);
@@ -158,13 +135,12 @@ impl Strategy for EngraveStrategy {
         let depths = pass_depths(op.depth, op.stepdown);
 
         let mut program = Program::new();
-        program.push(Step::Comment(format!(
-            "Engrave: {:.3} mm deep, {:.3} mm wide groove at {}\u{00b0} in {}",
-            op.depth,
-            2.0 * half_width,
-            included_angle_deg,
-            crate::passes_phrase(depths.len())
-        )));
+        let description = if let Some((angle, width)) = groove {
+            format!("Engrave: {:.3} mm deep, {:.3} mm wide groove at {}° in {}", op.depth, width, angle, crate::passes_phrase(depths.len()))
+        } else {
+            format!("Engrave: {:.3} mm deep with {} in {}; groove follows the selected cutter's profile", op.depth, tool.kind, crate::passes_phrase(depths.len()))
+        };
+        program.push(Step::Comment(description));
 
         // The path the tool centre follows. A closed loop may be rotated to begin at
         // the operator's chosen start and is closed back to it; an open stroke must
@@ -355,46 +331,43 @@ mod tests {
     // --- the gates ---
 
     #[test]
-    fn a_chamfer_mill_is_rejected_because_its_tip_does_not_cut() {
+    fn a_chamfer_mill_warns_about_its_tip_but_still_generates() {
         let r = run(
             op(0.5),
             tool_of(ToolKind::ChamferMill {
                 included_angle_deg: 90.0,
-                tip_diameter: 0.0,
+                tip_diameter: 1.0,
             }),
         );
-        let e = errors(&r);
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("chamfer mill") && e[0].contains("non-cutting"), "{e:?}");
-        assert!(r.program.steps().is_empty(), "no path may be emitted");
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("non-cutting tip")));
+        assert!(!r.program.is_empty());
     }
 
     #[test]
-    fn a_flat_end_mill_is_rejected_too() {
+    fn a_flat_end_mill_follows_the_engraving_path_with_a_warning() {
         let r = run(op(0.5), tool_of(ToolKind::EndMill));
-        let e = errors(&r);
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("V-bit"), "{e:?}");
-        assert!(r.program.steps().is_empty());
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("groove will follow")));
+        assert!(!r.program.is_empty());
     }
 
     #[test]
-    fn depth_past_the_cone_flare_is_rejected() {
+    fn depth_past_the_cone_flare_is_advisory() {
         // 90° V-bit, ⌀6 (r=3), sharp tip → the cone reaches full ⌀ at depth 3.0.
         let t = vbit(90.0, 0.0);
         assert!(errors(&run(op(2.9), t.clone())).is_empty());
         let r = run(op(3.1), t.clone());
-        let e = errors(&r);
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("shank rubs"), "{e:?}");
-        assert!(r.program.steps().is_empty());
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("cutting edge")));
+        assert!(!r.program.is_empty());
         // Exactly at the limit is allowed.
         assert!(errors(&run(op(3.0), t)).is_empty());
     }
 
     #[test]
     fn a_non_positive_depth_is_rejected() {
-        for d in [0.0, -1.0] {
+        for d in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             let r = run(op(d), vbit(90.0, 0.0));
             assert_eq!(errors(&r).len(), 1, "depth {d}");
         }

@@ -6,6 +6,7 @@ type Point3 = [f64; 3];
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SetupFeature {
     Stock(usize),
+    BoxPoint(usize),
     Model(EntityRef),
     Drawing(LoopRef),
 }
@@ -38,6 +39,8 @@ pub(super) struct SetupPickGeometry {
     points: Vec<PickPoint>,
     frame: cam_model::SetupFrame,
     top: f64,
+    origin_box: Option<Vec<Point3>>,
+    origin_box_lines: Vec<[Point3; 2]>,
 }
 
 impl SetupPickGeometry {
@@ -54,8 +57,7 @@ impl SetupPickGeometry {
         if !controller.has_geometry() {
             return result;
         }
-        let (min, max) = controller.pending_setup_model_bounds(setup);
-        let (min, max) = setup.stock.resolve_bounds(min, max);
+        let (min, max) = controller.pending_setup_stock_bounds(setup);
         if (0..3).all(|i| min[i].is_finite() && max[i].is_finite() && min[i] <= max[i]) {
             let corners: Vec<_> = (0..8)
                 .map(|index| {
@@ -251,6 +253,48 @@ impl SetupPickGeometry {
         }
         result
     }
+    /// Restrict an origin pick to the 27 conventional bounding-box points.
+    /// Box picks work independently of drawing snap preferences and visibility.
+    pub fn with_origin_box(mut self, setup: &cam_model::Setup, min: Point3, max: Point3) -> Self {
+        self.origin_box = Some(Vec::new());
+        if !(0..3).all(|i| min[i].is_finite() && max[i].is_finite() && min[i] <= max[i]) {
+            return self;
+        }
+        for x in 0..3 {
+            for y in 0..3 {
+                for z in 0..3 {
+                    let indices = [x, y, z];
+                    let point = std::array::from_fn(|i| {
+                        min[i] + (max[i] - min[i]) * indices[i] as f64 / 2.
+                    });
+                    self.origin_box
+                        .as_mut()
+                        .unwrap()
+                        .push(setup.frame.to_world_vector(point));
+                }
+            }
+        }
+        let corners: Vec<_> = (0..8)
+            .map(|index| {
+                setup.frame.to_world_vector(std::array::from_fn(|i| {
+                    if index & (1 << i) == 0 {
+                        min[i]
+                    } else {
+                        max[i]
+                    }
+                }))
+            })
+            .collect();
+        for index in 0..8 {
+            for axis in 0..3 {
+                let other = index ^ (1 << axis);
+                if index < other {
+                    self.origin_box_lines.push([corners[index], corners[other]]);
+                }
+            }
+        }
+        self
+    }
     fn add_line(&mut self, source: SetupFeature, a: Point3, b: Point3) {
         for point in [a, b] {
             self.points.push(PickPoint {
@@ -306,6 +350,9 @@ impl SetupPickGeometry {
         self.frame.to_world_vector(point)
     }
     pub fn fallback(&self, ray: cam_render::Ray) -> Option<Point3> {
+        if self.origin_box.is_some() {
+            return None;
+        }
         let origin = self.frame.to_setup_vector(ray.origin);
         let direction = self.frame.to_setup_vector(ray.direction);
         if direction[2].abs() < 1e-10 {
@@ -327,6 +374,24 @@ impl SetupPickGeometry {
         aperture: f32,
     ) -> SetupHover {
         let project = |p| project(camera, bounds, p);
+        if let Some(points) = &self.origin_box {
+            let snap = points
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &point)| {
+                    let (screen, depth) = project(point)?;
+                    let distance = screen.distance(cursor);
+                    (distance <= aperture).then_some((distance, depth, index, point))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
+                .map(|(_, _, index, point)| SetupSnap {
+                    point,
+                    kind: SnapKind::End,
+                    source: SetupFeature::BoxPoint(index),
+                });
+            return SetupHover { snap, edge: None };
+        }
+
         let aspect = bounds.width / bounds.height.max(1.);
         let ray = camera.pick_ray(
             2. * (cursor.x - bounds.x) / bounds.width - 1.,
@@ -437,6 +502,12 @@ impl SetupPickGeometry {
         cad_scene: &CadScene,
         through: bool,
     ) {
+        for edge in &self.origin_box_lines {
+            scene.add_strip(
+                edge.iter().map(|p| p.map(|v| v as f32)).collect(),
+                [0.45, 0.65, 0.85, 1.],
+            );
+        }
         let source = hover
             .snap
             .as_ref()
@@ -446,7 +517,7 @@ impl SetupPickGeometry {
             .edges
             .iter()
             .find(|e| Some(&e.source) == source)
-            .filter(|_| highlight)
+            .filter(|_| highlight && self.origin_box.is_none())
         {
             scene.add_strip(
                 edge.points.iter().map(|p| p.map(|v| v as f32)).collect(),
@@ -471,6 +542,15 @@ impl SetupPickGeometry {
                 color,
             );
         };
+        if let Some(points) = &self.origin_box {
+            for &point in points {
+                mark(point, 3.5 * wpp, SNAP_MARK);
+            }
+            if let Some(hit) = &hover.snap {
+                mark(hit.point, 7. * marker_scale * wpp, SNAP_MARK);
+            }
+            return;
+        }
         if highlight && show_points {
             let aspect = bounds.width / bounds.height.max(1.);
             let ray = camera.pick_ray(0., 0., aspect);

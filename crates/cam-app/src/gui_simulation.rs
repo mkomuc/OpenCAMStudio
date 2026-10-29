@@ -249,7 +249,7 @@ impl SimulationPlayer {
         let mut inputs = controller.job_inputs();
         inputs.preview_resolution = Some(inputs.stock_resolution(&outcome.program));
         let mut geometry = controller.geometry_state().clone();
-        let setup = controller.document().setup();
+        let setup = controller.inspection_setup();
         for instance in &mut geometry.instances {
             instance.visible &= setup.model_instances.contains(&instance.id)
                 && geometry
@@ -1176,7 +1176,7 @@ mod tests {
             pending_frame: None,
             custom_stock_color: [0.2, 0.65, 0.3],
         };
-        let frame = &controller.document().setup().frame;
+        let frame = &controller.inspection_setup().frame;
         for (time, tip, radius, length) in [
             (5., [5., 0., 0.], 3., 30.),
             (15., [10., 5., 0.], 6., 40.),

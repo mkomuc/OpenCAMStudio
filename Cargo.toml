@@ -45,3 +45,7 @@ opt-level = 3
 # those geometry queries interactive in development builds as well.
 [profile.dev.package.cam-render]
 opt-level = 3
+
+# Surface finishing checks swept cutter contact against the CAD triangle mesh.
+[profile.dev.package.cam-toolpath]
+opt-level = 2

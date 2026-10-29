@@ -136,143 +136,35 @@ impl App {
                 );
                 list = list.push(inspector_section("Geometry"));
                 list = list.push(self.setup_geometry_list(draft));
-                list = list.push(inspector_section("Coordinate system"));
-                if let Some(instance) = draft.model_instances.first().copied() {
-                    list = list.push(
-                        text(if draft.frame.references.model_instance.is_some() {
-                            "Using model coordinates"
-                        } else {
-                            "Using selected edges"
-                        })
-                        .size(11)
-                        .color(INSPECTOR_MUTED),
-                    );
-                    list = list.push(
-                        inspector_button("Use model coordinate system")
-                            .width(Length::Fill)
-                            .on_press(Message::SetupUseModelFrame(instance)),
-                    );
-                    list = list.push(
-                        inspector_button("Use model origin as datum")
-                            .width(Length::Fill)
-                            .on_press(Message::SetupUseModelOrigin(instance)),
-                    );
-                }
+                list = list.push(self.setup_wcs_editor(draft));
+                list = list.push(inspector_section("Tool change"));
                 list = list.push(
-                    text(if self.setup_axis_pick.is_some() {
-                        "Pick an edge in the viewport…"
-                    } else {
-                        "Select any axis edge; unassigned axes use the current orientation. Click WCS arrows to flip."
-                    })
-                    .size(11)
-                    .color(INSPECTOR_MUTED),
+                    checkbox(draft.tool_change_height.is_none())
+                        .label("Use machine maximum Z")
+                        .text_size(12)
+                        .on_toggle(Message::SetupToolChangeAutomatic),
                 );
-                if self.cad_candidates.len() > 1 && self.setup_axis_pick.is_some() {
-                    list = list.push(
-                        text("Overlapping edge candidates")
-                            .size(11)
-                            .color(INSPECTOR_MUTED),
-                    );
-                    for candidate in &self.cad_candidates {
-                        list = list.push(
-                            inspector_button(format!(
-                                "Edge {} · instance {}{}",
-                                candidate.entity.id,
-                                candidate.entity.instance_id,
-                                if candidate.occluded { " · behind" } else { "" }
-                            ))
-                            .on_press(Message::CadSelect(candidate.entity.clone())),
-                        );
-                    }
-                }
-                for (axis, reference) in [
-                    &draft.frame.references.x,
-                    &draft.frame.references.y,
-                    &draft.frame.references.z,
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let stock = draft.frame.references.stock_axes[axis].is_some();
-                    let label = if stock {
-                        "Stock edge".to_string()
-                    } else {
-                        reference
-                            .as_ref()
-                            .map(|r| format!("Edge {}", r.entity.id))
-                            .unwrap_or_else(|| "Current orientation".to_string())
-                    };
-                    let picking = self.setup_axis_pick == Some(axis);
-                    let mut axis_controls = column![row![
-                        text(["X", "Y", "Z"][axis])
-                            .size(12)
-                            .color(palette::ACCENT_BLUE)
-                            .width(18),
-                        text(label)
-                            .size(12)
-                            .color(INSPECTOR_MUTED)
-                            .width(Length::Fill),
-                        inspector_button(if picking { "Picking…" } else { "Select edge" })
-                            .style(move |theme, status| inspector_tab(theme, status, picking))
-                            .on_press(Message::SetupAxisPick(axis)),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center)]
-                    .spacing(6);
-                    if reference.is_some() || stock {
-                        let flipped = reference
-                            .as_ref()
-                            .map_or(draft.frame.references.stock_flipped[axis], |r| r.flipped);
-                        axis_controls = axis_controls.push(
-                            row![
-                                Space::new().width(24),
-                                checkbox(flipped)
-                                    .label("Flip direction")
-                                    .size(14)
-                                    .text_size(11)
-                                    .spacing(8)
-                                    .on_toggle(move |on| Message::SetupAxisFlip(axis, on)),
-                                Space::new().width(Length::Fill),
-                                inspector_button("Clear").on_press(Message::SetupAxisClear(axis)),
-                            ]
-                            .spacing(6)
-                            .align_y(Alignment::Center),
-                        );
-                    }
-                    list = list.push(axis_controls);
-                }
-                list = list.push(inspector_section("Work origin"));
-                // Stacked picking commands remain readable at narrow dock widths.
-                list = list.push(
-                    inspector_button(if self.setting_origin {
-                        "Cancel point pick"
-                    } else {
-                        "Pick origin point"
-                    })
-                    .width(Length::Fill)
-                    .on_press(Message::ToggleSetOrigin),
-                );
-                list = list.push(
-                    inspector_button(if self.setting_origin_2pt {
-                        "Cancel two-point pick"
-                    } else {
-                        "Pick origin from two points"
-                    })
-                    .width(Length::Fill)
-                    .on_press(Message::ToggleSetOrigin2pt),
-                );
-                for i in 0..3 {
-                    let value = self.setup_value(i, fmt_num(draft.origin[i]));
+                let height = draft
+                    .resolved_tool_change_height(self.controller.machine().envelope.max.z)
+                    - draft.origin[2];
+                if draft.tool_change_height.is_some() {
+                    let value = self.setup_value(41, fmt_num(height));
                     list = list.push(inspector_value(
-                        ["Origin X", "Origin Y", "Origin Z"][i],
+                        "Tool-change height",
                         &value,
                         "mm",
-                        move |v| Message::SetupOriginChanged(i, v),
+                        Message::SetupToolChangeHeightChanged,
                     ));
+                } else {
+                    list = list.push(
+                        text(format!("Tool-change height: {} mm", fmt_num(height)))
+                            .size(12)
+                            .color(INSPECTOR_TEXT),
+                    );
                 }
-                if let Some(error) = self.setup_frame_issue(draft) {
-                    list = list.push(text(error).size(11).color(palette::ERROR));
-                }
+                list = list.push(text(
+                    "Z relative to the base WCS origin. Used before tool changes and re-fixturing; must be at or above all operation clearance planes."
+                ).size(11).color(INSPECTOR_MUTED));
             }
             SetupEditorTab::Stock => {
                 list = list.push(inspector_section("Material"));
@@ -282,10 +174,20 @@ impl App {
                     cam_model::Stock::FixedBox { .. } => StockEditorKind::FixedBox,
                     cam_model::Stock::RelativeBox { .. } => StockEditorKind::RelativeBox,
                     cam_model::Stock::BoundingBox { .. } => StockEditorKind::LegacyBox,
+                    cam_model::Stock::PreviousSetup => StockEditorKind::PreviousSetup,
                 };
                 list = list.push(
                     pick_list(
-                        &StockEditorKind::ALL[..],
+                        if self
+                            .controller
+                            .setups()
+                            .first()
+                            .is_some_and(|s| s.id != draft.id)
+                        {
+                            &StockEditorKind::ALL[..]
+                        } else {
+                            &StockEditorKind::ALL[..3]
+                        },
                         Some(kind),
                         Message::SetupStockKindChanged,
                     )
@@ -295,6 +197,18 @@ impl App {
                     .width(Length::Fill),
                 );
                 match draft.stock {
+                    cam_model::Stock::PreviousSetup => {
+                        let previous = self
+                            .controller
+                            .setups()
+                            .iter()
+                            .take_while(|s| s.id != draft.id)
+                            .last();
+                        list = list.push(text(previous.map_or_else(
+                            || "The first setup needs box stock.".into(),
+                            |s| format!("Uses the remaining material after {}. Included operations are recalculated when generating or simulating.", s.name),
+                        )).size(11).color(INSPECTOR_MUTED));
+                    }
                     cam_model::Stock::FixedBox {
                         size,
                         model_position,
@@ -379,10 +293,12 @@ impl App {
                     .size(11)
                     .color(INSPECTOR_MUTED),
                 );
-                let (stock_min, stock_max) = draft.stock.resolve_bounds(model_min, model_max);
-                if (0..3).any(|i| {
-                    stock_min[i] > model_min[i] + 1e-6 || stock_max[i] < model_max[i] - 1e-6
-                }) {
+                let (stock_min, stock_max) = self.controller.pending_setup_stock_bounds(draft);
+                if draft.stock != cam_model::Stock::PreviousSetup
+                    && (0..3).any(|i| {
+                        stock_min[i] > model_min[i] + 1e-6 || stock_max[i] < model_max[i] - 1e-6
+                    })
+                {
                     list = list.push(
                         text("Stock does not contain the selected machining model.")
                             .size(11)
@@ -414,7 +330,7 @@ impl App {
         let numbers_valid = self
             .setup_values
             .values()
-            .all(|v| v.trim().parse::<f64>().is_ok())
+            .all(|v| v.trim().parse::<f64>().is_ok_and(|n| n.is_finite()))
             && self
                 .setup_values
                 .get(&40)

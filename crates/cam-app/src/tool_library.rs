@@ -472,15 +472,13 @@ impl ToolLibrary {
                 .filter(|t| matches!(t.kind, ToolKind::EndMill | ToolKind::FaceMill))
                 .max_by(|a, b| a.diameter.total_cmp(&b.diameter)),
             OpKind::Profile | OpKind::Pocket | OpKind::Adaptive => middle(|k| matches!(k, ToolKind::EndMill)),
+            OpKind::Parallel => middle(|k| matches!(k, ToolKind::BallMill)),
             OpKind::Drill => middle(|k| matches!(k, ToolKind::Drill { .. })),
             OpKind::Bore => middle(|k| matches!(k, ToolKind::EndMill)),
             OpKind::Thread => middle(|k| matches!(k, ToolKind::ThreadMill { .. })),
             OpKind::Chamfer => middle(|k| matches!(k, ToolKind::ChamferMill { .. })),
-            // Engraving *requires* a V-bit (a chamfer mill's tip does not cut), so
-            // this is the one default that matches the strategy's hard gate.
-            // Carving *requires* a V-bit too — it is the same gate, for the same
-            // reason: the tool's own cone is what shapes the cut. And for the same
-            // reason it is chosen by angle, not by size.
+            // Prefer a V-bit for engraving and carving, chosen by angle.
+            // Engraving also allows other cutters along the same centre path.
             OpKind::Engrave | OpKind::Carve => nearest_vbit(),
         };
         preferred.or_else(|| self.tools.first()).cloned()
@@ -626,35 +624,21 @@ impl ToolKindPick {
     }
 }
 
-/// The tool families offered for an operation, in the order shown.
-///
-/// A *family* is exactly a group in the Tool Library (the eight [`ToolKind`] classes),
-/// so the wizard and the library speak the same vocabulary. Bounding the list by
-/// operation is what keeps a library of hundreds usable: a pocket has no business
-/// listing drills or chamfer mills.
-///
-/// The strategy guards are the hard floor — anything here that could still not cut
-/// would be refused at Run time anyway — but this list is deliberately **narrower**
-/// than "whatever would not error", agreed with Andreas: no ball-nose for facing (it
-/// would leave a scalloped floor), no face mill for profiling or pocketing, and no end
-/// mill for drilling. Those remain *possible* if a tool is set another way; they are
-/// simply not offered.
+/// Tool families available in operation creation. General contour, bore, floor
+/// and engraving paths allow deliberate cutter substitutions; suitability warns
+/// during generation. Cone/thread-dependent strategies retain their geometric
+/// requirements. Default tool recommendations remain independent of this list.
 pub fn families_for(kind: OpKind) -> &'static [ToolKindPick] {
     use ToolKindPick as F;
     match kind {
-        // Side-milling a vertical wall: the end-mill family only.
-        OpKind::Profile | OpKind::Pocket => &[F::EndMill, F::BallMill, F::BullNose],
-        OpKind::Adaptive => &[F::EndMill],
-        // A flat floor: flat-bottomed tools (a bull-nose floor is still flat).
-        OpKind::Face => &[F::EndMill, F::BullNose, F::FaceMill],
-        OpKind::Drill => &[F::Drill],
-        OpKind::Bore => &[F::EndMill],
+        OpKind::Profile | OpKind::Pocket | OpKind::Face | OpKind::Drill
+        | OpKind::Bore | OpKind::Adaptive | OpKind::Engrave => &F::ALL,
+        OpKind::Parallel => &[F::BallMill],
         OpKind::Thread => &[F::ThreadMill],
         // A chamfer is cut by the flank, which both of these have.
         OpKind::Chamfer => &[F::ChamferMill, F::VBit],
-        // Engraving cuts with the tip; a chamfer mill's flat does not cut.
-        // Carving cuts with the tip too, and its geometry comes from the cone.
-        OpKind::Engrave | OpKind::Carve => &[F::VBit],
+        // Variable-width carving derives its path from the cutter's cone.
+        OpKind::Carve => &[F::VBit],
     }
 }
 

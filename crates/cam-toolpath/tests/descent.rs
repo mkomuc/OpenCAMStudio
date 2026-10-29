@@ -240,6 +240,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
 
 fn pocket() -> Operation {
     Operation::Pocket(PocketOp {
+        finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),
@@ -253,6 +254,7 @@ fn pocket() -> Operation {
         end: None,
         start: None,
         clear: ClearParams {
+            lift_height: 0.0,
             stepdown: 2.0,
             overlap: 0.4,
             offset: 0.0,

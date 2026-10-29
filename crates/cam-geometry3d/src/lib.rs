@@ -1,7 +1,13 @@
 //! Fixed-axis feature extraction. Analytic operations use exact topology;
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
+mod parallel;
+pub use parallel::{resolve_parallel, ParallelGeometry};
 mod adaptive;
+mod advisory;
+pub use advisory::{
+    resolve_binding_advisory, resolve_selection_advisory, verify_profile_entry, verify_selection,
+};
 mod bore_entry;
 mod chamfer_faces;
 mod profile_contours;
@@ -21,6 +27,97 @@ use std::{collections::BTreeSet, f64::consts::TAU};
 pub const RECOGNITION_TOLERANCE: f64 = 1e-5;
 pub const MACHINING_CHORD_TOLERANCE: f64 = 0.01;
 const T: f64 = RECOGNITION_TOLERANCE;
+
+/// Borrow only machining dependencies. Exact planar curves do not depend on
+/// either tessellation; silhouette operations also depend on projection data.
+#[derive(serde::Serialize)]
+struct MachiningTopology<'a> {
+    version: u32,
+    bodies: &'a [CadBody],
+    faces: &'a [CadFace],
+    edges: &'a [CadEdge],
+    loops: &'a [CadLoop],
+    vertices: &'a [CadVertex],
+    projection: Option<&'a CadProjectionMesh>,
+}
+impl<'a> MachiningTopology<'a> {
+    fn new(topology: &'a TopologySnapshot, projection: bool) -> Self {
+        Self {
+            version: topology.version,
+            bodies: &topology.bodies,
+            faces: &topology.faces,
+            edges: &topology.edges,
+            loops: &topology.loops,
+            vertices: &topology.vertices,
+            projection: if projection {
+                topology.projection.as_ref()
+            } else {
+                None
+            },
+        }
+    }
+}
+
+struct CachedTopologyFingerprint {
+    topology: std::sync::Weak<TopologySnapshot>,
+    exact: Option<u64>,
+    projection: Option<u64>,
+}
+
+/// Geometry snapshots never change in place. Hash large projection arrays once,
+/// then combine that digest with the current placement and operation settings.
+/// Weak keys neither retain deleted imports nor survive Arc::make_mut edits.
+fn topology_fingerprint(
+    topology: &std::sync::Arc<TopologySnapshot>,
+    projection: bool,
+) -> Result<u64, String> {
+    TOPOLOGY_FINGERPRINTS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.retain(|entry| entry.topology.strong_count() > 0);
+        let index = cache.iter().position(|entry| {
+            entry
+                .topology
+                .upgrade()
+                .is_some_and(|old| std::sync::Arc::ptr_eq(&old, topology))
+        });
+        if let Some(index) = index {
+            let entry = &cache[index];
+            if let Some(hash) = if projection {
+                entry.projection
+            } else {
+                entry.exact
+            } {
+                return Ok(hash);
+            }
+        }
+        let encoded = serde_json::to_vec(&MachiningTopology::new(topology, projection))
+            .map_err(|error| error.to_string())?;
+        let hash = encoded
+            .into_iter()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+        let index = if let Some(index) = index {
+            index
+        } else {
+            if cache.len() >= 32 {
+                cache.remove(0);
+            }
+            cache.push(CachedTopologyFingerprint {
+                topology: std::sync::Arc::downgrade(topology),
+                exact: None,
+                projection: None,
+            });
+            cache.len() - 1
+        };
+        if projection {
+            cache[index].projection = Some(hash);
+        } else {
+            cache[index].exact = Some(hash);
+        }
+        Ok(hash)
+    })
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedHole {
     pub center: Point,
@@ -51,15 +148,22 @@ pub fn profile_side(state: &GeometryState, selected: &[EntityRef]) -> Result<Sid
         );
     }
     let wire = view.wire(selected[0].id)?;
+    // A concave cylindrical segment can also be part of an exterior scallop.
+    // Only an entirely cylindrical boundary suggests a bore; extraction still
+    // certifies the complete feature before accepting an inside cut.
+    let mut bore_boundary = !wire.edge_uses.is_empty();
     for usage in &wire.edge_uses {
+        let mut inward_wall = false;
         for id in &view.edge(usage.edge_id)?.face_ids {
-            if matches!(
+            inward_wall |= matches!(
                 view.face(*id)?.surface,
                 CadSurface::Cylinder { inward: true, .. }
-            ) {
-                return Ok(Side::Inside);
-            }
+            );
         }
+        bore_boundary &= inward_wall;
+    }
+    if bore_boundary {
+        return Ok(Side::Inside);
     }
     Ok(Side::Outside)
 }
@@ -109,7 +213,7 @@ pub fn resolve_binding(
     if heights.top < base.top - T {
         return Err("top override skips material above the geometry-certified entry plane".into());
     }
-    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+    if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
         return Ok(ResolvedInput {
             chamfers: Vec::new(),
             profiles: Vec::new(),
@@ -117,12 +221,17 @@ pub fn resolve_binding(
             holes,
             heights,
             fingerprint: state.binding_fingerprint(binding),
-            diagnostics: vec!["3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into()],
+            diagnostics: vec![if binding.recipe == ExtractionRecipe::ParallelFinishing { "3D Parallel follows selected CAD surfaces and protects all setup bodies".into() } else { "3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into() }],
         });
     }
     let view = View::new(state, &binding.selected)?;
-    let mut exact = (*view.asset.topology).clone();
-    exact.mesh = CadMesh::default();
+    let exact = topology_fingerprint(
+        &view.asset.topology,
+        binding
+            .selected
+            .iter()
+            .any(|r| r.kind == EntityKind::Silhouette),
+    )?;
     let encoded = serde_json::to_vec(&(
         view.asset.id,
         view.asset.revision,
@@ -221,7 +330,9 @@ thread_local! {
     // Hover reuses immutable CAD data. Weak ownership does not keep deleted
     // imports alive; placement and snapshot identity prevent stale outlines.
     static SILHOUETTES: std::cell::RefCell<Vec<CachedSilhouette>> = const { std::cell::RefCell::new(Vec::new()) };
+    static TOPOLOGY_FINGERPRINTS: std::cell::RefCell<Vec<CachedTopologyFingerprint>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+
 struct View<'a> {
     asset: &'a GeometryAsset,
     instance: &'a GeometryInstance,
@@ -229,6 +340,16 @@ struct View<'a> {
 }
 impl<'a> View<'a> {
     fn new(state: &'a GeometryState, refs: &[EntityRef]) -> Result<Self, String> {
+        Self::new_impl(state, refs, true)
+    }
+    fn for_path(state: &'a GeometryState, refs: &[EntityRef]) -> Result<Self, String> {
+        Self::new_impl(state, refs, false)
+    }
+    fn new_impl(
+        state: &'a GeometryState,
+        refs: &[EntityRef],
+        require_solid: bool,
+    ) -> Result<Self, String> {
         let first = refs.first().ok_or("select geometry first")?;
         if !refs.iter().all(|r| state.entity_exists(r)) {
             return Err("Needs reselection: missing entity or stale asset revision".into());
@@ -245,14 +366,14 @@ impl<'a> View<'a> {
         if !instance.placement.is_rigid() {
             return Err("invalid machining placement".into());
         }
-        asset.topology.validate()?;
+        asset.topology.validate_cached()?;
         let body = asset
             .topology
             .bodies
             .iter()
             .find(|b| b.id == first.body_id)
             .ok_or("body missing")?;
-        if !body.valid_solid {
+        if require_solid && !body.valid_solid {
             return Err("invalid/open solid is inspectable but cannot drive machining".into());
         }
         Ok(Self {
@@ -271,14 +392,22 @@ impl<'a> View<'a> {
                 .iter()
                 .find(|entry| {
                     entry.body == self.body.id
-                        && entry.include_holes == include_holes
+                        // The outside-only overlay can fill an already resolved
+                        // profile silhouette instead of unioning its mesh again.
+                        && (entry.include_holes == include_holes || !include_holes)
                         && entry.placement == self.instance.placement
                         && entry
                             .topology
                             .upgrade()
                             .is_some_and(|t| std::sync::Arc::ptr_eq(&t, &self.asset.topology))
                 })
-                .map(|entry| entry.region.clone())
+                .and_then(|entry| {
+                    if entry.include_holes && !include_holes {
+                        Polygon::new(entry.region.outer().clone()).ok()
+                    } else {
+                        Some(entry.region.clone())
+                    }
+                })
         }) {
             return Ok(region);
         }
@@ -652,7 +781,12 @@ impl<'a> View<'a> {
 
     /// Skip only entry surfaces independently certified to widen away from the
     /// bore. Other overlapping faces still have to pass the roof checks.
-    fn roofs_over_except(&self, region: &Polygon, entry: f64, open_entries: &BTreeSet<EntityId>) -> Result<(), String> {
+    fn roofs_over_except(
+        &self,
+        region: &Polygon,
+        entry: f64,
+        open_entries: &BTreeSet<EntityId>,
+    ) -> Result<(), String> {
         for f in self
             .asset
             .topology
@@ -953,7 +1087,7 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
-    if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+    if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
         return Ok((
             Vec::new(),
             Vec::new(),
@@ -1176,13 +1310,21 @@ fn derive(
             let (c, z) = view.contour(w)?;
             let region = Polygon::new(c).map_err(|e| e.to_string())?;
             let mut bottom: Option<f64> = None;
+            let mut top: Option<f64> = None;
             let walls = view.walls(w)?;
             for wall in &walls {
                 let (lo, hi) = view.extent(wall)?;
-                if (hi - z).abs() > T || lo >= z - T {
-                    return Err("profile loop must be the top of a vertical exterior wall".into());
+                if ((hi - z).abs() > T && (lo - z).abs() > T) || lo >= hi - T {
+                    return Err(
+                        "profile loop must be an upper or lower rim of a vertical exterior wall"
+                            .into(),
+                    );
                 }
                 view.certify_wall(wall, lo, hi)?;
+                if top.is_some_and(|v| (hi - v).abs() > T) {
+                    return Err("profile walls have different entry heights".into());
+                }
+                top = Some(hi);
                 if let Some(v) = bottom {
                     if (lo - v).abs() > T {
                         return Err("profile walls have different depths".into());
@@ -1233,7 +1375,7 @@ fn derive(
                 return Err(format!("material on face {} outside the selected silhouette prevents safe side certification", face.id));
             }
             let heights = CuttingHeights {
-                top: z,
+                top: top.ok_or("no profile walls")?,
                 bottom: bottom.ok_or("no profile walls")?,
             };
             heights.validate()?;
@@ -1245,12 +1387,13 @@ fn derive(
         ExtractionRecipe::ChamferFaces
         | ExtractionRecipe::ChamferLoop
         | ExtractionRecipe::EngravePath
-        | ExtractionRecipe::CarveRegion => unreachable!(),
+        | ExtractionRecipe::CarveRegion
+        | ExtractionRecipe::PocketBoundary => unreachable!(),
         ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileEntries { .. } => {
             unreachable!()
         }
         ExtractionRecipe::ProfileSilhouette => Err("Select one body for its silhouette".into()),
-        ExtractionRecipe::AdaptiveClearing => unreachable!(),
+        ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing => unreachable!(),
     }
 }
 fn derive_holes(
@@ -1426,7 +1569,11 @@ fn derive_holes(
                 })
                 .collect(),
         );
-        view.roofs_over_except(&Polygon::new(circle).map_err(|e| e.to_string())?, hi, &open_entries)?;
+        view.roofs_over_except(
+            &Polygon::new(circle).map_err(|e| e.to_string())?,
+            hi,
+            &open_entries,
+        )?;
         if let Some(existing) = heights {
             if (h.top - existing.top).abs() > T
                 || (h.bottom - existing.bottom).abs() > T
@@ -1456,6 +1603,7 @@ fn derive_holes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     struct Fixture {
         t: TopologySnapshot,
         next: u64,
@@ -1717,6 +1865,224 @@ mod tests {
     }
 
     #[test]
+    fn advisory_recognition_keeps_exact_geometry_without_wall_or_face_certificates() {
+        let (mut state, face) = plate_with_hole();
+        let topology = Arc::make_mut(&mut state.assets[0].topology);
+        topology.bodies[0].valid_solid = false;
+        for face in &mut topology.faces {
+            face.surface = CadSurface::Unsupported {
+                description: "unclassified spline".into(),
+            };
+        }
+        let selection = std::slice::from_ref(&face);
+        for recipe in [
+            ExtractionRecipe::ProfileContours,
+            ExtractionRecipe::PocketFloor,
+            ExtractionRecipe::FaceRegion,
+            ExtractionRecipe::CarveRegion,
+        ] {
+            assert!(verify_selection(&state, selection, recipe.clone(), 1.).is_some());
+            let binding = resolve_selection_advisory(&state, selection, recipe, 1.).unwrap();
+            let resolved = resolve_binding_advisory(&state, &binding).unwrap();
+            assert!(!resolved.regions.is_empty());
+            assert!(resolved
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("verification (info)")));
+        }
+        let mut stale = face;
+        stale.revision += 1;
+        assert!(resolve_selection_advisory(
+            &state,
+            &[stale],
+            ExtractionRecipe::ProfileContours,
+            1.
+        )
+        .unwrap_err()
+        .contains("stale"));
+    }
+
+    #[test]
+    fn lower_exterior_loop_uses_the_full_certified_wall_interval() {
+        let (state, _) = plate_with_hole();
+        let wire = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|wire| {
+                wire.is_outer
+                    && state.assets[0].topology.faces.iter().any(|face| {
+                        face.id == wire.face_id
+                            && matches!(
+                                face.surface,
+                                CadSurface::Plane {
+                                    normal: [0., 0., -1.],
+                                    ..
+                                }
+                            )
+                    })
+            })
+            .unwrap();
+        let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Lower rim".into());
+        entry.source = ProfileGeometrySource::Cad(vec![reference(wire.id, EntityKind::Loop)]);
+        let (contours, heights) = profile_entry_contours(&state, &entry).unwrap();
+        assert_eq!(contours.len(), 1);
+        assert!(contours[0].closed);
+        assert_eq!(contours[0].side, Side::Outside);
+        assert_eq!(
+            heights,
+            Some(CuttingHeights {
+                top: 0.,
+                bottom: -5.
+            })
+        );
+
+        // Lower rims retain the exterior material check.
+        let mut blocked = state.clone();
+        std::sync::Arc::make_mut(&mut blocked.assets[0].topology)
+            .faces
+            .push(CadFace {
+                id: 999,
+                body_id: 1,
+                surface: CadSurface::Unsupported {
+                    description: "exterior overhang".into(),
+                },
+                loop_ids: vec![],
+                bounds: [[19., 0., -2.], [22., 20., -1.]],
+            });
+        assert!(verify_profile_entry(&blocked, &entry).is_some());
+        assert!(profile_entry_contours(&blocked, &entry).unwrap().0[0].closed);
+    }
+
+    #[test]
+    fn explicit_closed_loop_uses_exact_curves_and_operation_heights_on_spline_faces() {
+        let (mut state, face) = plate_with_hole();
+        let wire = state.assets[0]
+            .topology
+            .loops
+            .iter()
+            .find(|wire| wire.face_id == face.id && wire.is_outer)
+            .unwrap()
+            .clone();
+        // Legacy IGES snapshots can contain a planar boundary on an unrecognized
+        // spline face. No surface or wall certificate is inferred from the mesh.
+        for face in &mut Arc::make_mut(&mut state.assets[0].topology).faces {
+            face.surface = CadSurface::Unsupported {
+                description: "spline surface".into(),
+            };
+        }
+        let selected = vec![reference(wire.id, EntityKind::Loop)];
+        let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Closed rim".into());
+        entry.source = ProfileGeometrySource::Cad(selected.clone());
+        entry.chain_mode = ProfileChainMode::Closed;
+        let (contours, interval) = profile_entry_contours(&state, &entry).unwrap();
+        assert!(interval.is_none());
+        assert_eq!(contours.len(), 1);
+        assert!(contours[0].closed);
+        assert_eq!(contours[0].chain.area(), 400.);
+        let mut binding = resolve_selection(
+            &state,
+            &selected,
+            ExtractionRecipe::ProfileEntries {
+                entries: vec![entry],
+            },
+            1.,
+        )
+        .unwrap();
+        binding.overrides = GeometryOverrides {
+            top: Some(1.),
+            bottom: Some(-12.),
+        };
+        let resolved = resolve_binding(&state, &binding).unwrap();
+        assert_eq!(
+            resolved.heights,
+            CuttingHeights {
+                top: 1.,
+                bottom: -12.
+            }
+        );
+        let topology = Arc::make_mut(&mut state.assets[0].topology);
+        topology.mesh = CadMesh::default();
+        topology.projection = Some(CadProjectionMesh {
+            chord_tolerance: 0.0025,
+            mesh: CadMesh::default(),
+        });
+        assert_eq!(
+            resolve_binding(&state, &binding).unwrap(),
+            resolved,
+            "exact closed paths must not depend on tessellation"
+        );
+
+        // A small interior Z excursion can disappear at chord tolerance. The
+        // exact spline control hull must still reject that nonplanar boundary.
+        let edge = Arc::make_mut(&mut state.assets[0].topology)
+            .edges
+            .iter_mut()
+            .find(|edge| edge.id == wire.edge_uses[0].edge_id)
+            .unwrap();
+        let CadCurve::Line { start, end } = edge.curve else {
+            panic!("line")
+        };
+        let middle = [(start[0] + end[0]) / 2., (start[1] + end[1]) / 2., 0.005];
+        edge.curve = CadCurve::BezierSpans {
+            spans: vec![CadBezierSpan {
+                poles: vec![start, middle, end],
+                weights: vec![1.; 3],
+            }],
+        };
+        assert!(resolve_binding(&state, &binding)
+            .unwrap_err()
+            .contains("not coplanar"));
+    }
+
+    #[test]
+    fn cached_topology_validation_rechecks_changed_snapshots() {
+        let (mut state, reference) = plate_with_hole();
+        View::new(&state, std::slice::from_ref(&reference)).unwrap();
+        View::new(&state, std::slice::from_ref(&reference)).unwrap();
+        Arc::make_mut(&mut state.assets[0].topology)
+            .mesh
+            .triangles
+            .push([999, 999, 999]);
+        assert!(View::new(&state, &[reference]).is_err());
+    }
+
+    #[test]
+    fn one_concave_wall_does_not_classify_an_exterior_loop_as_a_bore() {
+        let (mut state, face) = plate_with_hole();
+        let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+        let wire = topology
+            .loops
+            .iter()
+            .find(|w| w.face_id == face.id && w.is_outer)
+            .unwrap();
+        let selected = reference(wire.id, EntityKind::Loop);
+        let edge = topology
+            .edges
+            .iter()
+            .find(|e| e.id == wire.edge_uses[0].edge_id)
+            .unwrap();
+        let wall = edge
+            .face_ids
+            .iter()
+            .copied()
+            .find(|id| *id != face.id)
+            .unwrap();
+        topology
+            .faces
+            .iter_mut()
+            .find(|f| f.id == wall)
+            .unwrap()
+            .surface = CadSurface::Cylinder {
+            origin: [10., -10., 0.],
+            axis: [0., 0., 1.],
+            radius: 10.,
+            inward: true,
+        };
+        assert_eq!(profile_side(&state, &[selected]).unwrap(), Side::Outside);
+    }
+
+    #[test]
     fn face_contours_extract_outer_and_inner_walls_with_independent_sides() {
         let (mut state, face) = plate_with_hole();
         state.instances[0].placement.translation = [100., -50., 40.];
@@ -1830,10 +2196,8 @@ mod tests {
             .id;
         let selected = reference(loop_id, EntityKind::Loop);
 
-        let mut entry = ProfileGeometryEntry::new(
-            ProfileGeometryKind::Chain,
-            "Selected inner loop".into(),
-        );
+        let mut entry =
+            ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Selected inner loop".into());
         entry.source = ProfileGeometrySource::Cad(vec![selected.clone()]);
         let (entry_contours, heights) = profile_entry_contours(&state, &entry).unwrap();
         assert_eq!(entry_contours.len(), 1);
@@ -1847,13 +2211,8 @@ mod tests {
             })
         );
 
-        let binding = resolve_selection(
-            &state,
-            &[selected],
-            ExtractionRecipe::ProfileContours,
-            0.,
-        )
-        .unwrap();
+        let binding =
+            resolve_selection(&state, &[selected], ExtractionRecipe::ProfileContours, 0.).unwrap();
         let direct = resolve_binding(&state, &binding).unwrap();
         assert_eq!(direct.profiles.len(), 1);
         assert_eq!(direct.profiles[0].side, Side::Inside);
@@ -2111,12 +2470,15 @@ mod tests {
         );
         std::sync::Arc::make_mut(&mut state.assets[0].topology).mesh = CadMesh::default();
         assert_eq!(resolve_binding(&state, &binding).unwrap(), resolved);
-        for mode in [ProfileChainMode::Auto, ProfileChainMode::Closed] {
-            entry.chain_mode = mode;
-            assert!(profile_entry_contours(&state, &entry)
-                .unwrap_err()
-                .contains("no adjoining vertical wall"));
-        }
+        entry.chain_mode = ProfileChainMode::Auto;
+        assert!(verify_profile_entry(&state, &entry)
+            .unwrap()
+            .contains("no adjoining vertical wall"));
+        assert!(!profile_entry_contours(&state, &entry).unwrap().0[0].closed);
+        entry.chain_mode = ProfileChainMode::Closed;
+        assert!(profile_entry_contours(&state, &entry)
+            .unwrap_err()
+            .contains("Complete the chain"));
         entry.chain_mode = ProfileChainMode::Open;
         entry.source = ProfileGeometrySource::Cad(vec![edges[0].clone(), edges[2].clone()]);
         assert!(profile_entry_contours(&state, &entry)
@@ -2562,6 +2924,55 @@ mod tests {
     }
 
     #[test]
+    fn cached_topology_fingerprints_follow_content_and_release_old_snapshots() {
+        let (geometry, _) = projected_l_prism();
+        let mut topology = Arc::new((*geometry.assets[0].topology).clone());
+        let exact = topology_fingerprint(&topology, false).unwrap();
+        let projected = topology_fingerprint(&topology, true).unwrap();
+        assert_eq!(topology_fingerprint(&topology, false).unwrap(), exact);
+        assert_eq!(topology_fingerprint(&topology, true).unwrap(), projected);
+
+        // Detached/reopened data hashes identically, independent of allocation.
+        let detached = Arc::new((*topology).clone());
+        assert_eq!(topology_fingerprint(&detached, false).unwrap(), exact);
+        assert_eq!(topology_fingerprint(&detached, true).unwrap(), projected);
+        let weak = Arc::downgrade(&detached);
+        drop(detached);
+        assert!(
+            weak.upgrade().is_none(),
+            "fingerprint caching must not retain geometry"
+        );
+
+        // A sole owner's make_mut must detach the weak cache key too.
+        let original = Arc::downgrade(&topology);
+        Arc::make_mut(&mut topology)
+            .projection
+            .as_mut()
+            .unwrap()
+            .chord_tolerance *= 2.;
+        assert!(original.upgrade().is_none());
+        assert_eq!(topology_fingerprint(&topology, false).unwrap(), exact);
+        let changed_projection = topology_fingerprint(&topology, true).unwrap();
+        assert_ne!(changed_projection, projected);
+
+        Arc::make_mut(&mut topology)
+            .mesh
+            .vertices
+            .push([100., 200., 300.]);
+        assert_eq!(topology_fingerprint(&topology, false).unwrap(), exact);
+        assert_eq!(
+            topology_fingerprint(&topology, true).unwrap(),
+            changed_projection
+        );
+        Arc::make_mut(&mut topology).bodies[0].bounds[0][0] -= 1.;
+        assert_ne!(topology_fingerprint(&topology, false).unwrap(), exact);
+        assert_ne!(
+            topology_fingerprint(&topology, true).unwrap(),
+            changed_projection
+        );
+    }
+
+    #[test]
     fn profile_silhouettes_include_through_openings_and_fill_blind_recesses() {
         let (mut geometry, selected) = projected_l_prism();
         let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
@@ -2601,7 +3012,14 @@ mod tests {
         assert_eq!(input.profiles[1].side, Side::Inside);
         assert!(!input.regions[0].contains(Point::new(2., 2.)));
         // The older envelope-only recipe and hover cache retain their original behavior.
-        assert!(silhouette(&geometry, &selected).unwrap().holes().is_empty());
+        let cached_outline = silhouette(&geometry, &selected).unwrap();
+        assert!(cached_outline.holes().is_empty());
+        SILHOUETTES.with(|cache| cache.borrow_mut().clear());
+        assert_eq!(
+            cached_outline,
+            silhouette(&geometry, &selected).unwrap(),
+            "filling a cached profile silhouette must match an independent outside-only projection"
+        );
         let projection = std::sync::Arc::make_mut(&mut geometry.assets[0].topology)
             .projection
             .as_mut()

@@ -23,13 +23,13 @@ pub(crate) fn validate_stock_to_leave(
             }
             op.depth
         }
-        Operation::Adaptive(_) => document
+        Operation::Adaptive(_) | Operation::Parallel(_) => document
             .geometry
             .bindings
             .get(&operation.id())
             .map(|binding| binding.effective_heights().depth())
-            .ok_or("Adaptive Clearing requires linked solid geometry")?,
-        _ => return Err("Stock to Leave is supported for Profile, Pocket, Face and Adaptive Clearing.".into()),
+            .ok_or("3D surface operations require linked solid geometry")?,
+        _ => return Err("Stock to Leave is supported for Profile, Pocket, Face, Adaptive Clearing and Parallel.".into()),
     };
     if stock.axial > 0.0 && stock.axial >= depth {
         return Err(format!("Axial stock to leave ({:.3} mm) must be less than the operation depth ({depth:.3} mm).", stock.axial));
@@ -64,7 +64,7 @@ impl AppController {
 
     pub(super) fn restore_active_setup_view(&mut self) {
         if !self.setups().iter().any(|s| s.id == self.active_setup_id) {
-            self.active_setup_id = self.setups()[0].id;
+            self.active_setup_id = self.setups().first().map_or(0, |s| s.id);
         }
         let id = self.active_setup_id;
         self.document.update_view(|doc| doc.active_setup_id = id);
@@ -74,11 +74,22 @@ impl AppController {
     }
 
     pub fn add_setup(&mut self) -> u64 {
+        let selected = self.cad_selection.iter().map(|r| r.instance_id).collect();
+        self.add_setup_with_models(selected)
+    }
+
+    /// Seed a new setup with the selected body instances, without copying operations.
+    pub fn add_setup_with_models(&mut self, selected: Vec<cam_model::InstanceId>) -> u64 {
         let mut setup = self.setup().clone();
         setup.id = self.document().next_setup_id().max(self.setup_id_floor);
         setup.name = format!("Setup {}", setup.id);
         setup.program_name = format!("setup-{}", setup.id);
-        setup.model_instances.clear();
+        setup.model_instances = selected
+            .into_iter()
+            .filter(|id| self.geometry_state().instance(*id).is_some())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         setup.operations.clear();
         setup.patterns.clear();
         setup.operation_heights.clear();
@@ -102,6 +113,9 @@ impl AppController {
         copy.id = self.document().next_setup_id().max(self.setup_id_floor);
         copy.name = format!("{} (copy)", copy.name);
         copy.program_name = format!("setup-{}", copy.id);
+        // The copy is inserted immediately after its source and continues machining
+        // the same workpiece, including material already removed by that setup.
+        copy.stock = Stock::PreviousSetup;
         let mut next_id = self.next_op_id();
         let mut bindings = Vec::new();
         let mut linked = Vec::new();
@@ -161,8 +175,14 @@ impl AppController {
     }
 
     pub fn delete_setup(&mut self, id: u64) -> Result<(), String> {
+        if self.setups().is_empty() {
+            return Err("Setup no longer exists".into());
+        }
         if self.setups().len() == 1 {
             return Err("Keep at least one setup in the project".into());
+        }
+        if self.setups()[0].id == id && self.setups()[1].stock == Stock::PreviousSetup {
+            return Err("The next setup uses this setup's stock. Choose a box stock for it before deleting this setup".into());
         }
         let removed = self
             .setups()
@@ -196,6 +216,11 @@ impl AppController {
             (at + 1 < self.setups().len()).then_some(at + 1)
         };
         if let Some(next) = next {
+            if (next == 0 && self.setups()[at].stock == Stock::PreviousSetup)
+                || (at == 0 && self.setups()[next].stock == Stock::PreviousSetup)
+            {
+                return;
+            }
             self.edit_document(|doc| doc.setups.swap(at, next));
             self.invalidate();
         }
@@ -223,6 +248,10 @@ impl AppController {
         let at = target - usize::from(from < target);
         if from == at {
             return Ok(());
+        }
+        let first = if at == 0 { from } else if from == 0 { 1 } else { 0 };
+        if self.setups()[first].stock == Stock::PreviousSetup {
+            return Err("The first setup needs box stock; it has no previous setup".into());
         }
         self.edit_document(move |doc| {
             let setup = doc.setups.remove(from);
@@ -319,6 +348,58 @@ impl AppController {
             let operation = ops.remove(from);
             ops.insert(at, operation);
         });
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Reorder a tree source and change pattern membership in one undo step.
+    /// A pattern header appends; a member row inserts before its anchor.
+    pub fn move_operation_in_tree(&mut self, id: u32, destination: u64, before: Option<u32>, pattern: Option<u64>) -> Result<(), String> {
+        let source = self.setups().iter().find(|s| s.operations.iter().any(|op| op.id() == id)).ok_or("Missing operation")?;
+        if source.id != destination {
+            if pattern.is_some() { return Err("Move the operation to the destination setup before adding it to a pattern".into()); }
+            return self.reorder_operation_to(id, destination, before);
+        }
+        let original = source.clone();
+        let mut setup = original.clone();
+        let from = setup.operations.iter().position(|op| op.id() == id).unwrap();
+        if let Some(anchor) = before {
+            let anchor = setup.operations.iter().find(|op| op.id() == anchor).ok_or("Missing drop target")?;
+            if anchor.work_offset() != setup.operations[from].work_offset() {
+                return Err("Operations execute in work-origin groups; use Move to Origin before reordering across groups".into());
+            }
+        }
+        if let Some(pattern_id) = pattern {
+            let target = setup.patterns.iter().find(|p| p.id == pattern_id).ok_or("Missing pattern")?;
+            if target.members.iter().filter(|member| **member != id).any(|member| setup.operations.iter().any(|op| op.id() == *member && op.work_offset() != setup.operations[from].work_offset())) {
+                return Err("Pattern sources must share one work datum".into());
+            }
+        }
+        if before == Some(id) { return Ok(()); }
+        let operation = setup.operations.remove(from);
+        for group in &mut setup.patterns { group.members.retain(|member| *member != id); }
+        let mut insertion = before.and_then(|anchor| setup.operations.iter().position(|op| op.id() == anchor)).unwrap_or(setup.operations.len());
+        if let Some(pattern_id) = pattern {
+            let group = setup.patterns.iter_mut().find(|p| p.id == pattern_id).unwrap();
+            let member_at = before.and_then(|anchor| group.members.iter().position(|member| *member == anchor)).unwrap_or(group.members.len());
+            if member_at == group.members.len() {
+                if let Some(last) = group.members.last() {
+                    insertion = setup.operations.iter().position(|op| op.id() == *last).unwrap() + 1;
+                }
+            }
+            group.members.insert(member_at, id);
+        }
+        setup.patterns.retain(|p| !p.members.is_empty());
+        setup.operations.insert(insertion, operation);
+        // Preserve each group's contiguous execution block when extracting a source.
+        for group in &setup.patterns {
+            let first = setup.operations.iter().position(|op| group.members.contains(&op.id())).unwrap();
+            let members: Vec<_> = group.members.iter().filter_map(|id| setup.operations.iter().find(|op| op.id() == *id).cloned()).collect();
+            setup.operations.retain(|op| !group.members.contains(&op.id()));
+            setup.operations.splice(first..first, members);
+        }
+        if setup == original { return Ok(()); }
+        self.edit_document(move |doc| *doc.setups.iter_mut().find(|s| s.id == destination).unwrap() = setup);
         self.invalidate();
         Ok(())
     }
@@ -691,7 +772,7 @@ impl AppController {
         let geometry = geometry
             .filter(|_| !matches!(&operation,Operation::Profile(p) if p.selections.is_some()));
         if let Some(selected) = &geometry {
-            if matches!(operation, Operation::Adaptive(_)) {
+            if matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)) {
                 cam_geometry3d::validate_adaptive_selection(&document.geometry, selected)?;
             } else {
                 crate::cad_operations::validate_selection(&document.geometry, selected)?;
@@ -715,8 +796,8 @@ impl AppController {
                     .is_some_and(|b| b.selected != *selected)
                 {
                     let binding =
-                        cam_geometry3d::resolve_selection(&geometry, selected, recipe.clone(), 0.)?;
-                    let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
+                        cam_geometry3d::resolve_selection_advisory(&geometry, selected, recipe.clone(), 0.)?;
+                    let input = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
                     if let Operation::Profile(profile) = &mut operation {
                         let previous: Vec<_> = profile.contours().collect();
                         let mut contours = input.profiles;
@@ -938,6 +1019,9 @@ impl AppController {
         }
         let (min, max) = self.pending_setup_model_bounds(&setup);
         match setup.stock {
+            Stock::PreviousSetup if self.setups()[0].id == setup.id => {
+                return Err("The first setup has no previous setup; choose box stock".into());
+            }
             Stock::FixedBox {
                 size,
                 model_position,
@@ -969,13 +1053,14 @@ impl AppController {
             }
             _ => {}
         }
-        let (stock_min, stock_max) = setup.stock.resolve_bounds(min, max);
+        let (stock_min, stock_max) = self.pending_setup_stock_bounds(&setup);
         if (0..3).any(|i| {
             !stock_min[i].is_finite() || !stock_max[i].is_finite() || stock_max[i] <= stock_min[i]
         }) {
             return Err("Stock must have finite, positive dimensions on all axes".into());
         }
-        if !self.geometry_state().instances.is_empty()
+        if setup.stock != Stock::PreviousSetup
+            && !self.geometry_state().instances.is_empty()
             && (0..3).any(|i| stock_min[i] > min[i] + 1e-6 || stock_max[i] < max[i] - 1e-6)
         {
             return Err("Stock does not contain the selected machining model".into());
@@ -1074,8 +1159,15 @@ impl AppController {
     }
 
     pub fn setup_geometry_state(&self) -> Result<cam_model::GeometryState, String> {
+        if self.setups().is_empty() {
+            return Err("Create a setup and select its models before creating an operation.".into());
+        }
         self.validate_setup_frame(self.setup())?;
         crate::cad_operations::geometry_for_setup(self.document())
+    }
+
+    pub fn pending_setup_stock_bounds(&self, setup: &Setup) -> ([f64; 3], [f64; 3]) {
+        self.document().stock_bounds_for(setup)
     }
 
     pub fn setup_model_bounds(&self) -> ([f64; 3], [f64; 3]) {
@@ -1154,7 +1246,7 @@ mod tests {
     #[test]
     fn tree_order_uses_stable_ids_and_survives_undo_redo_and_reopen() {
         let mut app = AppController::new(crate::default_machine());
-        let first = app.active_setup_id();
+        let first = app.add_setup();
         for _ in 0..3 {
             app.add_operation(drill());
         }

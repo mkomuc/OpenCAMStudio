@@ -2,9 +2,11 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
-pub const USAGE: &str = "Usage: opencamstudio [--setup <path.ocam>] [--help]
+pub const USAGE: &str = "Usage: opencamstudio [--setup <path.ocam>] [--mcp | --mcp-gui] [--help]
 
   --setup <path.ocam>  Open a saved setup/project on startup without a file dialog
+  --mcp                Serve application commands over MCP stdio without a window
+  --mcp-gui            Serve MCP stdio controlling the desktop window (requires gui)
   -h, --help           Show this help
 
 Relative paths are resolved from the current working directory.";
@@ -13,6 +15,8 @@ Relative paths are resolved from the current working directory.";
 pub struct Args {
     pub setup: Option<PathBuf>,
     pub help: bool,
+    pub mcp: bool,
+    pub mcp_gui: bool,
 }
 
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> {
@@ -30,6 +34,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> {
                 return Err("--setup requires a path to a .ocam project".into());
             }
             parsed.setup = Some(path.into());
+        } else if arg == "--mcp" || arg == "--mcp-gui" {
+            if parsed.mcp || parsed.mcp_gui {
+                return Err("specify only one of --mcp or --mcp-gui".into());
+            }
+            parsed.mcp = arg == "--mcp";
+            parsed.mcp_gui = arg == "--mcp-gui";
         } else if arg == "--help" || arg == "-h" {
             parsed.help = true;
         } else {
@@ -62,6 +72,21 @@ mod tests {
                 parse_strs(&["--setup", path]).unwrap().setup,
                 Some(path.into())
             );
+        }
+    }
+
+    #[test]
+    fn mcp_modes_accept_startup_projects_and_are_mutually_exclusive() {
+        let headless = parse_strs(&["--mcp", "--setup", "part.ocam"]).unwrap();
+        assert!(headless.mcp && !headless.mcp_gui);
+        let desktop = parse_strs(&["--setup", "part.ocam", "--mcp-gui"]).unwrap();
+        assert!(desktop.mcp_gui && !desktop.mcp);
+        for args in [
+            ["--mcp", "--mcp-gui"],
+            ["--mcp", "--mcp"],
+            ["--mcp-gui", "--mcp-gui"],
+        ] {
+            assert!(parse_strs(&args).is_err());
         }
     }
 

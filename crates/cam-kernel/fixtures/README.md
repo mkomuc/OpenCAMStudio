@@ -30,6 +30,10 @@ original and redistribution-safe, with the same 60 × 40 × 10 mm box at Z−10�
 
 - `box-mm.iges`, `box-inch.igs`, `box-m.iges`: B-rep solids in three source units.
 - `box-surfaces-mm.igs`: the box exported as trimmed faces, requiring sewing.
+- `spline-box-surfaces-mm.igs`: the same box with every planar surface represented
+  as a degree-two B-spline; all six faces must retain planar machining support.
+- `spline-bulge-surfaces-mm.igs`: the spline box with a raised interior control
+  pole on the top face. Its boundary is still flat; that face must stay nonplanar.
 - `two-boxes-mm.iges`, `two-boxes-surfaces-mm.iges`: two boxes, the second
   translated X+80 mm, exported as B-rep and trimmed faces respectively.
 - `nested-surfaces-mm.iges`: nested closed shells; must fail rather than fill a void.

@@ -169,6 +169,7 @@ pub(crate) fn recipe(
     selected: &[EntityRef],
 ) -> Result<ExtractionRecipe, String> {
     Ok(match kind {
+        OpKind::Pocket if selected.first().is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge)) => ExtractionRecipe::PocketBoundary,
         OpKind::Pocket => ExtractionRecipe::PocketFloor,
         OpKind::Drill => ExtractionRecipe::DrillHoles,
         OpKind::Chamfer if selected.first().is_some_and(|r| r.kind == EntityKind::Face) => {
@@ -187,7 +188,7 @@ pub(crate) fn recipe(
                 .filter(|_| reference.kind == EntityKind::Face)
                 .ok_or("Thread/Bore requires cylindrical bore or boss faces")?;
             let CadSurface::Cylinder { inward, .. } = face.surface else {
-                return Err("Thread/Bore requires cylindrical bore or boss faces".into());
+                return Err(format!("Thread/Bore requires cylindrical bore or boss faces; selected face: {}", face.surface.kind_name()));
             };
             if kind == OpKind::Bore {
                 ExtractionRecipe::BoreCylinders { internal: inward }
@@ -198,16 +199,62 @@ pub(crate) fn recipe(
         OpKind::Profile if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette => {
             ExtractionRecipe::ProfileSilhouette
         }
+        OpKind::Profile
+            if selected.first().is_some_and(|first| {
+                selected.iter().any(|reference| {
+                    reference.kind != first.kind
+                        || reference.instance_id != first.instance_id
+                        || reference.asset_id != first.asset_id
+                        || reference.body_id != first.body_id
+                })
+            }) =>
+        {
+            ExtractionRecipe::ProfileEntries {
+                entries: profile_entries_from_selection(selected),
+            }
+        }
         OpKind::Profile => ExtractionRecipe::ProfileContours,
         OpKind::Face => ExtractionRecipe::FaceRegion,
+        OpKind::Parallel => ExtractionRecipe::ParallelFinishing,
         OpKind::Adaptive => ExtractionRecipe::AdaptiveClearing,
     })
+}
+
+pub(crate) fn profile_entries_from_selection(selected: &[EntityRef]) -> Vec<ProfileGeometryEntry> {
+    let mut entries: Vec<ProfileGeometryEntry> = Vec::new();
+    for reference in selected {
+        if matches!(reference.kind, EntityKind::Edge | EntityKind::Face) {
+            if let Some(entry) = entries.iter_mut().find(|entry|
+                matches!(&entry.source, ProfileGeometrySource::Cad(refs) if refs.first().is_some_and(|first|
+                    first.kind == reference.kind && first.asset_id == reference.asset_id
+                        && first.instance_id == reference.instance_id && first.body_id == reference.body_id))) {
+                let ProfileGeometrySource::Cad(refs) = &mut entry.source else { unreachable!() };
+                refs.push(reference.clone());
+                continue;
+            }
+        }
+        let (kind, name) = match reference.kind {
+            EntityKind::Face => (ProfileGeometryKind::FaceContours, "Face Contours"),
+            EntityKind::Body | EntityKind::Silhouette => {
+                (ProfileGeometryKind::Silhouette, "Silhouette")
+            }
+            _ => (ProfileGeometryKind::Chain, "Chain"),
+        };
+        let mut entry = ProfileGeometryEntry::new(kind, format!("{name} {}", entries.len() + 1));
+        if reference.kind == EntityKind::Loop {
+            entry.chain_mode = ProfileChainMode::Closed;
+        }
+        entry.use_setup_models = false;
+        entry.source = ProfileGeometrySource::Cad(vec![reference.clone()]);
+        entries.push(entry);
+    }
+    entries
 }
 
 /// Source topology stays immutable. Only instance placements are rotated into
 /// the setup axes, preserving semantic references and approximation budgets.
 pub(crate) fn geometry_for_setup(document: &Document) -> Result<GeometryState, String> {
-    let setup = document.setup();
+    let setup = document.active_setup().ok_or("Create a setup before evaluating machining geometry.")?;
     let mut geometry = document.geometry.geometry_in_setup(&setup.frame)?;
     let ids: std::collections::BTreeSet<_> = setup.operations.iter().map(Operation::id).collect();
     geometry.bindings.retain(|id, _| ids.contains(id));
@@ -271,8 +318,7 @@ pub(crate) fn model_bounds(geometry: &GeometryState, setup: &Setup) -> ([f64; 3]
 }
 
 fn stock_top(document: &Document) -> f64 {
-    let (min, max) = model_bounds(&document.geometry, document.setup());
-    document.setup().stock.resolve_bounds(min, max).1[2]
+    document.stock_bounds_for(document.setup()).1[2]
 }
 /// Validate the complete selection before strategy extraction. A mixed geometry
 /// field cannot become a valid operation by dropping its incompatible members.
@@ -280,21 +326,8 @@ pub(crate) fn validate_selection(
     geometry: &GeometryState,
     selected: &[EntityRef],
 ) -> Result<(), String> {
-    let Some(first) = selected.first() else {
-        return Ok(());
-    };
     if selected.iter().any(|r| !geometry.entity_exists(r)) {
         return Err("Needs reselection: missing entity or stale asset revision".into());
-    }
-    if selected.iter().any(|r| r.kind != first.kind) {
-        return Err("Select features of the same kind; faces, loops and edges cannot be mixed in one geometry field".into());
-    }
-    if selected.iter().any(|r| {
-        r.asset_id != first.asset_id
-            || r.instance_id != first.instance_id
-            || r.body_id != first.body_id
-    }) {
-        return Err("Machining requires features from one body instance".into());
     }
     if selected
         .iter()
@@ -318,6 +351,7 @@ pub(crate) fn operation_type(operation: &Operation) -> &'static str {
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
         Operation::Adaptive(_) => "3D Adaptive Clearing",
+        Operation::Parallel(_) => "3D Parallel",
     }
 }
 
@@ -373,7 +407,7 @@ pub(crate) fn resolve_profile_entries(
             }
         }
     }
-    let mut binding = cam_geometry3d::resolve_selection(
+    let mut binding = cam_geometry3d::resolve_selection_advisory(
         &geometry,
         &selected,
         ExtractionRecipe::ProfileEntries {
@@ -387,7 +421,7 @@ pub(crate) fn resolve_profile_entries(
         binding.heights.bottom = binding.heights.top - profile.depth;
         binding.heights.validate()?;
     }
-    let input = cam_geometry3d::resolve_binding(&geometry, &binding)?;
+    let input = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
     let mut contours = input.profiles;
     let first = contours.remove(0);
     profile.chain = first.chain;
@@ -412,19 +446,23 @@ pub(crate) fn create_operation(
     defaults: JobParams,
 ) -> Result<(Operation, GeometryBinding), String> {
     let geometry = geometry_for_setup(document)?;
-    if kind == OpKind::Adaptive {
+    if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
         cam_geometry3d::validate_adaptive_selection(&geometry, &selected)?;
     } else {
         validate_selection(&geometry, &selected)?;
     }
-    let mut binding = cam_geometry3d::resolve_selection(
+    let mut binding = cam_geometry3d::resolve_selection_advisory(
         &geometry,
         &selected,
         recipe(kind, &geometry, &selected)?,
         stock_top(document),
     )?;
-    let resolved = cam_geometry3d::resolve_binding(&geometry, &binding)?;
-    let depth = resolved.heights.depth();
+    let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
+    let depth = if binding.recipe == ExtractionRecipe::PocketBoundary {
+        defaults.depth
+    } else {
+        resolved.heights.depth()
+    };
     let boundary = || {
         resolved
             .regions
@@ -434,6 +472,7 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            finishing: Default::default(),
             id,
             tool,
             work_offset,
@@ -447,6 +486,7 @@ pub(crate) fn create_operation(
             end: None,
             start: None,
             clear: ClearParams {
+                lift_height: 0.0,
                 stepdown: defaults.stepdown,
                 overlap: 0.5,
                 offset: 0.0,
@@ -461,7 +501,10 @@ pub(crate) fn create_operation(
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
             passes: Default::default(),
-            selections: None,
+            selections: match &binding.recipe {
+                ExtractionRecipe::ProfileEntries { entries } => Some(entries.clone()),
+                _ => None,
+            },
             closed: resolved.profiles.first().is_none_or(|p| p.closed),
             additional_chains: resolved.profiles.iter().skip(1).cloned().collect(),
             tabs: Default::default(),
@@ -480,9 +523,9 @@ pub(crate) fn create_operation(
                 .unwrap_or_else(boundary)?,
             side: match binding.recipe {
                 ExtractionRecipe::ProfileLoop { side } => side,
-                ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette => {
-                    resolved.profiles[0].side
-                }
+                ExtractionRecipe::ProfileContours
+                | ExtractionRecipe::ProfileSilhouette
+                | ExtractionRecipe::ProfileEntries { .. } => resolved.profiles[0].side,
                 _ => unreachable!("Profile uses a profile extraction recipe"),
             },
             comp: Comp::Computed,
@@ -678,8 +721,24 @@ pub(crate) fn create_operation(
                 ..Default::default()
             },
         }),
+        OpKind::Parallel => Operation::Parallel(ParallelOp {
+            id,
+            tool,
+            work_offset,
+            spindle_rpm: defaults.spindle_rpm,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            params: ParallelParams {
+                feed: defaults.feed,
+                plunge_feed: defaults.plunge_feed,
+                ..Default::default()
+            },
+        }),
     };
-    if surface_recipe(&binding.recipe) {
+    if binding.recipe == ExtractionRecipe::PocketBoundary {
+        binding.heights.bottom = binding.heights.top - depth;
+    } else if surface_recipe(&binding.recipe) {
         binding.heights = document.operation_base_cutting_heights(&op);
     }
     Ok((op, binding))
@@ -742,9 +801,11 @@ pub(crate) fn resolve_document_checked(
                 return Ok(());
             };
             if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
-                return Err(format!("Operation {id}: Needs reselection — {reason}"));
+                if !reason.starts_with("Geometry changed:") {
+                    return Err(format!("Operation {id}: Needs reselection — {reason}"));
+                }
             }
-            if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+            if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
                 cam_geometry3d::validate_adaptive_selection(&resolved.geometry, &binding.selected)
                     .map_err(|e| format!("Operation {id}: {e}"))?;
             } else if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
@@ -759,19 +820,20 @@ pub(crate) fn resolve_document_checked(
             if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
                 current_binding.heights.top = stock_top(document);
             }
-            let input = cam_geometry3d::resolve_binding(&resolved.geometry, &current_binding)
-                .map_err(|e| {
-                    format!(
-                        "{} operation #{id} / setup '{}' / {}: {e}",
-                        operation_type(operation),
-                        document.setup().name,
-                        describe_entities(&resolved.geometry, &current_binding.selected)
-                    )
-                })?;
+            let input =
+                cam_geometry3d::resolve_binding_advisory(&resolved.geometry, &current_binding)
+                    .map_err(|e| {
+                        format!(
+                            "{} operation #{id} / setup '{}' / {}: {e}",
+                            operation_type(operation),
+                            document.setup().name,
+                            describe_entities(&resolved.geometry, &current_binding.selected)
+                        )
+                    })?;
             let depth = input.heights.depth();
             let region = || input.regions.first().ok_or("No resolved machining region");
             match (operation, &binding.recipe) {
-                (Operation::Pocket(p), ExtractionRecipe::PocketFloor) => {
+                (Operation::Pocket(p), ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary) => {
                     p.boundary = region()?.outer().clone();
                     p.islands = region()?.holes().to_vec();
                     p.depth = depth;
@@ -944,7 +1006,7 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                     p.start_offset = input.heights.top;
                 }
-                (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
+                (Operation::Parallel(_), ExtractionRecipe::ParallelFinishing) | (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
                     // Body heights and projected silhouette belong to the binding;
                     // the adaptive planner resolves conservative CAD-derived layers.
                 }
@@ -995,7 +1057,7 @@ pub(crate) fn selection_height_defaults(
     operation: &Operation,
 ) -> OperationHeightSettings {
     let mut settings = OperationHeightSettings::default();
-    if matches!(operation, Operation::Adaptive(_)) {
+    if matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)) {
         *settings.definition_mut(HeightPlaneKind::Top) =
             HeightDefinition::new(HeightReference::StockTop, 0.);
         *settings.definition_mut(HeightPlaneKind::Bottom) =
@@ -1018,6 +1080,7 @@ pub(crate) fn surface_recipe(recipe: &ExtractionRecipe) -> bool {
         ExtractionRecipe::ChamferLoop
             | ExtractionRecipe::EngravePath
             | ExtractionRecipe::CarveRegion
+            | ExtractionRecipe::PocketBoundary
     )
 }
 
@@ -1032,7 +1095,7 @@ pub(crate) fn capture_height_override(
     // Adaptive operations have no legacy cutting-height fields. Their interval
     // belongs to the binding and reference-height settings, so comparing it with
     // legacy_cutting would turn an unrelated edit into a spurious height shift.
-    if matches!(after, Operation::Adaptive(_)) {
+    if matches!(after, Operation::Adaptive(_) | Operation::Parallel(_)) {
         return;
     }
     let Some(binding) = binding else {
@@ -1052,6 +1115,7 @@ pub(crate) fn capture_height_override(
         _ => {}
     }
     let (before_depth, after_depth) = match operation {
+        Operation::Pocket(p) if binding.recipe == ExtractionRecipe::PocketBoundary => (before.depth(), p.depth),
         Operation::Pocket(p) => (-before.bottom, p.depth),
         Operation::Profile(p) => (-before.bottom, p.depth),
         Operation::Drill(p) => (before.depth(), p.depth),
@@ -1060,7 +1124,7 @@ pub(crate) fn capture_height_override(
         Operation::Carve(p) => (before.depth(), p.depth),
         Operation::Bore(p) => (before.depth(), p.z_top - p.z_bottom),
         Operation::Thread(p) => (before.depth(), p.z_top - p.z_bottom),
-        Operation::Chamfer(_) | Operation::Adaptive(_) => return,
+        Operation::Chamfer(_) | Operation::Adaptive(_) | Operation::Parallel(_) => return,
     };
     if after_depth != before_depth {
         binding.overrides.bottom = Some(binding.effective_heights().top - after_depth);
@@ -1097,7 +1161,7 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
     if matches!(base.recipe, ExtractionRecipe::FaceRegion) {
         base.heights.top = stock_top(document);
     }
-    let input = cam_geometry3d::resolve_binding(&geometry_for_setup(document)?, &base)?;
+    let input = cam_geometry3d::resolve_binding_advisory(&geometry_for_setup(document)?, &base)?;
     let binding = document.geometry.bindings.get_mut(&id).unwrap();
     binding.heights = input.heights;
     binding.resolved_fingerprint = None;
@@ -1114,7 +1178,7 @@ pub(crate) fn refresh_binding_heights(document: &mut Document) {
         let owner=document.setups.iter().find(|s|s.operations.iter().any(|o|o.id()==id))?;
         context.active_setup_id=owner.id;
         if matches!(base.recipe,ExtractionRecipe::FaceRegion) {base.heights.top=stock_top(&context);}
-        Some((id,geometry_for_setup(&context).and_then(|geometry|cam_geometry3d::resolve_binding(&geometry,&base)).map(|input|input.heights)))
+        Some((id,geometry_for_setup(&context).and_then(|geometry|cam_geometry3d::resolve_binding_advisory(&geometry,&base)).map(|input|input.heights)))
     }).collect();
     for (id, result) in updates {
         let binding = document.geometry.bindings.get_mut(&id).unwrap();

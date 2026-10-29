@@ -41,6 +41,21 @@ pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
         .collect()
 }
 
+/// Read-only source names belong with the Selection controls in geometry settings.
+pub(super) fn selected_feature_names(labels: Vec<String>) -> Element<'static, Message> {
+    let names = if labels.is_empty() {
+        "No geometry selected".to_owned()
+    } else {
+        labels.join("\n")
+    };
+    row![
+        Space::new().width(90),
+        text(names).size(12).width(Length::Fill),
+    ]
+    .spacing(6)
+    .into()
+}
+
 pub(super) fn drawing_geometry_labels(selected: &[LoopRef]) -> Vec<String> {
     selected
         .iter()
@@ -65,7 +80,7 @@ pub(super) fn operation_geometry_labels(op: &Operation) -> Vec<String> {
         Operation::Thread(op) => (0..op.points.len())
             .map(|i| format!("Thread centre {}", i + 1))
             .collect(),
-        Operation::Adaptive(_) => vec!["Machining geometry".into()],
+        Operation::Adaptive(_) | Operation::Parallel(_) => vec!["Machining geometry".into()],
         Operation::Pocket(op) => std::iter::once("Boundary".into())
             .chain((0..op.islands.len()).map(|i| format!("Island {}", i + 1)))
             .collect(),
@@ -193,12 +208,13 @@ impl App {
             return self.profile_geometry_collection();
         }
         if let Some(
-            kind @ (OpKind::Chamfer
+            kind @ (OpKind::Pocket
+            | OpKind::Chamfer
             | OpKind::Engrave
             | OpKind::Carve
             | OpKind::Bore
             | OpKind::Thread
-            | OpKind::Adaptive),
+            | OpKind::Adaptive | OpKind::Parallel),
         ) = self.geometry_operation_kind()
         {
             return self.operation_geometry_collection(kind, labels);
@@ -420,7 +436,7 @@ impl App {
             } else {
                 selected.clear();
             }
-            let result = if self.geometry_operation_kind() == Some(OpKind::Adaptive) {
+            let result = if matches!(self.geometry_operation_kind(), Some(OpKind::Adaptive | OpKind::Parallel)) {
                 self.controller.try_set_adaptive_cad_selection(selected)
             } else {
                 self.controller.try_set_cad_selection(selected)

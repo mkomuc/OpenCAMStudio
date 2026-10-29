@@ -41,6 +41,11 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
         } else {
             "Add Chain. Select an open or closed engraving path. Configure individual edge selection in settings."
         })],
+        OpKind::Pocket if cad => vec![
+            (CadFilter::Face, "face", "Add Pocket Floor. Select a planar floor face, preserving its islands."),
+            (CadFilter::Loop, "chain", "Add Chain. Select a closed pocket boundary; set the cutting depth in Heights."),
+        ],
+        OpKind::Pocket => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary and optional islands.")],
         OpKind::Carve if cad => vec![
             (CadFilter::Face, "face", "Add Face Contours. Select a planar face, preserving its holes as islands."),
             (CadFilter::Loop, "chain", "Add Chain. Select one closed boundary enclosing the carving region."),
@@ -48,6 +53,7 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
         OpKind::Carve => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary; its holes remain uncut islands.")],
         OpKind::Bore => vec![(CadFilter::Face, "bore", "Select cylindrical holes or bosses with equal diameter and heights, or circular drawing loops.")],
         OpKind::Thread => vec![(CadFilter::Face, "thread", "Add Thread Centres. Select cylindrical bores or bosses with the same diameter and cutting heights; for a drawing, select circular holes.")],
+        OpKind::Parallel => vec![(CadFilter::Body, "silhouette", "Add solid bodies to 3D Parallel finishing."), (CadFilter::Face, "face", "Add machining faces. All setup bodies remain protected.")],
         OpKind::Adaptive => vec![
             (CadFilter::Body, "silhouette", "Add solid bodies to 3D Adaptive Clearing. Multiple bodies and instances can be selected."),
             (CadFilter::Face, "face", "Add individual faces to 3D Adaptive Clearing. Faces need a positive-area projection onto setup XY; selection never expands to the whole body."),
@@ -58,7 +64,7 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
 
 impl App {
     pub(super) fn stock_to_leave_supported(operation: &Operation) -> bool {
-        matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_))
+        matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_))
     }
 
     pub(super) fn stock_to_leave_enabled(&self) -> bool {
@@ -66,10 +72,13 @@ impl App {
     }
 
     pub(super) fn stock_to_leave_value(&self) -> cam_model::StockToLeave {
-        self.stock_to_leave_draft.unwrap_or_else(|| match self.controller.selection() {
-            Selection::Operation(id) => self.controller.document().setup().stock_to_leave_for(id),
-            _ => cam_model::StockToLeave::default(),
-        })
+        self.stock_to_leave_draft
+            .unwrap_or_else(|| match self.controller.selection() {
+                Selection::Operation(id) => {
+                    self.controller.inspection_setup().stock_to_leave_for(id)
+                }
+                _ => cam_model::StockToLeave::default(),
+            })
     }
 
     pub(super) fn operation_uses_cad_geometry(&self) -> bool {
@@ -113,7 +122,7 @@ impl App {
                     "bore"
                 } else if kind == OpKind::Thread {
                     "thread"
-                } else if kind == OpKind::Adaptive
+                } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel)
                     && sources.get(index).is_some_and(|r| r.kind == EntityKind::Body)
                 {
                     "silhouette"
@@ -136,7 +145,9 @@ impl App {
                     .padding(4)
                     .style(inspector_secondary)
                     .on_press(Message::OperationGeometry(GeometryMessage::Add(filter))),
-                description, self.tooltips));
+                description,
+                self.tooltips,
+            ));
         }
         toolbar = toolbar.push(hint(
             button(icon("remove", 28.))
@@ -145,7 +156,9 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Remove)),
                 ),
-            "Delete the selected geometry item.", self.tooltips));
+            "Delete the selected geometry item.",
+            self.tooltips,
+        ));
         toolbar = toolbar.push(hint(
             button(icon("settings", 28.))
                 .padding(4)
@@ -153,13 +166,15 @@ impl App {
                 .on_press_maybe(
                     selected.map(|_| Message::OperationGeometry(GeometryMessage::Edit)),
                 ),
-            "Configure the selected geometry and its selection mode.", self.tooltips));
+            "Configure the selected geometry and its selection mode.",
+            self.tooltips,
+        ));
         geometry_collection(
             if kind == OpKind::Bore {
                 "Bore selection"
             } else if kind == OpKind::Thread {
                 "Thread selection"
-            } else if kind == OpKind::Adaptive {
+            } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                 "Machining geometry"
             } else {
                 "Contour selection"
@@ -185,6 +200,34 @@ impl App {
                 && self.geometry_operation_kind() == Some(OpKind::Chamfer);
         }
         matches!(self.operation_draft, Some(Operation::Chamfer(ref op)) if !op.faces.is_empty())
+    }
+
+    pub(super) fn sync_pocket_geometry_height_defaults(&mut self, binding: &cam_model::GeometryBinding) {
+        let Some(operation @ Operation::Pocket(_)) = self.operation_draft.as_ref() else { return; };
+        let previous = self.operation_binding_preview.as_ref()
+            .or_else(|| self.controller.geometry_state().bindings.get(&operation.id()));
+        let Some(previous) = previous else { return; };
+        if previous.recipe == binding.recipe { return; }
+        let defaults_for = |recipe: &cam_model::ExtractionRecipe| {
+            if *recipe == cam_model::ExtractionRecipe::PocketBoundary {
+                crate::cad_operations::selection_height_defaults(self.controller.document(), operation)
+            } else {
+                cam_model::OperationHeightSettings::default()
+            }
+        };
+        let old = defaults_for(&previous.recipe);
+        let new = defaults_for(&binding.recipe);
+        if let Some(settings) = &mut self.height_draft {
+            for plane in cam_model::HeightPlaneKind::ALL {
+                let definition = old.definition(plane);
+                if settings.definition(plane) == definition
+                    && self.height_offsets.get(&plane).and_then(|s| s.parse::<f64>().ok()) == Some(definition.offset)
+                {
+                    *settings.definition_mut(plane) = new.definition(plane).clone();
+                    self.height_offsets.insert(plane, fmt_num(new.definition(plane).offset));
+                }
+            }
+        }
     }
 
     pub(super) fn sync_chamfer_face_height_defaults(&mut self, before: Option<&Operation>) {
@@ -241,10 +284,10 @@ impl App {
     pub(super) fn geometry_operation_fields(&self, operation: &Operation) -> Vec<Field> {
         let mut fields = operation_fields(operation);
         if self.stock_to_leave_draft.is_some_and(|stock| stock.enabled) {
-            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_)) {
+            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) | Operation::Parallel(_)) {
                 fields.push(Field::StockLeaveRadial);
             }
-            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_)) {
+            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_)) {
                 fields.push(Field::StockLeaveAxial);
             }
         }
@@ -291,6 +334,10 @@ impl App {
         let (contours, closed): (Vec<_>, _) = match operation {
             Operation::Chamfer(op) => (vec![&op.chain], op.closed),
             Operation::Engrave(op) => (vec![&op.chain], op.closed),
+            Operation::Pocket(cam_model::PocketOp { boundary, islands, .. }) => (
+                std::iter::once(boundary).chain(islands.iter()).collect(),
+                true,
+            ),
             Operation::Carve(op) => (
                 std::iter::once(&op.boundary)
                     .chain(op.islands.iter())
@@ -321,12 +368,13 @@ impl App {
                     return;
                 }
                 let Some(
-                    kind @ (OpKind::Chamfer
+                    kind @ (OpKind::Pocket
+                    | OpKind::Chamfer
                     | OpKind::Engrave
                     | OpKind::Carve
                     | OpKind::Bore
                     | OpKind::Thread
-                    | OpKind::Adaptive),
+                    | OpKind::Adaptive | OpKind::Parallel),
                 ) = self.geometry_operation_kind()
                 else {
                     return;
@@ -440,9 +488,11 @@ impl App {
                 )
                 .map(|_| ())
         } else if self.cad_pending_kind.is_some() {
-            self.controller
-                .preview_cad_operation(editor.kind, self.controller.cad_selection())
-                .map(|_| ())
+            self.validate_active_profile_geometry().unwrap_or_else(|| {
+                self.controller
+                    .preview_cad_operation(editor.kind, self.controller.cad_selection())
+                    .map(|_| ())
+            })
         } else {
             self.controller
                 .planar_operation_eligibility(
@@ -458,11 +508,13 @@ impl App {
         let cad = self.operation_uses_cad_geometry();
         let kind = editor.kind;
         let name = match kind {
+            OpKind::Pocket => "Pocket",
             OpKind::Chamfer => "Chamfer",
             OpKind::Engrave => "Engrave",
             OpKind::Carve => "Carve",
             OpKind::Bore => "Bore",
             OpKind::Thread => "Thread",
+            OpKind::Parallel => "3D Parallel",
             OpKind::Adaptive => "3D Adaptive Clearing",
             _ => unreachable!(),
         };
@@ -476,9 +528,9 @@ impl App {
                 icon(
                     if kind == OpKind::Thread {
                         "thread"
-                    } else if kind == OpKind::Adaptive {
+                    } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                         if self.cad_filter == CadFilter::Body { "silhouette" } else { "face" }
-                    } else if kind == OpKind::Carve && cad && self.cad_filter == CadFilter::Face {
+                    } else if matches!(kind, OpKind::Pocket | OpKind::Carve) && cad && self.cad_filter == CadFilter::Face {
                         "face"
                     } else {
                         "chain"
@@ -502,16 +554,24 @@ impl App {
             ]
             .spacing(6)
             .align_y(Alignment::Center),
-            text(format!("{} source feature(s) selected", labels.len()))
-                .size(11)
-                .color(INSPECTOR_MUTED),
+            geometry_selection::selected_feature_names(labels),
         ]
         .spacing(9);
-        if cad && matches!(kind, OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive) {
-            let options = if kind == OpKind::Adaptive {
+        if cad && matches!(kind, OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive | OpKind::Parallel) {
+            let options = if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                 vec![
                     (CadFilter::Body, "silhouette", "Whole solid body"),
-                    (CadFilter::Face, "face", "Selected faces only; each needs a positive-area setup XY projection"),
+                    (
+                        CadFilter::Face,
+                        "face",
+                        "Selected faces only; each needs a positive-area setup XY projection",
+                    ),
+                ]
+            } else if kind == OpKind::Pocket {
+                vec![
+                    (CadFilter::Face, "face", "Pocket floor and islands"),
+                    (CadFilter::Loop, "closed", "Closed boundary loop"),
+                    (CadFilter::Edge, "chain", "Select connected edges forming a closed boundary"),
                 ]
             } else if kind == OpKind::Carve {
                 vec![
@@ -552,22 +612,53 @@ impl App {
                         .padding(4)
                         .style(move |theme, status| inspector_tab(theme, status, active))
                         .on_press(Message::GeometryFilterChanged(filter)),
-                    description, self.tooltips));
+                    description,
+                    self.tooltips,
+                ));
             }
             body = body.push(controls);
         }
         let description = match kind {
+            OpKind::Pocket => "Select a planar pocket floor with its islands, a closed boundary loop, or connected edges forming a closed chain. For chains, set the cutting depth in Heights.",
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
             OpKind::Bore => "Select cylindrical holes or bosses, or circular drawing loops. Selected features must share diameter and cutting heights.",
             OpKind::Thread => "Select cylindrical bores or bosses, or circular drawing holes. Selected features must share diameter and cutting heights. A verified rounded entrance is supported; only the cylinder is threaded. Choose a thread mill, then review the suggested standard size in Geometry > Thread or enter a custom major diameter and pitch.",
+            OpKind::Parallel => "Select solid bodies or machining faces. Parallel rows follow the surface with a ball nose cutter. Containment uses the selected geometry bounding box in the pass direction.",
             OpKind::Adaptive => "Select whole solid bodies, individual faces, or both. Body selection includes all of its faces; face selection limits machining to the chosen face footprint.",
             _ => unreachable!(),
         };
         body = body.push(text(description).size(12));
-        for label in labels {
-            body = body.push(text(label).size(12));
+        if cad {
+            if let Some(info) =
+                crate::cad_operations::geometry_for_setup(self.controller.document())
+                    .ok()
+                    .and_then(|geometry| {
+                        crate::cad_operations::recipe(
+                            kind,
+                            &geometry,
+                            self.controller.cad_selection(),
+                        )
+                        .ok()
+                        .and_then(|recipe| {
+                            cam_geometry3d::verify_selection(
+                                &geometry,
+                                self.controller.cad_selection(),
+                                recipe,
+                                self.controller.stock_box().1[2],
+                            )
+                        })
+                    })
+            {
+                body = body.push(
+                    text(format!(
+                        "Info: Automatic verification: {info}. Operation settings are used."
+                    ))
+                    .size(11)
+                    .color(INSPECTOR_MUTED),
+                );
+            }
         }
         let valid = self.geometry_settings_valid();
         if let Err(error) = &valid {
@@ -602,6 +693,79 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read-only benchmark for the supplied local tray; no project is saved.
+    #[test]
+    #[ignore = "manual supplied-project performance measurement"]
+    fn tray_face_selection_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.controller = AppController::new(crate::default_machine());
+        let start = Instant::now();
+        app.library.tools.clear();
+        app.open_project(&std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testfiles/tray-parallel.ocam")).unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        while app.controller.run_needs_poll() {
+            let _ = app.update(Message::PollRun);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        eprintln!("open project {:?}", start.elapsed());
+        app.setup_draft = None;
+        let id = app.controller.inspection_setup().operations.iter()
+            .find(|op| matches!(op, Operation::Parallel(_))).unwrap().id();
+        let start = Instant::now();
+        app.begin_operation_draft(id);
+        eprintln!("open editor {:?}", start.elapsed());
+        let start = Instant::now();
+        black_box(app.view());
+        eprintln!("first editor view {:?}", start.elapsed());
+        app.operation_geometry_message(GeometryMessage::Add(CadFilter::Face));
+        let saved_faces = app.controller.cad_selection().to_vec();
+        let state = app.controller.geometry_state();
+        let instance = &state.instances[0];
+        let asset = state.asset(instance.asset_id).unwrap();
+        let faces: Vec<_> = asset.topology.faces.iter()
+            .filter(|face| face.body_id == instance.body_id)
+            .map(|face| EntityRef { asset_id: asset.id, revision: asset.revision,
+                instance_id: instance.id, body_id: instance.body_id,
+                kind: EntityKind::Face, id: face.id }).collect();
+        for count in [1, 10, faces.len()] {
+            app.controller.set_cad_selection(faces[..count].to_vec());
+            let start = Instant::now();
+            let _ = black_box(app.geometry_settings_valid());
+            eprintln!("{count} faces: validation {:?}", start.elapsed());
+            let start = Instant::now();
+            for _ in 0..3 {
+                let _ = app.update(Message::OrbitBy(0.01, 0.005));
+                black_box(app.view());
+            }
+            eprintln!("{count} faces: {:.3} ms/update+view", start.elapsed().as_secs_f64() * 1000. / 3.);
+        }
+        app.controller.set_cad_selection(saved_faces.clone());
+        for face in saved_faces.iter().take(5).chain(saved_faces.iter().take(5)) {
+            let start = Instant::now();
+            let _ = app.update(Message::CadSelect(face.clone()));
+            eprintln!("toggle face {} {:?}", face.id, start.elapsed());
+            let start = Instant::now();
+            black_box(app.view());
+            eprintln!("view after face toggle {:?}", start.elapsed());
+            let start = Instant::now();
+            let _ = app.update(Message::CadHover(Some(face.clone())));
+            black_box(app.view());
+            eprintln!("hover after face toggle {:?}", start.elapsed());
+        }
+        app.controller.set_cad_selection(saved_faces);
+        let start = Instant::now();
+        app.operation_geometry_message(GeometryMessage::Confirm);
+        eprintln!("confirm faces {:?}", start.elapsed());
+        let start = Instant::now();
+        let _ = app.update(Message::Apply);
+        eprintln!("apply operation {:?}", start.elapsed());
+    }
 
     fn drawing_app() -> App {
         let (mut app, _) = App::new();
@@ -733,13 +897,9 @@ mod tests {
         assert!(!app.cad_filter_explicit);
         let viewport = app.machining_viewport();
         assert!(viewport.cad_operation_kind.is_none());
-        let bounds = iced::Rectangle::new(
-            iced::Point::ORIGIN,
-            iced::Size::new(900., 600.),
-        );
-        let point: [f64; 3] = std::array::from_fn(|axis| {
-            (face_bounds[0][axis] + face_bounds[1][axis]) / 2.
-        });
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(900., 600.));
+        let point: [f64; 3] =
+            std::array::from_fn(|axis| (face_bounds[0][axis] + face_bounds[1][axis]) / 2.);
         let point = placement.transform_point(point);
         let cursor = picking_view::project(viewport.camera(), bounds, point).unwrap().0;
         let candidates = viewport.cad_candidates_at(cursor, bounds);

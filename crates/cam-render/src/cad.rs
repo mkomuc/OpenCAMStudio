@@ -170,7 +170,9 @@ impl CadScene {
                                         topology.faces.iter().find(|f| f.id == *id).is_some_and(
                                             |f| match f.surface {
                                                 CadSurface::Unsupported { .. }
-                                                | CadSurface::Torus { .. } => true,
+                                                | CadSurface::Torus { .. }
+                                                | CadSurface::Cone { .. }
+                                                | CadSurface::Sphere { .. } => true,
                                                 CadSurface::Cylinder {
                                                     axis,
                                                     inward: false,
@@ -583,6 +585,29 @@ impl CadScene {
             .collect();
         deduplicate_candidates(&mut candidates);
         candidates
+    }
+
+    /// Pocket boundaries may use either side of a planar rim, independently of
+    /// the supporting face normal. Keep the actual loop beside rounded walls.
+    pub fn pick_pocket_loop_candidates(
+        &self,
+        ray: Ray,
+        aperture: f64,
+        select_through: bool,
+    ) -> Vec<PickCandidate> {
+        let mut loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
+        loops.retain(|c| self.planar_loops.contains(&c.entity));
+        if loops.is_empty() {
+            loops = self.pick_candidates(ray, EntityKind::Face, aperture, select_through)
+                .into_iter().filter_map(|mut candidate| {
+                    let wire = self.face_outer_loops.get(&candidate.entity)?;
+                    if !self.planar_loops.contains(wire) { return None; }
+                    candidate.entity = wire.clone();
+                    Some(candidate)
+                }).collect();
+        }
+        deduplicate_candidates(&mut loops);
+        loops
     }
 
     /// Chamfer/engrave/carve select the actual planar rim. Rounded transitions
@@ -1075,6 +1100,24 @@ mod tests {
             .pick_profile_candidates(down(), 0.1, false)
             .is_empty());
     }
+    #[test]
+    fn pocket_can_pick_a_downward_facing_planar_boundary() {
+        let mut geometry = geometry();
+        let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
+        let face = topology.faces.iter_mut().find(|face| face.id == 10).unwrap();
+        face.surface = CadSurface::Plane { origin: [0., 0., 0.], normal: [0., 0., -1.] };
+        face.loop_ids.push(60);
+        topology.loops.push(CadLoop {
+            id: 60, body_id: 1, face_id: 10, edge_uses: vec![], is_outer: true,
+        });
+        let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        assert!(scene.pick_surface_loop_candidates(down(), 0.1, false).is_empty());
+        let hits = scene.pick_pocket_loop_candidates(down(), 0.1, false);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entity.kind, EntityKind::Loop);
+        assert_eq!(hits[0].entity.id, 60);
+    }
+
     #[test]
     fn drill_picks_cylinders_from_visible_rims_and_excludes_planar_entry_faces() {
         let mut geometry = geometry();

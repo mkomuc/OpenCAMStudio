@@ -27,9 +27,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "profile.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -398,7 +396,7 @@ impl App {
         if let Some(tool) = self
             .operation_tools
             .iter()
-            .chain(self.controller.document().setup().tools.iter())
+            .chain(self.controller.inspection_setup().tools.iter())
             .find(|tool| tool.number == profile.tool)
         {
             if let Err(message) = profile.validate_control_leads(tool.radius()) {

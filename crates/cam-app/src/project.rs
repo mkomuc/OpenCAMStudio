@@ -100,7 +100,8 @@ pub enum OcamFile {
 }
 
 impl OcamFile {
-    /// Serialize to pretty JSON (tagged).
+    /// Serialize tagged JSON. Projects use compact JSON because embedded CAD
+    /// meshes can contain millions of numeric array entries; libraries stay pretty.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         if let OcamFile::Project(project) = self {
             project.validate().map_err(serde::ser::Error::custom)?;
@@ -108,7 +109,10 @@ impl OcamFile {
         if let OcamFile::Library(library) = self {
             library.validate().map_err(serde::ser::Error::custom)?;
         }
-        serde_json::to_string_pretty(self)
+        match self {
+            OcamFile::Project(_) => serde_json::to_string(self),
+            OcamFile::Library(_) => serde_json::to_string_pretty(self),
+        }
     }
 
     /// Parse a `.ocam` file, accepting a **legacy untagged project** (a bare [`Project`]
@@ -208,10 +212,10 @@ pub struct Project {
 }
 
 impl Project {
-    /// Serialize to pretty JSON.
+    /// Serialize to compact JSON, without expanding embedded CAD arrays.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
-        serde_json::to_string_pretty(self)
+        serde_json::to_string(self)
     }
 
     /// Parse from JSON, migrating the embedded document to the current schema first.
@@ -229,8 +233,8 @@ impl Project {
     pub fn validate(&self) -> Result<(), String> {
         use std::collections::BTreeSet;
 
-        if self.document.setups.is_empty() {
-            return Err("project must contain at least one setup".into());
+        if self.document.setups.first().is_some_and(|s| s.stock == cam_model::Stock::PreviousSetup) {
+            return Err("The first setup has no previous setup; choose box stock".into());
         }
         let mut setup_ids = BTreeSet::new();
         let mut operation_ids = BTreeSet::new();
@@ -441,6 +445,22 @@ mod tests {
     }
 
     #[test]
+    fn large_project_arrays_save_compactly_and_keep_exact_geometry() {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
+        else { panic!("expected project") };
+        project.open_paths.push(Polyline::new((0..10_000).map(|i| {
+            cam_geo::Point::new(i as f64 * 0.123456789012345, (i as f64).sin())
+        }).collect()));
+        let pretty = serde_json::to_string_pretty(&project).unwrap();
+        let compact = project.to_json().unwrap();
+        assert!(compact.len() * 3 < pretty.len() * 2);
+        assert_eq!(Project::from_json(&compact).unwrap(), project);
+        let tagged = OcamFile::Project(project.clone()).to_json().unwrap();
+        assert!(tagged.len() * 3 < pretty.len() * 2);
+        assert_eq!(OcamFile::from_json(&tagged).unwrap(), OcamFile::Project(project));
+    }
+
+    #[test]
     fn an_untagged_non_project_object_is_rejected() {
         // A bare tool-library object (no `ocam` tag) is neither a tagged OcamFile nor a
         // legacy Project, so it must fail rather than silently mis-parse.
@@ -642,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn project_loader_rejects_no_setups_duplicate_global_operation_ids_and_orphan_bindings() {
+    fn project_loader_accepts_no_setups_and_rejects_duplicate_ids_and_orphan_bindings() {
         let OcamFile::Project(project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
             panic!("expected project");
         };
@@ -650,10 +670,10 @@ mod tests {
             serde_json::from_str(&OcamFile::Project(project.clone()).to_json().unwrap()).unwrap();
 
         value["document"]["setups"] = serde_json::json!([]);
-        assert!(OcamFile::from_json(&value.to_string())
-            .unwrap_err()
-            .to_string()
-            .contains("at least one setup"));
+        let OcamFile::Project(empty) = OcamFile::from_json(&value.to_string()).unwrap() else {
+            panic!("expected project");
+        };
+        assert!(empty.document.setups.is_empty());
 
         let mut value: serde_json::Value =
             serde_json::from_str(&OcamFile::Project(project.clone()).to_json().unwrap()).unwrap();
@@ -725,6 +745,7 @@ mod tests {
             kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
             order: cam_model::PatternOrder::ByInstance,
             suppressed: false,
+            options: Default::default(),
         });
         assert!(OcamFile::Project(project.clone()).to_json().unwrap_err().to_string().contains("missing operation 999"));
         let json = serde_json::to_string(&OcamFile::Project(project)).unwrap();

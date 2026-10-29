@@ -158,6 +158,18 @@ impl App {
                     Message::PlungeKindChanged,
                 ));
             }
+            Operation::Parallel(p) => {
+                moves.push(help_wrap(
+                    row![
+                        text("Keep tool down").size(12).width(Length::Fill),
+                        checkbox(p.params.stay_down)
+                            .size(15)
+                            .on_toggle(Message::ParallelStayDownToggled),
+                    ].spacing(8).align_y(Alignment::Center),
+                    "Enable short transitions between neighboring passes when the swept cutter clears the model. At 0 mm Lift height, the tool continues finishing along the surface without an added lift. Gaps and unsafe transitions retract to clearance. Use on pre-roughed stock.",
+                    self.tooltips,
+                ));
+            }
             Operation::Adaptive(_) => {
                 moves.push(label_help(
                     "Retract along cleared path",
@@ -334,9 +346,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Pocket);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()

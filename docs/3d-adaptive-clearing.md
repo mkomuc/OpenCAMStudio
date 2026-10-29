@@ -28,6 +28,8 @@ corners can exceed Optimal Load.
 Stock to Leave is also available in Profile and Pocket, and as an axial allowance
 in Face. Apply the edit before generating. Entry and exit preferences are described
 in [entry and exit positions](lead-positions.md).
+Use [Lift height](lift-height.md) in **Lead-in and lead-out moves → Linking moves**
+to raise local transitions above the cutting level.
 
 ## Machining boundaries
 

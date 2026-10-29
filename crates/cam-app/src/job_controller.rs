@@ -4,6 +4,11 @@ use crate::jobs::{JobInputs, JobProgress, JobStamp};
 use std::sync::Arc;
 
 impl AppController {
+    #[cfg(feature = "gui")]
+    pub(crate) fn operation_preview_cache(&self) -> cam_toolpath::OperationCache {
+        self.operation_cache.clone()
+    }
+
     /// Session revision increases through edits and undo/redo; it never rolls back.
     pub fn revision(&self) -> u64 {
         self.document_epoch
@@ -27,6 +32,18 @@ impl AppController {
         // here would leave pattern membership dangling.
         let document = self.document().clone();
         let (min, max) = self.stock_box();
+        let frame_error = self.validate_setup_frame(self.setup()).err().or_else(|| {
+            if self.setup().stock != Stock::PreviousSetup {
+                return None;
+            }
+            let at = document.setups.iter()
+                .position(|s| s.id == self.active_setup_id).unwrap();
+            let start = document.setups[..at].iter()
+                .rposition(|s| s.stock != Stock::PreviousSetup).unwrap_or(0);
+            document.setups[start..at].iter().find_map(|s| {
+                self.validate_setup_frame(s).err().map(|e| format!("{}: {e}", s.name))
+            })
+        });
         JobInputs {
             document: Arc::new(document),
             machine: self.machine.clone(),
@@ -36,9 +53,10 @@ impl AppController {
             max,
             spindle_rpm: self.defaults.spindle_rpm,
             tool_diameter: self.defaults.tool_diameter,
-            frame_error: self.validate_setup_frame(self.setup()).err(),
+            frame_error,
             preview_program: None,
             preview_resolution: None,
+            toolpath_preview: false,
             simulation_accuracy: self.simulation_accuracy,
         }
     }
@@ -75,6 +93,9 @@ impl AppController {
         recompute: bool,
         include_predecessors: bool,
     ) -> Result<JobStamp, String> {
+        if self.setups().is_empty() {
+            return Err("Create a setup before generating toolpaths.".into());
+        }
         let mut inputs = self.job_inputs();
         if let Some(id) = operation {
             let document = Arc::make_mut(&mut inputs.document);
@@ -110,6 +131,7 @@ impl AppController {
 
     /// Run exactly one pattern, retaining every included source at each instance.
     pub fn start_pattern_toolpath_run(&mut self, pattern_id: u64, recompute: bool) -> Result<JobStamp, String> {
+        if self.setups().is_empty() { return Err("Create a setup before generating toolpaths.".into()); }
         let mut inputs = self.job_inputs();
         let members: BTreeSet<u32> = inputs.document.setup().patterns.iter().find(|p| p.id == pattern_id)
             .ok_or_else(|| "Pattern no longer exists.".to_string())?.members.iter().copied().collect();
@@ -138,7 +160,7 @@ impl AppController {
             .map(|a| (a.id, a.revision, &a.source_fingerprint))
             .collect();
         let bytes = serde_json::to_vec(&(
-            inputs.document.setup(),
+            &inputs.document.setups,
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,
             &geometry.bindings,
@@ -224,6 +246,7 @@ impl AppController {
     pub(crate) fn current_toolpath_fingerprints(&self) -> BTreeMap<u32, String> {
         let document = self.document();
         let mut result = BTreeMap::new();
+        let mut previous_setup = String::new();
         for setup in &document.setups {
             // Common machining configuration; omit names and view state.
             let models: Vec<_> = document
@@ -247,6 +270,8 @@ impl AppController {
                 setup.id,
                 &setup.frame,
                 &setup.stock,
+                (setup.stock == Stock::PreviousSetup).then_some(&previous_setup),
+                document.stock_bounds_for(setup),
                 &setup.model_instances,
                 &setup.extra_origins,
                 setup.origin,
@@ -290,6 +315,7 @@ impl AppController {
                     patterns,
                 ))
                 .expect("operation dependencies serialize");
+                if matches!(op, Operation::Parallel(_)) { bytes.extend_from_slice(&cam_toolpath::ParallelStrategy::DOMAIN_REVISION.to_le_bytes()); }
                 if matches!(op, Operation::Adaptive(_)) {
                     bytes.extend_from_slice(
                         &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),
@@ -301,6 +327,7 @@ impl AppController {
                 );
                 result.insert(id, format!("{own}:{previous}"));
             }
+            previous_setup = previous;
         }
         result
     }

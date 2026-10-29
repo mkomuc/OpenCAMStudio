@@ -79,7 +79,7 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::TabSpacing
         | Field::AdaptiveOffset => OperationTab::Geometry,
         Field::BoreDiameter | Field::BoreTaper => OperationTab::Geometry,
-        Field::BoreSafeDistance | Field::BoreLeadRadius => OperationTab::Linking,
+        Field::LiftHeight | Field::BoreSafeDistance | Field::BoreLeadRadius => OperationTab::Linking,
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -174,10 +174,12 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
     }
     match field {
         Field::Profile(n) => n.invalid(value),
+        Field::PocketFinish(n) => n.invalid(value),
         Field::Depth
         | Field::ChamferWidth
         | Field::Feed
         | Field::PlungeFeed
+        | Field::ParallelStepover
         | Field::AdaptiveTolerance
         | Field::AdaptiveOptimalLoad
         | Field::AdaptiveFineStepdown
@@ -189,7 +191,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         Field::Stepdown
             if matches!(
                 op,
-                Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_)
+                Operation::Profile(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_)
             ) =>
         {
             value <= 0.0
@@ -226,7 +228,9 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::ThreadTop
         | Field::ThreadBottom
         | Field::ChamferTop
-        | Field::FaceOvershoot => false,
+        | Field::FaceOvershoot
+        | Field::ParallelAngle
+        | Field::AdaptiveOffset => false,
         Field::ProfileOffset if matches!(op, Operation::Profile(_)) => false,
         _ => value < 0.0,
     }
@@ -279,13 +283,13 @@ fn stock_offset_fields(operation: &Operation) -> Vec<Field> {
     let mut fields = Vec::with_capacity(2);
     if matches!(
         operation,
-        Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_)
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) | Operation::Parallel(_)
     ) {
         fields.push(Field::StockLeaveRadial);
     }
     if matches!(
         operation,
-        Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_)
+        Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_)
     ) {
         fields.push(Field::StockLeaveAxial);
     }
@@ -408,7 +412,7 @@ impl App {
             let tool = self
                 .operation_tools
                 .iter()
-                .chain(self.controller.document().setup().tools.iter())
+                .chain(self.controller.inspection_setup().tools.iter())
                 .find(|tool| tool.number == op.tool());
             list = list.push(
                 text(match tool {
@@ -523,7 +527,7 @@ impl App {
                 Operation::Drill(o) => format!("{} hole centres", o.points.len()),
                 Operation::Bore(o) => format!("{} bore centres", o.points.len()),
                 Operation::Thread(o) => format!("{} thread centres", o.points.len()),
-                Operation::Adaptive(_) => linked.map_or_else(
+                Operation::Parallel(_) | Operation::Adaptive(_) => linked.map_or_else(
                     || "Selected geometry".into(),
                     |binding| {
                         let bodies = binding
@@ -576,6 +580,7 @@ impl App {
             if matches!(
                 field,
                 Field::Profile(_)
+                    | Field::PocketFinish(_)
                     | Field::TabWidth
                     | Field::TabHeight
                     | Field::TabSpacing
@@ -739,6 +744,7 @@ impl App {
             }
             Operation::Pocket(p) => {
                 if tab == OperationTab::Passes {
+                    list = list.extend(self.pocket_finishing_controls(&p.finishing));
                     list = list.section("Passes");
                     list = list.push(
                         row![
@@ -889,6 +895,12 @@ impl App {
                     );
                 }
             }
+            Operation::Parallel(p) if tab == OperationTab::Passes => {
+                list = list.section("Passes").push(row![text("Both ways (zigzag)").size(12), checkbox(p.params.both_ways).size(15).on_toggle(Message::ParallelBothWaysToggled)].spacing(8));
+            }
+            Operation::Parallel(p) if tab == OperationTab::Geometry => {
+                list = list.push(profile_picker("Tool containment", "Position of the cutter relative to the selected model bounding box.", self.tooltips, p.params.containment, &[cam_model::AdaptiveContainment::Inside, cam_model::AdaptiveContainment::Center, cam_model::AdaptiveContainment::Outside][..], Message::AdaptiveContainmentChanged));
+            }
             Operation::Adaptive(adaptive) if tab == OperationTab::Passes => {
                 list = list.section("Passes").push(
                     row![
@@ -924,9 +936,7 @@ impl App {
                 if tab == OperationTab::Passes {
                     list = list.section("Passes");
                     if let Some(shape) = self
-                        .controller
-                        .document()
-                        .setup()
+                        .controller.inspection_setup()
                         .tools
                         .iter()
                         .find(|t| t.number == c.tool)
@@ -969,7 +979,7 @@ impl App {
                             let current = self
                                 .operation_tools
                                 .iter()
-                                .chain(self.controller.document().setup().tools.iter())
+                                .chain(self.controller.inspection_setup().tools.iter())
                                 .find(|t| t.number == cl.tool)
                                 .and_then(|embedded| {
                                     self.library
@@ -1135,7 +1145,7 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut operation, &fields);
-        if matches!(operation, Operation::Adaptive(_)) {
+        if matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)) {
             cam_geometry3d::validate_adaptive_selection(
                 self.controller.geometry_state(),
                 &selected,
@@ -1218,7 +1228,7 @@ mod tests {
         app.setup_draft = None;
         app.focus_ops.clear();
         let _ = app.update(Message::ClickOp(0));
-        let before = app.controller.document().setup().clone();
+        let before = app.controller.inspection_setup().clone();
         let binding = app.controller.geometry_state().bindings[&0].clone();
         let mut tool = before.tools[0].clone();
         tool.flute_length = 25.0;
@@ -1242,9 +1252,7 @@ mod tests {
             app.status
         );
         assert_eq!(
-            app.controller
-                .document()
-                .setup()
+            app.controller.inspection_setup()
                 .tools
                 .iter()
                 .find(|t| t.number == number)
@@ -1266,7 +1274,7 @@ mod tests {
         assert_eq!(app.current_operation(0).unwrap().tool(), number);
         assert!(!app.inspector_dirty());
         assert!(app.controller.undo());
-        assert_eq!(app.controller.document().setup(), &before);
+        assert_eq!(app.controller.inspection_setup(), &before);
     }
 
     #[test]
@@ -1331,9 +1339,7 @@ mod tests {
         ] {
             controller.new_operation(kind);
         }
-        controller
-            .document()
-            .setup()
+        controller.inspection_setup()
             .operations
             .iter()
             .rev()
@@ -1480,9 +1486,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -1525,9 +1529,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -1631,15 +1633,13 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
             .id();
         app.begin_operation_draft(id);
-        let before = app.controller.document().setup().clone();
+        let before = app.controller.inspection_setup().clone();
         let _ = app.update(Message::OperationTabChanged(OperationTab::Tool));
         let _ = app.update(Message::FieldChanged(Field::Feed, "432.1".into()));
         let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
@@ -1655,7 +1655,7 @@ mod tests {
             matches!(app.controller.operation(id), Some(Operation::Profile(o)) if o.feed == 432.1 && o.side == Side::Inside && !o.clearing.climb && o.start == Some([-4.5, 0.0]))
         );
         assert!(app.controller.undo());
-        assert_eq!(app.controller.document().setup(), &before);
+        assert_eq!(app.controller.inspection_setup(), &before);
     }
 
     #[test]
@@ -1904,7 +1904,7 @@ mod tests {
             viewport.cad_scene = Arc::new(CadScene::from_geometry_in_setup(
                 &geometry,
                 &BTreeSet::new(),
-                &app.controller.document().setup().frame,
+                &app.controller.inspection_setup().frame,
             ));
             viewport.setup_snaps.clear();
             let (screen, _) = picking_view::project(viewport.camera(), bounds, world).unwrap();
@@ -2056,7 +2056,7 @@ mod tests {
     fn model_position_pick_hits_surface_in_oblique_view_and_converts_setup_axes() {
         for frame in [cam_model::SetupFrame::default(), cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()] {
             let (mut app, _) = linked_face_app();
-            let mut setup = app.controller.document().setup().clone();
+            let mut setup = app.controller.inspection_setup().clone();
             setup.frame = frame.clone();
             app.controller.apply_setup_settings(setup).unwrap();
             let mut geometry = app.controller.geometry_state().clone();
@@ -2175,9 +2175,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -2216,9 +2214,7 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let old_id = app
-            .controller
-            .document()
-            .setup()
+            .controller.inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -2338,7 +2334,7 @@ mod tests {
             matches!(app.controller.operation(id), Some(Operation::Face(op)) if op.direction == Axis::Y && op.stepdown == 0.75)
         );
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(cam_model::HeightPlaneKind::Clearance)
                 .offset,
             12.5
@@ -2497,7 +2493,7 @@ mod tests {
         assert_eq!(op.stepdown, 0.75);
         assert!(matches!(op.lead_in, Lead::Linear { length } if length == 2.5));
         assert_eq!(
-            app.controller.document().setup().height_settings[&id]
+            app.controller.inspection_setup().height_settings[&id]
                 .definition(P::Clearance)
                 .offset,
             12.5
@@ -2599,8 +2595,131 @@ mod tests {
     }
 
     #[test]
+    fn pocket_geometry_switches_between_floor_and_chain_height_defaults() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R};
+        let (mut app, _) = linked_face_app();
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let source = EntityRef {
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Face,
+            id: 2,
+        };
+        let _ = app.update(Message::CadSelect(source.clone()));
+        assert_eq!(
+            app.height_draft
+                .as_ref()
+                .unwrap()
+                .definition(P::Top)
+                .reference,
+            R::StockTop
+        );
+        assert_eq!(
+            app.height_draft
+                .as_ref()
+                .unwrap()
+                .definition(P::Bottom)
+                .reference,
+            R::SelectedContours
+        );
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let before = app.controller.document().clone();
+        for (filter, entity, top, bottom) in [
+            (
+                CadFilter::Loop,
+                EntityRef {
+                    kind: EntityKind::Loop,
+                    id: 5,
+                    ..source.clone()
+                },
+                R::SelectedContours,
+                R::Plane(P::Top),
+            ),
+            (CadFilter::Face, source, R::StockTop, R::SelectedContours),
+        ] {
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(filter)));
+            let _ = app.update(Message::CadSelect(entity));
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+            assert!(app.geometry_editor.is_none(), "{}", app.status);
+            assert_eq!(
+                app.height_draft
+                    .as_ref()
+                    .unwrap()
+                    .definition(P::Top)
+                    .reference,
+                top
+            );
+            assert_eq!(
+                app.height_draft
+                    .as_ref()
+                    .unwrap()
+                    .definition(P::Bottom)
+                    .reference,
+                bottom
+            );
+            assert_eq!(app.controller.document(), &before);
+        }
+    }
+
+    #[test]
+    fn pocket_chain_settings_accumulate_edges_and_preserve_height_edits() {
+        let (mut app, _) = linked_face_app();
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Loop,
+        )));
+        let _ = app.inspector();
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Edge));
+        let _ = app.update(Message::HeightOffsetChanged(
+            cam_model::HeightPlaneKind::Bottom,
+            "-1.5".into(),
+        ));
+        for id in 20..24 {
+            let _ = app.update(Message::CadSelect(EntityRef {
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                kind: EntityKind::Edge,
+                id,
+            }));
+            assert_eq!(app.controller.cad_selection().len(), (id - 19) as usize);
+            assert_eq!(
+                app.controller
+                    .preview_cad_operation(OpKind::Pocket, app.controller.cad_selection())
+                    .is_ok(),
+                id == 23
+            );
+        }
+        assert_eq!(
+            app.height_offsets[&cam_model::HeightPlaneKind::Bottom],
+            "-1.5"
+        );
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("pocket selected")
+        };
+        let heights = app.controller.inspection_setup().height_settings[&id]
+            .resolve(
+                app.controller.document(),
+                app.controller.operation(id).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(heights.top, -1.);
+        assert_eq!(heights.bottom, -2.5);
+    }
+
+    #[test]
     fn cad_surface_geometry_creates_clears_and_switches_to_an_open_engraving() {
-        for kind in [OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
+        for kind in [OpKind::Pocket, OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
             let (mut app, _) = linked_face_app();
             let before = app.controller.document().clone();
             let _ = app.update(Message::BeginOp(kind));
@@ -2666,7 +2785,7 @@ mod tests {
 
     #[test]
     fn cad_icon_settings_cancel_and_confirm_keep_the_operation_transactional() {
-        for kind in [OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
+        for kind in [OpKind::Pocket, OpKind::Chamfer, OpKind::Engrave, OpKind::Carve] {
             let (mut app, _) = linked_face_app();
             let _ = app.update(Message::BeginOp(kind));
             let source = EntityRef {

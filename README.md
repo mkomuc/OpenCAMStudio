@@ -2,29 +2,38 @@
 
 A CAM application for CNC toolpath generation, built in Rust.
 
-> **Status: the 2.5-D milling slice works end-to-end** — DXF/DWG in, toolpaths
-> and material simulation in a live viewport, real G-code out. Initial 3D Adaptive
-> Clearing uses conservative CAD-derived Z levels. Freeform finishing, turning
-> and plugins remain roadmap work.
+> **Status: 2.5-D milling and initial 3D machining work end-to-end** — geometry
+> import, toolpath generation, material-removal simulation and G-code export.
+> 3D Adaptive Clearing provides CAD-derived roughing levels; 3D Parallel finishing
+> follows freeform surfaces with a ball nose cutter on pre-roughed stock.
+> Additional 3D finishing strategies, turning and plugins remain roadmap work.
 
-![The OpenCAMStudio desktop application](docs/screenshot_step.png)
+![3D Parallel finishing toolpath generated for the tray project](docs/tray-parallel-toolpath.png)
 
-*The built-in sample (**Home → Sample**) with a profile and a pocket, run and ready
-to export.*
+*3D Parallel finishing on `tray.ocam`: surface-following passes with a 6 mm ball nose cutter and 1 mm stepover.*
+
+![Simulation of the tray Parallel finishing operation](docs/tray-parallel-simulation.png)
+
+*Completed material-removal simulation of the tray’s Parallel finishing operation.*
 
 ## What works
 
 - **Operations** — profile, pocket, drill, face, chamfer, **thread milling**,
   **V-carve engraving** and **V-carving**; leads and ramp/helix plunges;
   engagement-capped area clearing (adaptive front-advance where it certifies,
-  concentric otherwise).
+  concentric otherwise). Pocket operations offer optional finishing passes with
+  separate radial stepover and feed, leads, a repeat pass and closure overlap;
+  cutter compensation is computed in the toolpath.
 - **3D Adaptive Clearing** — roughing levels with upward fine-step refinement,
   optimal load and tolerance controls, using the independent CAD machining
   tessellation. Select the bodies or faces to machine while retaining other setup
   bodies as protected obstacles. See the [workflow and geometry
   limits](docs/3d-adaptive-clearing.md).
+- **3D Parallel finishing** — ball nose surface passes with scan angle, horizontal
+  stepover, one-way or zigzag cutting, CAD body/face selection, bounding-box
+  containment and a Keep tool down option with separate Lift Height. See [controls and limits](docs/parallel.md).
 - **Stock to Leave** — shared radial and axial finishing allowances for Profile,
-  Pocket and 3D Adaptive Clearing; axial allowance for Face. Disabled settings
+  Pocket, 3D Adaptive Clearing and 3D Parallel; axial allowance for Face. Disabled settings
   preserve existing toolpaths.
 - **V-carving** — the boundary outlines an *area*, not a path: the tool never
   touches it, its flanks land on it, and the depth follows from the shape's own
@@ -35,11 +44,10 @@ to export.*
   depth's width, so it roughs the taper as a staircase — and then hands over to
   the V-bit, which finishes the wall and cleans the corners a round cutter
   cannot reach.
-- **Tool suitability guards** — every operation checks that the surface doing the
-  cutting *is* a cutting surface, reading each tool's own profile rather than
-  matching on its type. Using a non-cutting surface (engraving with a chamfer
-  mill, whose tip is a flat that does not cut) or cutting past the flute length
-  onto the shank is refused; merely *poor* choices warn and proceed.
+- **Tool suitability warnings** — cutter shape, cutting surfaces and reach are
+  advisory. Deliberately different cutters can generate and simulate; stock
+  removal follows the selected cutter's actual profile. Numeric validity,
+  computable paths and simulation collision checks remain enforced.
 - **Geometry in** — DXF/DWG import with contour chaining and hole nesting,
   including **open paths** (lettering and decorative strokes, for engraving);
   a carved region's islands (the counters of letters) come from the drawing's own
@@ -58,8 +66,8 @@ to export.*
   mills. Each carries real flute/shank/neck geometry and a per-kind revolve
   profile shown in a **live 2D cross-section preview** as you edit; import/export
   `.ocam` libraries; gap-filling / swap / bulk tool numbering. Operations pick a
-  tool by **family, then tool**, with the families bounded by what the operation
-  can actually cut. [Material-linked cutting presets](docs/tool-presets.md)
+  tool by **family, then tool**, with deliberate cutter substitutions available
+  for general path operations. [Material-linked cutting presets](docs/tool-presets.md)
   automatically seed operations from a shared stock-material list; each operation
   can select another preset or override its cutting values.
 - **Setup** — workpiece origin (datum) + program start point; part-relative

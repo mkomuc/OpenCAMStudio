@@ -184,6 +184,7 @@ fn assert_no_rapid_onto_uncut_stock(program: &Program, floor: f64) {
 /// A 60×40 pocket with a 10×10 island, cleared in two levels by a ⌀6 end mill.
 fn pocket_doc() -> Document {
     let op = PocketOp {
+        finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),
@@ -197,6 +198,7 @@ fn pocket_doc() -> Document {
         end: None,
         start: None,
         clear: ClearParams {
+            lift_height: 0.0,
             clearing: Clearing::default(),
             stepdown: 2.0,
             overlap: 0.5,
@@ -491,6 +493,58 @@ fn facing_enters_beyond_the_stock_edge() {
 /// tool's disc. Every island pocket reported
 /// `RapidThroughStock: rapid at Z -1.500 passes through stock standing at Z 0.000`
 /// and would not export. Nothing in this crate's tests simulated anything, so nothing knew.
+#[test]
+fn lifted_pocket_links_preserve_floor_coverage_and_simulate_clean() {
+    use cam_sim::{simulate, SimOptions, SimTool, ToolProfile};
+
+    for (engagement, plunge, leads) in [
+        (0., Plunge::Straight, false),
+        (0., Plunge::Ramp { angle_deg: 5. }, true),
+        (0., Plunge::Helix { radius: 1., pitch: 0.5 }, true),
+        (2., Plunge::Straight, false),
+    ] {
+        let mut baseline = None;
+        for lift in [0., 2., 100.] {
+            let mut doc = pocket_doc();
+            let Operation::Pocket(op) = &mut doc.setups[0].operations[0] else { unreachable!() };
+            op.clear.lift_height = lift;
+            op.clear.clearing.engagement = engagement;
+            op.clear.plunge = plunge;
+            if leads {
+                op.clear.lead_in = Lead::Arc { radius: 1. };
+                op.clear.lead_out = Lead::Arc { radius: 1. };
+            }
+            let (program, nc) = post(&doc, "lifted-pocket");
+            assert!(!nc.is_empty());
+            assert_no_rapid_onto_uncut_stock(&program, TOP);
+            if lift > 0. && engagement == 0. {
+                // Both depth levels have local horizontal links at their own
+                // Z + lift. Even an excessive lift stops at clearance.
+                for z in [-2., -3.] {
+                    let raised = (z + lift).min(CLEARANCE);
+                    assert!(program.steps().windows(2).any(|pair| matches!(pair,
+                        [Step::Linear { to: a, tag, .. }, Step::Linear { to: b, .. }]
+                            if tag.kind == MoveKind::Link && a.z == raised && b.z == raised
+                                && (a.x != b.x || a.y != b.y))));
+                }
+            }
+            let sim = simulate(
+                &program, [-5., -5., -10.], [65., 45., TOP],
+                &SimOptions { resolution: 0.5, tool_radius: 3. },
+                &[SimTool { number: 1, profile: ToolProfile::flat(3.), noncutting_tip_radius: None }],
+            );
+            assert!(sim.is_clean(), "lift {lift}, engagement {engagement}, {plunge:?}: {:?}", sim.collisions);
+            if lift == 0. {
+                baseline = Some(sim.field);
+            } else {
+                let difference = sim.field.compare(baseline.as_ref().unwrap(), 0.01);
+                assert!(difference.residual_volume <= 1.,
+                    "lift left extra stock: {difference:?}, {plunge:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn an_adaptively_cleared_island_pocket_simulates_clean() {
     use cam_sim::{simulate, SimOptions, SimTool, ToolProfile};

@@ -6,6 +6,29 @@ Release packages include STEP/IGES support. For source builds, see
 errors appear in the application. A failed import leaves the project intact.
 Resolve active editing drafts before importing.
 
+STEP/IGES exporters sometimes encode circular holes as rational splines instead
+of analytic cylinders. Import recognizes spline lines, circular arcs and straight
+cylindrical spline extrusions from their control-point data, with recognition
+checks at 0.000000001 mm. Degree-elevated extrusions are included.
+The check covers the complete curves and extrusion, including arc traversal;
+circular rims alone do not establish a cylindrical wall. Other splines retain
+their exact curves and existing surface classification. Recognition does not
+change body topology, placements or the display mesh. It applies to new imports;
+replace or reimport older models and review their linked selections to use it.
+
+Elliptical, parabolic and hyperbolic edges retain exact rational spline curves
+for boundary selections. Cones and spheres retain analytic metadata; each
+operation still needs to support the selected surface. Both STEP and IGES can
+recover closed surface shells as solids, using imported edge tolerances when
+sewing. Open or ambiguously nested surface shells remain import errors.
+
+An invalid transferred solid receives a bounded repair attempt on a copy. A
+repair is accepted only when solid validation succeeds, face/wire/edge/vertex
+counts stay unchanged, and bounds stay within source/import tolerances. Import
+diagnostics identify successful repairs, solids that remain invalid, and faces
+or edges without supported feature representations. See the
+[import robustness implementation notes](cad-import-robustness.md).
+
 The Models tree groups each imported model and its bodies. Add the required bodies
 to a [setup](multi-setup.md) before creating model-linked operations. Visibility,
 hide and isolate affect the view; they do not change which bodies belong to a setup
@@ -25,7 +48,7 @@ inputs follow the selected geometry; explicit values override it within the
 supported cutting interval.
 
 Chamfer can use modeled planar bevel faces, boundary loops or individual edges.
-For modeled faces, the cutter angle must match the bevel; Stepdown limits each
+For modeled faces, a cutter-angle mismatch warns; Stepdown limits each
 finishing band. For edges and loops, set Chamfer width explicitly. Engrave follows
 open or closed planar paths; Carve uses a closed region and retains its islands.
 Thread selects cylindrical bores or bosses; review its nominal size and pitch

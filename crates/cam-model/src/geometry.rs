@@ -390,7 +390,7 @@ pub struct GeometryImportOptions {
     pub import_tolerance: f64,
     pub display_tolerance: f64,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeometryAsset {
     #[serde(default)]
     pub import_options: Option<GeometryImportOptions>,
@@ -409,6 +409,26 @@ pub struct GeometryAsset {
     pub source_fingerprint: String,
     /// Shared immutable topology; replacement creates a new snapshot/revision.
     pub topology: Arc<TopologySnapshot>,
+}
+impl PartialEq for GeometryAsset {
+    fn eq(&self, other: &Self) -> bool {
+        self.import_options == other.import_options
+            && self.id == other.id
+            && self.revision == other.revision
+            && self.name == other.name
+            && self.source_format == other.source_format
+            && self.source_units == other.source_units
+            && self.backend == other.backend
+            && self.import_diagnostics == other.import_diagnostics
+            && self.source_fingerprint == other.source_fingerprint
+            && (Arc::ptr_eq(&self.source_data, &other.source_data)
+                || self.source_data == other.source_data)
+            // Arc's PartialEq does not skip shared allocations for types containing
+            // floats. Dirty-state checks otherwise walk every projection triangle
+            // on each GUI update, even when both snapshots share the same topology.
+            && (Arc::ptr_eq(&self.topology, &other.topology)
+                || self.topology == other.topology)
+    }
 }
 impl GeometryAsset {
     pub fn fingerprint_source(bytes: &[u8]) -> String {
@@ -465,6 +485,17 @@ pub enum CadSurface {
         radius: f64,
         inward: bool,
     },
+    /// Exact cone metadata; tapered machining requires an operation adapter.
+    Cone {
+        origin: [f64; 3],
+        axis: [f64; 3],
+        radius: f64,
+        semi_angle: f64,
+    },
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+    },
     /// Analytic fillet surface; inspectable, with no 3D surfacing adapter.
     Torus {
         origin: [f64; 3],
@@ -472,8 +503,8 @@ pub enum CadSurface {
         major_radius: f64,
         minor_radius: f64,
     },
-    /// Native extrusion, including a degree-one spline surface whose pole rows
-    /// are exact translations with identical rational weights.
+    /// Native extrusion, including spline surfaces whose complete pole rows
+    /// are axial translations with separable positive rational weights.
     LinearExtrusion {
         axis: [f64; 3],
         /// Local outward surface orientation at each boundary edge's midpoint.
@@ -483,6 +514,19 @@ pub enum CadSurface {
     Unsupported {
         description: String,
     },
+}
+impl CadSurface {
+    pub fn kind_name(&self) -> &str {
+        match self {
+            Self::Plane { .. } => "plane",
+            Self::Cylinder { .. } => "cylinder",
+            Self::Cone { .. } => "cone",
+            Self::Sphere { .. } => "sphere",
+            Self::Torus { .. } => "torus",
+            Self::LinearExtrusion { .. } => "linear extrusion",
+            Self::Unsupported { description } => description,
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CadWallEdgeSide {
@@ -608,7 +652,10 @@ pub enum ExtractionRecipe {
     /// Conservative 3D adaptive roughing over selected bodies and faces, with
     /// every included setup body retained as an obstacle.
     AdaptiveClearing,
+    ParallelFinishing,
     PocketFloor,
+    /// One closed planar loop or connected closed edge chain, at an operator-defined depth.
+    PocketBoundary,
     DrillHoles,
     /// One closed planar rim; the operation defines the bevel dimensions.
     ChamferLoop,
@@ -724,7 +771,7 @@ impl GeometryState {
     /// Deterministic dependency key for an immutable asset revision. Display
     /// tessellation does not participate; placement and machining overrides do.
     pub fn binding_fingerprint(&self, binding: &GeometryBinding) -> String {
-        if binding.recipe == ExtractionRecipe::AdaptiveClearing {
+        if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
             let mut dependencies: Vec<_> = self
                 .instances
                 .iter()
@@ -834,7 +881,7 @@ impl GeometryState {
             if !ids.insert(a.id) {
                 return Err("duplicate geometry asset ID".into());
             }
-            a.topology.validate()?;
+            a.topology.validate_cached()?;
         }
         ids.clear();
         for i in &self.instances {
@@ -883,7 +930,33 @@ impl Operation {
     }
 }
 
+thread_local! {
+    // Weak ownership lets deleted imports go and makes Arc::make_mut detach a
+    // validated snapshot even when it has only one remaining strong owner.
+    static VALID_TOPOLOGIES: std::cell::RefCell<Vec<std::sync::Weak<TopologySnapshot>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl TopologySnapshot {
+    /// Validate an immutable shared snapshot once per thread. Reference revisions,
+    /// placements and selections still need validation on every request.
+    pub fn validate_cached(self: &Arc<Self>) -> Result<(), String> {
+        VALID_TOPOLOGIES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.retain(|entry| entry.strong_count() > 0);
+            if cache.iter().any(|entry| {
+                entry.upgrade().is_some_and(|old| Arc::ptr_eq(&old, self))
+            }) {
+                return Ok(());
+            }
+            self.validate()?;
+            if cache.len() >= 32 {
+                cache.remove(0);
+            }
+            cache.push(Arc::downgrade(self));
+            Ok(())
+        })
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!(
@@ -934,6 +1007,23 @@ impl TopologySnapshot {
                     radius,
                     ..
                 } => finite(*origin) && direction(*axis) && radius.is_finite() && *radius > 0.,
+                CadSurface::Cone {
+                    origin,
+                    axis,
+                    radius,
+                    semi_angle,
+                } => {
+                    finite(*origin)
+                        && direction(*axis)
+                        && radius.is_finite()
+                        && *radius >= 0.
+                        && semi_angle.is_finite()
+                        && semi_angle.abs() > 0.
+                        && semi_angle.abs() < std::f64::consts::FRAC_PI_2
+                }
+                CadSurface::Sphere { center, radius } => {
+                    finite(*center) && radius.is_finite() && *radius > 0.
+                }
                 CadSurface::Torus {
                     origin,
                     axis,
@@ -1229,6 +1319,73 @@ mod tests {
         }
     }
     #[test]
+    fn cone_and_sphere_metadata_round_trip_and_reject_invalid_dimensions() {
+        for (surface, valid) in [
+            (
+                CadSurface::Sphere {
+                    center: [1., 2., 3.],
+                    radius: 5.,
+                },
+                true,
+            ),
+            (
+                CadSurface::Sphere {
+                    center: [1., 2., 3.],
+                    radius: -5.,
+                },
+                false,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 0.,
+                    semi_angle: 0.3,
+                },
+                true,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 5.,
+                    semi_angle: -0.3,
+                },
+                true,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 5.,
+                    semi_angle: 0.,
+                },
+                false,
+            ),
+            (
+                CadSurface::Cone {
+                    origin: [0.; 3],
+                    axis: [0., 0., 1.],
+                    radius: 5.,
+                    semi_angle: std::f64::consts::FRAC_PI_2,
+                },
+                false,
+            ),
+        ] {
+            let mut topology = (*state().assets[0].topology).clone();
+            topology.faces[0].surface = surface;
+            let encoded = serde_json::to_vec(&topology).unwrap();
+            let restored: TopologySnapshot = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(restored, topology);
+            assert_eq!(
+                restored.validate().is_ok(),
+                valid,
+                "{:?}",
+                restored.faces[0].surface
+            );
+        }
+    }
+    #[test]
     fn mismatched_embedded_source_and_invalid_import_budgets_are_rejected() {
         let mut s = state();
         std::sync::Arc::make_mut(&mut s.assets[0].source_data).push(0);
@@ -1239,6 +1396,40 @@ mod tests {
             display_tolerance: 0.1,
         });
         assert!(s.validate().unwrap_err().contains("tolerances"));
+    }
+
+    #[test]
+    fn shared_topology_validation_reuses_only_immutable_snapshots() {
+        let mut s = state();
+        s.validate().unwrap();
+        let original = s.assets[0].topology.clone();
+        assert_eq!(Arc::weak_count(&original), 1);
+        s.validate().unwrap();
+        assert_eq!(
+            Arc::weak_count(&original),
+            1,
+            "reuse the existing cache entry"
+        );
+
+        Arc::make_mut(&mut s.assets[0].topology).version = 2;
+        assert!(s.validate().unwrap_err().contains("snapshot version"));
+        original.validate_cached().unwrap();
+        let weak = Arc::downgrade(&original);
+        drop(original);
+        assert!(
+            weak.upgrade().is_none(),
+            "validation must not retain deleted CAD data"
+        );
+
+        let mut sole_owner = state().assets.remove(0).topology;
+        sole_owner.validate_cached().unwrap();
+        let weak = Arc::downgrade(&sole_owner);
+        Arc::make_mut(&mut sole_owner).mesh.triangles.push([999; 3]);
+        assert!(weak.upgrade().is_none());
+        assert!(
+            sole_owner.validate_cached().is_err(),
+            "sole-owner edits must be revalidated"
+        );
     }
     #[test]
     fn self_contained_geometry_roundtrip_keeps_identity_mesh_and_overrides() {
@@ -1291,6 +1482,28 @@ mod tests {
             &history.current().assets[0].topology,
             &topology
         ));
+    }
+    #[test]
+    fn shared_asset_equality_still_compares_detached_geometry_and_metadata() {
+        let original = state().assets.remove(0);
+        assert_eq!(original, original.clone());
+        let detached: GeometryAsset =
+            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        assert!(!Arc::ptr_eq(&original.topology, &detached.topology));
+        assert_eq!(original, detached);
+
+        let mut edited = original.clone();
+        edited.name.push_str(" renamed");
+        assert_ne!(original, edited);
+        let mut edited = original.clone();
+        Arc::make_mut(&mut edited.topology)
+            .mesh
+            .vertices
+            .push([1., 2., 3.]);
+        assert_ne!(original, edited);
+        let mut edited = original.clone();
+        Arc::make_mut(&mut edited.source_data).push(0);
+        assert_ne!(original, edited);
     }
     #[test]
     fn stale_revision_requires_reselection_and_never_reattaches_by_entity_number() {

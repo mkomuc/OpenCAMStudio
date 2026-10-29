@@ -39,16 +39,9 @@ impl Strategy for DrillStrategy {
                 ..Default::default()
             };
         };
-        // Drilling is a pure plunge: the surface on the axis must cut, and the hole
-        // must not run deeper than the cutting edge.
-        if !crate::guards::check_plunge(op.id, "drill", tool, &mut diagnostics)
-            || !crate::guards::check_axial_reach(op.id, "drill", tool, op.depth, &mut diagnostics)
-        {
-            return StrategyResult {
-                diagnostics,
-                ..Default::default()
-            };
-        }
+        // Report plunge and reach suitability without suppressing the path.
+        crate::guards::warn_plunge(op.id, "drill", tool, &mut diagnostics);
+        crate::guards::warn_axial_reach(op.id, "drill", tool, op.depth, &mut diagnostics);
         // A centre-cutting mill *can* be plunged, but it is not a drill: no point
         // geometry to centre the hole, and full-diameter engagement all the way.
         if !matches!(tool.kind, cam_model::ToolKind::Drill { .. }) {

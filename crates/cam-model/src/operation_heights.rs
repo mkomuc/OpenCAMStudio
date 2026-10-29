@@ -328,7 +328,7 @@ impl OperationHeightSettings {
         use HeightReference::*;
         let setup = doc.setup();
         let (model_min, model_max) = doc.height_model_bounds();
-        let (stock_min, stock_max) = setup.stock.resolve_bounds(model_min, model_max);
+        let (stock_min, stock_max) = doc.stock_bounds_for(setup);
         Ok(match reference {
             Plane(p) => self
                 .resolve_plane(p, doc, op, values, visiting)?
@@ -419,6 +419,7 @@ pub fn legacy_cutting(op: &Operation, h: &Heights) -> CuttingHeights {
             top: o.top,
             bottom: o.top - o.depth,
         },
+        Operation::Parallel(_) => CuttingHeights { top: h.top_of_stock, bottom: h.top_of_stock - 1.0 },
         Operation::Adaptive(o) => {
             let top = h.top_of_stock;
             let stepdown = if o.params.stepdown.is_finite() && o.params.stepdown > 0.0 {
@@ -468,10 +469,16 @@ impl Document {
                     })
                     .collect()
             }
-            crate::ExtractionRecipe::ProfileContours => binding.selected.clone(),
+            crate::ExtractionRecipe::ProfileContours | crate::ExtractionRecipe::PocketBoundary => {
+                binding.selected.clone()
+            }
             _ => vec![],
         };
-        if references.is_empty() || references.iter().any(|r| r.kind != EntityKind::Edge) {
+        if references.is_empty()
+            || references
+                .iter()
+                .any(|r| !matches!(r.kind, EntityKind::Edge | EntityKind::Loop))
+        {
             return Ok(binding.heights.bottom);
         }
         let (min, max) = self.height_selection_bounds(&references)?;
@@ -503,7 +510,7 @@ impl Document {
     /// A chamfer's zero depth means its natural cutter depth, rather than a zero
     /// cutting interval. All other strategies store their target interval directly.
     pub fn operation_base_cutting_heights(&self, op: &Operation) -> CuttingHeights {
-        if matches!(op, Operation::Adaptive(_)) {
+        if matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)) {
             if let Some(binding) = self.geometry.bindings.get(&op.id()) {
                 return binding.effective_heights();
             }
@@ -522,7 +529,10 @@ impl Document {
     }
     /// Same conservative source bounds used for stock, independent of display mesh.
     pub fn height_model_bounds(&self) -> ([f64; 3], [f64; 3]) {
-        let setup = self.setup();
+        self.height_model_bounds_for(self.setup())
+    }
+
+    pub fn height_model_bounds_for(&self, setup: &crate::Setup) -> ([f64; 3], [f64; 3]) {
         let mut points = vec![];
         for instance in &self.geometry.instances {
             if !setup.model_instances.contains(&instance.id) {
@@ -551,6 +561,30 @@ impl Document {
         }
         bounds(&points).unwrap_or(([0.; 3], [0.; 3]))
     }
+    /// Enclosing stock bounds in the requested setup's machining axes. Inherited
+    /// stock keeps the original blank's enclosure; its removed regions are supplied
+    /// by simulation. Resolve directly from the source axes to avoid accumulating
+    /// oversized bounding boxes through a chain of rotated setups.
+    pub fn stock_bounds_for(&self, setup: &crate::Setup) -> ([f64; 3], [f64; 3]) {
+        if setup.stock != crate::Stock::PreviousSetup {
+            let (min, max) = self.height_model_bounds_for(setup);
+            return setup.stock.resolve_bounds(min, max);
+        }
+        let Some(at) = self.setups.iter().position(|s| s.id == setup.id) else {
+            return self.height_model_bounds_for(setup);
+        };
+        let Some(source) = self.setups[..at].iter().rev()
+            .find(|s| s.stock != crate::Stock::PreviousSetup) else {
+            return self.height_model_bounds_for(setup);
+        };
+        let (min, max) = self.height_model_bounds_for(source);
+        let (min, max) = source.stock.resolve_bounds(min, max);
+        let points = box_corners([min, max]).map(|p| {
+            setup.frame.to_setup_vector(source.frame.to_world_vector(p))
+        });
+        bounds(&points).unwrap_or(([0.; 3], [0.; 3]))
+    }
+
     pub fn height_definition_bounds(
         &self,
         d: &HeightDefinition,
@@ -899,6 +933,78 @@ mod tests {
             kind: EntityKind::Body,
             id: 1,
         }
+    }
+    #[test]
+    fn pocket_contour_height_follows_placement_and_setup_axes_independently_of_wcs() {
+        let mut doc = doc();
+        let mut reference = add_body(&mut doc);
+        reference.kind = EntityKind::Loop;
+        reference.id = 4;
+        let topology = std::sync::Arc::make_mut(&mut doc.geometry.assets[0].topology);
+        topology.faces.push(CadFace {
+            id: 3,
+            body_id: 1,
+            surface: CadSurface::Plane {
+                origin: [0.; 3],
+                normal: [0., 0., -1.],
+            },
+            loop_ids: vec![4],
+            bounds: [[0.; 3], [20., 10., 0.]],
+        });
+        topology.loops.push(CadLoop {
+            id: 4,
+            body_id: 1,
+            face_id: 3,
+            edge_uses: vec![],
+            is_outer: false,
+        });
+        doc.geometry.bindings.insert(
+            1,
+            GeometryBinding {
+                selected: vec![reference],
+                recipe: ExtractionRecipe::PocketBoundary,
+                heights: CuttingHeights {
+                    top: 0.,
+                    bottom: -4.,
+                },
+                overrides: GeometryOverrides::default(),
+                status: ResolutionStatus::Resolved,
+                resolved_fingerprint: None,
+            },
+        );
+        let mut settings = OperationHeightSettings::default();
+        *settings.definition_mut(HeightPlaneKind::Top) =
+            HeightDefinition::new(HeightReference::SelectedContours, 0.);
+        *settings.definition_mut(HeightPlaneKind::Bottom) =
+            HeightDefinition::new(HeightReference::Plane(HeightPlaneKind::Top), -4.);
+        doc.setup_mut().stock = Stock::BoundingBox {
+            x_offset: 0.,
+            y_offset: 0.,
+            top: 40.,
+            thickness: 45.,
+        };
+        let resolve = |doc: &Document| settings.resolve(doc, &doc.setup().operations[0]).unwrap();
+        doc.geometry.instances[0].placement.translation = [0., 0., 20.];
+        assert_eq!(resolve(&doc).top, 20.);
+        assert_eq!(resolve(&doc).bottom, 16.);
+        doc.setup_mut().origin[2] = 20.;
+        assert_eq!(resolve(&doc).top - doc.setup().origin[2], 0.);
+        assert_eq!(resolve(&doc).bottom - doc.setup().origin[2], -4.);
+        doc.geometry.instances[0].placement.translation = [0., 30., 20.];
+        doc.setup_mut().frame.world_from_setup.rotation =
+            [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
+        // This loop is perpendicular to world Z, so rotating setup Z into world Y
+        // must reject it rather than reuse the cached, apparently planar height.
+        assert!(settings
+            .resolve(&doc, &doc.setup().operations[0])
+            .unwrap_err()
+            .contains("one plane"));
+        doc.setup_mut().frame.world_from_setup.rotation = RigidTransform::default().rotation;
+        doc.geometry.bindings.get_mut(&1).unwrap().selected[0].revision = 2;
+        assert!(settings
+            .resolve(&doc, &doc.setup().operations[0])
+            .unwrap_err()
+            .contains("missing or changed"));
     }
     #[test]
     fn selected_chain_height_uses_source_plane_in_setup_axes_instead_of_cached_wall_bottom() {
