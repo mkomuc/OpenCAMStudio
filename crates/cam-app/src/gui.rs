@@ -8784,8 +8784,10 @@ impl App {
         // Matched project tools adopt the shop library's numbering.
         let report = self.controller.reconcile_tools(&self.library.tools);
         self.focus_ops.clear();
-        self.controller.select(Selection::Setup);
         self.end_setup_draft();
+        self.restore_project_view();
+        // Establish a baseline for legacy files too, using their default opening view.
+        self.controller.set_project_view(Some(self.capture_project_view()));
         self.refresh_fields();
         // Rebuild the preview from saved cutting fragments only when current.
         // Opening a stale/legacy project must not initiate a recalculation.
@@ -8806,9 +8808,14 @@ impl App {
 
     /// Save the project to `path` and report the result.
     fn save_to(&mut self, path: &Path) {
+        let previous_view = self.controller.project_view().cloned();
+        self.controller.set_project_view(Some(self.capture_project_view()));
         self.status = match self.controller.save_project(path) {
             Ok(()) => format!("Saved {}.", path.display()),
-            Err(e) => format!("Save failed: {e}"),
+            Err(e) => {
+                self.controller.set_project_view(previous_view);
+                format!("Save failed: {e}")
+            }
         };
     }
 
@@ -8819,7 +8826,7 @@ impl App {
             .and_then(Path::file_stem)
             .map(|name| name.to_string_lossy())
             .unwrap_or_else(|| "New Project".into());
-        let unsaved_marker = if self.controller.has_unsaved_changes() {
+        let unsaved_marker = if self.controller.has_unsaved_changes() || self.project_view_changed() {
             " *"
         } else {
             ""

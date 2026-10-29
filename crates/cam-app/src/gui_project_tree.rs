@@ -5,16 +5,7 @@ use iced::widget::column;
 const TREE_ROW_H: f32 = 30.0;
 const TREE_TEXT_SIZE: u32 = 12;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TreeNode {
-    Models,
-    Setups,
-    Asset(u64),
-    Model(InstanceId),
-    Setup(u64),
-    Pattern(u64),
-    Operation(u32),
-}
+pub(super) use crate::project::TreeNode;
 
 #[derive(Clone, Debug)]
 pub(super) struct TreeDrag {
@@ -1248,6 +1239,105 @@ mod tests {
         assert_eq!(reopened.controller.geometry_state().instances.len(), 4);
         assert_eq!(visible_bodies(&reopened), [1, 2, 3, 4]);
         let _ = reopened.view();
+    }
+
+    #[test]
+    fn saved_project_restores_browser_selection_expansion_and_visibility() {
+        let (mut app, ids) = tree_app();
+        add_browser_models(&mut app);
+        let first_setup = app.controller.active_setup_id();
+        let second_setup = app.controller.add_setup_with_models(vec![3, 4]);
+        let copied = app.controller.duplicate_setup(first_setup).unwrap();
+        app.controller.activate_setup(copied).unwrap();
+        let operation = app.controller.document().setup().operations[0].id();
+        app.controller.edit_setup(|setup| {
+            setup.model_instances = vec![3, 4];
+            setup.patterns.push(cam_model::OperationPattern {
+                id: 17,
+                name: "Copies".into(),
+                members: vec![operation],
+                kind: cam_model::PatternKind::Rectangular {
+                    nx: 2,
+                    ny: 1,
+                    dx: 20.,
+                    dy: 0.,
+                },
+                order: cam_model::PatternOrder::ByInstance,
+                suppressed: false,
+                options: Default::default(),
+            });
+        });
+        app.controller.select(Selection::Operation(operation));
+        app.controller.set_cad_selection(vec![EntityRef {
+            asset_id: 2,
+            revision: 1,
+            instance_id: 4,
+            body_id: 1,
+            kind: EntityKind::Body,
+            id: 1,
+        }]);
+        app.model_view = None;
+        app.browser_view = TreeNode::Setup(second_setup);
+        app.models_collapsed = false;
+        app.setups_collapsed = true;
+        app.expanded_setups = BTreeSet::from([copied]);
+        app.collapsed_assets = BTreeSet::from([1]);
+        app.expanded_operations = BTreeSet::from([operation]);
+        app.expanded_patterns = BTreeSet::from([17]);
+        app.tools_expanded = true;
+        app.hidden_assets = BTreeSet::from([1]);
+        app.cad_hidden = BTreeSet::from([3]);
+        app.hidden_setups = BTreeSet::from([first_setup]);
+        app.hidden_ops = BTreeSet::from([ids[0]]);
+        app.focus_ops = BTreeSet::from([operation]);
+        app.show_stock = true;
+        app.show_origin = false;
+        let expected = app.capture_project_view();
+        let bodies = visible_bodies(&app);
+        let path = std::env::temp_dir().join(format!("browser-view-{}.ocam", std::process::id()));
+        app.save_to(&path);
+        assert!(app.status.starts_with("Saved"), "{}", app.status);
+        let (reopened, _) = App::new_with_setup(&path).unwrap();
+        assert_eq!(reopened.capture_project_view(), expected);
+        assert!(!reopened.project_view_changed());
+        assert_eq!(visible_bodies(&reopened), bodies);
+        // Headless consumers must retain the desktop state when saving a project.
+        let mut controller = AppController::new(crate::default_machine());
+        controller.open_project(&path).unwrap();
+        controller.save_project(&path).unwrap();
+        let (reopened, _) = App::new_with_setup(&path).unwrap();
+        assert_eq!(reopened.capture_project_view(), expected);
+        let mut reopened = reopened;
+        reopened.tools_expanded = !reopened.tools_expanded;
+        assert!(reopened.project_view_changed());
+        assert!(reopened.has_changes_to_discard());
+        assert!(reopened.window_title().ends_with(" *"));
+        reopened.save_to(&path.join("cannot-save.ocam"));
+        assert!(reopened.status.starts_with("Save failed:"));
+        assert!(reopened.project_view_changed());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_project_resets_browser_state_instead_of_inheriting_previous_project() {
+        let (mut app, _) = tree_app();
+        let path =
+            std::env::temp_dir().join(format!("legacy-browser-view-{}.ocam", std::process::id()));
+        app.controller.save_project(&path).unwrap();
+        app.expanded_setups.insert(99);
+        app.expanded_patterns.insert(99);
+        app.hidden_assets.insert(1);
+        app.models_collapsed = false;
+        app.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(app.controller.selection(), Selection::Setup);
+        assert_eq!(
+            app.expanded_setups,
+            BTreeSet::from([app.controller.active_setup_id()])
+        );
+        assert!(app.expanded_patterns.is_empty());
+        assert!(app.hidden_assets.is_empty());
+        assert!(app.models_collapsed);
     }
 
     fn drain_context_job(app: &mut App) {

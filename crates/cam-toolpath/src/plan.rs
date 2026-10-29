@@ -737,7 +737,10 @@ fn apply_feed_height(
                 out.push(Step::Linear {
                     to: *to,
                     feed: plunge,
-                    tag: *tag,
+                    // This is now a cutting entry at plunge feed. Keeping the
+                    // rapid's Link tag would make verification treat the feed
+                    // descent through stock as a non-cutting reposition.
+                    tag: Tag { kind: MoveKind::Plunge, ..*tag },
                 });
             }
             (Some(from), Step::Linear { to, feed, tag })
@@ -1556,6 +1559,36 @@ mod tests {
             .steps()
             .iter()
             .any(|s| matches!(s,Step::Drill(c) if c.depth == -4.5)));
+    }
+
+    #[test]
+    fn feed_approach_below_stock_cuts_and_still_checks_nonplunging_tools() {
+        let operation = profile_operation();
+        let link = Tag { pattern_id: Some(2), instance_index: Some(0),
+            ..Tag::new(operation.id(), MoveKind::Link) };
+        let program = Program { steps: vec![
+            Step::ToolChange { tool: 1 },
+            Step::Rapid { to: Point3::new(10., 10., 29.), tag: link },
+            Step::Rapid { to: Point3::new(10., 10., 1.), tag: link },
+        ] };
+        let approach = apply_feed_height(&program, 14., &operation).unwrap();
+        assert!(matches!(approach.steps().last(), Some(Step::Linear { tag, .. })
+            if tag.kind == MoveKind::Plunge && tag.pattern_id == Some(2)
+                && tag.instance_index == Some(0)));
+        for noncutting_tip_radius in [None, Some(1.)] {
+            let result = cam_sim::simulate(&approach, [0., 0., 0.], [20., 20., 14.],
+                &cam_sim::SimOptions { resolution: 0.2, tool_radius: 3. },
+                &[cam_sim::SimTool { number: 1, profile: cam_sim::ToolProfile::flat(3.),
+                    noncutting_tip_radius }]);
+            if noncutting_tip_radius.is_none() {
+                assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+                assert!(result.removed_volume > 0.);
+            } else {
+                assert!(result.collisions.iter().any(|c|
+                    c.kind == cam_sim::CollisionKind::NonCuttingThroughStock));
+                assert_eq!(result.removed_volume, 0.);
+            }
+        }
     }
 
     #[test]

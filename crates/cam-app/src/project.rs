@@ -13,6 +13,8 @@
 //! version, so the migrating path is the ordinary path rather than a rarely-exercised
 //! branch.
 
+use std::collections::BTreeSet;
+
 use cam_geo::{Polygon, Polyline};
 use cam_model::{migrate, Document};
 
@@ -173,11 +175,55 @@ pub struct StoredToolpaths {
     pub fingerprints: std::collections::BTreeMap<u32, String>,
 }
 
+/// A stable project-browser node, shared with the persisted view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TreeNode {
+    #[default]
+    Models,
+    Setups,
+    Asset(u64),
+    Model(u64),
+    Setup(u64),
+    Pattern(u64),
+    Operation(u32),
+}
+
+/// Project-local browser, selection and viewport visibility at the last save.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ProjectView {
+    pub active_setup: u64,
+    pub active_origin: u32,
+    pub selection: crate::Selection,
+    pub cad_selection: Vec<cam_model::EntityRef>,
+    pub expanded_setups: BTreeSet<u64>,
+    pub collapsed_assets: BTreeSet<u64>,
+    pub expanded_operations: BTreeSet<u32>,
+    pub expanded_patterns: BTreeSet<u64>,
+    pub tools_expanded: bool,
+    pub hidden_assets: BTreeSet<u64>,
+    pub model_view: Option<TreeNode>,
+    pub browser_view: TreeNode,
+    pub models_collapsed: bool,
+    pub setups_collapsed: bool,
+    pub hidden_setups: BTreeSet<u64>,
+    pub hidden_ops: BTreeSet<u32>,
+    pub cad_hidden: BTreeSet<u64>,
+    pub focus_ops: BTreeSet<u32>,
+    pub planar_selection: Vec<crate::LoopRef>,
+    pub show_stock: bool,
+    pub show_origin: bool,
+    pub show_project_browser: bool,
+}
+
 /// A saved OpenCAMStudio project: the editable document plus the imported geometry
 /// it was built from and the seed defaults. Self-contained — no references to
 /// external CAD files — so opening it needs nothing else on disk.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
+    /// Absent in older projects, which retain the default opening view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ProjectView>,
     #[serde(default)]
     pub toolpaths: StoredToolpaths,
     /// Schema version (mirrors [`cam_model::SCHEMA_VERSION`]).
@@ -231,8 +277,6 @@ impl Project {
     /// Operation identities are document-wide because CAD bindings are keyed by
     /// operation ID, even though operation lists live under individual setups.
     pub fn validate(&self) -> Result<(), String> {
-        use std::collections::BTreeSet;
-
         if self.document.setups.first().is_some_and(|s| s.stock == cam_model::Stock::PreviousSetup) {
             return Err("The first setup has no previous setup; choose box stock".into());
         }

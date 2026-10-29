@@ -23,6 +23,7 @@ impl DiscardAction {
 impl App {
     pub(super) fn has_changes_to_discard(&self) -> bool {
         self.controller.has_unsaved_changes()
+            || self.project_view_changed()
             || self.setup_draft_dirty()
             || self.inspector_dirty()
             || self.any_field_invalid()

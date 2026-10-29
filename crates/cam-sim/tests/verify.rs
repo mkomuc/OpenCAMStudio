@@ -235,6 +235,7 @@ fn pocket_finishing_clears_walls_without_crossing_islands_or_rapiding_through_st
             op.finishing = cam_model::PocketFinishing {
                 enabled: true, count: 2, stepover: 0.4, feed: 123.,
                 lead_in_out_all: true, repeat_pass: true, overlap: 0.5,
+                finish_only_final: false,
             };
             let sim = run(&setup(vec![Operation::Pocket(op)]));
             assert!(sim.is_clean(), "climb={climb}, plunge={plunge:?}: {:?}", sim.collisions);

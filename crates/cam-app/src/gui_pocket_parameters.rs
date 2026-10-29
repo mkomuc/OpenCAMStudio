@@ -21,7 +21,7 @@ impl Number {
     }
     pub fn help(self) -> &'static str {
         match self {
-            Self::Count => "Radial finishing cuts on the pocket walls and islands after roughing at each depth. Includes the final wall pass.",
+            Self::Count => "Radial finishing cuts on the pocket walls and islands after roughing at each depth, or only at the final depth when selected. Includes the final wall pass.",
             Self::Stepover => "Material reserved for each finishing cut. Roughing leaves the pass count times this stepover in addition to the wall stock to leave.",
             Self::Feed => "Cutting feed for finishing passes and the repeat pass. Zero uses the pocket cutting feed. Entry feed overrides still apply.",
             Self::Overlap => "Extra cutting distance past each finishing loop's start to blend the closure mark.",
@@ -58,6 +58,7 @@ pub(super) enum Toggle {
     Enabled,
     AllLeads,
     Repeat,
+    FinishOnlyFinal,
 }
 impl Toggle {
     pub fn set(self, p: &mut PocketFinishing, value: bool) {
@@ -65,6 +66,7 @@ impl Toggle {
             Self::Enabled => p.enabled = value,
             Self::AllLeads => p.lead_in_out_all = value,
             Self::Repeat => p.repeat_pass = value,
+            Self::FinishOnlyFinal => p.finish_only_final = value,
         }
     }
 }
@@ -120,6 +122,9 @@ impl App {
         list = list.push(toggle("Repeat finishing pass",
             "Repeat the final wall pass once at the same size and finishing feed to remove material left by tool deflection.",
             p.repeat_pass, Toggle::Repeat));
+        list = list.push(toggle("Finish only on final depth",
+            "Run finishing passes and the repeat pass only at the final depth. Roughing still leaves the finishing allowance at every depth.",
+            p.finish_only_final, Toggle::FinishOnlyFinal));
         list.push(number(Number::Overlap))
     }
 }
@@ -165,6 +170,7 @@ mod tests {
         }
         let _ = app.update(Message::PocketFinishToggle(Toggle::AllLeads, true));
         let _ = app.update(Message::PocketFinishToggle(Toggle::Repeat, true));
+        let _ = app.update(Message::PocketFinishToggle(Toggle::FinishOnlyFinal, true));
         let _ = app.update(Message::PocketFinishToggle(Toggle::Enabled, false));
         let _ = app.update(Message::PocketFinishToggle(Toggle::Enabled, true));
         assert_eq!(app.fields[&Field::PocketFinish(Number::Count)], "3");
@@ -187,6 +193,7 @@ mod tests {
                 feed: 123.,
                 overlap: 0.2,
                 repeat_pass: true,
+                finish_only_final: true,
                 lead_in_out_all: true,
             }
         );

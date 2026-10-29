@@ -125,6 +125,7 @@ fn overrides_and_all_available_presets_survive_project_and_library_round_trips()
     }
     app.add_operation(op);
     let project = Project {
+        view: None,
             toolpaths: Default::default(),
         schema_version: SCHEMA_VERSION,
         document: app.document().clone(),

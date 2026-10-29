@@ -250,6 +250,7 @@ pub struct AppController {
     /// The `.ocam` path this project was last saved to / opened from.
     current_path: Option<PathBuf>,
     saved_project: Option<ProjectSnapshot>,
+    project_view: Option<crate::project::ProjectView>,
     /// An operation being created, awaiting a geometry pick in the viewport.
     pending_op: Option<PendingOp>,
     outcome: Option<RunOutcome>,
@@ -563,6 +564,7 @@ impl AppController {
             source_name: String::new(),
             current_path: None,
             saved_project: None,
+            project_view: None,
             pending_op: None,
             outcome: None,
             nc: None,
@@ -910,6 +912,7 @@ impl AppController {
                 let count = import.regions.len() + import.open_chains.len();
                 if self.source_name.is_empty() {
                     self.source_name = name;
+        self.project_view = None;
                 }
                 self.edit_document(move |doc| {
                     doc.geometry.drawing_regions.extend(import.regions);
@@ -1323,6 +1326,7 @@ impl AppController {
         self.regions = regions;
         self.open_paths = open_paths;
         self.source_name = name;
+        self.project_view = None;
         let mut document = self.generate_document(seed_ops);
         document.geometry.drawing_regions = self.regions.clone();
         document.geometry.drawing_paths = self.open_paths.clone();
@@ -1356,6 +1360,7 @@ impl AppController {
         self.active_setup_id = 0;
         self.active_origin = 1;
         self.source_name.clear();
+        self.project_view = None;
         self.current_path = None;
         self.pending_op = None;
         self.selection = Selection::Setup;
@@ -1375,6 +1380,25 @@ impl AppController {
     /// The `.ocam` file this project was last saved to / opened from, if any.
     pub fn current_path(&self) -> Option<&Path> {
         self.current_path.as_deref()
+    }
+
+    /// Desktop view last opened or supplied before saving; preserved by headless edits.
+    pub fn project_view(&self) -> Option<&crate::project::ProjectView> {
+        self.project_view.as_ref()
+    }
+
+    pub fn set_project_view(&mut self, view: Option<crate::project::ProjectView>) {
+        self.project_view = view;
+    }
+
+    fn current_project_view(&self) -> Option<crate::project::ProjectView> {
+        self.project_view.clone().map(|mut view| {
+            view.active_setup = self.active_setup_id;
+            view.active_origin = self.active_origin;
+            view.selection = self.selection;
+            view.cad_selection = self.cad_selection.clone();
+            view
+        })
     }
 
     fn project_snapshot(&self) -> ProjectSnapshot {
@@ -1422,6 +1446,7 @@ impl AppController {
             doc.pattern_id_floor = doc.pattern_id_floor.max(pattern_floor);
         });
         let project = Project {
+            view: self.current_project_view(),
             toolpaths: crate::project::StoredToolpaths {
                 cache: self.operation_cache.clone(),
                 fingerprints: self.toolpath_fingerprints.clone(),
@@ -1513,7 +1538,17 @@ impl AppController {
         self.pending_op = None;
         self.current_path = Some(path.to_path_buf());
         self.selection = Selection::Setup;
-        self.reconcile_selection();
+        self.project_view = project.view;
+        if let Some(view) = self.project_view.clone() {
+            let _ = self.activate_setup(view.active_setup);
+            self.select(view.selection);
+            if self.setup().origin_indices().contains(&view.active_origin) {
+                self.active_origin = view.active_origin;
+            }
+            self.cad_selection = view.cad_selection;
+        } else {
+            self.reconcile_selection();
+        }
         self.invalidate();
         self.mark_project_saved();
         Ok(())
@@ -4066,6 +4101,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_WITH_STROKE_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4088,6 +4124,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4666,6 +4703,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4780,6 +4818,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4819,6 +4858,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),

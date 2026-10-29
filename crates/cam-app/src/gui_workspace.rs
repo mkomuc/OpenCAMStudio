@@ -149,6 +149,62 @@ pub(super) struct CadSceneKey {
 }
 
 impl App {
+    pub(super) fn project_view_changed(&self) -> bool {
+        self.controller
+            .project_view()
+            .is_some_and(|saved| *saved != self.capture_project_view())
+    }
+
+    pub(super) fn capture_project_view(&self) -> crate::project::ProjectView {
+        crate::project::ProjectView {
+            active_setup: self.controller.active_setup_id(),
+            active_origin: self.controller.active_origin(),
+            selection: self.controller.selection(),
+            cad_selection: self.controller.cad_selection().to_vec(),
+            expanded_setups: self.expanded_setups.clone(),
+            collapsed_assets: self.collapsed_assets.clone(),
+            expanded_operations: self.expanded_operations.clone(),
+            expanded_patterns: self.expanded_patterns.clone(),
+            tools_expanded: self.tools_expanded,
+            hidden_assets: self.hidden_assets.clone(),
+            model_view: self.model_view,
+            browser_view: self.browser_view,
+            models_collapsed: self.models_collapsed,
+            setups_collapsed: self.setups_collapsed,
+            hidden_setups: self.hidden_setups.clone(),
+            hidden_ops: self.hidden_ops.clone(),
+            cad_hidden: self.cad_hidden.clone(),
+            focus_ops: self.focus_ops.clone(),
+            planar_selection: self.planar_selection.clone(),
+            show_stock: self.show_stock,
+            show_origin: self.show_origin,
+            show_project_browser: self.show_project_browser,
+        }
+    }
+
+    pub(super) fn restore_project_view(&mut self) {
+        if let Some(view) = self.controller.project_view().cloned() {
+            self.expanded_setups = view.expanded_setups;
+            self.collapsed_assets = view.collapsed_assets;
+            self.expanded_operations = view.expanded_operations;
+            self.expanded_patterns = view.expanded_patterns;
+            self.tools_expanded = view.tools_expanded;
+            self.hidden_assets = view.hidden_assets;
+            self.model_view = view.model_view;
+            self.browser_view = view.browser_view;
+            self.models_collapsed = view.models_collapsed;
+            self.setups_collapsed = view.setups_collapsed;
+            self.hidden_setups = view.hidden_setups;
+            self.hidden_ops = view.hidden_ops;
+            self.cad_hidden = view.cad_hidden;
+            self.focus_ops = view.focus_ops;
+            self.planar_selection = view.planar_selection;
+            self.show_stock = view.show_stock;
+            self.show_origin = view.show_origin;
+            self.show_project_browser = view.show_project_browser;
+        }
+    }
+
     pub(super) fn reset_model_browser(&mut self) {
         self.model_view = Some(TreeNode::Models);
         self.browser_view = TreeNode::Models;
@@ -157,6 +213,9 @@ impl App {
         self.cad_hidden.clear();
         self.hidden_assets.clear();
         self.collapsed_assets.clear();
+        self.expanded_setups = self.controller.setups().first()
+            .map(|s| s.id).into_iter().collect();
+        self.expanded_patterns.clear();
         self.expanded_operations.clear();
         self.tools_expanded = false;
         self.hidden_setups.clear();

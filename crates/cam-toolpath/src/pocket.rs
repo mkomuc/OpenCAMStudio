@@ -168,7 +168,7 @@ impl Strategy for PocketStrategy {
     }
 }
 
-/// Finish each cleared depth before stepping down again. Each disconnected loop
+/// Finish each cleared depth, or only the final depth when selected. Each disconnected loop
 /// approaches from clearance, so links cannot cut through an island or another lobe.
 #[allow(clippy::too_many_arguments)]
 fn emit_with_finishing(
@@ -185,6 +185,7 @@ fn emit_with_finishing(
     use crate::rings::{concentric_rings, RingsError};
     let finish = op.finishing;
     let stages = finish.count + u32::from(finish.repeat_pass);
+    let finish_levels = if finish.finish_only_final { levels.len().min(1) } else { levels.len() };
     let reversed = op.clear.clearing.climb != (env.spindle == SpindleDir::Cw);
     let feed = if finish.feed > 0. { finish.feed } else { op.clear.feed };
     let mut paths = Vec::new();
@@ -201,7 +202,7 @@ fn emit_with_finishing(
             if reversed { ring.pts.reverse(); }
             total_points = total_points.saturating_add(ring.pts.len());
         }
-        if total_points.saturating_mul(levels.len()) > 1_000_000 {
+        if total_points.saturating_mul(finish_levels) > 1_000_000 {
             return Err(RingsError::Limit("too many pocket finishing moves; reduce pass count or depth levels".into()));
         }
         let guard = offset(std::slice::from_ref(region), -distance, JoinStyle::Round)
@@ -209,9 +210,14 @@ fn emit_with_finishing(
         paths.push((rings, guard));
     }
     let mut from_z = env.heights.top_of_stock;
-    for &z in levels {
+    for (level, &z) in levels.iter().enumerate() {
         if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
         rough(program, &[z])?;
+        if finish.finish_only_final && level + 1 < levels.len() {
+            // The reserved wall stock is still uncut above the final level.
+            // Keep entry at the stock top rather than the previous roughing depth.
+            continue;
+        }
         for (stage, (rings, guard)) in paths.iter().enumerate() {
             for ring in rings {
                 if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
@@ -682,6 +688,60 @@ mod tests {
     }
 
     #[test]
+    fn finishing_only_at_final_depth_preserves_roughing_and_repeat_pass() {
+        for depth in [0.5, 2.5] {
+            let mut op = leaded_op(vec![]);
+            op.clear.lead_in = Lead::None;
+            op.clear.lead_out = Lead::None;
+            op.clear.stepdown = 1.;
+            op.depth = depth;
+            op.finishing = cam_model::PocketFinishing {
+                enabled: true, count: 2, feed: 123., repeat_pass: true,
+                overlap: 0.75, ..Default::default()
+            };
+            let every_depth = finishing_result(op.clone());
+            op.finishing.finish_only_final = true;
+            let final_only = finishing_result(op);
+            assert!(!every_depth.has_errors(), "{:?}", every_depth.diagnostics);
+            assert!(!final_only.has_errors(), "{:?}", final_only.diagnostics);
+            let rough_cuts = |result: &StrategyResult| result.program.steps().iter()
+                .filter(|step| matches!(step,
+                    Step::Linear { feed: 300., tag, .. } | Step::Arc { feed: 300., tag, .. }
+                        if tag.kind == MoveKind::Cutting))
+                .cloned().collect::<Vec<_>>();
+            assert_eq!(rough_cuts(&every_depth), rough_cuts(&final_only));
+            let steps = final_only.program.steps();
+            let last_rough = steps.iter().rposition(|step| matches!(step,
+                Step::Linear { feed: 300., tag, .. } if tag.kind == MoveKind::Cutting)).unwrap();
+            let entry = steps[last_rough + 1..].windows(2).find(|pair| matches!(pair[1],
+                Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge)).unwrap();
+            let entry_top = match &entry[0] {
+                Step::Linear { to, .. } | Step::Rapid { to, .. } => to.z,
+                other => panic!("unexpected approach: {other:?}"),
+            };
+            assert_eq!(entry_top, 0., "finishing must enter from above the reserved wall stock");
+            let mut finish_cuts = 0;
+            let mut reached_finish = false;
+            for step in final_only.program.steps() {
+                match step {
+                    Step::Linear { to, feed, tag } if tag.kind == MoveKind::Cutting && *feed == 123. => {
+                        assert_eq!(to.z, -depth);
+                        finish_cuts += 1;
+                        reached_finish = true;
+                    }
+                    Step::Linear { feed: 300., tag, .. } if tag.kind == MoveKind::Cutting => {
+                        assert!(!reached_finish, "all roughing must precede finishing");
+                    }
+                    _ => {}
+                }
+            }
+            assert!(finish_cuts > 0);
+            let levels = depth.ceil();
+            assert!((finish_length(&final_only) * levels - finish_length(&every_depth)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn finishing_leads_apply_to_first_and_last_or_every_pass() {
         let mut op = leaded_op(vec![]);
         op.finishing = cam_model::PocketFinishing {
@@ -702,9 +762,14 @@ mod tests {
         op.finishing = cam_model::PocketFinishing {
             enabled: true, count: 3, feed: 123., repeat_pass: true,
             lead_in_out_all: true, overlap: 0.4, stepover: 0.25,
+            finish_only_final: true,
         };
         let mut saved = serde_json::to_value(&op).unwrap();
         assert_eq!(serde_json::from_value::<PocketOp>(saved.clone()).unwrap(), op);
+        saved["finishing"].as_object_mut().unwrap().remove("finish_only_final");
+        let old = serde_json::from_value::<PocketOp>(saved.clone()).unwrap();
+        assert!(!old.finishing.finish_only_final);
+        assert!(old.finishing.enabled);
         saved.as_object_mut().unwrap().remove("finishing");
         assert_eq!(serde_json::from_value::<PocketOp>(saved).unwrap().finishing, Default::default());
     }
