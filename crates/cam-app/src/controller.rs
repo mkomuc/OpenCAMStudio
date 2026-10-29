@@ -3271,8 +3271,8 @@ mod tests {
         assert!(app.redo());
         assert!(app.has_unsaved_changes());
         // Failed writes/reads never reset the saved baseline or current content.
-        assert!(app.save_project(&path.join("cannot-save.ocam")).is_err());
-        assert!(app.open_project(&path.join("cannot-open.ocam")).is_err());
+        assert!(app.save_project(path.join("cannot-save.ocam")).is_err());
+        assert!(app.open_project(path.join("cannot-open.ocam")).is_err());
         assert!(app.has_unsaved_changes());
         assert_eq!(app.document().setup().name, "Changed");
         app.open_project(&path).unwrap();

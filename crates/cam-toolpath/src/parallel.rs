@@ -661,6 +661,8 @@ fn flat_height(p: V, t: &[V; 3], r: f64) -> Option<f64> {
     }
     best.is_finite().then_some(best)
 }
+// Keep the recursive segment's geometry and safety limits explicit at call sites.
+#[allow(clippy::too_many_arguments)]
 fn refine(
     grid: &Grid,
     a: V,

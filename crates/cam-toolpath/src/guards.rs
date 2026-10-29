@@ -63,7 +63,6 @@ pub(crate) fn warn_side_milling(
              Reduce the depth or use a longer-fluted tool.",
             tool.number
         )));
-        return;
     }
 }
 
@@ -128,7 +127,6 @@ pub(crate) fn warn_axial_reach(
              of cutting edge — deeper, the non-cutting shank would be in the hole.",
             tool.number
         )));
-        return;
     }
 }
 

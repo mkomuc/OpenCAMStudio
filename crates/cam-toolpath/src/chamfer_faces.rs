@@ -98,7 +98,6 @@ pub(super) fn compute(
                     program,
                     diagnostics,
                     cancelled: true,
-                    ..Default::default()
                 };
             }
             let band_bottom = if pass == count {

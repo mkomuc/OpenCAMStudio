@@ -24,7 +24,7 @@ fn saved_scalloped_lower_perimeter_is_an_outside_profile() {
         id: 127,
     };
     assert_eq!(
-        profile_side(&state, &[selected.clone()]).unwrap(),
+        profile_side(&state, std::slice::from_ref(&selected)).unwrap(),
         Side::Outside
     );
     let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Chain 1".into());

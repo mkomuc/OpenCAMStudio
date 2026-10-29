@@ -1874,14 +1874,15 @@ mod tests {
                 description: "unclassified spline".into(),
             };
         }
+        let selection = std::slice::from_ref(&face);
         for recipe in [
             ExtractionRecipe::ProfileContours,
             ExtractionRecipe::PocketFloor,
             ExtractionRecipe::FaceRegion,
             ExtractionRecipe::CarveRegion,
         ] {
-            assert!(verify_selection(&state, &[face.clone()], recipe.clone(), 1.).is_some());
-            let binding = resolve_selection_advisory(&state, &[face.clone()], recipe, 1.).unwrap();
+            assert!(verify_selection(&state, selection, recipe.clone(), 1.).is_some());
+            let binding = resolve_selection_advisory(&state, selection, recipe, 1.).unwrap();
             let resolved = resolve_binding_advisory(&state, &binding).unwrap();
             assert!(!resolved.regions.is_empty());
             assert!(resolved

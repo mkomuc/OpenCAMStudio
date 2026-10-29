@@ -382,7 +382,7 @@ impl canvas::Program<Message> for TabOverlay {
                     let world = self.frame.to_world_vector(point);
                     picking_view::project(self.camera, local, world)
                 });
-                let points = projected.map(|point| point.map(|(screen, depth)| (screen, depth)));
+                let points = projected;
                 let points = [points[0]?, points[1]?, points[2]?];
                 let depth = points.iter().map(|(_, depth)| depth).sum::<f32>() / 3.0;
                 Some((*index, depth, points.map(|(screen, _)| screen)))

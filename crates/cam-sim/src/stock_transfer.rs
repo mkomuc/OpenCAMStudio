@@ -25,7 +25,7 @@ impl Heightfield {
         }
         let mut field = Self::new([min[0], min[1]], [max[0], max[1]], res, max[2]);
         let mut columns: Vec<Vec<Hit>> = vec![Vec::new(); field.z.len()];
-        for triangle in mesh.indices.chunks_exact(3) {
+        for triangle in mesh.indices.as_chunks::<3>().0 {
             if cancelled() {
                 return None;
             }

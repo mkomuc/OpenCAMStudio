@@ -223,7 +223,7 @@ impl App {
                 self.cad_candidates.clear();
                 self.cad_inspecting = false;
                 self.focus_ops.clear();
-                self.model_view = Some(node.clone());
+                self.model_view = Some(*node);
                 iced::Task::none()
             }
         }
@@ -827,7 +827,7 @@ impl App {
             ] {
                 items = items.push(item(
                     label.into(),
-                    Message::ToolpathCommand(node.clone(), action),
+                    Message::ToolpathCommand(*node, action),
                 ));
             }
             items = items.push(popup_separator());
@@ -892,7 +892,7 @@ impl App {
                     items = items.push(item(format!("Delete pattern and {} source operation(s)", pattern.members.len()), Message::PatternDelete(*id)));
                     items = items.push(popup_separator());
                     for (label, action) in [("Recompute toolpath", ToolpathAction::Recompute), ("Simulate toolpath", ToolpathAction::Simulate), ("Post process and export…", ToolpathAction::Export), ("Calculate processing time…", ToolpathAction::ProcessingTime)] {
-                        items = items.push(item(label.into(), Message::ToolpathCommand(node.clone(), action)));
+                        items = items.push(item(label.into(), Message::ToolpathCommand(*node, action)));
                     }
                 }
             }

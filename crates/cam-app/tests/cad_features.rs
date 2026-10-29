@@ -687,7 +687,7 @@ fn inside_profile_reports_recognition_findings_and_rejects_unusable_curve_data()
         assert!(finding.contains(reason), "{defect}: {finding}");
         if ["blocked entry", "invalid solid", "ambiguous floor"].contains(&defect) {
             let preview = app
-                .preview_cad_operation(OpKind::Profile, &[selected.clone()])
+                .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&selected))
                 .unwrap();
             assert!(preview
                 .diagnostics

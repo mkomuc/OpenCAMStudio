@@ -261,17 +261,17 @@ impl App {
                         .any(|r| r.kind == EntityKind::Silhouette)
                     {
                         0.0
-                    } else if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary {
-                        resolved.heights.top
-                    } else if matches!(
-                        op,
-                        Operation::Drill(_)
-                            | Operation::Bore(_)
-                            | Operation::Thread(_)
-                            | Operation::Chamfer(_)
-                            | Operation::Engrave(_)
-                            | Operation::Carve(_)
-                    ) {
+                    } else if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary
+                        || matches!(
+                            op,
+                            Operation::Drill(_)
+                                | Operation::Bore(_)
+                                | Operation::Thread(_)
+                                | Operation::Chamfer(_)
+                                | Operation::Engrave(_)
+                                | Operation::Carve(_)
+                        )
+                    {
                         resolved.heights.top
                     } else {
                         resolved.heights.bottom
