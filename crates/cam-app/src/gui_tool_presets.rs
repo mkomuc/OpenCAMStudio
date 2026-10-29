@@ -26,7 +26,9 @@ impl std::fmt::Display for PresetChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum PresetField {
     Rpm,
+    CuttingSpeed,
     Feed,
+    FeedPerTooth,
     Plunge,
     Ramp,
     LeadIn,
@@ -35,9 +37,11 @@ pub(super) enum PresetField {
     Overlap,
 }
 impl PresetField {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::Rpm,
+        Self::CuttingSpeed,
         Self::Feed,
+        Self::FeedPerTooth,
         Self::Plunge,
         Self::Ramp,
         Self::LeadIn,
@@ -48,7 +52,9 @@ impl PresetField {
     fn label(self) -> &'static str {
         match self {
             Self::Rpm => "Spindle (rpm)",
+            Self::CuttingSpeed => "Cutting speed (m/min)",
             Self::Feed => "Cutting feed (mm/min)",
+            Self::FeedPerTooth => "Feed per tooth (mm/tooth)",
             Self::Plunge => "Plunge feed (mm/min)",
             Self::Ramp => "Ramp feed (mm/min, optional)",
             Self::LeadIn => "Lead-in feed (mm/min, optional)",
@@ -204,6 +210,7 @@ impl App {
             .into_iter()
             .collect();
         }
+        self.refresh_preset_cutting_fields(None);
     }
     pub(super) fn add_library_preset(&mut self) {
         if self.preset_edit_invalid() {
@@ -255,12 +262,40 @@ impl App {
         }
     }
     pub(super) fn edit_preset_value(&mut self, field: PresetField, value: String) {
+        let tool = self.tool_edit.clone();
+        let fallback_rpm = self.controller.defaults().spindle_rpm;
+        let mut linked = None;
         if field.valid(&value) {
             let parsed = value.trim().parse::<f64>().ok();
             if let Some(p) = self.library_preset_mut() {
                 match field {
                     PresetField::Rpm => p.spindle_rpm = parsed.unwrap(),
+                    PresetField::CuttingSpeed => {
+                        if let Some(rpm) = tool
+                            .as_ref()
+                            .and_then(|t| t.rpm_for_cutting_speed(parsed.unwrap()))
+                            .filter(|v| *v > 0.)
+                        {
+                            p.spindle_rpm = rpm;
+                            linked = Some((PresetField::Rpm, rpm));
+                        }
+                    }
                     PresetField::Feed => p.feed = parsed.unwrap(),
+                    PresetField::FeedPerTooth => {
+                        let rpm = if p.spindle_rpm == 0. {
+                            fallback_rpm
+                        } else {
+                            p.spindle_rpm
+                        };
+                        if let Some(feed) = tool
+                            .as_ref()
+                            .and_then(|t| t.feed_for_tooth(rpm, parsed.unwrap()))
+                            .filter(|v| *v > 0.)
+                        {
+                            p.feed = feed;
+                            linked = Some((PresetField::Feed, feed));
+                        }
+                    }
                     PresetField::Plunge => p.plunge_feed = parsed.unwrap(),
                     PresetField::Ramp => p.entry_feeds.ramp = parsed,
                     PresetField::LeadIn => p.entry_feeds.lead_in = parsed,
@@ -270,7 +305,52 @@ impl App {
                 }
             }
         }
+        if let Some((field, value)) = linked {
+            self.preset_values.insert(field, fmt_num(value));
+        }
         self.preset_values.insert(field, value);
+        if matches!(
+            field,
+            PresetField::Rpm
+                | PresetField::CuttingSpeed
+                | PresetField::Feed
+                | PresetField::FeedPerTooth
+        ) {
+            self.refresh_preset_cutting_fields(Some(field));
+        }
+    }
+    pub(super) fn refresh_preset_cutting_fields(&mut self, edited: Option<PresetField>) {
+        let Some(tool) = &self.tool_edit else {
+            return;
+        };
+        let Some(preset) = tool
+            .presets
+            .iter()
+            .find(|p| Some(p.id) == self.library_preset)
+        else {
+            return;
+        };
+        let rpm = self.effective_cutting_rpm(preset.spindle_rpm);
+        for (field, value) in [
+            (PresetField::CuttingSpeed, tool.cutting_speed(rpm)),
+            (
+                PresetField::FeedPerTooth,
+                tool.feed_per_tooth(rpm, preset.feed),
+            ),
+        ] {
+            if field == PresetField::CuttingSpeed
+                && matches!(edited, Some(PresetField::Feed | PresetField::FeedPerTooth))
+            {
+                continue;
+            }
+            if edited != Some(field) {
+                if let Some(value) = value {
+                    self.preset_values.insert(field, fmt_num(value));
+                } else {
+                    self.preset_values.remove(&field);
+                }
+            }
+        }
     }
     pub(super) fn preset_edit_invalid(&self) -> bool {
         self.tool_edit
@@ -369,20 +449,29 @@ impl App {
                 .spacing(4),
             );
             for field in PresetField::ALL {
+                let unavailable =
+                    matches!(field, PresetField::CuttingSpeed | PresetField::FeedPerTooth)
+                        && !self.preset_values.contains_key(&field);
                 let value = self
                     .preset_values
                     .get(&field)
                     .map(String::as_str)
                     .unwrap_or("");
-                list = list.push(
-                    column![
-                        text(field.label()).size(12),
-                        inspector_input("", value)
-                            .on_input(move |v| Message::PresetValueChanged(field, v))
-                    ]
-                    .spacing(4),
+                let input = inspector_input(
+                    if unavailable {
+                        "Cutter data unavailable"
+                    } else {
+                        ""
+                    },
+                    value,
                 );
-                if !field.valid(value) {
+                let input = if unavailable {
+                    input
+                } else {
+                    input.on_input(move |v| Message::PresetValueChanged(field, v))
+                };
+                list = list.push(column![text(field.label()).size(12), input].spacing(4));
+                if !unavailable && !field.valid(value) {
                     list = list.push(text("Enter a valid value").size(11).color(palette::ERROR));
                 }
             }
@@ -409,7 +498,7 @@ impl App {
         .spacing(8)
         .align_y(Alignment::Center);
         let widths = [
-            150., 150., 80., 75., 85., 115., 115., 105., 105., 105., 95., 90.,
+            150., 150., 80., 75., 85., 145., 115., 150., 115., 105., 105., 105., 95., 90.,
         ];
         let cells = |values: Vec<String>| {
             let mut cells = row![].spacing(4);
@@ -425,7 +514,9 @@ impl App {
                 "Material ID",
                 "Cooling",
                 "RPM",
+                "Cutting speed m/min",
                 "Feed mm/min",
+                "Feed per tooth mm/tooth",
                 "Plunge mm/min",
                 "Ramp mm/min",
                 "Lead-in mm/min",
@@ -454,7 +545,20 @@ impl App {
                 "—".into(),
                 tool.cooling.to_string(),
                 nominal(tool.nominal_rpm),
+                tool.cutting_speed(self.effective_cutting_rpm(tool.nominal_rpm))
+                    .map(fmt_num)
+                    .unwrap_or_else(|| "—".into()),
                 nominal(tool.nominal_feed),
+                tool.feed_per_tooth(
+                    self.effective_cutting_rpm(tool.nominal_rpm),
+                    if tool.nominal_feed > 0. {
+                        tool.nominal_feed
+                    } else {
+                        self.controller.defaults().feed
+                    },
+                )
+                .map(fmt_num)
+                .unwrap_or_else(|| "—".into()),
                 nominal(tool.nominal_plunge_feed),
                 "—".into(),
                 "—".into(),
@@ -478,29 +582,35 @@ impl App {
                 })
                 .unwrap_or_else(|| "Any material".into());
             let active = selected == Some(preset.id);
-            let item = container(cells(vec![
-                preset.name.clone(),
-                material,
-                preset
-                    .material_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "—".into()),
-                preset.cooling.to_string(),
-                fmt_num(preset.spindle_rpm),
-                fmt_num(preset.feed),
-                fmt_num(preset.plunge_feed),
-                optional(preset.entry_feeds.ramp),
-                optional(preset.entry_feeds.lead_in),
-                optional(preset.entry_feeds.lead_out),
-                optional(preset.stepdown),
-                optional(preset.overlap.map(|v| v * 100.)),
-            ]))
-            .padding(7)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: active.then_some(Background::Color(palette::SELECT_BG)),
-                ..Default::default()
-            });
+            let item =
+                container(cells(vec![
+                    preset.name.clone(),
+                    material,
+                    preset
+                        .material_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    preset.cooling.to_string(),
+                    fmt_num(preset.spindle_rpm),
+                    optional(tool.cutting_speed(self.effective_cutting_rpm(preset.spindle_rpm))),
+                    fmt_num(preset.feed),
+                    optional(tool.feed_per_tooth(
+                        self.effective_cutting_rpm(preset.spindle_rpm),
+                        preset.feed,
+                    )),
+                    fmt_num(preset.plunge_feed),
+                    optional(preset.entry_feeds.ramp),
+                    optional(preset.entry_feeds.lead_in),
+                    optional(preset.entry_feeds.lead_out),
+                    optional(preset.stepdown),
+                    optional(preset.overlap.map(|v| v * 100.)),
+                ]))
+                .padding(7)
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: active.then_some(Background::Color(palette::SELECT_BG)),
+                    ..Default::default()
+                });
             rows = rows.push(mouse_area(item).on_press(Message::LibraryPresetSelected(preset.id)));
         }
         if tool.presets.is_empty() {
@@ -509,7 +619,7 @@ impl App {
         container(
             column![
                 toolbar,
-                scrollable(rows.width(1445))
+                scrollable(rows.width(1750))
                     .direction(scrollable::Direction::Both {
                         vertical: scrollable::Scrollbar::default(),
                         horizontal: scrollable::Scrollbar::default(),
@@ -695,8 +805,14 @@ impl App {
         self.library.materials.retain(|m| m.id != id);
         self.library.save();
     }
-    fn operation_preset_tool(&self) -> Option<&cam_model::Tool> {
-        let op = self.operation_draft.as_ref()?;
+    pub(super) fn operation_preset_tool(&self) -> Option<&cam_model::Tool> {
+        let op = self.operation_draft.as_ref().or_else(|| {
+            if let Selection::Operation(id) = self.controller.selection() {
+                self.controller.operation(id)
+            } else {
+                None
+            }
+        })?;
         if self.cad_pending_kind.is_some() {
             return self
                 .library
@@ -757,6 +873,7 @@ impl App {
                 self.fields.insert(field, fmt_num(value));
             }
         }
+        self.refresh_cutting_fields(None);
     }
     pub(super) fn pick_operation_preset(&mut self, id: Option<u64>) {
         let Some(id) = id else {
@@ -871,6 +988,238 @@ mod tests {
     fn send(app: &mut App, message: Message) {
         let _ = app.update(message);
     }
+    fn number(app: &App, field: Field) -> f64 {
+        app.fields[&field].parse().unwrap()
+    }
+    fn near(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn linked_operation_cutting_data_survives_apply_cancel_and_undo() {
+        let mut app = app();
+        app.library.tools[0].diameter = 6.;
+        app.library.tools[0].flutes = 2;
+        app.library.tools[0].presets[0].spindle_rpm = 24000.;
+        app.library.tools[0].presets[0].feed = 3000.;
+        send(&mut app, Message::BeginOp(OpKind::Pocket));
+        near(number(&app, Field::CuttingSpeed), 452.3893421169302);
+        near(number(&app, Field::FeedPerTooth), 0.0625);
+        send(
+            &mut app,
+            Message::FieldChanged(Field::CuttingSpeed, "226.1946710584651".into()),
+        );
+        near(number(&app, Field::SpindleRpm), 12000.);
+        near(number(&app, Field::Feed), 3000.);
+        near(number(&app, Field::FeedPerTooth), 0.125);
+        send(
+            &mut app,
+            Message::FieldChanged(Field::FeedPerTooth, "0.05".into()),
+        );
+        near(number(&app, Field::Feed), 1200.);
+        send(&mut app, Message::FieldChanged(Field::Feed, "1800".into()));
+        near(number(&app, Field::FeedPerTooth), 0.075);
+        send(
+            &mut app,
+            Message::FieldChanged(Field::SpindleRpm, "24000".into()),
+        );
+        near(number(&app, Field::CuttingSpeed), 452.3893421169302);
+        near(number(&app, Field::FeedPerTooth), 0.0375);
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        assert!(app.creation_ready(), "{}", app.status);
+        send(&mut app, Message::ConfirmOp);
+        let id = app
+            .controller
+            .inspection_setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        let saved = app.controller.document().clone();
+        app.begin_operation_draft(id);
+        assert!(!app.inspector_dirty());
+        send(
+            &mut app,
+            Message::FieldChanged(Field::FeedPerTooth, "0.1".into()),
+        );
+        send(&mut app, Message::CancelOperationDraft);
+        assert_eq!(app.controller.document(), &saved);
+        app.begin_operation_draft(id);
+        near(number(&app, Field::FeedPerTooth), 0.0375);
+        send(
+            &mut app,
+            Message::FieldChanged(Field::FeedPerTooth, "0.1".into()),
+        );
+        send(&mut app, Message::Apply);
+        near(
+            op_field(app.controller.operation(id).unwrap(), Field::Feed).unwrap(),
+            4800.,
+        );
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document(), &saved);
+    }
+
+    #[test]
+    fn preset_cutting_data_links_both_ways_and_round_trips_with_the_cutter() {
+        let mut app = app();
+        app.library.tools[0].diameter = 6.;
+        app.library.tools[0].flutes = 2;
+        app.switch_workspace(Workspace::Tools);
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Rpm, "24000".into()),
+        );
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "3000".into()),
+        );
+        near(
+            app.preset_values[&PresetField::CuttingSpeed]
+                .parse()
+                .unwrap(),
+            452.3893421169302,
+        );
+        near(
+            app.preset_values[&PresetField::FeedPerTooth]
+                .parse()
+                .unwrap(),
+            0.0625,
+        );
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::CuttingSpeed, "226.1946710584651".into()),
+        );
+        near(
+            app.preset_values[&PresetField::Rpm].parse().unwrap(),
+            12000.,
+        );
+        near(
+            app.preset_values[&PresetField::FeedPerTooth]
+                .parse()
+                .unwrap(),
+            0.125,
+        );
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::FeedPerTooth, "0.05".into()),
+        );
+        near(
+            app.preset_values[&PresetField::Feed].parse().unwrap(),
+            1200.,
+        );
+        let tool = app.tool_edit.as_ref().unwrap();
+        let restored: cam_model::Tool =
+            serde_json::from_str(&serde_json::to_string(tool).unwrap()).unwrap();
+        let preset = &restored.presets[0];
+        near(
+            restored.cutting_speed(preset.spindle_rpm).unwrap(),
+            226.1946710584651,
+        );
+        near(
+            restored
+                .feed_per_tooth(preset.spindle_rpm, preset.feed)
+                .unwrap(),
+            0.05,
+        );
+        send(&mut app, Message::LibraryPresetSelected(2));
+        send(&mut app, Message::LibraryPresetSelected(1));
+        near(
+            app.preset_values[&PresetField::FeedPerTooth]
+                .parse()
+                .unwrap(),
+            0.05,
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ToolDiameter, "12".into()),
+        );
+        near(
+            app.preset_values[&PresetField::CuttingSpeed]
+                .parse()
+                .unwrap(),
+            452.3893421169302,
+        );
+        send(&mut app, Message::FieldChanged(Field::Flutes, "4".into()));
+        near(
+            app.preset_values[&PresetField::FeedPerTooth]
+                .parse()
+                .unwrap(),
+            0.025,
+        );
+    }
+
+    #[test]
+    fn invalid_derived_edits_remain_visible_and_do_not_change_saved_cutting_data() {
+        let mut app = app();
+        send(&mut app, Message::BeginOp(OpKind::Pocket));
+        let rpm = app.fields[&Field::SpindleRpm].clone();
+        for invalid in ["", "-", "-1", "0", "NaN", "inf"] {
+            send(
+                &mut app,
+                Message::FieldChanged(Field::CuttingSpeed, invalid.into()),
+            );
+            assert!(app.field_invalid(Field::CuttingSpeed));
+            assert_eq!(app.fields[&Field::SpindleRpm], rpm);
+        }
+        app.refresh_operation_fields();
+        assert_eq!(app.fields[&Field::CuttingSpeed], "inf");
+        send(&mut app, Message::FieldChanged(Field::Feed, "1000".into()));
+        assert_eq!(app.fields[&Field::CuttingSpeed], "inf");
+        send(&mut app, Message::CancelOp);
+        app.switch_workspace(Workspace::Tools);
+        let saved = app.tool_edit.clone();
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::CuttingSpeed, "NaN".into()),
+        );
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Plunge, "120".into()),
+        );
+        assert!(app.preset_edit_invalid());
+        assert_eq!(app.preset_values[&PresetField::CuttingSpeed], "NaN");
+        assert_eq!(
+            app.tool_edit.as_ref().unwrap().presets[0].spindle_rpm,
+            saved.unwrap().presets[0].spindle_rpm
+        );
+    }
+
+    #[test]
+    fn inherited_rpm_and_missing_flutes_are_handled_without_division_by_zero() {
+        let mut app = app();
+        app.library.tools[0].presets[0].spindle_rpm = 0.;
+        send(&mut app, Message::BeginOp(OpKind::Pocket));
+        let tool = app.operation_preset_tool().unwrap();
+        let rpm = app.controller.defaults().spindle_rpm;
+        near(
+            number(&app, Field::CuttingSpeed),
+            tool.cutting_speed(rpm).unwrap(),
+        );
+        near(
+            number(&app, Field::FeedPerTooth),
+            tool.feed_per_tooth(rpm, 500.).unwrap(),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::FeedPerTooth, "0.1".into()),
+        );
+        near(
+            number(&app, Field::Feed),
+            rpm * f64::from(app.operation_preset_tool().unwrap().flutes) * 0.1,
+        );
+        send(&mut app, Message::CancelOp);
+        app.library.tools[0].flutes = 0;
+        send(&mut app, Message::BeginOp(OpKind::Pocket));
+        let fields = app.inspector_fields();
+        assert!(fields.contains(&Field::CuttingSpeed));
+        assert!(!fields.contains(&Field::FeedPerTooth));
+        send(&mut app, Message::CancelOp);
+        app.switch_workspace(Workspace::Tools);
+        assert!(!app.preset_values.contains_key(&PresetField::FeedPerTooth));
+        assert!(!app.preset_edit_invalid());
+    }
     #[test]
     fn creating_switching_overriding_and_undoing_presets_is_transactional() {
         let mut app = app();
@@ -931,7 +1280,8 @@ mod tests {
             .unwrap();
         send(&mut app, Message::ConfirmOp);
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -957,7 +1307,8 @@ mod tests {
             650.
         );
         assert_eq!(
-            app.controller.inspection_setup()
+            app.controller
+                .inspection_setup()
                 .tools
                 .iter()
                 .find(|t| t.number == app.controller.operation(id).unwrap().tool())

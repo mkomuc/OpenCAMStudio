@@ -284,7 +284,10 @@ mod tests {
         assert!(!app.controller.geometry_state().instances.is_empty());
         assert!(app.controller.cad_import_preview().is_none());
         assert!(app.status.starts_with("Imported "));
-        assert!(app.notice.is_none(), "a clean STEP import needs no warning dialog");
+        assert!(
+            app.notice.is_none(),
+            "a clean STEP import needs no warning dialog"
+        );
         assert!(app.notice_queue.is_empty());
         assert!(!app.setup_draft_dirty());
         assert!(app.controller.undo());
@@ -319,7 +322,8 @@ mod tests {
         }
         assert!(app.notice.is_none(), "run errors must not interrupt work");
         let target = StatusTarget::Setup(app.controller.active_setup_id());
-        assert!(app.status_notice(target, &app.controller.current_toolpath_fingerprints())
+        assert!(app
+            .status_notice(target, &app.controller.current_toolpath_fingerprints())
             .is_some_and(|notice| notice.error));
         let _ = app.update(Message::ShowStatus(target));
         assert!(app.notice.as_ref().is_some_and(|notice| notice.error));

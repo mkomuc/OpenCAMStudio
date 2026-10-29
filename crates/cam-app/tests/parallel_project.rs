@@ -8,40 +8,78 @@ use cam_toolpath::{CancelToken, JobCompletion};
 fn tray_parallel_stay_down_verifies_against_remaining_stock() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut app = AppController::new(default_machine());
-    app.open_project(root.join("testfiles/tray-parallel.ocam")).unwrap();
+    app.open_project(root.join("testfiles/tray-parallel.ocam"))
+        .unwrap();
     app.edit_operation(0, |op| {
-        let Operation::Parallel(p) = op else { panic!("the tray fixture must contain Parallel #0") };
+        let Operation::Parallel(p) = op else {
+            panic!("the tray fixture must contain Parallel #0")
+        };
         p.params.stay_down = true;
         p.params.lift_height = 0.;
     });
     let run = app.run(&CancelToken::new());
-    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
-    let retracts: Vec<_> = run.program.steps().iter().filter_map(|s| match s {
-        Step::Rapid { to, tag } if tag.op_id == 0 && tag.kind == MoveKind::Retract => Some(*to),
-        _ => None,
-    }).collect();
-    eprintln!("Parallel clearance retracts: {} {:?}", retracts.len(), retracts);
-    let ys: Vec<_> = run.program.steps().iter().filter_map(|s| match s {
-        Step::Linear { to, tag, .. } if tag.op_id == 0 && tag.kind == MoveKind::Cutting => Some(to.y),
-        _ => None,
-    }).collect();
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
+    let retracts: Vec<_> = run
+        .program
+        .steps()
+        .iter()
+        .filter_map(|s| match s {
+            Step::Rapid { to, tag } if tag.op_id == 0 && tag.kind == MoveKind::Retract => Some(*to),
+            _ => None,
+        })
+        .collect();
+    eprintln!(
+        "Parallel clearance retracts: {} {:?}",
+        retracts.len(),
+        retracts
+    );
+    let ys: Vec<_> = run
+        .program
+        .steps()
+        .iter()
+        .filter_map(|s| match s {
+            Step::Linear { to, tag, .. } if tag.op_id == 0 && tag.kind == MoveKind::Cutting => {
+                Some(to.y)
+            }
+            _ => None,
+        })
+        .collect();
     let min_y = ys.iter().copied().fold(f64::INFINITY, f64::min);
     let max_y = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let margin = (max_y - min_y) * 0.1;
-    assert!(!retracts.iter().any(|p| p.y > min_y + margin && p.y < max_y - margin),
-        "continuous interior finishing rows must stay down, not only pass verification");
+    assert!(
+        !retracts
+            .iter()
+            .any(|p| p.y > min_y + margin && p.y < max_y - margin),
+        "continuous interior finishing rows must stay down, not only pass verification"
+    );
     for collision in run.collisions.iter().take(3) {
         if let Some(index) = collision.step_index {
-            eprintln!("{collision:?}; nearby steps: {:?}",
-                &run.program.steps()[index.saturating_sub(2)..(index + 3).min(run.program.steps().len())]);
+            eprintln!(
+                "{collision:?}; nearby steps: {:?}",
+                &run.program.steps()
+                    [index.saturating_sub(2)..(index + 3).min(run.program.steps().len())]
+            );
         }
     }
-    assert!(run.collisions.is_empty(), "{} collisions: {:?}", run.collisions.len(), run.collisions.first());
+    assert!(
+        run.collisions.is_empty(),
+        "{} collisions: {:?}",
+        run.collisions.len(),
+        run.collisions.first()
+    );
     // This fixture exceeds its configured machine's Y travel. Its independent
     // travel check must remain active, while stock collisions no longer block export.
-    assert!(!matches!(app.export_nc(),
+    assert!(!matches!(
+        app.export_nc(),
         Err(cam_app::ExportError::NonCuttingThroughStock(_)
-            | cam_app::ExportError::RapidThroughStock(_))));
+            | cam_app::ExportError::RapidThroughStock(_))
+    ));
 }
 
 /// The supplied local CAD fixture is deliberately optional in ordinary CI.

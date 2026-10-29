@@ -164,5 +164,8 @@ fn repair_cannot_turn_an_incomplete_body_into_a_valid_solid() {
     cad.topology.validate().unwrap();
     assert_eq!(cad.topology.bodies.len(), 1);
     assert!(!cad.topology.bodies[0].valid_solid);
-    assert!(cad.warnings.iter().any(|warning| warning.contains("bounded repair did not succeed")));
+    assert!(cad
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("bounded repair did not succeed")));
 }

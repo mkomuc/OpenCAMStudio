@@ -21,7 +21,9 @@ impl App {
         } else {
             Message::CancelOperationPreview
         };
-        let progress = self.controller.run_progress()
+        let progress = self
+            .controller
+            .run_progress()
             .or_else(|| self.operation_preview.progress())?;
         let label = match progress.phase {
             JobPhase::Queued => "Waiting to calculate…".into(),
@@ -99,7 +101,8 @@ impl App {
     }
 
     fn rerun_with_review(&mut self, review_all: bool) {
-        self.controller.set_simulation_accuracy(self.settings.simulation.accuracy);
+        self.controller
+            .set_simulation_accuracy(self.settings.simulation.accuracy);
         self.pending_toolpath_export = None;
         self.pending_simulation = None;
         self.pending_processing_time = None;
@@ -197,7 +200,8 @@ impl App {
             .select(operation.map_or(Selection::Setup, Selection::Operation));
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
-        self.controller.set_simulation_accuracy(self.settings.simulation.accuracy);
+        self.controller
+            .set_simulation_accuracy(self.settings.simulation.accuracy);
         let run = if let Some(pattern_id) = pattern {
             self.controller
                 .start_pattern_toolpath_run(pattern_id, action == ToolpathAction::Recompute)
@@ -219,8 +223,8 @@ impl App {
                     self.set_pane_visible(Pane::Output, true);
                 }
                 if action == ToolpathAction::ProcessingTime {
-                    self.pending_processing_time = Some(
-                        super::processing_time_view::PendingProcessingTime {
+                    self.pending_processing_time =
+                        Some(super::processing_time_view::PendingProcessingTime {
                             stamp: stamp.clone(),
                             label: match node {
                                 TreeNode::Setup(id) => self
@@ -235,8 +239,7 @@ impl App {
                                 _ => "Program".to_string(),
                             },
                             feed_override: "100".to_string(),
-                        },
-                    );
+                        });
                 }
                 self.status = match action {
                     ToolpathAction::Recompute => "Recomputing toolpaths…",

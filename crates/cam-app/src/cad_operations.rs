@@ -169,7 +169,13 @@ pub(crate) fn recipe(
     selected: &[EntityRef],
 ) -> Result<ExtractionRecipe, String> {
     Ok(match kind {
-        OpKind::Pocket if selected.first().is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge)) => ExtractionRecipe::PocketBoundary,
+        OpKind::Pocket
+            if selected
+                .first()
+                .is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge)) =>
+        {
+            ExtractionRecipe::PocketBoundary
+        }
         OpKind::Pocket => ExtractionRecipe::PocketFloor,
         OpKind::Drill => ExtractionRecipe::DrillHoles,
         OpKind::Chamfer if selected.first().is_some_and(|r| r.kind == EntityKind::Face) => {
@@ -188,7 +194,10 @@ pub(crate) fn recipe(
                 .filter(|_| reference.kind == EntityKind::Face)
                 .ok_or("Thread/Bore requires cylindrical bore or boss faces")?;
             let CadSurface::Cylinder { inward, .. } = face.surface else {
-                return Err(format!("Thread/Bore requires cylindrical bore or boss faces; selected face: {}", face.surface.kind_name()));
+                return Err(format!(
+                    "Thread/Bore requires cylindrical bore or boss faces; selected face: {}",
+                    face.surface.kind_name()
+                ));
             };
             if kind == OpKind::Bore {
                 ExtractionRecipe::BoreCylinders { internal: inward }
@@ -254,7 +263,9 @@ pub(crate) fn profile_entries_from_selection(selected: &[EntityRef]) -> Vec<Prof
 /// Source topology stays immutable. Only instance placements are rotated into
 /// the setup axes, preserving semantic references and approximation budgets.
 pub(crate) fn geometry_for_setup(document: &Document) -> Result<GeometryState, String> {
-    let setup = document.active_setup().ok_or("Create a setup before evaluating machining geometry.")?;
+    let setup = document
+        .active_setup()
+        .ok_or("Create a setup before evaluating machining geometry.")?;
     let mut geometry = document.geometry.geometry_in_setup(&setup.frame)?;
     let ids: std::collections::BTreeSet<_> = setup.operations.iter().map(Operation::id).collect();
     geometry.bindings.retain(|id, _| ids.contains(id));
@@ -769,7 +780,9 @@ pub(crate) fn resolve_document_checked(
     // Resolve all reference geometry in its source placement, before rotating
     // instances for the strategy adapters. Keep a worker-only absolute snapshot.
     for operation in &document.setup().operations {
-        if !document.operation_is_included(document.setup().id, operation.id()) { continue; }
+        if !document.operation_is_included(document.setup().id, operation.id()) {
+            continue;
+        }
         if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
             let heights = settings.resolve(document, operation).map_err(|reason| {
                 error(format!("Operation {}: {reason}", operation.id())).for_op(operation.id())
@@ -785,7 +798,9 @@ pub(crate) fn resolve_document_checked(
     resolved.geometry = geometry_for_setup(document).map_err(error)?;
     let mut operations = std::mem::take(&mut resolved.setup_mut().operations);
     for operation in &mut operations {
-        if !document.operation_is_included(document.setup().id, operation.id()) { continue; }
+        if !document.operation_is_included(document.setup().id, operation.id()) {
+            continue;
+        }
         if cancelled() {
             return Err(error("Geometry resolution cancelled".into())
                 .with_code(cam_toolpath::DiagnosticCode::Cancelled));
@@ -805,7 +820,10 @@ pub(crate) fn resolve_document_checked(
                     return Err(format!("Operation {id}: Needs reselection — {reason}"));
                 }
             }
-            if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
+            if matches!(
+                binding.recipe,
+                ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing
+            ) {
                 cam_geometry3d::validate_adaptive_selection(&resolved.geometry, &binding.selected)
                     .map_err(|e| format!("Operation {id}: {e}"))?;
             } else if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
@@ -833,7 +851,10 @@ pub(crate) fn resolve_document_checked(
             let depth = input.heights.depth();
             let region = || input.regions.first().ok_or("No resolved machining region");
             match (operation, &binding.recipe) {
-                (Operation::Pocket(p), ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary) => {
+                (
+                    Operation::Pocket(p),
+                    ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary,
+                ) => {
                     p.boundary = region()?.outer().clone();
                     p.islands = region()?.holes().to_vec();
                     p.depth = depth;
@@ -903,7 +924,7 @@ pub(crate) fn resolve_document_checked(
                     p.closed = path.closed;
                     if !p.closed {
                         p.start = None;
-                    p.end = None;
+                        p.end = None;
                         p.lead_overlap = 0.;
                     }
                     p.top = input.heights.top;
@@ -916,7 +937,7 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                     if !p.closed {
                         p.start = None;
-                    p.end = None;
+                        p.end = None;
                     }
                 }
                 (Operation::Carve(p), ExtractionRecipe::CarveRegion) => {
@@ -957,7 +978,11 @@ pub(crate) fn resolve_document_checked(
                             .iter()
                             .find(|t| t.number == p.tool)
                             .ok_or("Missing thread tool")?;
-                        if input.holes.iter().any(|hole| tool.diameter >= hole.diameter) {
+                        if input
+                            .holes
+                            .iter()
+                            .any(|hole| tool.diameter >= hole.diameter)
+                        {
                             return Err(format!(
                                 "Thread tool diameter {:.3} cannot enter the selected bore; choose a smaller thread mill or prepare a larger bore",
                                 tool.diameter
@@ -994,7 +1019,8 @@ pub(crate) fn resolve_document_checked(
                         .map(|h| [h.center.x, h.center.y])
                         .collect();
                     p.depth = depth;
-                    p.start_offset = input.heights.top - document.setup().heights_for(id).top_of_stock;
+                    p.start_offset =
+                        input.heights.top - document.setup().heights_for(id).top_of_stock;
                 }
                 (Operation::Face(p), ExtractionRecipe::FaceRegion) => {
                     if p.overshoot < 0.0 {
@@ -1006,7 +1032,8 @@ pub(crate) fn resolve_document_checked(
                     p.depth = depth;
                     p.start_offset = input.heights.top;
                 }
-                (Operation::Parallel(_), ExtractionRecipe::ParallelFinishing) | (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
+                (Operation::Parallel(_), ExtractionRecipe::ParallelFinishing)
+                | (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
                     // Body heights and projected silhouette belong to the binding;
                     // the adaptive planner resolves conservative CAD-derived layers.
                 }
@@ -1115,7 +1142,9 @@ pub(crate) fn capture_height_override(
         _ => {}
     }
     let (before_depth, after_depth) = match operation {
-        Operation::Pocket(p) if binding.recipe == ExtractionRecipe::PocketBoundary => (before.depth(), p.depth),
+        Operation::Pocket(p) if binding.recipe == ExtractionRecipe::PocketBoundary => {
+            (before.depth(), p.depth)
+        }
         Operation::Pocket(p) => (-before.bottom, p.depth),
         Operation::Profile(p) => (-before.bottom, p.depth),
         Operation::Drill(p) => (before.depth(), p.depth),

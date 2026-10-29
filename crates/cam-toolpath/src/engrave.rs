@@ -64,21 +64,45 @@ impl Strategy for EngraveStrategy {
             )));
             bail!();
         };
-        if [op.depth, op.top, op.stepdown, op.feed, op.plunge_feed, tool.diameter, tool.length]
-            .iter().any(|v| !v.is_finite())
-            || op.chain.points().iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
-            || tool.diameter <= 0. || tool.length <= 0. || op.feed <= 0. || op.plunge_feed <= 0.
+        if [
+            op.depth,
+            op.top,
+            op.stepdown,
+            op.feed,
+            op.plunge_feed,
+            tool.diameter,
+            tool.length,
+        ]
+        .iter()
+        .any(|v| !v.is_finite())
+            || op
+                .chain
+                .points()
+                .iter()
+                .any(|p| !p.x.is_finite() || !p.y.is_finite())
+            || tool.diameter <= 0.
+            || tool.length <= 0.
+            || op.feed <= 0.
+            || op.plunge_feed <= 0.
         {
             diagnostics.push(Diagnostic::error("Engraving coordinates and dimensions must be finite; tool dimensions and feeds must be positive"));
             bail!();
         }
-        if op.stepdown > 0. && (op.depth / op.stepdown).ceil() * op.chain.len() as f64 > cam_model::MAX_PROFILE_MOVES as f64 {
-            diagnostics.push(Diagnostic::error("Engraving motion budget exceeded; increase stepdown or simplify the path"));
+        if op.stepdown > 0.
+            && (op.depth / op.stepdown).ceil() * op.chain.len() as f64
+                > cam_model::MAX_PROFILE_MOVES as f64
+        {
+            diagnostics.push(Diagnostic::error(
+                "Engraving motion budget exceeded; increase stepdown or simplify the path",
+            ));
             bail!();
         }
 
         let v_shape = match tool.kind {
-            ToolKind::VBit { included_angle_deg, tip_radius } => Some((included_angle_deg, tip_radius)),
+            ToolKind::VBit {
+                included_angle_deg,
+                tip_radius,
+            } => Some((included_angle_deg, tip_radius)),
             _ => {
                 diagnostics.push(Diagnostic::warning(format!(
                     "operation {}: tool {} is a {}; the engraved groove will follow the selected cutter's profile",
@@ -116,15 +140,23 @@ impl Strategy for EngraveStrategy {
             let alpha = 0.5 * included_angle_deg.to_radians();
             if !(alpha > 0.0 && alpha < std::f64::consts::FRAC_PI_2) {
                 diagnostics.push(Diagnostic::error(format!(
-                    "operation {}: tool included angle {} is not a valid V (0–180°)", op.id, included_angle_deg
+                    "operation {}: tool included angle {} is not a valid V (0–180°)",
+                    op.id, included_angle_deg
                 )));
                 bail!();
             }
             let max_depth = vtip_max_depth(alpha, tip_radius, tool.radius());
             if op.depth <= max_depth + 1e-9 {
-                Some((included_angle_deg, 2. * vtip_half_width(alpha, tip_radius, op.depth)))
-            } else { None }
-        } else { None };
+                Some((
+                    included_angle_deg,
+                    2. * vtip_half_width(alpha, tip_radius, op.depth),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let link = Tag::new(op.id, MoveKind::Link);
         let plunge = Tag::new(op.id, MoveKind::Plunge);
@@ -136,7 +168,13 @@ impl Strategy for EngraveStrategy {
 
         let mut program = Program::new();
         let description = if let Some((angle, width)) = groove {
-            format!("Engrave: {:.3} mm deep, {:.3} mm wide groove at {}° in {}", op.depth, width, angle, crate::passes_phrase(depths.len()))
+            format!(
+                "Engrave: {:.3} mm deep, {:.3} mm wide groove at {}° in {}",
+                op.depth,
+                width,
+                angle,
+                crate::passes_phrase(depths.len())
+            )
         } else {
             format!("Engrave: {:.3} mm deep with {} in {}; groove follows the selected cutter's profile", op.depth, tool.kind, crate::passes_phrase(depths.len()))
         };
@@ -155,10 +193,10 @@ impl Strategy for EngraveStrategy {
         let start = pts[0];
 
         // The first pass rapids down to the **retract plane**, not to the stock top:
-    // ending a rapid exactly on the surface leaves no margin, so slightly proud
-    // stock or a small Z-zero error means rapiding into material. Taking the higher
-    // of the two is never lower than the old behaviour. Later passes still rapid to
-    // the previous depth — that is through air the tool has already cut.
+        // ending a rapid exactly on the surface leaves no margin, so slightly proud
+        // stock or a small Z-zero error means rapiding into material. Taking the higher
+        // of the two is never lower than the old behaviour. Later passes still rapid to
+        // the previous depth — that is through air the tool has already cut.
         let mut prev_z = env.heights.retract.max(op.top);
         for &d in &depths {
             if cancel.is_cancelled() {
@@ -228,9 +266,9 @@ fn pass_depths(depth: f64, stepdown: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Severity;
     use cam_geo::{Contour, Point};
     use cam_model::{Heights, Tool};
-    use crate::Severity;
 
     fn vbit(included_angle_deg: f64, tip_radius: f64) -> Tool {
         Tool {
@@ -340,7 +378,10 @@ mod tests {
             }),
         );
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
-        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("non-cutting tip")));
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.message.contains("non-cutting tip")));
         assert!(!r.program.is_empty());
     }
 
@@ -348,7 +389,10 @@ mod tests {
     fn a_flat_end_mill_follows_the_engraving_path_with_a_warning() {
         let r = run(op(0.5), tool_of(ToolKind::EndMill));
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
-        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("groove will follow")));
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.message.contains("groove will follow")));
         assert!(!r.program.is_empty());
     }
 
@@ -359,7 +403,10 @@ mod tests {
         assert!(errors(&run(op(2.9), t.clone())).is_empty());
         let r = run(op(3.1), t.clone());
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
-        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("cutting edge")));
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.message.contains("cutting edge")));
         assert!(!r.program.is_empty());
         // Exactly at the limit is allowed.
         assert!(errors(&run(op(3.0), t)).is_empty());
@@ -410,7 +457,10 @@ mod tests {
         match last {
             Step::Rapid { to, tag } => {
                 assert_eq!(tag.kind, MoveKind::Retract);
-                assert!((to.x - 20.0).abs() < 1e-9 && (to.y - 5.0).abs() < 1e-9, "{to:?}");
+                assert!(
+                    (to.x - 20.0).abs() < 1e-9 && (to.y - 5.0).abs() < 1e-9,
+                    "{to:?}"
+                );
             }
             other => panic!("expected a retract, got {other:?}"),
         }
@@ -433,7 +483,10 @@ mod tests {
             })
             .next_back()
             .unwrap();
-        assert!(last_cut[0].abs() < 1e-9 && last_cut[1].abs() < 1e-9, "{last_cut:?}");
+        assert!(
+            last_cut[0].abs() < 1e-9 && last_cut[1].abs() < 1e-9,
+            "{last_cut:?}"
+        );
     }
 
     #[test]
@@ -522,7 +575,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(rapid_zs, vec![5.0, 2.0, 5.0, -0.4, 5.0, -0.8], "{rapid_zs:?}");
+        assert_eq!(
+            rapid_zs,
+            vec![5.0, 2.0, 5.0, -0.4, 5.0, -0.8],
+            "{rapid_zs:?}"
+        );
     }
 
     #[test]

@@ -4,9 +4,7 @@
 //! O1; the `G71`/`M53` drilling cycles — O3; and per-operation multi-WCS
 //! (`G15 H<n>` from a `Step::Datum`, in shop section-head order) — O2.
 
-use cam_cldata::{
-    ArcDir, DrillCycle, MoveKind, Point3, Program, ProgramBuilder, SpindleDir, Tag,
-};
+use cam_cldata::{ArcDir, DrillCycle, MoveKind, Point3, Program, ProgramBuilder, SpindleDir, Tag};
 use cam_model::{Envelope, Machine};
 use cam_post::{PostKind, PostOptions};
 
@@ -17,7 +15,10 @@ fn machine() -> Machine {
         tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
-        envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),
+        envelope: Envelope::new(
+            Point3::new(0.0, 0.0, -50.0),
+            Point3::new(300.0, 180.0, 50.0),
+        ),
         safe_z: 5.0,
         tool_change_pos: None,
     }
@@ -94,7 +95,10 @@ fn tool_section_carries_g15_wcs_and_g56_tool_length() {
     assert!(g.contains("G15 H1"), "work-coordinate select:\n{g}");
     // Tool-length offset is keyed to the tool number, and lives in a different H
     // number space than G15 (OKUMA_PLAN §3).
-    assert!(g.contains("G56 H88"), "tool-length offset keyed to the tool:\n{g}");
+    assert!(
+        g.contains("G56 H88"),
+        "tool-length offset keyed to the tool:\n{g}"
+    );
 }
 
 #[test]
@@ -116,7 +120,10 @@ fn arcs_are_native_with_incremental_ij() {
         .lines()
         .find(|l| l.starts_with("G3"))
         .expect("a native G3 arc line");
-    assert!(arc.contains("I10.000") && arc.contains("J0.000"), "incremental I/J:\n{arc}");
+    assert!(
+        arc.contains("I10.000") && arc.contains("J0.000"),
+        "incremental I/J:\n{arc}"
+    );
 }
 
 /// Byte-pinned goldens (O5). A tripwire against silent drift in the whole-program
@@ -127,7 +134,10 @@ fn arcs_are_native_with_incremental_ij() {
 /// re-read the diff. Not a substitute for the O6 line-audit against real posted words.
 #[test]
 fn golden_mill() {
-    assert_eq!(okuma(&mill_program()), include_str!("golden/mill_okuma.min"));
+    assert_eq!(
+        okuma(&mill_program()),
+        include_str!("golden/mill_okuma.min")
+    );
 }
 
 #[test]
@@ -144,7 +154,10 @@ fn golden_drill() {
 ///   `cargo test -p cam-post --test okuma reference_dump -- --nocapture`
 #[test]
 fn reference_dump() {
-    println!("\n===== Okuma OSP: milling =====\n{}", okuma(&mill_program()));
+    println!(
+        "\n===== Okuma OSP: milling =====\n{}",
+        okuma(&mill_program())
+    );
     println!(
         "\n===== Okuma OSP: peck drilling (G71/M53) =====\n{}",
         okuma(&drill_program(DrillCycle {
@@ -297,7 +310,10 @@ fn base_cycle() -> DrillCycle {
 /// The lines of the drill cycle proper: from the `G71` return-level declaration
 /// through the `G80` cancel, inclusive.
 fn cycle_lines(g: &str) -> Vec<&str> {
-    let from = g.lines().position(|l| l.starts_with("G71 ")).expect("a G71");
+    let from = g
+        .lines()
+        .position(|l| l.starts_with("G71 "))
+        .expect("a G71");
     let to = g.lines().position(|l| l == "G80").expect("a G80");
     g.lines().skip(from).take(to - from + 1).collect()
 }
@@ -348,7 +364,10 @@ fn g71_return_level_is_the_retract_plane() {
         retract: 15.0,
         ..base_cycle()
     }));
-    assert!(cycle_lines(&g).contains(&"G71 Z15.000"), "G71 tracks retract:\n{g}");
+    assert!(
+        cycle_lines(&g).contains(&"G71 Z15.000"),
+        "G71 tracks retract:\n{g}"
+    );
 }
 
 #[test]
@@ -363,7 +382,9 @@ fn g80_auto_m05_is_left_alone_when_the_section_ends() {
         .take_while(|l| *l != "M02")
         .collect();
     assert!(
-        !after_g80.iter().any(|l| l.starts_with("M3") || l.starts_with("M4")),
+        !after_g80
+            .iter()
+            .any(|l| l.starts_with("M3") || l.starts_with("M4")),
         "no spurious spindle restart before the section ends:\n{g}"
     );
 }

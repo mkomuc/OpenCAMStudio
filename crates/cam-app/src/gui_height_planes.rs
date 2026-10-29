@@ -244,7 +244,8 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -278,12 +279,14 @@ mod tests {
             original.setup().heights
         );
         assert!(app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .iter()
             .filter(|o| o.id() != id)
             .all(|o| !app
-                .controller.inspection_setup()
+                .controller
+                .inspection_setup()
                 .height_settings
                 .contains_key(&o.id())));
         let path = std::env::temp_dir().join(format!(
@@ -352,7 +355,8 @@ mod tests {
         let _ = app.update(Message::OperationTabChanged(OperationTab::Tool));
         assert!(app.height_preview(camera, 0.).is_none());
         assert!(app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .height_settings
             .contains_key(&id));
     }
@@ -433,7 +437,8 @@ mod tests {
         ] {
             app.controller.new_operation(kind);
             let id = app
-                .controller.inspection_setup()
+                .controller
+                .inspection_setup()
                 .operations
                 .last()
                 .unwrap()
@@ -480,8 +485,7 @@ mod tests {
                 index: 2,
                 position: [-476.8, 367., 50.],
             });
-            setup.frame.world_from_setup.rotation =
-                [[-1., 0., 0.], [0., 0., 1.], [0., 1., 0.]];
+            setup.frame.world_from_setup.rotation = [[-1., 0., 0.], [0., 0., 1.], [0., 1., 0.]];
         });
         // The editor may be editing a different datum than the tree selection.
         app.operation_draft.as_mut().unwrap().set_work_offset(2);

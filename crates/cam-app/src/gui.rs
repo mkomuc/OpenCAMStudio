@@ -49,30 +49,30 @@ mod height_reference;
 mod inspector_view;
 #[path = "gui_jobs.rs"]
 mod jobs_view;
-#[path = "gui_processing_time.rs"]
-mod processing_time_view;
 #[path = "gui_output.rs"]
 mod output_view;
+#[path = "gui_processing_time.rs"]
+mod processing_time_view;
 use jobs_view::ToolpathAction;
 #[path = "gui_backplot_preview.rs"]
 mod backplot_preview_view;
 #[path = "gui_simulation.rs"]
 mod simulation_view;
 use simulation_view::{SimulationOption, SimulationPlayer, SimulationTab};
-#[path = "gui_operation_metadata.rs"]
-mod operation_metadata;
-#[path = "gui_thread_parameters.rs"]
-mod thread_parameters;
-#[path = "gui_operation_tabs.rs"]
-mod operation_tabs;
-#[path = "gui_operation_sections.rs"]
-mod operation_sections;
 #[path = "gui_operation_linking.rs"]
 mod operation_linking;
-#[path = "gui_setup_editor.rs"]
-mod setup_editor_view;
+#[path = "gui_operation_metadata.rs"]
+mod operation_metadata;
+#[path = "gui_operation_sections.rs"]
+mod operation_sections;
+#[path = "gui_operation_tabs.rs"]
+mod operation_tabs;
 #[path = "gui_pattern_editor.rs"]
 mod pattern_editor_view;
+#[path = "gui_setup_editor.rs"]
+mod setup_editor_view;
+#[path = "gui_thread_parameters.rs"]
+mod thread_parameters;
 use operation_tabs::OperationTab;
 #[path = "gui_project_tree.rs"]
 mod project_tree_view;
@@ -84,35 +84,40 @@ use workspace_view::Workspace;
 mod geometry_selection;
 #[path = "gui_operation_geometry.rs"]
 mod operation_geometry;
-use operation_geometry::GeometryMessage;
 use geometry_selection::{
     cad_geometry_labels, drawing_geometry_labels, operation_geometry_labels, ProfileSelectionMode,
 };
+use operation_geometry::GeometryMessage;
 #[path = "gui_creation.rs"]
 mod creation;
+#[path = "gui_cutting_data.rs"]
+mod cutting_data;
+#[cfg(test)]
+#[path = "gui_performance.rs"]
+mod performance;
 #[path = "gui_tool_presets.rs"]
 mod tool_presets;
 use tool_presets::{MaterialChoice, PresetChoice, PresetField};
 #[path = "gui_grid.rs"]
 mod grid_view;
+#[path = "gui_help.rs"]
+mod illustrated_help;
+#[path = "gui_operation_positions.rs"]
+mod operation_positions;
 #[path = "gui_operation_preview.rs"]
 mod operation_preview;
 #[path = "gui_picking.rs"]
 mod picking_view;
-#[path = "gui_profile_entries.rs"]
-mod profile_entries_view;
-#[path = "gui_profile_sides.rs"]
-mod profile_sides;
-#[path = "gui_help.rs"]
-mod illustrated_help;
-#[path = "gui_profile_parameters.rs"]
-mod profile_parameters;
 #[path = "gui_pocket_parameters.rs"]
 mod pocket_parameters;
+#[path = "gui_profile_entries.rs"]
+mod profile_entries_view;
+#[path = "gui_profile_parameters.rs"]
+mod profile_parameters;
+#[path = "gui_profile_sides.rs"]
+mod profile_sides;
 #[path = "gui_profile_tabs.rs"]
 mod profile_tabs;
-#[path = "gui_operation_positions.rs"]
-mod operation_positions;
 #[path = "gui_wcs.rs"]
 mod wcs_view;
 use picking_view::{SetupFeature, SetupHover, SetupPickGeometry};
@@ -125,8 +130,8 @@ mod unsaved;
 use unsaved::DiscardAction;
 #[path = "gui_status.rs"]
 mod status_view;
-use status_view::{StatusMessages, StatusTarget};
 use operation_metadata::operation_fields;
+use status_view::{StatusMessages, StatusTarget};
 
 /// Ribbon palette and metrics, adopted from **OpenCADStudio**'s ribbon
 /// (`HakanSeven12/OpenCADStudio`, GPL-3.0) so users moving CAD → CAM meet a
@@ -793,11 +798,16 @@ impl LeadKind {
         match self {
             LeadKind::None => Lead::None,
             LeadKind::Linear => Lead::Linear { length: size },
-            LeadKind::Arc => if let Lead::ArcSweep { angle_deg, .. } = prev {
-                Lead::ArcSweep { radius: size, angle_deg }
-            } else {
-                Lead::Arc { radius: size }
-            },
+            LeadKind::Arc => {
+                if let Lead::ArcSweep { angle_deg, .. } = prev {
+                    Lead::ArcSweep {
+                        radius: size,
+                        angle_deg,
+                    }
+                } else {
+                    Lead::Arc { radius: size }
+                }
+            }
         }
     }
 }
@@ -1192,7 +1202,9 @@ enum Field {
     /// Operation spindle speed (rpm) — `M3 S<rpm>`. Seeded from the tool's nominal
     /// RPM when the operation is created; `0` falls back to the job default.
     SpindleRpm,
+    CuttingSpeed,
     Feed,
+    FeedPerTooth,
     PlungeFeed,
     RampFeed,
     LeadInFeed,
@@ -1346,7 +1358,9 @@ impl Field {
             Field::StockLeaveAxial => "Axial stock to leave (mm)",
             Field::Stepover => "Stepover (mm)",
             Field::SpindleRpm => "Spindle (rpm)",
+            Field::CuttingSpeed => "Cutting speed (m/min)",
             Field::Feed => "Feed (mm/min)",
+            Field::FeedPerTooth => "Feed per tooth (mm/tooth)",
             Field::PlungeFeed => "Plunge feed (mm/min)",
             Field::RampFeed => "Ramp feed (0=cutting)",
             Field::LeadInFeed => "Lead-in feed (0=cutting)",
@@ -1587,6 +1601,8 @@ impl Field {
                  the tool's nominal RPM when the operation is created; edit it for this cut. \
                  0 falls back to the job default."
             }
+            Field::CuttingSpeed => "Surface speed at the cutter diameter: π × diameter × RPM / 1000 (m/min). Editing this value updates spindle RPM.",
+            Field::FeedPerTooth => "Feed per cutting tooth: cutting feed / (RPM × flute count), in mm/tooth. Editing this value updates cutting feed. RPM changes recalculate this value while retaining cutting feed.",
             Field::Feed => "Cutting feed rate — how fast the tool advances while cutting (mm/min).",
             Field::RampFeed => "Ramp, helix and zigzag entry feed in mm/min. Zero inherits the cutting feed.",
             Field::LeadInFeed => "Lead-in feed in mm/min. Zero inherits the cutting feed. Used when a lead-in is generated.",
@@ -1893,7 +1909,10 @@ fn set_lead_size(lead: Lead, size: f64) -> Lead {
         Lead::None => Lead::None,
         Lead::Linear { .. } => Lead::Linear { length: size },
         Lead::Arc { .. } => Lead::Arc { radius: size },
-        Lead::ArcSweep { angle_deg, .. } => Lead::ArcSweep { radius: size, angle_deg },
+        Lead::ArcSweep { angle_deg, .. } => Lead::ArcSweep {
+            radius: size,
+            angle_deg,
+        },
     }
 }
 
@@ -2028,6 +2047,7 @@ struct App {
     discarding_confirmed: bool,
     mcp: Option<std::sync::mpsc::Receiver<mcp::Request>>,
     viewport_cache: std::cell::RefCell<Option<(workspace_view::ViewportKey, Viewport)>>,
+    profile_contour_cache: std::cell::RefCell<profile_sides::ProfileContourCache>,
     cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
     notice: Option<Notice>,
     notice_queue: VecDeque<Notice>,
@@ -3163,9 +3183,7 @@ impl App {
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
-        self.stock_to_leave_draft = Some(
-            self.controller.inspection_setup().stock_to_leave_for(id),
-        );
+        self.stock_to_leave_draft = Some(self.controller.inspection_setup().stock_to_leave_for(id));
         if matches!(self.operation_draft, Some(Operation::Profile(_))) {
             let first = self
                 .controller
@@ -3188,7 +3206,8 @@ impl App {
 
     fn stage_operation_tool(&mut self, mut tool: cam_model::Tool) -> u32 {
         if let Some(number) = self
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .tools
             .iter()
             .find(|saved| saved.identity() == tool.identity())
@@ -3213,7 +3232,8 @@ impl App {
             return number;
         }
         let number = self
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .tools
             .iter()
             .chain(self.operation_tools.iter())
@@ -3435,6 +3455,7 @@ impl App {
             discarding_confirmed: false,
             mcp: None,
             viewport_cache: Default::default(),
+            profile_contour_cache: Default::default(),
             cad_scene_cache: Default::default(),
             notice: None,
             notice_queue: VecDeque::new(),
@@ -3634,7 +3655,10 @@ impl App {
             return iced::Task::none();
         }
         if self.pending_discard.is_some()
-            && !matches!(message, Message::WindowResized(_) | Message::WindowCursor(_))
+            && !matches!(
+                message,
+                Message::WindowResized(_) | Message::WindowCursor(_)
+            )
         {
             return iced::Task::none();
         }
@@ -3697,17 +3721,27 @@ impl App {
             | Message::ProfileChainEdgesChanged(_) => true,
             _ => false,
         };
-        let sync_thread = matches!(&message,
-            Message::ThreadParameters(_) | Message::ThreadInternalChanged(_)
-                | Message::CadSelect(_) | Message::CadPicked(_) | Message::PickWorld(_, _)
-                | Message::OperationGeometry(_) | Message::GeometryRemove(_) | Message::GeometryClear
-                | Message::ConfirmCadOperation | Message::UseDrawingGeometry | Message::BeginOp(_)
+        let sync_thread = matches!(
+            &message,
+            Message::ThreadParameters(_)
+                | Message::ThreadInternalChanged(_)
+                | Message::CadSelect(_)
+                | Message::CadPicked(_)
+                | Message::PickWorld(_, _)
+                | Message::OperationGeometry(_)
+                | Message::GeometryRemove(_)
+                | Message::GeometryClear
+                | Message::ConfirmCadOperation
+                | Message::UseDrawingGeometry
+                | Message::BeginOp(_)
                 | Message::OperationToolPicked(_)
         );
         let previous_status = self.status.clone();
         let context = self.output_context();
         let task = self.update_message(message);
-        if sync_thread { self.sync_thread_standard(); }
+        if sync_thread {
+            self.sync_thread_standard();
+        }
         if self.status != previous_status {
             self.append_output(&context, &self.status.clone());
         }
@@ -3795,11 +3829,15 @@ impl App {
             self.operation_geometry_message(GeometryMessage::Confirm);
             return iced::Task::none();
         }
-        if self.profile_entry_editor.is_some() && matches!(message,Message::Apply|Message::ConfirmOp) {
-            self.status="Finish or cancel the geometry entry settings first.".into();
+        if self.profile_entry_editor.is_some()
+            && matches!(message, Message::Apply | Message::ConfirmOp)
+        {
+            self.status = "Finish or cancel the geometry entry settings first.".into();
             return iced::Task::none();
         }
-        if matches!(message,Message::CancelOp|Message::CancelOperationDraft) { self.profile_entry_editor=None; }
+        if matches!(message, Message::CancelOp | Message::CancelOperationDraft) {
+            self.profile_entry_editor = None;
+        }
         if self.notice.is_some() {
             if matches!(&message, Message::CadEscape | Message::Apply) {
                 return self.update(Message::NoticeDismissed);
@@ -3973,11 +4011,16 @@ impl App {
                 | Message::OpenSample
         ) {
             self.geometry_additive = false;
-            if matches!(message, Message::CadEscape | Message::CancelOperationDraft | Message::CancelOp) {
+            if matches!(
+                message,
+                Message::CadEscape | Message::CancelOperationDraft | Message::CancelOp
+            ) {
                 self.geometry_auto_pick = false;
             }
             self.geometry_row_selection = None;
-            if self.operation_position_pick.take().is_some() && matches!(message, Message::CadEscape) {
+            if self.operation_position_pick.take().is_some()
+                && matches!(message, Message::CadEscape)
+            {
                 self.status = "Position selection cancelled.".into();
                 return iced::Task::none();
             }
@@ -4027,22 +4070,34 @@ impl App {
                 }
             }
             Message::SimulationToolpathStart => {
-                if let Some(player) = &mut self.simulation { player.seek_end(false); }
+                if let Some(player) = &mut self.simulation {
+                    player.seek_end(false);
+                }
             }
             Message::SimulationPreviousOperation => {
-                if let Some(player) = &mut self.simulation { player.seek_operation(false); }
+                if let Some(player) = &mut self.simulation {
+                    player.seek_operation(false);
+                }
             }
             Message::SimulationPreviousPoint => {
-                if let Some(player) = &mut self.simulation { player.seek_point(false); }
+                if let Some(player) = &mut self.simulation {
+                    player.seek_point(false);
+                }
             }
             Message::SimulationNextPoint => {
-                if let Some(player) = &mut self.simulation { player.seek_point(true); }
+                if let Some(player) = &mut self.simulation {
+                    player.seek_point(true);
+                }
             }
             Message::SimulationNextOperation => {
-                if let Some(player) = &mut self.simulation { player.seek_operation(true); }
+                if let Some(player) = &mut self.simulation {
+                    player.seek_operation(true);
+                }
             }
             Message::SimulationToolpathEnd => {
-                if let Some(player) = &mut self.simulation { player.seek_end(true); }
+                if let Some(player) = &mut self.simulation {
+                    player.seek_end(true);
+                }
             }
             Message::SimulationSpeed(speed) => {
                 if let Some(player) = &mut self.simulation {
@@ -4114,8 +4169,8 @@ impl App {
                     && self.cad_pending_kind.is_none()
                     && self.cad_editing_op.is_none();
                 if tab == OperationTab::Geometry && self.operation_uses_cad_geometry() {
-                    self.geometry_additive = self.cad_pending_kind.is_some()
-                        || self.cad_editing_op.is_some();
+                    self.geometry_additive =
+                        self.cad_pending_kind.is_some() || self.cad_editing_op.is_some();
                     self.cad_filter_explicit = false;
                 } else if tab != OperationTab::Geometry {
                     self.geometry_additive = false;
@@ -4153,7 +4208,11 @@ impl App {
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(p) = op {
                         p.tabs.manual = mode == profile_tabs::Positioning::Manual;
-                        p.tabs.count = if mode == profile_tabs::Positioning::ByCount { Some(p.tabs.count.unwrap_or(4)) } else { None };
+                        p.tabs.count = if mode == profile_tabs::Positioning::ByCount {
+                            Some(p.tabs.count.unwrap_or(4))
+                        } else {
+                            None
+                        };
                         if let Some(spacing) = spacing {
                             p.tabs.spacing = spacing;
                         }
@@ -4204,27 +4263,36 @@ impl App {
                     if selected == index {
                         None
                     } else {
-                        Some(if selected > index { selected - 1 } else { selected })
+                        Some(if selected > index {
+                            selected - 1
+                        } else {
+                            selected
+                        })
                     }
                 });
-                let mut positions = self.profile_tab_operation().map(|op| {
-                    if op.tabs.manual {
-                        op.tabs.positions
-                    } else {
-                        // Keep the precise footprints around offset corners when
-                        // converting automatic placements to editable manual tabs.
-                        self.profile_tab_diameter(&op)
-                            .map(|diameter| {
-                                cam_toolpath::profile_tab_preview(
-                                    &op, diameter, cam_cldata::SpindleDir::Cw,
-                                )
-                                .into_iter()
-                                .map(|tab| tab.center)
-                                .collect()
-                            })
-                            .unwrap_or_default()
-                    }
-                }).unwrap_or_default();
+                let mut positions = self
+                    .profile_tab_operation()
+                    .map(|op| {
+                        if op.tabs.manual {
+                            op.tabs.positions
+                        } else {
+                            // Keep the precise footprints around offset corners when
+                            // converting automatic placements to editable manual tabs.
+                            self.profile_tab_diameter(&op)
+                                .map(|diameter| {
+                                    cam_toolpath::profile_tab_preview(
+                                        &op,
+                                        diameter,
+                                        cam_cldata::SpindleDir::Cw,
+                                    )
+                                    .into_iter()
+                                    .map(|tab| tab.center)
+                                    .collect()
+                                })
+                                .unwrap_or_default()
+                        }
+                    })
+                    .unwrap_or_default();
                 if index < positions.len() {
                     positions.remove(index);
                     self.edit_operation_draft(|op| {
@@ -4245,51 +4313,79 @@ impl App {
                 });
             }
             Message::PocketFinishToggle(toggle, value) => {
-                let parsed = self.fields.iter().filter_map(|(f, s)| {
-                    s.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (*f, v))
-                }).collect();
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
                 self.edit_operation_draft(|op| {
                     apply_op_fields(op, &parsed);
-                    if let Operation::Pocket(p) = op { toggle.set(&mut p.finishing, value); }
+                    if let Operation::Pocket(p) = op {
+                        toggle.set(&mut p.finishing, value);
+                    }
                 });
                 self.refresh_operation_fields();
             }
             Message::ProfilePassToggle(toggle, value) => {
-                let parsed = self.fields.iter().filter_map(|(f, s)| {
-                    s.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (*f, v))
-                }).collect();
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
                 self.edit_operation_draft(|op| {
                     apply_op_fields(op, &parsed);
-                    if let Operation::Profile(p) = op { toggle.set(p, value); }
+                    if let Operation::Profile(p) = op {
+                        toggle.set(p, value);
+                    }
                 });
                 self.refresh_operation_fields();
             }
             Message::ProfileOrder(order) => {
                 self.edit_operation_draft(|op| {
-                    if let Operation::Profile(p) = op { p.passes.order = order; }
+                    if let Operation::Profile(p) = op {
+                        p.passes.order = order;
+                    }
                 });
                 self.refresh_operation_fields();
             }
             Message::ProfileStockBoundary(choice) => {
                 let boundary = match choice {
                     profile_parameters::StockChoice::Setup => None,
-                    profile_parameters::StockChoice::Drawing(index) => {
-                        self.controller.regions().get(index).map(|p| p.outer().clone())
-                    }
+                    profile_parameters::StockChoice::Drawing(index) => self
+                        .controller
+                        .regions()
+                        .get(index)
+                        .map(|p| p.outer().clone()),
                     profile_parameters::StockChoice::Saved => return iced::Task::none(),
                 };
                 self.edit_operation_draft(|op| {
-                    if let Operation::Profile(p) = op { p.passes.stock_boundary = boundary; }
+                    if let Operation::Profile(p) = op {
+                        p.passes.stock_boundary = boundary;
+                    }
                 });
             }
             Message::ProfileCorner(corner) => {
                 self.edit_operation_draft(|op| {
-                    if let Operation::Profile(p) = op { p.passes.outer_corner = corner; }
+                    if let Operation::Profile(p) = op {
+                        p.passes.outer_corner = corner;
+                    }
                 });
             }
             Message::ProfileTabShape(shape) => {
                 self.edit_operation_draft(|op| {
-                    if let Operation::Profile(p) = op { p.tabs.shape = shape; }
+                    if let Operation::Profile(p) = op {
+                        p.tabs.shape = shape;
+                    }
                 });
             }
             Message::ProfileCompChanged(comp) => {
@@ -4346,6 +4442,7 @@ impl App {
                     });
                     self.refresh_operation_fields();
                     self.auto_operation_preset();
+                    self.refresh_cutting_fields(None);
                 }
             }
             Message::EditDrawingGeometry(id) => {
@@ -4393,22 +4490,26 @@ impl App {
             Message::OpenSample => {
                 self.pending_processing_time = None;
                 match self.controller.open_dxf(SAMPLE_DXF, "sample.dxf") {
-                Ok(n) => {
-                    self.status_messages = StatusMessages::default();
-                    self.reset_model_browser();
-                    self.planar_selection.clear();
-                    self.focus_ops.clear();
-                    self.controller.select(Selection::Setup);
-                    self.end_setup_draft();
-                    self.refresh_fields();
-                    self.status = format!("Imported {n} region(s).");
-                    self.rerun();
-                }
-                Err(e) => self.status = format!("Import failed: {e}"),
+                    Ok(n) => {
+                        self.status_messages = StatusMessages::default();
+                        self.reset_model_browser();
+                        self.planar_selection.clear();
+                        self.focus_ops.clear();
+                        self.controller.select(Selection::Setup);
+                        self.end_setup_draft();
+                        self.refresh_fields();
+                        self.status = format!("Imported {n} region(s).");
+                        self.rerun();
+                    }
+                    Err(e) => self.status = format!("Import failed: {e}"),
                 }
             }
             Message::SelectSetup(id) => {
-                if self.pattern_draft.is_some() { self.status = "Apply or cancel the pattern draft before switching setups.".into(); return iced::Task::none(); }
+                if self.pattern_draft.is_some() {
+                    self.status =
+                        "Apply or cancel the pattern draft before switching setups.".into();
+                    return iced::Task::none();
+                }
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before switching setups.".into();
                 } else if let Err(error) = self.controller.activate_setup(id) {
@@ -4547,13 +4648,14 @@ impl App {
             Message::SetupToolChangeAutomatic(automatic) => {
                 self.setup_values.remove(&41);
                 if let Some(draft) = &mut self.setup_draft {
-                    draft.tool_change_height = if automatic {
-                        None
-                    } else {
-                        Some(draft.resolved_tool_change_height(
-                            self.controller.machine().envelope.max.z,
-                        ))
-                    };
+                    draft.tool_change_height =
+                        if automatic {
+                            None
+                        } else {
+                            Some(draft.resolved_tool_change_height(
+                                self.controller.machine().envelope.max.z,
+                            ))
+                        };
                 }
             }
             Message::SetupToolChangeHeightChanged(value) => {
@@ -4702,17 +4804,56 @@ impl App {
             }
             Message::PatternTabChanged(tab) => self.pattern_tab = tab,
             Message::BeginPattern(circular) => {
-                if self.setup_draft_dirty() { self.status = "Apply or cancel setup changes before editing a pattern.".into(); return iced::Task::none(); }
+                if self.setup_draft_dirty() {
+                    self.status = "Apply or cancel setup changes before editing a pattern.".into();
+                    return iced::Task::none();
+                }
                 self.end_setup_draft();
                 self.simulation = None;
                 self.pattern_tab = pattern_editor_view::PatternTab::Placement;
-                let Some(setup) = self.controller.setups().iter().find(|s| s.id == self.controller.active_setup_id()) else { return iced::Task::none(); };
-                let members: Vec<u32> = if self.focus_ops.is_empty() { Vec::new() } else { self.focus_ops.iter().copied().collect() };
+                let Some(setup) = self
+                    .controller
+                    .setups()
+                    .iter()
+                    .find(|s| s.id == self.controller.active_setup_id())
+                else {
+                    return iced::Task::none();
+                };
+                let members: Vec<u32> = if self.focus_ops.is_empty() {
+                    Vec::new()
+                } else {
+                    self.focus_ops.iter().copied().collect()
+                };
                 let origin = setup.origin_position(self.controller.active_origin());
                 self.pattern_draft = Some(PatternDraft {
-                    setup_id: setup.id, pattern_id: None, name: "Pattern".into(), members, circular, order: cam_model::PatternOrder::ByInstance, clockwise: false,
-                    options: cam_model::PatternOptions { spacing: if circular { cam_model::PatternSpacing::Extent } else { cam_model::PatternSpacing::Spacing }, second_direction: false, ..Default::default() }, picking: None, highlighted: None,
-                    values: if circular { ["4".into(), origin[0].to_string(), origin[1].to_string(), "360".into()] } else { ["2".into(), "2".into(), "20".into(), "20".into()] },
+                    setup_id: setup.id,
+                    pattern_id: None,
+                    name: "Pattern".into(),
+                    members,
+                    circular,
+                    order: cam_model::PatternOrder::ByInstance,
+                    clockwise: false,
+                    options: cam_model::PatternOptions {
+                        spacing: if circular {
+                            cam_model::PatternSpacing::Extent
+                        } else {
+                            cam_model::PatternSpacing::Spacing
+                        },
+                        second_direction: false,
+                        ..Default::default()
+                    },
+                    picking: None,
+                    highlighted: None,
+                    values: if circular {
+                        [
+                            "4".into(),
+                            origin[0].to_string(),
+                            origin[1].to_string(),
+                            "360".into(),
+                        ]
+                    } else {
+                        ["2".into(), "2".into(), "20".into(), "20".into()]
+                    },
                 });
                 self.controller.select(Selection::Setup);
                 self.inspector_active = true;
@@ -4720,44 +4861,156 @@ impl App {
                 self.status = "Choose source operations and pattern placement, then create or cancel the draft.".into();
             }
             Message::EditPattern(id) => {
-                if self.setup_draft_dirty() { self.status = "Apply or cancel setup changes before editing a pattern.".into(); return iced::Task::none(); }
+                if self.setup_draft_dirty() {
+                    self.status = "Apply or cancel setup changes before editing a pattern.".into();
+                    return iced::Task::none();
+                }
                 self.end_setup_draft();
                 self.simulation = None;
                 self.pattern_tab = pattern_editor_view::PatternTab::Placement;
-                let Some((setup_id, pattern)) = self.controller.setups().iter().find_map(|setup| setup.patterns.iter().find(|p| p.id == id).map(|p| (setup.id, p.clone()))) else { self.status = "Pattern no longer exists.".into(); return iced::Task::none(); };
+                let Some((setup_id, pattern)) = self.controller.setups().iter().find_map(|setup| {
+                    setup
+                        .patterns
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| (setup.id, p.clone()))
+                }) else {
+                    self.status = "Pattern no longer exists.".into();
+                    return iced::Task::none();
+                };
                 let (circular, clockwise, values) = match pattern.kind {
-                    cam_model::PatternKind::Rectangular { nx, ny, dx, dy } => (false, false, [nx.to_string(), ny.to_string(), dx.to_string(), dy.to_string()]),
-                    cam_model::PatternKind::Circular { center_xy, count, distribution, direction } => {
-                        let sweep = match distribution { cam_model::CircularDistribution::Full => 360.0, cam_model::CircularDistribution::Partial { sweep_degrees } => sweep_degrees, cam_model::CircularDistribution::Spacing { angle_degrees } => angle_degrees };
-                        (true, direction == cam_model::PatternDirection::Cw, [count.to_string(), center_xy[0].to_string(), center_xy[1].to_string(), sweep.to_string()])
+                    cam_model::PatternKind::Rectangular { nx, ny, dx, dy } => (
+                        false,
+                        false,
+                        [
+                            nx.to_string(),
+                            ny.to_string(),
+                            dx.to_string(),
+                            dy.to_string(),
+                        ],
+                    ),
+                    cam_model::PatternKind::Circular {
+                        center_xy,
+                        count,
+                        distribution,
+                        direction,
+                    } => {
+                        let sweep = match distribution {
+                            cam_model::CircularDistribution::Full => 360.0,
+                            cam_model::CircularDistribution::Partial { sweep_degrees } => {
+                                sweep_degrees
+                            }
+                            cam_model::CircularDistribution::Spacing { angle_degrees } => {
+                                angle_degrees
+                            }
+                        };
+                        (
+                            true,
+                            direction == cam_model::PatternDirection::Cw,
+                            [
+                                count.to_string(),
+                                center_xy[0].to_string(),
+                                center_xy[1].to_string(),
+                                sweep.to_string(),
+                            ],
+                        )
                     }
                 };
                 let mut options = pattern.options;
                 if let cam_model::PatternKind::Circular { distribution, .. } = pattern.kind {
-                    options.spacing = if matches!(distribution, cam_model::CircularDistribution::Spacing { .. }) { cam_model::PatternSpacing::Spacing } else { cam_model::PatternSpacing::Extent };
+                    options.spacing = if matches!(
+                        distribution,
+                        cam_model::CircularDistribution::Spacing { .. }
+                    ) {
+                        cam_model::PatternSpacing::Spacing
+                    } else {
+                        cam_model::PatternSpacing::Extent
+                    };
                 }
-                self.pattern_draft = Some(PatternDraft { setup_id, pattern_id: Some(id), name: pattern.name, members: pattern.members, circular, order: pattern.order, clockwise, options, picking: None, highlighted: None, values });
+                self.pattern_draft = Some(PatternDraft {
+                    setup_id,
+                    pattern_id: Some(id),
+                    name: pattern.name,
+                    members: pattern.members,
+                    circular,
+                    order: pattern.order,
+                    clockwise,
+                    options,
+                    picking: None,
+                    highlighted: None,
+                    values,
+                });
                 self.controller.activate_setup(setup_id).ok();
                 self.controller.select(Selection::Setup);
                 self.inspector_active = true;
                 self.inspector_enabled = true;
             }
-            Message::PatternName(value) => if let Some(draft) = self.pattern_draft.as_mut() { draft.name = value; },
-            Message::PatternValue(index, value) => if let Some(draft) = self.pattern_draft.as_mut() { if index < 4 {
-                draft.values[index] = value;
-                if draft.circular && (index == 1 || index == 2) { draft.options.axis = None; }
-            } },
-            Message::PatternMember(id, checked) => if let Some(draft) = self.pattern_draft.as_mut() {
-                if checked { if !draft.members.contains(&id) { draft.members.push(id); } } else { draft.members.retain(|member| *member != id); }
-            },
-            Message::PatternOrderChanged(order) => if let Some(draft) = self.pattern_draft.as_mut() { draft.order = order; },
+            Message::PatternName(value) => {
+                if let Some(draft) = self.pattern_draft.as_mut() {
+                    draft.name = value;
+                }
+            }
+            Message::PatternValue(index, value) => {
+                if let Some(draft) = self.pattern_draft.as_mut() {
+                    if index < 4 {
+                        draft.values[index] = value;
+                        if draft.circular && (index == 1 || index == 2) {
+                            draft.options.axis = None;
+                        }
+                    }
+                }
+            }
+            Message::PatternMember(id, checked) => {
+                if let Some(draft) = self.pattern_draft.as_mut() {
+                    if checked {
+                        if !draft.members.contains(&id) {
+                            draft.members.push(id);
+                        }
+                    } else {
+                        draft.members.retain(|member| *member != id);
+                    }
+                }
+            }
+            Message::PatternOrderChanged(order) => {
+                if let Some(draft) = self.pattern_draft.as_mut() {
+                    draft.order = order;
+                }
+            }
             Message::PatternTypeChanged(circular) => self.change_pattern_type(circular),
-            Message::PatternSpacingChanged(spacing) => if let Some(draft) = &mut self.pattern_draft { draft.options.spacing = spacing; },
-            Message::PatternSecondDirection(enabled) => if let Some(draft) = &mut self.pattern_draft { draft.options.second_direction = enabled; },
-            Message::PatternKeepOriginal(enabled) => if let Some(draft) = &mut self.pattern_draft { draft.options.keep_original = enabled; },
-            Message::PatternReverse(enabled) => if let Some(draft) = &mut self.pattern_draft { draft.options.reverse = enabled; },
-            Message::PatternAxisReversed(axis, enabled) => if let Some(draft) = &mut self.pattern_draft { if axis < 2 { draft.options.directions[axis].reversed = enabled; } },
-            Message::PatternSymmetric(axis, enabled) => if let Some(draft) = &mut self.pattern_draft { if axis < 2 { draft.options.directions[axis].symmetric = enabled; } },
+            Message::PatternSpacingChanged(spacing) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    draft.options.spacing = spacing;
+                }
+            }
+            Message::PatternSecondDirection(enabled) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    draft.options.second_direction = enabled;
+                }
+            }
+            Message::PatternKeepOriginal(enabled) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    draft.options.keep_original = enabled;
+                }
+            }
+            Message::PatternReverse(enabled) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    draft.options.reverse = enabled;
+                }
+            }
+            Message::PatternAxisReversed(axis, enabled) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    if axis < 2 {
+                        draft.options.directions[axis].reversed = enabled;
+                    }
+                }
+            }
+            Message::PatternSymmetric(axis, enabled) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    if axis < 2 {
+                        draft.options.directions[axis].symmetric = enabled;
+                    }
+                }
+            }
             Message::PatternHighlight(axis) => {
                 if let Some(draft) = &mut self.pattern_draft {
                     draft.picking = None;
@@ -4766,47 +5019,119 @@ impl App {
                 self.cad_hover = None;
                 self.cad_candidates.clear();
                 self.status = "Selected pattern edge highlighted.".into();
-            },
+            }
             Message::PatternPick(axis) => {
                 self.cancel_setup_picks();
-                if let Some(draft) = &mut self.pattern_draft { draft.picking = Some(axis); }
+                if let Some(draft) = &mut self.pattern_draft {
+                    draft.picking = Some(axis);
+                }
                 self.cad_filter = CadFilter::Edge;
                 self.cad_candidates.clear();
-                self.status = if axis == 2 { "Select a circular edge or a straight axis parallel to setup Z." } else { "Select a straight edge in setup XY." }.into();
-            },
-            Message::PatternClear(axis) => if let Some(draft) = &mut self.pattern_draft {
-                draft.picking = None;
-                if draft.highlighted == Some(axis) { draft.highlighted = None; }
-                if axis < 2 { draft.options.directions[axis].reference = None; draft.options.directions[axis].angle_degrees = if axis == 0 { 0.0 } else { 90.0 }; }
-                else { draft.options.axis = None; }
-            },
-            Message::PatternDirectionChanged(clockwise) => if let Some(draft) = self.pattern_draft.as_mut() { draft.clockwise = clockwise; },
-            Message::TogglePatternExpanded(id) => { if !self.expanded_patterns.remove(&id) { self.expanded_patterns.insert(id); } },
-            Message::PatternCancel => { self.pattern_draft = None; self.status = "Pattern draft cancelled.".into(); },
+                self.status = if axis == 2 {
+                    "Select a circular edge or a straight axis parallel to setup Z."
+                } else {
+                    "Select a straight edge in setup XY."
+                }
+                .into();
+            }
+            Message::PatternClear(axis) => {
+                if let Some(draft) = &mut self.pattern_draft {
+                    draft.picking = None;
+                    if draft.highlighted == Some(axis) {
+                        draft.highlighted = None;
+                    }
+                    if axis < 2 {
+                        draft.options.directions[axis].reference = None;
+                        draft.options.directions[axis].angle_degrees =
+                            if axis == 0 { 0.0 } else { 90.0 };
+                    } else {
+                        draft.options.axis = None;
+                    }
+                }
+            }
+            Message::PatternDirectionChanged(clockwise) => {
+                if let Some(draft) = self.pattern_draft.as_mut() {
+                    draft.clockwise = clockwise;
+                }
+            }
+            Message::TogglePatternExpanded(id) => {
+                if !self.expanded_patterns.remove(&id) {
+                    self.expanded_patterns.insert(id);
+                }
+            }
+            Message::PatternCancel => {
+                self.pattern_draft = None;
+                self.status = "Pattern draft cancelled.".into();
+            }
             Message::PatternCommit => {
                 if let Some(draft) = self.pattern_draft.clone() {
                     let parsed = pattern_editor_view::configuration_from_draft(&draft);
                     match parsed.and_then(|(kind, options)| {
                         if let Some(id) = draft.pattern_id {
-                            self.controller.edit_pattern_with_options(draft.setup_id, id, &draft.members, draft.name.clone(), kind, draft.order, options)?;
+                            self.controller.edit_pattern_with_options(
+                                draft.setup_id,
+                                id,
+                                &draft.members,
+                                draft.name.clone(),
+                                kind,
+                                draft.order,
+                                options,
+                            )?;
                         } else {
-                            self.controller.create_pattern_with_options(draft.setup_id, &draft.members, draft.name.clone(), kind, draft.order, options)?;
+                            self.controller.create_pattern_with_options(
+                                draft.setup_id,
+                                &draft.members,
+                                draft.name.clone(),
+                                kind,
+                                draft.order,
+                                options,
+                            )?;
                         }
                         Ok(())
                     }) {
-                        Ok(_) => { self.pattern_draft = None; self.inspector_active = false; self.status = "Pattern created. Seed operations remain editable inside the group.".into(); }
+                        Ok(_) => {
+                            self.pattern_draft = None;
+                            self.inspector_active = false;
+                            self.status = "Pattern created. Seed operations remain editable inside the group.".into();
+                        }
                         Err(reason) => self.status = reason,
                     }
                 }
             }
             Message::PatternSuppression(id, suppressed) => {
-                if let Some(setup_id) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == id)).map(|s| s.id) { self.controller.set_pattern_suppressed(setup_id, id, suppressed); }
+                if let Some(setup_id) = self
+                    .controller
+                    .setups()
+                    .iter()
+                    .find(|s| s.patterns.iter().any(|p| p.id == id))
+                    .map(|s| s.id)
+                {
+                    self.controller
+                        .set_pattern_suppressed(setup_id, id, suppressed);
+                }
             }
             Message::PatternDissolve(id) => {
-                if let Some(setup_id) = self.controller.setups().iter().find(|s| s.patterns.iter().any(|p| p.id == id)).map(|s| s.id) { self.controller.dissolve_pattern(setup_id, id); self.status = "Pattern dissolved; source operations remain in place.".into(); }
+                if let Some(setup_id) = self
+                    .controller
+                    .setups()
+                    .iter()
+                    .find(|s| s.patterns.iter().any(|p| p.id == id))
+                    .map(|s| s.id)
+                {
+                    self.controller.dissolve_pattern(setup_id, id);
+                    self.status = "Pattern dissolved; source operations remain in place.".into();
+                }
             }
             Message::PatternDelete(id) => {
-                if let Some((setup_id, count)) = self.controller.setups().iter().find_map(|s| s.patterns.iter().find(|p| p.id == id).map(|p| (s.id, p.members.len()))) { self.controller.delete_pattern_and_operations(setup_id, id); self.status = format!("Deleted pattern and {count} source operation(s)."); }
+                if let Some((setup_id, count)) = self.controller.setups().iter().find_map(|s| {
+                    s.patterns
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| (s.id, p.members.len()))
+                }) {
+                    self.controller.delete_pattern_and_operations(setup_id, id);
+                    self.status = format!("Deleted pattern and {count} source operation(s).");
+                }
             }
             Message::SetupAxisFlip(axis, flipped) => self.set_setup_axis_flip(axis, flipped),
             Message::SetupAxisToggle(axis) => {
@@ -4900,7 +5225,11 @@ impl App {
                 }
             }
             Message::Select(selection) => {
-                if self.pattern_draft.is_some() { self.status = "Apply or cancel the pattern draft before changing selection.".into(); return iced::Task::none(); }
+                if self.pattern_draft.is_some() {
+                    self.status =
+                        "Apply or cancel the pattern draft before changing selection.".into();
+                    return iced::Task::none();
+                }
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before changing selection.".into();
                     return iced::Task::none();
@@ -4924,7 +5253,11 @@ impl App {
                 self.refresh_fields();
             }
             Message::ClickOp(id) => {
-                if self.pattern_draft.is_some() { self.status = "Apply or cancel the pattern draft before changing selection.".into(); return iced::Task::none(); }
+                if self.pattern_draft.is_some() {
+                    self.status =
+                        "Apply or cancel the pattern draft before changing selection.".into();
+                    return iced::Task::none();
+                }
                 if self.setup_draft_dirty() {
                     self.status = "Apply or cancel setup changes before changing selection.".into();
                     return iced::Task::none();
@@ -5087,7 +5420,9 @@ impl App {
                 if matches!(field, Field::MajorDia | Field::Pitch) {
                     self.thread_parameters.mode = thread_parameters::ThreadMatchMode::Manual;
                 }
-                if matches!(field, Field::TabSpacing | Field::StartX | Field::StartY) { self.profile_tab_selection = None; }
+                if matches!(field, Field::TabSpacing | Field::StartX | Field::StartY) {
+                    self.profile_tab_selection = None;
+                }
                 if self.creating_operation() {
                     self.creation_edited_fields.insert(field);
                 }
@@ -5106,6 +5441,7 @@ impl App {
                         op
                     });
                 self.fields.insert(field, value);
+                self.edit_cutting_field(field);
                 if matches!(field, Field::ChamferWidth | Field::ChamferDepth) {
                     if self.creating_operation() {
                         self.sync_creation_geometry_heights();
@@ -5140,7 +5476,8 @@ impl App {
                 self.machine_post_edit = Some(kind);
             }
             Message::EstlcamOutputChanged(output, enabled) => {
-                let mut options = self.machine_estlcam_edit
+                let mut options = self
+                    .machine_estlcam_edit
                     .unwrap_or(self.controller.estlcam_options());
                 match output {
                     1 => options.output_1 = enabled,
@@ -5166,6 +5503,11 @@ impl App {
                     && self.inspector_dirty()
                 {
                     self.apply_inspector();
+                    // A committed edit ends the inspector session. Failed applies
+                    // leave the draft dirty, so the inspector stays open for fixes.
+                    if !self.inspector_dirty() {
+                        self.inspector_active = false;
+                    }
                 }
             }
             Message::CancelOperationDraft => {
@@ -5353,10 +5695,14 @@ impl App {
                         })
                     }) {
                         let operation = (self.focus_ops.len() == 1)
-                            .then(|| self.focus_ops.iter().next().copied()).flatten();
+                            .then(|| self.focus_ops.iter().next().copied())
+                            .flatten();
                         match SimulationPlayer::new_for_operation(&self.controller, operation) {
                             Ok(mut player) => {
-                                player.configure(&self.settings.simulation, self.settings.view.stock_color);
+                                player.configure(
+                                    &self.settings.simulation,
+                                    self.settings.view.stock_color,
+                                );
                                 self.simulation = Some(player);
                                 self.status =
                                     "Simulation ready. Press Play or drag the timeline.".into();
@@ -5395,7 +5741,10 @@ impl App {
             Message::GeometryFilterChanged(filter) => {
                 let _ = self.pick_operation_geometry();
                 if self.cad_filter != filter
-                    && !matches!(self.geometry_operation_kind(), Some(OpKind::Adaptive | OpKind::Parallel))
+                    && !matches!(
+                        self.geometry_operation_kind(),
+                        Some(OpKind::Adaptive | OpKind::Parallel)
+                    )
                 {
                     self.remove_operation_geometry(None);
                 }
@@ -5412,12 +5761,24 @@ impl App {
             }
             Message::CadHover(entity) => self.cad_hover = entity,
             Message::CadPicked(candidates) => {
-                if self.pattern_draft.as_ref().is_some_and(|draft| draft.picking.is_some()) {
-                    if let Some(candidate) = candidates.first() { self.pattern_entity_picked(candidate.entity.clone()); }
+                if self
+                    .pattern_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.picking.is_some())
+                {
+                    if let Some(candidate) = candidates.first() {
+                        self.pattern_entity_picked(candidate.entity.clone());
+                    }
                     return iced::Task::none();
                 }
-                if self.profile_entry_editor.as_ref().is_some_and(|e|e.picking) {
-                    if let Some(candidate)=candidates.first(){self.profile_entry_cad_pick(candidate.entity.clone());}
+                if self
+                    .profile_entry_editor
+                    .as_ref()
+                    .is_some_and(|e| e.picking)
+                {
+                    if let Some(candidate) = candidates.first() {
+                        self.profile_entry_cad_pick(candidate.entity.clone());
+                    }
                     return iced::Task::none();
                 }
                 if self.setup_model_pick {
@@ -5488,7 +5849,11 @@ impl App {
             Message::GeometryRemove(index) => self.remove_operation_geometry(Some(index)),
             Message::GeometryClear => self.remove_operation_geometry(None),
             Message::CadSelect(entity) => {
-                if self.pattern_draft.as_ref().is_some_and(|draft| draft.picking.is_some()) {
+                if self
+                    .pattern_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.picking.is_some())
+                {
                     self.pattern_entity_picked(entity);
                     return iced::Task::none();
                 }
@@ -5531,7 +5896,11 @@ impl App {
                 }
             }
             Message::CadEscape => {
-                if self.pattern_draft.as_mut().is_some_and(|draft| draft.picking.take().is_some()) {
+                if self
+                    .pattern_draft
+                    .as_mut()
+                    .is_some_and(|draft| draft.picking.take().is_some())
+                {
                     self.cad_candidates.clear();
                     self.status = "Pattern selection cancelled.".into();
                     return iced::Task::none();
@@ -5627,7 +5996,11 @@ impl App {
                                             }
                                         }
                                     }
-                                    Operation::Pocket(cam_model::PocketOp { boundary, islands, .. }) => {
+                                    Operation::Pocket(cam_model::PocketOp {
+                                        boundary,
+                                        islands,
+                                        ..
+                                    }) => {
                                         if let Some(region) = input.regions.first() {
                                             *boundary = region.outer().clone();
                                             *islands = region.holes().to_vec();
@@ -5705,10 +6078,13 @@ impl App {
                                 _ => CadFilter::Loop,
                             }
                         }
-                        cam_model::ExtractionRecipe::AdaptiveClearing | cam_model::ExtractionRecipe::ParallelFinishing => match refs.first().map(|r| r.kind) {
-                            Some(EntityKind::Face) => CadFilter::Face,
-                            _ => CadFilter::Body,
-                        },
+                        cam_model::ExtractionRecipe::AdaptiveClearing
+                        | cam_model::ExtractionRecipe::ParallelFinishing => {
+                            match refs.first().map(|r| r.kind) {
+                                Some(EntityKind::Face) => CadFilter::Face,
+                                _ => CadFilter::Body,
+                            }
+                        }
                         _ => CadFilter::Face,
                     };
                     let refs = self.operation_geometry.clone().unwrap_or(refs);
@@ -5953,15 +6329,20 @@ impl App {
             }
             Message::BeginOp(kind) => {
                 if self.controller.setups().is_empty() {
-                    self.status = "Select a model or body and create a setup before adding an operation.".into();
+                    self.status =
+                        "Select a model or body and create a setup before adding an operation."
+                            .into();
                     return iced::Task::none();
                 }
                 self.end_setup_draft();
                 self.cad_filter_explicit = false;
                 self.operation_tools.clear();
                 self.operation_tab = OperationTab::Tool;
-                if matches!(kind, OpKind::Adaptive | OpKind::Parallel) && self.controller.geometry_state().instances.is_empty() {
-                    self.status = "Import a solid CAD model before creating 3D Adaptive Clearing.".into();
+                if matches!(kind, OpKind::Adaptive | OpKind::Parallel)
+                    && self.controller.geometry_state().instances.is_empty()
+                {
+                    self.status =
+                        "Import a solid CAD model before creating 3D Adaptive Clearing.".into();
                     return iced::Task::none();
                 }
                 if !self.controller.geometry_state().instances.is_empty()
@@ -5987,17 +6368,16 @@ impl App {
                     self.cad_tool_pick = tool.map(|tool| tool.number);
                     self.cad_inspecting = false;
                     self.cad_editing_op = None;
-                    self.cad_filter =
-                        if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
-                            match self.controller.cad_selection().first().map(|r| r.kind) {
-                                Some(EntityKind::Face) => CadFilter::Face,
-                                _ => CadFilter::Body,
-                            }
-                        } else if matches!(kind, OpKind::Profile | OpKind::Chamfer | OpKind::Engrave) {
-                            CadFilter::Loop
-                        } else {
-                            CadFilter::Face
-                        };
+                    self.cad_filter = if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
+                        match self.controller.cad_selection().first().map(|r| r.kind) {
+                            Some(EntityKind::Face) => CadFilter::Face,
+                            _ => CadFilter::Body,
+                        }
+                    } else if matches!(kind, OpKind::Profile | OpKind::Chamfer | OpKind::Engrave) {
+                        CadFilter::Loop
+                    } else {
+                        CadFilter::Face
+                    };
                     self.controller.cancel_operation();
                     self.seed_creation_editor(kind);
                     self.status = "Choose a tool, then select geometry on the Geometry tab.".into();
@@ -6112,6 +6492,7 @@ impl App {
                             self.cursor = None;
                             self.rebase_setup_draft();
                             self.begin_operation_draft(id);
+                            self.inspector_active = false;
                             self.focus_ops.clear();
                             self.focus_ops.insert(id);
                             self.rerun();
@@ -6122,7 +6503,9 @@ impl App {
                 }
             }
             Message::PickWorld(w, aperture) => {
-                if self.profile_entry_drawing_pick(w,aperture){return iced::Task::none();}
+                if self.profile_entry_drawing_pick(w, aperture) {
+                    return iced::Task::none();
+                }
                 if let Some(plane) = self.height_reference_pick {
                     if let Some((reference, _)) = self
                         .controller
@@ -6339,7 +6722,12 @@ impl App {
                 self.setup_hover = hover;
             }
             Message::SetupStockEdgePicked(direction) => {
-                if let Some(axis) = self.pattern_draft.as_ref().and_then(|draft| draft.picking).filter(|axis| *axis < 2) {
+                if let Some(axis) = self
+                    .pattern_draft
+                    .as_ref()
+                    .and_then(|draft| draft.picking)
+                    .filter(|axis| *axis < 2)
+                {
                     self.pattern_direction_picked(axis, direction, None);
                     return iced::Task::none();
                 }
@@ -6461,7 +6849,8 @@ impl App {
             Message::ToggleStock => {
                 if let Some(player) = &self.simulation {
                     let show = !player.options.show_stock;
-                    return self.update_message(Message::SimulationOption(SimulationOption::Stock(show)));
+                    return self
+                        .update_message(Message::SimulationOption(SimulationOption::Stock(show)));
                 }
                 self.show_stock = !self.show_stock;
                 self.status = if self.show_stock {
@@ -6474,7 +6863,9 @@ impl App {
             Message::ToggleTransparentStock => {
                 if let Some(player) = &self.simulation {
                     let transparent = !player.options.transparent_stock;
-                    return self.update_message(Message::SimulationOption(SimulationOption::TransparentStock(transparent)));
+                    return self.update_message(Message::SimulationOption(
+                        SimulationOption::TransparentStock(transparent),
+                    ));
                 }
                 self.settings.view.transparent_stock = !self.settings.view.transparent_stock;
                 self.status = if self.settings.view.transparent_stock {
@@ -6821,11 +7212,19 @@ impl App {
                 self.refresh_operation_fields();
             }
             Message::ParallelBothWaysToggled(on) => {
-                self.edit_operation_draft(|op| { if let Operation::Parallel(p) = op { p.params.both_ways = on; } });
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.both_ways = on;
+                    }
+                });
                 self.refresh_operation_fields();
             }
             Message::ParallelStayDownToggled(on) => {
-                self.edit_operation_draft(|op| { if let Operation::Parallel(p) = op { p.params.stay_down = on; } });
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.stay_down = on;
+                    }
+                });
                 self.refresh_operation_fields();
             }
             Message::AdaptiveClimbToggled(on) => {
@@ -6841,7 +7240,9 @@ impl App {
                     if let Operation::Adaptive(adaptive) = op {
                         adaptive.params.containment = value;
                     }
-                    if let Operation::Parallel(p) = op { p.params.containment = value; }
+                    if let Operation::Parallel(p) = op {
+                        p.params.containment = value;
+                    }
                 });
                 self.refresh_operation_fields();
             }
@@ -6849,14 +7250,22 @@ impl App {
                 if self.profile_geometry_active() {
                     self.set_profile_contour_side(self.profile_contour_selection, side);
                 } else {
-                    self.edit_operation_draft(|op| { if let Operation::Chamfer(c) = op { c.side = side; } });
+                    self.edit_operation_draft(|op| {
+                        if let Operation::Chamfer(c) = op {
+                            c.side = side;
+                        }
+                    });
                     self.refresh_operation_fields();
                 }
             }
             Message::ProfileContourSideCycle(index) => {
                 if let Some((profile, _)) = self.profile_selection_geometry() {
                     if let Some(contour) = profile.contours().nth(index) {
-                        let next = match contour.side { Side::Outside => Side::Inside, Side::Inside => Side::On, Side::On => Side::Outside };
+                        let next = match contour.side {
+                            Side::Outside => Side::Inside,
+                            Side::Inside => Side::On,
+                            Side::On => Side::Outside,
+                        };
                         self.set_profile_contour_side(index, next);
                     }
                 }
@@ -7132,7 +7541,8 @@ impl App {
                 // reconcile so it adopts the shop number (§6.3). Idempotent by geometry.
                 self.open_tool_menu = None;
                 let tool = self
-                    .controller.inspection_setup()
+                    .controller
+                    .inspection_setup()
                     .tools
                     .iter()
                     .find(|t| t.number == number)
@@ -7266,7 +7676,9 @@ impl App {
             }
             // The preamble already cleared it; the arm keeps the match exhaustive.
             Message::CloseRibbonPopup => {}
-            Message::CloseRequested(_) | Message::DiscardConfirmed | Message::DiscardCancelled => unreachable!(),
+            Message::CloseRequested(_) | Message::DiscardConfirmed | Message::DiscardCancelled => {
+                unreachable!()
+            }
             Message::OutputAction(_) | Message::OutputCopy | Message::OutputClear => unreachable!(),
             Message::SetPaneVisible(Pane::Inspector, show) => self.inspector_enabled = show,
             Message::SetPaneVisible(pane, show) => self.set_pane_visible(pane, show),
@@ -7780,7 +8192,8 @@ impl App {
                 .or_else(|| self.library.tools.get(self.lib_sel).map(|t| t.kind));
         }
         if let Selection::Tool(i) = self.controller.selection() {
-            self.controller.inspection_setup()
+            self.controller
+                .inspection_setup()
                 .tools
                 .get(i)
                 .map(|t| t.kind)
@@ -8044,7 +8457,8 @@ impl App {
                 && !self.creating_operation()
                 && (self.height_rules_dirty()
                     || self
-                        .controller.inspection_setup()
+                        .controller
+                        .inspection_setup()
                         .height_settings
                         .contains_key(&id))
                 && self.resolve_height_editor(id).is_err()
@@ -8100,6 +8514,9 @@ impl App {
             if f != edited {
                 self.fields.insert(f, fmt_num(val));
             }
+        }
+        if matches!(edited, Field::ToolDiameter | Field::Flutes) {
+            self.refresh_preset_cutting_fields(None);
         }
     }
 
@@ -8178,17 +8595,27 @@ impl App {
             return draft != cam_model::StockToLeave::default();
         }
         match self.controller.selection() {
-            Selection::Operation(id) => draft != self.controller.inspection_setup().stock_to_leave_for(id),
+            Selection::Operation(id) => {
+                draft != self.controller.inspection_setup().stock_to_leave_for(id)
+            }
             _ => false,
         }
     }
 
     fn stock_to_leave_with_fields(&self) -> cam_model::StockToLeave {
         let mut stock = self.stock_to_leave_value();
-        if let Some(value) = self.fields.get(&Field::StockLeaveRadial).and_then(|s| s.trim().parse().ok()) {
+        if let Some(value) = self
+            .fields
+            .get(&Field::StockLeaveRadial)
+            .and_then(|s| s.trim().parse().ok())
+        {
             stock.radial = value;
         }
-        if let Some(value) = self.fields.get(&Field::StockLeaveAxial).and_then(|s| s.trim().parse().ok()) {
+        if let Some(value) = self
+            .fields
+            .get(&Field::StockLeaveAxial)
+            .and_then(|s| s.trim().parse().ok())
+        {
             stock.axial = value;
         }
         stock
@@ -8339,7 +8766,8 @@ impl App {
                 Field::OriginZ,
             ],
             Selection::Tool(i) => tool_fields(
-                self.controller.inspection_setup()
+                self.controller
+                    .inspection_setup()
                     .tools
                     .get(i)
                     .map(|t| t.kind),
@@ -8362,6 +8790,16 @@ impl App {
     }
     /// The model value backing a field for the current selection, if any.
     fn field_value(&self, field: Field) -> Option<f64> {
+        if matches!(field, Field::CuttingSpeed | Field::FeedPerTooth) {
+            let operation = self.operation_draft.as_ref().or_else(|| {
+                if let Selection::Operation(id) = self.controller.selection() {
+                    self.controller.operation(id)
+                } else {
+                    None
+                }
+            })?;
+            return self.operation_cutting_value(operation, field);
+        }
         if matches!(field, Field::StockLeaveRadial | Field::StockLeaveAxial) {
             let stock = self.stock_to_leave_value();
             return Some(match field {
@@ -8422,12 +8860,10 @@ impl App {
             Field::TopOfStock => Some(heights.top_of_stock),
             // Shows the *effective* height: the explicit value if set, else the
             // machine-Z-travel default the planner would resolve.
-            Field::ToolChangeHeight => {
-                Some(
-                    setup.resolved_tool_change_height(self.controller.machine().envelope.max.z)
-                        - setup.origin[2],
-                )
-            }
+            Field::ToolChangeHeight => Some(
+                setup.resolved_tool_change_height(self.controller.machine().envelope.max.z)
+                    - setup.origin[2],
+            ),
             Field::OriginX => Some(
                 self.controller
                     .origin_position(self.controller.active_origin())[0],
@@ -8521,7 +8957,8 @@ impl App {
         let post = self
             .machine_post_edit
             .is_some_and(|p| p != self.controller.post_kind());
-        let estlcam = self.machine_estlcam_edit
+        let estlcam = self
+            .machine_estlcam_edit
             .is_some_and(|o| o != self.controller.estlcam_options());
         name || post || estlcam
     }
@@ -8641,7 +9078,8 @@ impl App {
             let heights = self.preview_safety_heights(id);
             let result = if self.height_rules_dirty()
                 || self
-                    .controller.inspection_setup()
+                    .controller
+                    .inspection_setup()
                     .height_settings
                     .contains_key(&id)
             {
@@ -8657,14 +9095,15 @@ impl App {
                     Err(reason) => Err(reason),
                 }
             } else {
-                self.controller.apply_operation_settings_with_heights_and_stock(
-                    operation,
-                    overrides,
-                    tools,
-                    self.operation_geometry.clone(),
-                    Some(heights),
-                    self.stock_to_leave_with_fields(),
-                )
+                self.controller
+                    .apply_operation_settings_with_heights_and_stock(
+                        operation,
+                        overrides,
+                        tools,
+                        self.operation_geometry.clone(),
+                        Some(heights),
+                        self.stock_to_leave_with_fields(),
+                    )
             };
             match result {
                 Ok(()) => {
@@ -8787,16 +9226,20 @@ impl App {
         self.end_setup_draft();
         self.restore_project_view();
         // Establish a baseline for legacy files too, using their default opening view.
-        self.controller.set_project_view(Some(self.capture_project_view()));
+        self.controller
+            .set_project_view(Some(self.capture_project_view()));
         self.refresh_fields();
         // Rebuild the preview from saved cutting fragments only when current.
         // Opening a stale/legacy project must not initiate a recalculation.
         let statuses = self.controller.toolpath_statuses();
         let document = self.controller.document();
-        if document.active_setup().is_some_and(|setup| setup.operations.iter()
-            .filter(|op| document.operation_is_included(document.setup().id, op.id()))
-            .all(|op| statuses.get(&op.id()).copied().unwrap_or(false)))
-        {
+        if document.active_setup().is_some_and(|setup| {
+            setup
+                .operations
+                .iter()
+                .filter(|op| document.operation_is_included(document.setup().id, op.id()))
+                .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
+        }) {
             self.rerun();
         }
         self.status = match report.summary() {
@@ -8809,7 +9252,8 @@ impl App {
     /// Save the project to `path` and report the result.
     fn save_to(&mut self, path: &Path) {
         let previous_view = self.controller.project_view().cloned();
-        self.controller.set_project_view(Some(self.capture_project_view()));
+        self.controller
+            .set_project_view(Some(self.capture_project_view()));
         self.status = match self.controller.save_project(path) {
             Ok(()) => format!("Saved {}.", path.display()),
             Err(e) => {
@@ -8826,7 +9270,8 @@ impl App {
             .and_then(Path::file_stem)
             .map(|name| name.to_string_lossy())
             .unwrap_or_else(|| "New Project".into());
-        let unsaved_marker = if self.controller.has_unsaved_changes() || self.project_view_changed() {
+        let unsaved_marker = if self.controller.has_unsaved_changes() || self.project_view_changed()
+        {
             " *"
         } else {
             ""
@@ -9269,7 +9714,8 @@ impl App {
     /// [`origin_move_targets`], which holds the rule and can be tested without an app.
     fn origin_move_targets_for(&self, id: u32) -> Vec<u32> {
         let current = self
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .iter()
             .find(|op| op.id() == id)
@@ -9500,7 +9946,8 @@ impl App {
         let has_geo = self.controller.has_geometry();
         // A new op needs geometry to pick; its tool is drawn from the library, so the
         // library must have at least one tool (it seeds defaults, so it always does).
-        let can_create = has_geo && !self.controller.setups().is_empty() && !self.library.tools.is_empty();
+        let can_create =
+            has_geo && !self.controller.setups().is_empty() && !self.library.tools.is_empty();
         let begin = |kind: OpKind| can_create.then_some(Message::BeginOp(kind));
         match self.active_tab {
             RibbonTab::Home => vec![
@@ -9548,7 +9995,11 @@ impl App {
                     cmd(Icon::Chamfer, "Chamfer", begin(OpKind::Chamfer)),
                     cmd(Icon::Engrave, "Engrave", begin(OpKind::Engrave)),
                     cmd(Icon::Carve, "Carve", begin(OpKind::Carve)),
-                    cmd(Icon::Adaptive, "3D Adaptive Clearing", begin(OpKind::Adaptive)),
+                    cmd(
+                        Icon::Adaptive,
+                        "3D Adaptive Clearing",
+                        begin(OpKind::Adaptive),
+                    ),
                     cmd(Icon::Parallel, "3D Parallel", begin(OpKind::Parallel)),
                 ],
             }],
@@ -9868,7 +10319,9 @@ impl App {
     }
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
-        if self.profile_entry_cad_pick(entity.clone()){return;}
+        if self.profile_entry_cad_pick(entity.clone()) {
+            return;
+        }
         let auto_edit_id = if self.geometry_auto_pick
             && self.operation_tab == OperationTab::Geometry
             && self.cad_editing_op.is_none()
@@ -9876,7 +10329,10 @@ impl App {
         {
             match self.controller.selection() {
                 Selection::Operation(id)
-                    if self.controller.geometry_state().bindings.contains_key(&id) => Some(id),
+                    if self.controller.geometry_state().bindings.contains_key(&id) =>
+                {
+                    Some(id)
+                }
                 _ => None,
             }
         } else {
@@ -9887,7 +10343,8 @@ impl App {
                 self.status = "OK or Cancel setup changes before selecting new geometry.".into();
                 return;
             }
-            if matches!(&self.operation_draft, Some(Operation::Profile(profile)) if profile.selections.is_some()) {
+            if matches!(&self.operation_draft, Some(Operation::Profile(profile)) if profile.selections.is_some())
+            {
                 let entry_kind = match entity.kind {
                     EntityKind::Face => Some(cam_model::ProfileGeometryKind::FaceContours),
                     EntityKind::Edge | EntityKind::Loop => {
@@ -9943,9 +10400,16 @@ impl App {
         }
         let pocket_edges = entity.kind == EntityKind::Edge
             && self.geometry_operation_kind() == Some(OpKind::Pocket);
-        let multiple = pocket_edges || (profile && entity.kind != EntityKind::Silhouette)
-            || matches!(self.cad_pending_kind, Some(OpKind::Adaptive | OpKind::Parallel))
-            || self.cad_editing_op.and_then(|id| self.current_operation(id)).is_some_and(|op| matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)))
+        let multiple = pocket_edges
+            || (profile && entity.kind != EntityKind::Silhouette)
+            || matches!(
+                self.cad_pending_kind,
+                Some(OpKind::Adaptive | OpKind::Parallel)
+            )
+            || self
+                .cad_editing_op
+                .and_then(|id| self.current_operation(id))
+                .is_some_and(|op| matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)))
             || matches!(
                 self.cad_pending_kind,
                 Some(
@@ -9974,14 +10438,21 @@ impl App {
                 || (self.modifiers.command() && !self.modifiers.control())
                 || self.modifiers.shift();
         self.geometry_row_selection = None;
-        let adaptive = matches!(self.cad_pending_kind, Some(OpKind::Adaptive | OpKind::Parallel))
-            || self.cad_editing_op
-                .and_then(|id| self.current_operation(id))
-                .is_some_and(|operation| matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)));
+        let adaptive = matches!(
+            self.cad_pending_kind,
+            Some(OpKind::Adaptive | OpKind::Parallel)
+        ) || self
+            .cad_editing_op
+            .and_then(|id| self.current_operation(id))
+            .is_some_and(|operation| {
+                matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_))
+            });
         let selection_result = if adaptive {
-            self.controller.toggle_adaptive_cad_selection(entity.clone(), additive)
+            self.controller
+                .toggle_adaptive_cad_selection(entity.clone(), additive)
         } else {
-            self.controller.toggle_cad_selection(entity.clone(), additive)
+            self.controller
+                .toggle_cad_selection(entity.clone(), additive)
         };
         match selection_result {
             Ok(()) => {
@@ -10028,15 +10499,18 @@ impl App {
         {
             return;
         }
-        let kind = self.cad_pending_kind.or_else(|| {
-            self.cad_editing_op
-                .and_then(|id| self.current_operation(id))
-                .map(AppController::operation_kind)
-        }).or_else(|| {
-            (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
-                .then(|| self.geometry_operation_kind())
-                .flatten()
-        });
+        let kind = self
+            .cad_pending_kind
+            .or_else(|| {
+                self.cad_editing_op
+                    .and_then(|id| self.current_operation(id))
+                    .map(AppController::operation_kind)
+            })
+            .or_else(|| {
+                (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
+                    .then(|| self.geometry_operation_kind())
+                    .flatten()
+            });
         let Some(kind) = kind else {
             return;
         };
@@ -10068,9 +10542,10 @@ impl App {
         self.cad_filter = match (kind, entity.kind) {
             (OpKind::Chamfer, EntityKind::Face) => CadFilter::Face,
             (OpKind::Chamfer, EntityKind::Edge) => CadFilter::Edge,
-            (OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve, EntityKind::Loop) => {
-                CadFilter::Loop
-            }
+            (
+                OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve,
+                EntityKind::Loop,
+            ) => CadFilter::Loop,
             (OpKind::Pocket | OpKind::Engrave, EntityKind::Edge) => CadFilter::Edge,
             (OpKind::Pocket | OpKind::Carve, EntityKind::Face) => CadFilter::Face,
             (OpKind::Thread | OpKind::Drill, EntityKind::Face) => CadFilter::Face,
@@ -11117,9 +11592,15 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             _ => {}
         }
     }
-    if let Some(value) = get(Field::RampFeed) { op.entry_feeds_mut().ramp = (value > 0.).then_some(value); }
-    if let Some(value) = get(Field::LeadInFeed) { op.entry_feeds_mut().lead_in = (value > 0.).then_some(value); }
-    if let Some(value) = get(Field::LeadOutFeed) { op.entry_feeds_mut().lead_out = (value > 0.).then_some(value); }
+    if let Some(value) = get(Field::RampFeed) {
+        op.entry_feeds_mut().ramp = (value > 0.).then_some(value);
+    }
+    if let Some(value) = get(Field::LeadInFeed) {
+        op.entry_feeds_mut().lead_in = (value > 0.).then_some(value);
+    }
+    if let Some(value) = get(Field::LeadOutFeed) {
+        op.entry_feeds_mut().lead_out = (value > 0.).then_some(value);
+    }
     // Spindle speed is common to every operation kind.
     if let Some(v) = get(Field::SpindleRpm) {
         op.set_spindle_rpm(v.max(0.0));
@@ -11141,7 +11622,9 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
         Operation::Profile(o) => {
             for (&field, &value) in parsed {
                 if let Field::Profile(n) = field {
-                    if !n.invalid(value) { n.set(o, value); }
+                    if !n.invalid(value) {
+                        n.set(o, value);
+                    }
                 }
             }
             if let Some(v) = get(Field::TabWidth) {
@@ -11191,7 +11674,9 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
         Operation::Pocket(o) => {
             for (&field, &value) in parsed {
                 if let Field::PocketFinish(n) = field {
-                    if !n.invalid(value) { n.set(&mut o.finishing, value); }
+                    if !n.invalid(value) {
+                        n.set(&mut o.finishing, value);
+                    }
                 }
             }
             if let Some(v) = get(Field::Depth) {
@@ -11386,21 +11871,47 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
         }
         Operation::Parallel(o) => {
-            if let Some(v) = get(Field::ParallelStepover) { o.params.stepover = v; }
-            if let Some(v) = get(Field::ParallelAngle) { o.params.angle = v; }
-            if let Some(v) = get(Field::AdaptiveTolerance) { o.params.tolerance = v; }
-            if let Some(v) = get(Field::AdaptiveOffset) { o.params.additional_offset = v; }
-            if let Some(v) = get(Field::Feed) { o.params.feed = v; }
-            if let Some(v) = get(Field::PlungeFeed) { o.params.plunge_feed = v; }
+            if let Some(v) = get(Field::ParallelStepover) {
+                o.params.stepover = v;
+            }
+            if let Some(v) = get(Field::ParallelAngle) {
+                o.params.angle = v;
+            }
+            if let Some(v) = get(Field::AdaptiveTolerance) {
+                o.params.tolerance = v;
+            }
+            if let Some(v) = get(Field::AdaptiveOffset) {
+                o.params.additional_offset = v;
+            }
+            if let Some(v) = get(Field::Feed) {
+                o.params.feed = v;
+            }
+            if let Some(v) = get(Field::PlungeFeed) {
+                o.params.plunge_feed = v;
+            }
         }
         Operation::Adaptive(o) => {
-            if let Some(v) = get(Field::AdaptiveTolerance) { o.params.tolerance = v; }
-            if let Some(v) = get(Field::AdaptiveOptimalLoad) { o.params.optimal_load = v; }
-            if let Some(v) = get(Field::Stepdown) { o.params.stepdown = v; }
-            if let Some(v) = get(Field::AdaptiveFineStepdown) { o.params.fine_stepdown = v; }
-            if let Some(v) = get(Field::AdaptiveOffset) { o.params.additional_offset = v; }
-            if let Some(v) = get(Field::Feed) { o.params.feed = v; }
-            if let Some(v) = get(Field::PlungeFeed) { o.params.plunge_feed = v; }
+            if let Some(v) = get(Field::AdaptiveTolerance) {
+                o.params.tolerance = v;
+            }
+            if let Some(v) = get(Field::AdaptiveOptimalLoad) {
+                o.params.optimal_load = v;
+            }
+            if let Some(v) = get(Field::Stepdown) {
+                o.params.stepdown = v;
+            }
+            if let Some(v) = get(Field::AdaptiveFineStepdown) {
+                o.params.fine_stepdown = v;
+            }
+            if let Some(v) = get(Field::AdaptiveOffset) {
+                o.params.additional_offset = v;
+            }
+            if let Some(v) = get(Field::Feed) {
+                o.params.feed = v;
+            }
+            if let Some(v) = get(Field::PlungeFeed) {
+                o.params.plunge_feed = v;
+            }
         }
         Operation::Engrave(o) => {
             if let Some(v) = get(Field::Depth) {
@@ -11762,8 +12273,14 @@ const RESIZE_BAND: f32 = PANE_RESIZE_LEEWAY + 2.0;
 
 /// Whether `pos` (absolute) is within [`RESIZE_BAND`] of any edge of `bounds` —
 /// i.e. where a press likely means "drag the pane divider", not "orbit".
-fn browser_region_contains(point: iced::Point, bounds: iced::Rectangle, width: f32, height: f32) -> bool {
-    browser_contains(point, bounds, width) && point.y <= bounds.y + 8. + height.min(bounds.height - 16.)
+fn browser_region_contains(
+    point: iced::Point,
+    bounds: iced::Rectangle,
+    width: f32,
+    height: f32,
+) -> bool {
+    browser_contains(point, bounds, width)
+        && point.y <= bounds.y + 8. + height.min(bounds.height - 16.)
 }
 
 fn browser_contains(point: iced::Point, bounds: iced::Rectangle, width: f32) -> bool {
@@ -11960,7 +12477,9 @@ impl Viewport {
         let outcome = if editor_geometry.is_some() {
             None
         } else {
-            preview.or(operation_preview).or_else(|| controller.outcome())
+            preview
+                .or(operation_preview)
+                .or_else(|| controller.outcome())
         };
         let mut scene = match outcome {
             Some(outcome) => outcome.scene.clone(),
@@ -11983,12 +12502,9 @@ impl Viewport {
                     .op
                     .is_none_or(|id| focus_ops.contains(&id) && !hidden_ops.contains(&id))
         });
-        scene
-            .path_cones
-            .retain(|cone| {
-                preview.is_some()
-                    || (focus_ops.contains(&cone.op) && !hidden_ops.contains(&cone.op))
-            });
+        scene.path_cones.retain(|cone| {
+            preview.is_some() || (focus_ops.contains(&cone.op) && !hidden_ops.contains(&cone.op))
+        });
         // Drilling annotations from the backplot (peck rings + dwell bars), once a
         // run has produced a program. Anchors only — sized to the screen at draw.
         let drill_marks = outcome
@@ -12137,7 +12653,8 @@ impl Viewport {
                 // (the one the pick flow and inspector edit) is drawn larger, so it
                 // reads without relying on colour.
                 for idx in controller.origin_indices() {
-                    let pos = controller.inspection_setup()
+                    let pos = controller
+                        .inspection_setup()
                         .frame
                         .to_world_vector(controller.origin_position(idx));
                     let r = if idx == active { base_r } else { base_r * 0.65 };
@@ -12191,14 +12708,26 @@ impl Viewport {
         } else {
             operation_preview.or_else(|| {
                 let operations = &controller.inspection_setup().operations;
-                let through = operations.iter().rposition(|op| focus_ops.contains(&op.id()))?;
-                let expected: BTreeSet<_> = operations[..=through].iter()
-                    .filter(|op| controller.document().operation_is_included(
-                        controller.active_setup_id(), op.id()))
-                    .map(Operation::id).collect();
+                let through = operations
+                    .iter()
+                    .rposition(|op| focus_ops.contains(&op.id()))?;
+                let expected: BTreeSet<_> = operations[..=through]
+                    .iter()
+                    .filter(|op| {
+                        controller
+                            .document()
+                            .operation_is_included(controller.active_setup_id(), op.id())
+                    })
+                    .map(Operation::id)
+                    .collect();
                 outcome.filter(|result| {
-                    let actual: BTreeSet<_> = result.program.steps().iter()
-                        .filter_map(Step::tag).map(|tag| tag.op_id).collect();
+                    let actual: BTreeSet<_> = result
+                        .program
+                        .steps()
+                        .iter()
+                        .filter_map(Step::tag)
+                        .map(|tag| tag.op_id)
+                        .collect();
                     actual == expected
                 })
             })
@@ -12342,16 +12871,27 @@ impl Viewport {
         )
     }
     fn operation_position_at(&self, pos: iced::Point, bounds: iced::Rectangle) -> Option<[f64; 3]> {
-        if bounds.width <= 0.0 || bounds.height <= 0.0 { return None; }
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return None;
+        }
         let camera = self.camera();
         let ray = camera.pick_ray(
             2.0 * (pos.x - bounds.x) / bounds.width - 1.0,
             1.0 - 2.0 * (pos.y - bounds.y) / bounds.height,
             bounds.width / bounds.height,
         );
-        let world = self.setup_hover_at(pos, bounds).snap.map(|hit| hit.point)
-            .or_else(|| self.cad_scene.pick_candidates(ray, EntityKind::Face, 0.0, false)
-                .first().map(|hit| std::array::from_fn(|i| ray.origin[i] + hit.depth * ray.direction[i])))
+        let world = self
+            .setup_hover_at(pos, bounds)
+            .snap
+            .map(|hit| hit.point)
+            .or_else(|| {
+                self.cad_scene
+                    .pick_candidates(ray, EntityKind::Face, 0.0, false)
+                    .first()
+                    .map(|hit| {
+                        std::array::from_fn(|i| ray.origin[i] + hit.depth * ray.direction[i])
+                    })
+            })
             .or_else(|| self.setup_geometry.fallback(ray))?;
         Some(self.setup_geometry.to_setup(world))
     }
@@ -12429,9 +12969,9 @@ impl Viewport {
                     self.cad_select_through,
                 )
             }
-            Some(OpKind::Pocket) if self.cad_filter == EntityKind::Loop => {
-                self.cad_scene.pick_pocket_loop_candidates(ray, aperture as f64, self.cad_select_through)
-            }
+            Some(OpKind::Pocket) if self.cad_filter == EntityKind::Loop => self
+                .cad_scene
+                .pick_pocket_loop_candidates(ray, aperture as f64, self.cad_select_through),
             Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve)
                 if self.cad_filter == EntityKind::Loop =>
             {
@@ -12476,11 +13016,7 @@ impl Viewport {
                     .pick_profile_candidates(ray, aperture, through);
                 candidates.extend(self.cad_scene.pick_any_candidates(
                     ray,
-                    &[
-                        EntityKind::Face,
-                        EntityKind::Edge,
-                        EntityKind::Silhouette,
-                    ],
+                    &[EntityKind::Face, EntityKind::Edge, EntityKind::Silhouette],
                     aperture,
                     through,
                 ));
@@ -12506,22 +13042,21 @@ impl Viewport {
                 through,
             ),
             OpKind::Pocket | OpKind::Carve => {
-                let mut candidates = self.cad_scene.pick_any_candidates(
-                    ray,
-                    &[EntityKind::Face],
-                    aperture,
-                    through,
-                );
+                let mut candidates =
+                    self.cad_scene
+                        .pick_any_candidates(ray, &[EntityKind::Face], aperture, through);
                 candidates.extend(if kind == OpKind::Pocket {
-                    self.cad_scene.pick_pocket_loop_candidates(ray, aperture, through)
+                    self.cad_scene
+                        .pick_pocket_loop_candidates(ray, aperture, through)
                 } else {
-                    self.cad_scene.pick_surface_loop_candidates(ray, aperture, through)
+                    self.cad_scene
+                        .pick_surface_loop_candidates(ray, aperture, through)
                 });
                 candidates
             }
-            OpKind::Drill | OpKind::Bore | OpKind::Thread => self
-                .cad_scene
-                .pick_drill_candidates(ray, aperture, through),
+            OpKind::Drill | OpKind::Bore | OpKind::Thread => {
+                self.cad_scene.pick_drill_candidates(ray, aperture, through)
+            }
             OpKind::Adaptive | OpKind::Parallel => self.cad_scene.pick_any_candidates(
                 ray,
                 &[EntityKind::Face, EntityKind::Body],
@@ -12648,9 +13183,14 @@ impl shader::Program<Message> for Viewport {
             Mouse::CursorMoved { position } => Some(*position),
             _ => cursor.position(),
         };
-        if position
-            .is_some_and(|position| browser_region_contains(position, bounds, self.browser_overlay_width, self.browser_overlay_height))
-        {
+        if position.is_some_and(|position| {
+            browser_region_contains(
+                position,
+                bounds,
+                self.browser_overlay_width,
+                self.browser_overlay_height,
+            )
+        }) {
             state.drag = None;
             state.last = None;
             state.press = None;
@@ -12678,7 +13218,10 @@ impl shader::Program<Message> for Viewport {
                 if matches!(button, Button::Left) && self.operation_position_picking {
                     let point = self.operation_position_at(pos, bounds);
                     return Some(match point {
-                        Some(point) => shader::Action::publish(Message::OperationPositionPicked(point)).and_capture(),
+                        Some(point) => {
+                            shader::Action::publish(Message::OperationPositionPicked(point))
+                                .and_capture()
+                        }
                         None => shader::Action::capture(),
                     });
                 }
@@ -12947,8 +13490,16 @@ impl shader::Program<Message> for Viewport {
             );
         }
         if self.operation_position_picking {
-            if let Some(point) = cursor.position_over(bounds)
-                .filter(|point| !browser_region_contains(*point, bounds, self.browser_overlay_width, self.browser_overlay_height))
+            if let Some(point) = cursor
+                .position_over(bounds)
+                .filter(|point| {
+                    !browser_region_contains(
+                        *point,
+                        bounds,
+                        self.browser_overlay_width,
+                        self.browser_overlay_height,
+                    )
+                })
                 .and_then(|point| self.operation_position_at(point, bounds))
             {
                 let point = self.setup_geometry.to_world(point);
@@ -12957,9 +13508,14 @@ impl shader::Program<Message> for Viewport {
                     / aspect.min(1.0);
                 for direction in [camera.right(), camera.up()] {
                     setup_scene.add_highlight(
-                        [-1.0, 1.0].into_iter().map(|sign| {
-                            std::array::from_fn(|i| point[i] as f32 + sign * size * direction[i])
-                        }).collect(),
+                        [-1.0, 1.0]
+                            .into_iter()
+                            .map(|sign| {
+                                std::array::from_fn(|i| {
+                                    point[i] as f32 + sign * size * direction[i]
+                                })
+                            })
+                            .collect(),
                         self.operation_position_color,
                     );
                 }
@@ -12999,7 +13555,9 @@ impl shader::Program<Message> for Viewport {
         cursor: iced::mouse::Cursor,
     ) -> iced::mouse::Interaction {
         let over = cursor.position_over(bounds).is_some();
-        if (self.picking || self.set_origin || self.setup_axis || self.operation_position_picking) && over {
+        if (self.picking || self.set_origin || self.setup_axis || self.operation_position_picking)
+            && over
+        {
             // Aiming a pick: a crosshair, but a plain arrow once a snap engages so
             // its marker reads on its own. Never the orbit "hand" while picking.
             if self.snap_engaged || self.setup_hover.snap.is_some() {
@@ -13649,8 +14207,10 @@ mod startup_tests {
 
     #[test]
     fn startup_loads_saved_geometry_setups_and_editor_state() {
-        let path = std::env::temp_dir()
-            .join(format!("startup setup with spaces-{}.ocam", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "startup setup with spaces-{}.ocam",
+            std::process::id()
+        ));
         let mut source = AppController::new(crate::default_machine());
         source.open_dxf(SAMPLE_DXF, "startup sample.dxf").unwrap();
         source.edit_setup(|setup| setup.name = "Top".into());
@@ -13673,8 +14233,8 @@ mod startup_tests {
 
     #[test]
     fn startup_returns_load_errors_before_opening_a_window() {
-        let path = std::env::temp_dir()
-            .join(format!("invalid-startup-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("invalid-startup-{}.ocam", std::process::id()));
         std::fs::write(&path, "not a project").unwrap();
         let invalid = run_with_setup(&path).unwrap_err().to_string();
         std::fs::remove_file(&path).unwrap();
@@ -13737,7 +14297,8 @@ mod multi_setup_draft_tests {
     #[test]
     fn saved_profile_selection_allows_switching_operations_without_escape() {
         let path = std::env::temp_dir().join(format!(
-            "saved-profile-selection-{}.ocam", std::process::id()
+            "saved-profile-selection-{}.ocam",
+            std::process::id()
         ));
         let mut source = AppController::new(crate::default_machine());
         source.open_dxf(SAMPLE_DXF, "profiles.dxf").unwrap();
@@ -13745,9 +14306,14 @@ mod multi_setup_draft_tests {
         source.new_operation(OpKind::Profile);
         let second = source.document().setup().operations[1].id();
         source.edit_setup(|setup| {
-            setup.stock_to_leave.insert(second, cam_model::StockToLeave {
-                enabled: true, radial: 0.25, axial: 0.1,
-            });
+            setup.stock_to_leave.insert(
+                second,
+                cam_model::StockToLeave {
+                    enabled: true,
+                    radial: 0.25,
+                    axial: 0.1,
+                },
+            );
         });
         source.save_project(&path).unwrap();
         let (mut app, _) = App::new();
@@ -13769,7 +14335,10 @@ mod multi_setup_draft_tests {
         );
         send(&mut app, Message::Tree(TreeMessage::Release));
         assert_eq!(app.controller.selection(), Selection::Operation(second));
-        assert!(!app.inspector_dirty(), "an untouched selection must be clean");
+        assert!(
+            !app.inspector_dirty(),
+            "an untouched selection must be clean"
+        );
         assert!(
             !app.any_field_invalid(),
             "{:?}",
@@ -13848,9 +14417,15 @@ mod multi_setup_draft_tests {
         assert_eq!(app.pattern_draft.as_ref().unwrap().members, vec![operation]);
         assert!(app.pane_handle(Pane::Inspector).is_some());
         send(&mut app, Message::ClickOp(operation));
-        assert!(app.pattern_draft.is_some(), "selection changes do not discard a draft");
+        assert!(
+            app.pattern_draft.is_some(),
+            "selection changes do not discard a draft"
+        );
         send(&mut app, Message::RunJob);
-        assert!(app.controller.outcome().is_none(), "generation is blocked until the draft is resolved");
+        assert!(
+            app.controller.outcome().is_none(),
+            "generation is blocked until the draft is resolved"
+        );
         send(&mut app, Message::PatternValue(0, "1".into()));
         send(&mut app, Message::PatternCommit);
         assert!(app.pattern_draft.is_some(), "invalid drafts remain open");
@@ -13859,22 +14434,47 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::PatternCommit);
         let pattern = app.controller.inspection_setup().patterns[0].clone();
         assert_eq!(pattern.members, vec![operation]);
-        assert_eq!(pattern.kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 20.0, dy: 0.0 });
+        assert_eq!(
+            pattern.kind,
+            cam_model::PatternKind::Rectangular {
+                nx: 2,
+                ny: 1,
+                dx: 20.0,
+                dy: 0.0
+            }
+        );
         assert!(app.pattern_draft.is_none());
 
         app.inspector_enabled = false;
-        send(&mut app, Message::Tree(TreeMessage::DoubleClick(TreeNode::Pattern(pattern.id))));
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::DoubleClick(TreeNode::Pattern(pattern.id))),
+        );
         assert!(app.pane_handle(Pane::Inspector).is_some());
         send(&mut app, Message::PatternValue(2, "35".into()));
         send(&mut app, Message::PatternCancel);
-        assert_eq!(app.controller.inspection_setup().patterns[0].kind, pattern.kind);
+        assert_eq!(
+            app.controller.inspection_setup().patterns[0].kind,
+            pattern.kind
+        );
 
         send(&mut app, Message::EditPattern(pattern.id));
         send(&mut app, Message::PatternValue(2, "35".into()));
         send(&mut app, Message::PatternCommit);
-        assert_eq!(app.controller.inspection_setup().patterns[0].kind, cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 35.0, dy: 0.0 });
+        assert_eq!(
+            app.controller.inspection_setup().patterns[0].kind,
+            cam_model::PatternKind::Rectangular {
+                nx: 2,
+                ny: 1,
+                dx: 35.0,
+                dy: 0.0
+            }
+        );
         assert!(app.controller.undo());
-        assert_eq!(app.controller.inspection_setup().patterns[0].kind, pattern.kind);
+        assert_eq!(
+            app.controller.inspection_setup().patterns[0].kind,
+            pattern.kind
+        );
     }
 
     #[test]
@@ -13882,7 +14482,8 @@ mod multi_setup_draft_tests {
         let (mut app, _) = App::new();
         send(&mut app, Message::OpenSample);
         app.controller.add_origin();
-        app.controller.edit_active_origin(|origin| *origin = [17.25, -8.5, 0.0]);
+        app.controller
+            .edit_active_origin(|origin| *origin = [17.25, -8.5, 0.0]);
         let setup = app.controller.inspection_setup();
         let expected = setup.origin_position(app.controller.active_origin());
         send(&mut app, Message::BeginPattern(true));
@@ -14004,21 +14605,46 @@ mod multi_setup_draft_tests {
         let mut app = blank_app();
         let operation = app.controller.operation_template(OpKind::Parallel, 1);
         let id = operation.id();
-        assert_eq!(families_for(OpKind::Parallel), &[crate::ToolKindPick::BallMill]);
-        for field in [Field::ParallelStepover, Field::ParallelAngle, Field::AdaptiveTolerance] {
+        assert_eq!(
+            families_for(OpKind::Parallel),
+            &[crate::ToolKindPick::BallMill]
+        );
+        for field in [
+            Field::ParallelStepover,
+            Field::ParallelAngle,
+            Field::AdaptiveTolerance,
+        ] {
             assert!(operation_fields(&operation).contains(&field));
             assert_eq!(operation_tabs::field_tab(field), OperationTab::Passes);
         }
-        assert!(operation_tabs::operation_field_invalid(&operation, Field::ParallelStepover, 0.));
-        assert!(!operation_tabs::operation_field_invalid(&operation, Field::ParallelAngle, -45.));
+        assert!(operation_tabs::operation_field_invalid(
+            &operation,
+            Field::ParallelStepover,
+            0.
+        ));
+        assert!(!operation_tabs::operation_field_invalid(
+            &operation,
+            Field::ParallelAngle,
+            -45.
+        ));
         app.controller.add_operation(operation);
         app.begin_operation_draft(id);
-        send(&mut app, Message::FieldChanged(Field::ParallelStepover, "0.3".into()));
-        send(&mut app, Message::FieldChanged(Field::ParallelAngle, "35".into()));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ParallelStepover, "0.3".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ParallelAngle, "35".into()),
+        );
         send(&mut app, Message::ParallelBothWaysToggled(false));
-        assert!(matches!(app.current_operation(id), Some(Operation::Parallel(p)) if !p.params.both_ways));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Parallel(p)) if !p.params.both_ways)
+        );
         send(&mut app, Message::CancelOperationDraft);
-        assert!(matches!(app.controller.operation(id), Some(Operation::Parallel(p)) if p.params.both_ways && p.params.angle == 0.));
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Parallel(p)) if p.params.both_ways && p.params.angle == 0.)
+        );
     }
 
     #[test]
@@ -14032,23 +14658,36 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::ParallelStayDownToggled(true));
         assert!(checked(app.current_operation(id).unwrap()));
         assert!(!checked(app.controller.operation(id).unwrap()));
-        assert_eq!(op_field(app.current_operation(id).unwrap(), Field::LiftHeight), Some(0.));
+        assert_eq!(
+            op_field(app.current_operation(id).unwrap(), Field::LiftHeight),
+            Some(0.)
+        );
         send(&mut app, Message::CancelOperationDraft);
         assert!(!checked(app.controller.operation(id).unwrap()));
         app.begin_operation_draft(id);
         send(&mut app, Message::ParallelStayDownToggled(true));
         send(&mut app, Message::Apply);
-        assert!(checked(app.controller.operation(id).unwrap()), "{}", app.status);
+        assert!(
+            checked(app.controller.operation(id).unwrap()),
+            "{}",
+            app.status
+        );
         assert!(app.controller.undo());
         assert!(!checked(app.controller.operation(id).unwrap()));
         assert!(app.controller.redo());
         assert!(checked(app.controller.operation(id).unwrap()));
         app.begin_operation_draft(id);
-        send(&mut app, Message::FieldChanged(Field::LiftHeight, "2".into()));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LiftHeight, "2".into()),
+        );
         send(&mut app, Message::ParallelStayDownToggled(false));
         send(&mut app, Message::Apply);
         assert!(!checked(app.controller.operation(id).unwrap()));
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), Field::LiftHeight), Some(2.));
+        assert_eq!(
+            op_field(app.controller.operation(id).unwrap(), Field::LiftHeight),
+            Some(2.)
+        );
     }
 
     #[test]
@@ -14066,24 +14705,44 @@ mod multi_setup_draft_tests {
             assert_eq!(operation_tabs::field_tab(field), OperationTab::Linking);
             assert_eq!(op_field(&operation, field), Some(0.));
             for value in [-1., f64::NAN, f64::INFINITY] {
-                assert!(operation_tabs::operation_field_invalid(&operation, field, value));
+                assert!(operation_tabs::operation_field_invalid(
+                    &operation, field, value
+                ));
             }
-            assert!(!operation_tabs::operation_field_invalid(&operation, field, 0.));
-            assert!(!operation_tabs::operation_field_invalid(&operation, field, 2.));
+            assert!(!operation_tabs::operation_field_invalid(
+                &operation, field, 0.
+            ));
+            assert!(!operation_tabs::operation_field_invalid(
+                &operation, field, 2.
+            ));
             app.controller.add_operation(operation);
             app.begin_operation_draft(id);
             send(&mut app, Message::FieldChanged(field, "2".into()));
-            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.));
+            assert_eq!(
+                op_field(app.controller.operation(id).unwrap(), field),
+                Some(0.)
+            );
             send(&mut app, Message::CancelOperationDraft);
             app.begin_operation_draft(id);
             assert_eq!(app.fields.get(&field).map(String::as_str), Some("0"));
             send(&mut app, Message::FieldChanged(field, "2".into()));
             send(&mut app, Message::Apply);
-            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(2.), "{}", app.status);
+            assert_eq!(
+                op_field(app.controller.operation(id).unwrap(), field),
+                Some(2.),
+                "{}",
+                app.status
+            );
             assert!(app.controller.undo());
-            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.));
+            assert_eq!(
+                op_field(app.controller.operation(id).unwrap(), field),
+                Some(0.)
+            );
             assert!(app.controller.redo());
-            assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(2.));
+            assert_eq!(
+                op_field(app.controller.operation(id).unwrap(), field),
+                Some(2.)
+            );
         }
     }
 
@@ -14100,22 +14759,43 @@ mod multi_setup_draft_tests {
         assert!(operation_fields(&operation).contains(&field));
         assert_eq!(operation_tabs::field_tab(field), OperationTab::Passes);
         assert_eq!(op_field(&operation, field), Some(0.1));
-        assert!(operation_tabs::operation_field_invalid(&operation, field, 0.0));
-        assert!(operation_tabs::operation_field_invalid(&operation, field, -0.001));
+        assert!(operation_tabs::operation_field_invalid(
+            &operation, field, 0.0
+        ));
+        assert!(operation_tabs::operation_field_invalid(
+            &operation, field, -0.001
+        ));
         app.controller.add_operation(operation);
         app.begin_operation_draft(id);
         send(&mut app, Message::FieldChanged(field, "0.025".into()));
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.1));
+        assert_eq!(
+            op_field(app.controller.operation(id).unwrap(), field),
+            Some(0.1)
+        );
         send(&mut app, Message::CancelOperationDraft);
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.1));
+        assert_eq!(
+            op_field(app.controller.operation(id).unwrap(), field),
+            Some(0.1)
+        );
         app.begin_operation_draft(id);
         send(&mut app, Message::FieldChanged(field, "0.025".into()));
         send(&mut app, Message::Apply);
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.025), "{}", app.status);
+        assert_eq!(
+            op_field(app.controller.operation(id).unwrap(), field),
+            Some(0.025),
+            "{}",
+            app.status
+        );
         assert!(app.controller.undo());
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.1));
+        assert_eq!(
+            op_field(app.controller.operation(id).unwrap(), field),
+            Some(0.1)
+        );
         assert!(app.controller.redo());
-        assert_eq!(op_field(app.controller.operation(id).unwrap(), field), Some(0.025));
+        assert_eq!(
+            op_field(app.controller.operation(id).unwrap(), field),
+            Some(0.025)
+        );
     }
 
     #[test]
@@ -14123,26 +14803,48 @@ mod multi_setup_draft_tests {
         let (mut app, id) = stock_profile_app();
         let before = app.controller.inspection_setup().clone();
         send(&mut app, Message::StockToLeaveToggled(true));
-        send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()));
-        send(&mut app, Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()),
+        );
         assert_eq!(app.controller.inspection_setup(), &before);
         assert!(app.inspector_dirty());
 
         send(&mut app, Message::CancelOperationDraft);
         assert_eq!(app.controller.inspection_setup(), &before);
-        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(id), Default::default());
+        assert_eq!(
+            app.controller.inspection_setup().stock_to_leave_for(id),
+            Default::default()
+        );
 
         send(&mut app, Message::StockToLeaveToggled(true));
-        send(&mut app, Message::FieldChanged(Field::StockLeaveRadial, "0.5".into()));
-        send(&mut app, Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::StockLeaveRadial, "0.5".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()),
+        );
         send(&mut app, Message::Apply);
         assert_eq!(
             app.controller.inspection_setup().stock_to_leave_for(id),
-            cam_model::StockToLeave { enabled: true, radial: 0.5, axial: 0.2 }
+            cam_model::StockToLeave {
+                enabled: true,
+                radial: 0.5,
+                axial: 0.2
+            }
         );
         assert_eq!(app.stock_to_leave_value().radial, 0.5);
         assert!(app.controller.undo());
-        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(id), Default::default());
+        assert_eq!(
+            app.controller.inspection_setup().stock_to_leave_for(id),
+            Default::default()
+        );
     }
 
     #[test]
@@ -14153,19 +14855,41 @@ mod multi_setup_draft_tests {
             radial: 0.3,
             axial: 0.2,
         };
-        app.controller
-            .edit_setup(|setup| { setup.stock_to_leave.insert(id, allowance); });
+        app.controller.edit_setup(|setup| {
+            setup.stock_to_leave.insert(id, allowance);
+        });
         app.controller.duplicate_selected_operation();
         let Selection::Operation(copy_id) = app.controller.selection() else {
             panic!("duplicate should be selected");
         };
-        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(copy_id), allowance);
+        assert_eq!(
+            app.controller
+                .inspection_setup()
+                .stock_to_leave_for(copy_id),
+            allowance
+        );
         app.controller.delete_selected_operation();
-        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(copy_id), Default::default());
-        assert_eq!(app.controller.inspection_setup().stock_to_leave_for(id), allowance);
+        assert_eq!(
+            app.controller
+                .inspection_setup()
+                .stock_to_leave_for(copy_id),
+            Default::default()
+        );
+        assert_eq!(
+            app.controller.inspection_setup().stock_to_leave_for(id),
+            allowance
+        );
 
-        let setup_copy = app.controller.duplicate_setup(app.controller.active_setup_id()).unwrap();
-        let duplicate_setup = app.controller.setups().iter().find(|s| s.id == setup_copy).unwrap();
+        let setup_copy = app
+            .controller
+            .duplicate_setup(app.controller.active_setup_id())
+            .unwrap();
+        let duplicate_setup = app
+            .controller
+            .setups()
+            .iter()
+            .find(|s| s.id == setup_copy)
+            .unwrap();
         let copied_id = duplicate_setup.operations[0].id();
         assert_eq!(duplicate_setup.stock_to_leave_for(copied_id), allowance);
     }
@@ -14414,20 +15138,32 @@ mod multi_setup_draft_tests {
         assert_eq!(app.controller.inspection_setup(), &original);
         send(&mut app, Message::SetupCommit);
         assert!(app.setup_draft.is_none(), "{}", app.status);
-        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(72.));
+        assert_eq!(
+            app.controller.inspection_setup().tool_change_height,
+            Some(72.)
+        );
         assert!(app.controller.undo());
         assert_eq!(app.controller.inspection_setup(), &original);
         assert!(app.controller.redo());
 
         app.begin_setup_draft();
-        send(&mut app, Message::SetupToolChangeHeightChanged("NaN".into()));
+        send(
+            &mut app,
+            Message::SetupToolChangeHeightChanged("NaN".into()),
+        );
         send(&mut app, Message::SetupCommit);
         assert!(app.setup_draft.is_some());
-        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(72.));
+        assert_eq!(
+            app.controller.inspection_setup().tool_change_height,
+            Some(72.)
+        );
         send(&mut app, Message::SetupToolChangeAutomatic(true));
         assert!(!app.setup_values.contains_key(&41));
         send(&mut app, Message::SetupCancel);
-        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(72.));
+        assert_eq!(
+            app.controller.inspection_setup().tool_change_height,
+            Some(72.)
+        );
 
         app.begin_setup_draft();
         send(&mut app, Message::SetupToolChangeAutomatic(true));
@@ -14831,7 +15567,11 @@ mod inspector_field_tests {
                 };
                 // Exercise a valid edit; bottom-referenced taper permits only
                 // nonpositive slopes for the supported cylindrical tools.
-                let want = if field==Field::Profile(profile_parameters::Number::Taper) {before-1.} else {before+1.};
+                let want = if field == Field::Profile(profile_parameters::Number::Taper) {
+                    before - 1.
+                } else {
+                    before + 1.
+                };
                 let mut edited = op.clone();
                 let mut parsed = BTreeMap::new();
                 parsed.insert(field, want);
@@ -15070,8 +15810,15 @@ mod ribbon_tests {
     #[test]
     fn families_allow_deliberate_cutter_substitutions() {
         use ToolKindPick as F;
-        for kind in [OpKind::Profile, OpKind::Pocket, OpKind::Bore, OpKind::Face,
-            OpKind::Drill, OpKind::Engrave, OpKind::Adaptive] {
+        for kind in [
+            OpKind::Profile,
+            OpKind::Pocket,
+            OpKind::Bore,
+            OpKind::Face,
+            OpKind::Drill,
+            OpKind::Engrave,
+            OpKind::Adaptive,
+        ] {
             assert_eq!(families_for(kind), &F::ALL, "{kind:?}");
         }
         assert_eq!(families_for(OpKind::Thread), &[F::ThreadMill]);

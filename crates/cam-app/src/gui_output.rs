@@ -282,7 +282,7 @@ impl App {
                 lines.push("Simulation: no collisions.".into());
             }
             lines.extend(outcome.collisions.iter().map(|c| {
-                        let owner = match (c.pattern_id, c.instance_index) {
+                let owner = match (c.pattern_id, c.instance_index) {
                     (Some(pattern), Some(instance)) => format!(
                         " (pattern #{pattern}, instance {instance}, operation #{})",
                         c.op_id.unwrap_or(0)
@@ -290,8 +290,8 @@ impl App {
                     _ => c
                         .op_id
                         .map_or(String::new(), |op| format!(" (operation #{op})")),
-                        };
-                        format!("Verification {:?}{}: {}", c.kind, owner, c.message)
+                };
+                format!("Verification {:?}{}: {}", c.kind, owner, c.message)
             }));
         }
         let output = lines.join("\n");
@@ -301,17 +301,31 @@ impl App {
             // Replace only the changed suffix, including any diagnostics footer.
             let mut prefix_bytes = 0;
             let mut prefix_lines = 0;
-            for (old, new) in self.output_snapshot.split_inclusive('\n').zip(output.split_inclusive('\n')) {
-                if old != new || !old.ends_with('\n') { break; }
+            for (old, new) in self
+                .output_snapshot
+                .split_inclusive('\n')
+                .zip(output.split_inclusive('\n'))
+            {
+                if old != new || !old.ends_with('\n') {
+                    break;
+                }
                 prefix_bytes += old.len();
                 prefix_lines += 1;
             }
             self.output_content.move_to(text_editor::Cursor {
-                position: text_editor::Position { line: prefix_lines, column: 0 },
+                position: text_editor::Position {
+                    line: prefix_lines,
+                    column: 0,
+                },
                 selection: None,
             });
-            self.output_content.perform(text_editor::Action::Select(text_editor::Motion::DocumentEnd));
-            self.output_content.perform(text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(output[prefix_bytes..].to_owned()))));
+            self.output_content.perform(text_editor::Action::Select(
+                text_editor::Motion::DocumentEnd,
+            ));
+            self.output_content
+                .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                    Arc::new(output[prefix_bytes..].to_owned()),
+                )));
             self.output_snapshot = output;
         }
     }
@@ -368,8 +382,17 @@ mod tests {
         app.sync_output();
         assert_eq!(app.output_content.text(), app.output_snapshot);
         assert!(app.output_content.text().contains("Face 36\n"));
-        assert!(app.output_content.text().contains("Face 37\nToolpath diagnostics:"));
-        assert_eq!(app.output_content.text().matches("Toolpath diagnostics:").count(), 1);
+        assert!(app
+            .output_content
+            .text()
+            .contains("Face 37\nToolpath diagnostics:"));
+        assert_eq!(
+            app.output_content
+                .text()
+                .matches("Toolpath diagnostics:")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -400,11 +423,10 @@ mod tests {
         );
         app.output_action(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
         app.sync_output();
-        assert!(
-            app.output_content
+        assert!(app
+            .output_content
             .text()
-                .contains("Another message arrived while copying")
-        );
+            .contains("Another message arrived while copying"));
     }
 
     #[test]

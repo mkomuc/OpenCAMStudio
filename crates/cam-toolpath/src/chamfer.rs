@@ -54,7 +54,10 @@ impl Strategy for ChamferStrategy {
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if let Err(reason) = op.entry_feeds.validate() {
-            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            };
         }
         let mut diagnostics = Vec::new();
 
@@ -283,7 +286,9 @@ impl Strategy for ChamferStrategy {
             // An internal chamfer eases in from the bounded bore interior — guard the
             // lead against overshooting it; an external one leads into open air.
             let guard: Vec<Polygon> = if air_sign < 0.0 {
-                Polygon::new(Contour::new(pts.to_vec())).into_iter().collect()
+                Polygon::new(Contour::new(pts.to_vec()))
+                    .into_iter()
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -319,8 +324,7 @@ impl Strategy for ChamferStrategy {
             // the exit somewhere other than the entry. Without one the tool stays down
             // and plunges to the next width, as the unleaded profile path does — and a
             // descent that never happens cannot end in metal.
-            let repositions =
-                (exit.x - entry.x).abs() > 1e-9 || (exit.y - entry.y).abs() > 1e-9;
+            let repositions = (exit.x - entry.x).abs() > 1e-9 || (exit.y - entry.y).abs() > 1e-9;
             let mut prev_z = env.heights.retract.max(op.top);
             for (i, &wk) in widths.iter().enumerate() {
                 let z = op.top - (wk / tan_a + delta);
@@ -682,7 +686,10 @@ mod tests {
         let r = run(op(1.5), chamfer_tool(90.0, 0.0));
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
         let z = cut_depth(&r.program).expect("a plunge to depth");
-        assert!((z - (-1.5)).abs() < 1e-9, "90° chamfer of 1.5 → depth −1.5, got {z}");
+        assert!(
+            (z - (-1.5)).abs() < 1e-9,
+            "90° chamfer of 1.5 → depth −1.5, got {z}"
+        );
     }
 
     /// A 60° mill (α=30°, tan≈0.577) cuts deeper than its width for the same bevel.
@@ -691,7 +698,10 @@ mod tests {
         let r = run(op(1.0), chamfer_tool(60.0, 0.0));
         let z = cut_depth(&r.program).expect("a plunge to depth");
         let expected = -1.0 / (30.0_f64.to_radians().tan());
-        assert!((z - expected).abs() < 1e-9, "60° chamfer depth {z} vs {expected}");
+        assert!(
+            (z - expected).abs() < 1e-9,
+            "60° chamfer depth {z} vs {expected}"
+        );
     }
 
     #[test]
@@ -734,7 +744,10 @@ mod tests {
         };
 
         let at_zero = retract_xy(op(1.5));
-        assert!(at_zero.x.abs() < 1e-9 && at_zero.y.abs() < 1e-9, "closes at the start");
+        assert!(
+            at_zero.x.abs() < 1e-9 && at_zero.y.abs() < 1e-9,
+            "closes at the start"
+        );
 
         let mut with_overlap = op(1.5);
         with_overlap.lead_overlap = 2.0;
@@ -781,7 +794,11 @@ mod tests {
         let lead_arcs: Vec<Point3> = steps
             .iter()
             .filter_map(|s| match s {
-                Step::Arc { end, tag, .. } if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) => Some(*end),
+                Step::Arc { end, tag, .. }
+                    if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) =>
+                {
+                    Some(*end)
+                }
                 _ => None,
             })
             .collect();
@@ -843,16 +860,34 @@ mod tests {
 
     #[test]
     fn pass_widths_uniform_and_gradual() {
-        assert_eq!(pass_widths(3.0, 0.0, false), vec![3.0], "no step ⇒ one pass");
-        assert_eq!(pass_widths(3.0, 5.0, false), vec![3.0], "step ≥ width ⇒ one pass");
-        assert_eq!(pass_widths(3.0, 1.0, false), vec![1.0, 2.0, 3.0], "uniform steps");
+        assert_eq!(
+            pass_widths(3.0, 0.0, false),
+            vec![3.0],
+            "no step ⇒ one pass"
+        );
+        assert_eq!(
+            pass_widths(3.0, 5.0, false),
+            vec![3.0],
+            "step ≥ width ⇒ one pass"
+        );
+        assert_eq!(
+            pass_widths(3.0, 1.0, false),
+            vec![1.0, 2.0, 3.0],
+            "uniform steps"
+        );
 
         // Gradual, equal material per pass: widths step·√k, ending on the target.
         // width 3, step 1 ⇒ √1..√9, i.e. exactly 9 passes (√9 = 3).
         let g = pass_widths(3.0, 1.0, true);
         assert_eq!(g.len(), 9, "equal-area passes: {g:?}");
-        assert!((g[1] - std::f64::consts::SQRT_2).abs() < 1e-9, "2nd pass at √2");
-        assert!((g.last().unwrap() - 3.0).abs() < 1e-9, "ends exactly at width");
+        assert!(
+            (g[1] - std::f64::consts::SQRT_2).abs() < 1e-9,
+            "2nd pass at √2"
+        );
+        assert!(
+            (g.last().unwrap() - 3.0).abs() < 1e-9,
+            "ends exactly at width"
+        );
     }
 
     #[test]
@@ -874,7 +909,10 @@ mod tests {
         let mut shallow = op(1.5);
         shallow.depth = 0.5;
         let r = run(shallow, chamfer_tool(90.0, 0.0));
-        assert!((cut_depth(&r.program).unwrap() + 1.5).abs() < 1e-9, "clamped to the tip");
+        assert!(
+            (cut_depth(&r.program).unwrap() + 1.5).abs() < 1e-9,
+            "clamped to the tip"
+        );
         assert!(!r.diagnostics.is_empty(), "warns about the under-set depth");
     }
 
@@ -896,8 +934,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!((plunge_zs[0] + 1.0).abs() < 1e-9, "first pass shallow at −1");
-        assert!((plunge_zs[2] + 3.0).abs() < 1e-9, "final pass at the full depth −3");
+        assert!(
+            (plunge_zs[0] + 1.0).abs() < 1e-9,
+            "first pass shallow at −1"
+        );
+        assert!(
+            (plunge_zs[2] + 3.0).abs() < 1e-9,
+            "final pass at the full depth −3"
+        );
     }
 
     #[test]
@@ -907,9 +951,12 @@ mod tests {
         o.gradual = true;
         let r = run(o, chamfer_tool(90.0, 0.0));
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
-        assert_eq!(plunge_count(&r), 9, "equal-area gradual ⇒ 9 passes for 3 mm @ step 1");
+        assert_eq!(
+            plunge_count(&r),
+            9,
+            "equal-area gradual ⇒ 9 passes for 3 mm @ step 1"
+        );
     }
-
 
     fn xy_of_first_cut(prog: &Program) -> [f64; 2] {
         prog.steps()

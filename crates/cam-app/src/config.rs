@@ -80,7 +80,6 @@ pub(crate) enum ConfigLoad {
     Rejected(String),
 }
 
-
 /// Read `T` from its place in the config directory.
 pub(crate) fn load<T: ConfigFile>() -> (T, ConfigLoad) {
     match crate::paths::config_file(T::FILE_NAME) {
@@ -252,12 +251,18 @@ pub(crate) mod tests {
         let (p, outcome) = load_from::<Probe>(&s.file("probe.json"));
         assert_eq!(outcome, ConfigLoad::Fresh);
         assert_eq!(p, Probe::default());
-        assert!(!s.file("probe.json").exists(), "settings-like files stay absent");
+        assert!(
+            !s.file("probe.json").exists(),
+            "settings-like files stay absent"
+        );
 
         let (v, outcome) = load_from::<Seeded>(&s.file("seeded.json"));
         assert_eq!(outcome, ConfigLoad::Seeded);
         assert_eq!(v.items, vec![7, 8, 9]);
-        assert!(s.file("seeded.json").exists(), "a library seeds itself on first run");
+        assert!(
+            s.file("seeded.json").exists(),
+            "a library seeds itself on first run"
+        );
     }
 
     /// **The contract that matters**, tested once for every file that uses it.
@@ -270,8 +275,14 @@ pub(crate) mod tests {
         let (p, outcome) = load_from::<Probe>(&s.file("probe.json"));
         assert!(matches!(outcome, ConfigLoad::Rejected(_)), "{outcome:?}");
         assert_eq!(p, Probe::default());
-        assert_eq!(std::fs::read_to_string(s.file("probe.json")).unwrap(), precious);
-        assert_eq!(std::fs::read_to_string(s.file("probe.json.bak")).unwrap(), precious);
+        assert_eq!(
+            std::fs::read_to_string(s.file("probe.json")).unwrap(),
+            precious
+        );
+        assert_eq!(
+            std::fs::read_to_string(s.file("probe.json.bak")).unwrap(),
+            precious
+        );
     }
 
     /// A rejected load falls back to [`ConfigFile::seed`], **not** `Default`. Caught by
@@ -299,7 +310,10 @@ pub(crate) mod tests {
         };
         assert!(why.contains("newer version"), "{why}");
         assert_eq!(p, Probe::default());
-        assert_eq!(std::fs::read_to_string(s.file("probe.json")).unwrap(), newer);
+        assert_eq!(
+            std::fs::read_to_string(s.file("probe.json")).unwrap(),
+            newer
+        );
     }
 
     #[test]

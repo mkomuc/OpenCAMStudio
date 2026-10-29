@@ -14,7 +14,8 @@ imports and exports.
    preset selected this copies its values. Give the new preset a name and select
    its material, or leave it at **Any material**. The material picker stores the ID
    and displays its name. Select a preset row and use **Edit** or **Remove** to manage it.
-3. Enter spindle RPM, cutting feed, and plunge feed. Choose **Cooling → MMS** to
+3. Enter spindle RPM (or **Cutting speed**), cutting feed (or **Feed per tooth**),
+   and plunge feed. Choose **Cooling → MMS** to
    run minimum-quantity lubrication, or **None** to cut without cooling. Optionally enter ramp,
    lead-in, and lead-out feeds, as well as stepdown and overlap. Click **Done** to
    return to the table, then **Apply changes** in the inspector to save the cutter
@@ -66,6 +67,22 @@ within a compound V-carve operation too. None never activates a coolant output.
 For Estlcam, the machine's **Coolant / MMS outputs** settings select which output
 is driven: output 1 uses M8/M9, output 2 uses M10/M11. Other posts emit their mist
 commands (M7/M9). See [Estlcam export](estlcam.md).
+
+## Cutting speed and feed per tooth
+
+The operation's **Tool** tab and preset editor link **Cutting speed** (m/min) to
+spindle RPM and **Feed per tooth** (mm/tooth) to cutting feed (mm/min):
+
+- Cutting speed = π × cutter diameter (mm) × RPM / 1000.
+- Feed per tooth = cutting feed / (RPM × flute count).
+
+Editing either member of a pair updates the other immediately. Changing RPM also
+recalculates feed per tooth, retaining the current cutting feed. Calculations use
+the selected cutter's nominal diameter and flute count, and resolve RPM `0` to the
+job's spindle speed. Cutters without a flute count cannot calculate feed per tooth.
+The preset table shows both calculated values. Projects and presets save the linked
+RPM and feed, so these values are restored without introducing independent,
+potentially conflicting cutting data.
 
 ## Independent entry and exit feeds
 

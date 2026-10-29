@@ -136,7 +136,9 @@ pub(crate) fn clear_validated(
     accept: impl Fn(&Program) -> bool,
 ) -> Result<ClearResult, RingsError> {
     if !job.lift_height.is_finite() || job.lift_height < 0.0 {
-        return Err(RingsError::Limit("Lift height must be finite and nonnegative".into()));
+        return Err(RingsError::Limit(
+            "Lift height must be finite and nonnegative".into(),
+        ));
     }
     let mut adaptive_candidate = None;
     // **Adaptive dispatch: the front-advance clearer, behind the exact oracle.**
@@ -344,21 +346,33 @@ fn clear_concentric(
         return Ok(0);
     }
     let n = rings.len();
-    let vertices: usize = rings.iter().map(|r|r.pts.len()).sum();
+    let vertices: usize = rings.iter().map(|r| r.pts.len()).sum();
     if vertices.saturating_mul(levels.len()).saturating_mul(34) > cam_model::MAX_PROFILE_MOVES {
-        return Err(RingsError::Limit("Clearing motion budget exceeded; increase stepover/stepdown".into()));
+        return Err(RingsError::Limit(
+            "Clearing motion budget exceeded; increase stepover/stepdown".into(),
+        ));
     }
     for ring in &rings {
-        let mut previous=heights.top_of_stock;
+        let mut previous = heights.top_of_stock;
         for &z in levels {
-            crate::profile::validate_ramp_travel(job.plunge,previous-z,crate::profile::loop_perimeter(&ring.pts)).map_err(RingsError::Limit)?;
+            crate::profile::validate_ramp_travel(
+                job.plunge,
+                previous - z,
+                crate::profile::loop_perimeter(&ring.pts),
+            )
+            .map_err(RingsError::Limit)?;
             if job.lift_height > 0.0 {
-                let top = (z + job.lift_height).min(heights.clearance).min(heights.top_of_stock);
+                let top = (z + job.lift_height)
+                    .min(heights.clearance)
+                    .min(heights.top_of_stock);
                 crate::profile::validate_ramp_travel(
-                    job.plunge, (top - z).max(0.0), crate::profile::loop_perimeter(&ring.pts),
-                ).map_err(RingsError::Limit)?;
+                    job.plunge,
+                    (top - z).max(0.0),
+                    crate::profile::loop_perimeter(&ring.pts),
+                )
+                .map_err(RingsError::Limit)?;
             }
-            previous=z;
+            previous = z;
         }
     }
 
@@ -395,7 +409,9 @@ fn clear_concentric(
         1.5 * spacing,
         cancel,
     );
-    if cancel.is_cancelled() { return Err(RingsError::Cancelled); }
+    if cancel.is_cancelled() {
+        return Err(RingsError::Cancelled);
+    }
     Ok(n)
 }
 
@@ -459,12 +475,25 @@ fn emit_adaptive_moves(
             Some(len) => {
                 let path: Vec<_> = moves.iter().map(|&(p, _)| p).collect();
                 let ramp = crate::profile::advance_along_path(&path, len);
-                crate::profile::emit_open_ramp(prog, &ramp, from_z, z, job.entry_feeds.ramp(job.feed), plunge_tag);
+                crate::profile::emit_open_ramp(
+                    prog,
+                    &ramp,
+                    from_z,
+                    z,
+                    job.entry_feeds.ramp(job.feed),
+                    plunge_tag,
+                );
             }
             None => crate::profile::emit_plunge(
-                prog, start, tan, out, from_z, z,
+                prog,
+                start,
+                tan,
+                out,
+                from_z,
+                z,
                 crate::leads::guard_plunge(job.guard, start, out, job.plunge),
-                job.plunge_feed, job.entry_feeds.ramp(job.feed),
+                job.plunge_feed,
+                job.entry_feeds.ramp(job.feed),
                 plunge_tag,
             ),
         }
@@ -605,21 +634,34 @@ fn emit_adaptive_moves(
                 let dx = b.x - a.x;
                 let dy = b.y - a.y;
                 let length2 = dx * dx + dy * dy;
-                if length2 <= 1e-24 { continue; }
-                let t = (((preferred[0] - a.x) * dx + (preferred[1] - a.y) * dy) / length2).clamp(0.0, 1.0);
+                if length2 <= 1e-24 {
+                    continue;
+                }
+                let t = (((preferred[0] - a.x) * dx + (preferred[1] - a.y) * dy) / length2)
+                    .clamp(0.0, 1.0);
                 let point = Point::new(a.x + t * dx, a.y + t * dy);
                 let distance = (point.x - preferred[0]).powi(2) + (point.y - preferred[1]).powi(2);
                 // Ties prefer the latest visit, keeping return travel short.
-                if distance <= nearest.2 { nearest = (i, point, distance); }
+                if distance <= nearest.2 {
+                    nearest = (i, point, distance);
+                }
             }
             if nearest.2.is_finite() {
                 let tag = Tag::new(job.id, MoveKind::LeadOut);
                 for i in (nearest.0..moves.len() - 1).rev() {
                     let p = moves[i].0;
-                    prog.push(Step::Linear { to: Point3::new(p.x, p.y, z), feed: job.entry_feeds.lead_out(job.feed), tag });
+                    prog.push(Step::Linear {
+                        to: Point3::new(p.x, p.y, z),
+                        feed: job.entry_feeds.lead_out(job.feed),
+                        tag,
+                    });
                 }
                 last = nearest.1;
-                prog.push(Step::Linear { to: Point3::new(last.x, last.y, z), feed: job.entry_feeds.lead_out(job.feed), tag });
+                prog.push(Step::Linear {
+                    to: Point3::new(last.x, last.y, z),
+                    feed: job.entry_feeds.lead_out(job.feed),
+                    tag,
+                });
             }
         }
         prog.push(Step::Rapid {
@@ -640,7 +682,10 @@ mod tests {
     }
 
     fn frame_job() -> Clearing {
-        Clearing { engagement: 2.0, climb: true }
+        Clearing {
+            engagement: 2.0,
+            climb: true,
+        }
     }
 
     fn count(prog: &Program, pred: impl Fn(&Step) -> bool) -> usize {
@@ -710,9 +755,15 @@ mod tests {
                         Step::Rapid { to, tag } if tag.kind == MoveKind::Link
                             && *to == Point3::new(x, 10., raised))));
                 }
-                let cutting = program.steps().iter().position(|s| matches!(s,
+                let cutting = program
+                    .steps()
+                    .iter()
+                    .position(|s| {
+                        matches!(s,
                     Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting
-                        && *to == Point3::new(13., 10., z))).unwrap();
+                        && *to == Point3::new(13., 10., z))
+                    })
+                    .unwrap();
                 if lift > 0. {
                     assert!(matches!(&program.steps()[cutting - 1],
                         Step::Linear { to, feed, tag } if tag.kind == MoveKind::Plunge
@@ -736,7 +787,14 @@ mod tests {
         job.lift_height = 2.;
         let h = Heights::new(5., 2., 0.);
         let mut program = Program::new();
-        emit_adaptive_moves(&mut program, &moves, &[false, true, false, false], &job, &h, &[-3.]);
+        emit_adaptive_moves(
+            &mut program,
+            &moves,
+            &[false, true, false, false],
+            &job,
+            &h,
+            &[-3.],
+        );
         assert!(!program.steps().iter().any(|s| matches!(s,
             Step::Linear { to, .. } if *to == Point3::new(11., 10., -3.))));
         assert!(program.steps().iter().any(|s| matches!(s,
@@ -749,8 +807,15 @@ mod tests {
             let mut job = frame_clearjob(frame_job());
             job.lift_height = lift;
             let mut program = Program::new();
-            assert!(clear(&mut program, &frame_region(), &job,
-                &Heights::new(5., 2., 0.), &[-1.], &CancelToken::new()).is_err());
+            assert!(clear(
+                &mut program,
+                &frame_region(),
+                &job,
+                &Heights::new(5., 2., 0.),
+                &[-1.],
+                &CancelToken::new()
+            )
+            .is_err());
             assert!(program.steps().is_empty());
         }
     }
@@ -758,22 +823,36 @@ mod tests {
     #[test]
     fn rejected_frontier_is_discarded_before_concentric_fallback() {
         let region = Polygon::new(Contour::new(vec![
-            Point::new(0., 0.), Point::new(40., 0.),
-            Point::new(40., 40.), Point::new(0., 40.),
-        ])).unwrap();
+            Point::new(0., 0.),
+            Point::new(40., 0.),
+            Point::new(40., 40.),
+            Point::new(0., 40.),
+        ]))
+        .unwrap();
         let mut job = frame_clearjob(frame_job());
-        let heights = Heights { clearance: 5., retract: 2., top_of_stock: 0. };
+        let heights = Heights {
+            clearance: 5.,
+            retract: 2.,
+            top_of_stock: 0.,
+        };
         let token = CancelToken::new();
         let checked = std::cell::Cell::new(false);
         let mut actual = Program::new();
         actual.push(Step::Comment("preceding region".into()));
         let rings = clear_validated(
-            &mut actual, &region, &job, &heights, &[-1.], &token, false,
+            &mut actual,
+            &region,
+            &job,
+            &heights,
+            &[-1.],
+            &token,
+            false,
             |candidate| {
                 assert!(!candidate.steps().is_empty());
                 checked.replace(true)
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(checked.get(), "fixture must exercise frontier rejection");
         // Disable frontier dispatch while preserving the same ring spacing.
         job.spacing = job.effective_spacing();
@@ -783,7 +862,10 @@ mod tests {
         let expected_rings = clear(&mut expected, &region, &job, &heights, &[-1.], &token).unwrap();
         assert_eq!(rings.paths, expected_rings);
         assert!(rings.concentric);
-        assert_eq!(actual, expected, "no rejected moves may leak into the output");
+        assert_eq!(
+            actual, expected,
+            "no rejected moves may leak into the output"
+        );
     }
 
     #[test]
@@ -795,24 +877,37 @@ mod tests {
         let mut original = Program::new();
         clear(&mut original, &region, &job, &heights, &[-1.], &token).unwrap();
         let original_lifts = clearance_lifts(&original, &heights);
-        assert!(original_lifts > 1, "fixture must have a fragmented frontier");
+        assert!(
+            original_lifts > 1,
+            "fixture must have a fragmented frontier"
+        );
 
         for accept_fallback in [true, false] {
             let checked = std::cell::Cell::new(0);
             let mut actual = Program::new();
             let result = clear_validated(
-                &mut actual, &region, &job, &heights, &[-1.], &token, true,
+                &mut actual,
+                &region,
+                &job,
+                &heights,
+                &[-1.],
+                &token,
+                true,
                 |candidate| {
                     checked.set(checked.get() + 1);
                     accept_fallback || *candidate == original
                 },
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(checked.get(), 2, "validate both frontier and fallback");
             assert_eq!(result.concentric, accept_fallback);
             if accept_fallback {
                 assert!(clearance_lifts(&actual, &heights) < original_lifts);
             } else {
-                assert_eq!(actual, original, "a rejected fallback must preserve the safe frontier");
+                assert_eq!(
+                    actual, original,
+                    "a rejected fallback must preserve the safe frontier"
+                );
             }
         }
     }
@@ -820,15 +915,25 @@ mod tests {
     #[test]
     fn rejected_concentric_fallback_emits_no_motion() {
         let region = frame_region();
-        let job = frame_clearjob(Clearing { engagement: 0., climb: true });
+        let job = frame_clearjob(Clearing {
+            engagement: 0.,
+            climb: true,
+        });
         let heights = Heights::new(5., 2., 0.);
         let mut program = Program::new();
         program.push(Step::Comment("preceding region".into()));
         let original = program.clone();
         assert!(clear_validated(
-            &mut program, &region, &job, &heights, &[-1.], &CancelToken::new(), true,
+            &mut program,
+            &region,
+            &job,
+            &heights,
+            &[-1.],
+            &CancelToken::new(),
+            true,
             |_| false,
-        ).is_err());
+        )
+        .is_err());
         assert_eq!(program, original);
     }
 
@@ -842,25 +947,55 @@ mod tests {
         let mut job = frame_clearjob(frame_job());
         job.end = Some([10., 0.]);
         let moves = vec![
-            (Point::new(0., 0.), false), (Point::new(10., 0.), true),
-            (Point::new(20., 20.), false), (Point::new(30., 20.), true),
+            (Point::new(0., 0.), false),
+            (Point::new(10., 0.), true),
+            (Point::new(20., 20.), false),
+            (Point::new(30., 20.), true),
             (Point::new(30., 30.), true),
         ];
         let mut program = Program::new();
-        emit_adaptive_moves(&mut program, &moves, &[], &job, &Heights::new(5., 2., 0.), &[-1.]);
+        emit_adaptive_moves(
+            &mut program,
+            &moves,
+            &[],
+            &job,
+            &Heights::new(5., 2., 0.),
+            &[-1.],
+        );
         assert!(program.validate().is_ok());
-        let exits: Vec<_> = program.steps().iter().filter_map(|s| match s {
-            Step::Linear { to, tag, .. } if tag.kind == MoveKind::LeadOut => Some(*to),
-            _ => None,
-        }).collect();
-        assert_eq!(exits, vec![Point3::new(30., 20., -1.), Point3::new(20., 20., -1.)]);
-        assert!(matches!(program.steps().last(), Some(Step::Rapid { to, .. }) if *to == Point3::new(20., 20., 5.)));
-        assert_eq!(count(&program, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting)), 3);
+        let exits: Vec<_> = program
+            .steps()
+            .iter()
+            .filter_map(|s| match s {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::LeadOut => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            exits,
+            vec![Point3::new(30., 20., -1.), Point3::new(20., 20., -1.)]
+        );
+        assert!(
+            matches!(program.steps().last(), Some(Step::Rapid { to, .. }) if *to == Point3::new(20., 20., 5.))
+        );
+        assert_eq!(
+            count(
+                &program,
+                |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting)
+            ),
+            3
+        );
     }
 
     #[test]
     fn concentric_exit_is_independent_of_entry_and_keeps_wall_leads() {
-        let region = Polygon::new(Contour::new(vec![Point::new(0., 0.), Point::new(40., 0.), Point::new(40., 40.), Point::new(0., 40.)])).unwrap();
+        let region = Polygon::new(Contour::new(vec![
+            Point::new(0., 0.),
+            Point::new(40., 0.),
+            Point::new(40., 40.),
+            Point::new(0., 40.),
+        ]))
+        .unwrap();
         for plunge in [Plunge::Straight, Plunge::Ramp { angle_deg: 10.0 }] {
             let mut job = frame_clearjob(Clearing::default());
             job.start = Some([20., 10.]);
@@ -869,7 +1004,15 @@ mod tests {
             job.lead_in = Lead::Arc { radius: 0.5 };
             job.lead_out = Lead::Arc { radius: 0.5 };
             let mut program = Program::new();
-            clear(&mut program, &region, &job, &Heights::new(5., 2., 0.), &[-1.], &CancelToken::new()).unwrap();
+            clear(
+                &mut program,
+                &region,
+                &job,
+                &Heights::new(5., 2., 0.),
+                &[-1.],
+                &CancelToken::new(),
+            )
+            .unwrap();
             assert!(program.validate().is_ok());
             let mut previous = None;
             let mut last_exit = None;
@@ -879,11 +1022,16 @@ mod tests {
                     Step::Arc { end, tag, .. } => (*end, *tag),
                     _ => continue,
                 };
-                if tag.kind == MoveKind::LeadOut { last_exit = previous; }
+                if tag.kind == MoveKind::LeadOut {
+                    last_exit = previous;
+                }
                 previous = Some(point);
             }
             let exit: Point3 = last_exit.unwrap();
-            assert!((exit.x - 37.).hypot(exit.y - 20.) < 0.02, "{plunge:?}: {exit:?}");
+            assert!(
+                (exit.x - 37.).hypot(exit.y - 20.) < 0.02,
+                "{plunge:?}: {exit:?}"
+            );
         }
     }
 
@@ -893,8 +1041,14 @@ mod tests {
         let job = frame_clearjob(frame_job());
         let heights = Heights::new(5.0, 2.0, 0.0); // clearance 5, retract 2, stock top 0
         let mut prog = Program::new();
-        let Ok(_) = clear(&mut prog, &region, &job, &heights, &levels_two(), &CancelToken::new())
-        else {
+        let Ok(_) = clear(
+            &mut prog,
+            &region,
+            &job,
+            &heights,
+            &levels_two(),
+            &CancelToken::new(),
+        ) else {
             panic!("clear should succeed");
         };
         // Every plunge-tagged feed is either the level's own entry (the operator's strategy,
@@ -951,22 +1105,43 @@ mod tests {
         let levels = [-1.0, -2.0];
         let plunges = |plunge: Plunge| -> (usize, usize) {
             // conventional ⇒ the concentric clearer answers, not the steered one
-            let mut job = frame_clearjob(Clearing { engagement: 2.0, climb: false });
+            let mut job = frame_clearjob(Clearing {
+                engagement: 2.0,
+                climb: false,
+            });
             job.plunge = plunge;
             let mut prog = Program::new();
-            let Ok(_) = clear(&mut prog, &region, &job, &heights, &levels, &CancelToken::new())
-            else {
+            let Ok(_) = clear(
+                &mut prog,
+                &region,
+                &job,
+                &heights,
+                &levels,
+                &CancelToken::new(),
+            ) else {
                 panic!("clear should succeed");
             };
-            let arcs = count(&prog, |s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge));
-            let straight = count(&prog, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge));
+            let arcs = count(
+                &prog,
+                |s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge),
+            );
+            let straight = count(
+                &prog,
+                |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge),
+            );
             (arcs, straight)
         };
         let (straight_arcs, straight_drops) = plunges(Plunge::Straight);
         assert_eq!(straight_arcs, 0, "a straight plunge emits no arcs");
-        assert!(straight_drops >= 2, "at least one entry per level, got {straight_drops}");
+        assert!(
+            straight_drops >= 2,
+            "at least one entry per level, got {straight_drops}"
+        );
 
-        let (helix_arcs, helix_drops) = plunges(Plunge::Helix { radius: 1.0, pitch: 0.5 });
+        let (helix_arcs, helix_drops) = plunges(Plunge::Helix {
+            radius: 1.0,
+            pitch: 0.5,
+        });
         assert!(helix_arcs > 0, "a helix plunge must emit arcs");
         assert_eq!(
             helix_drops, 0,
@@ -990,19 +1165,34 @@ mod tests {
         let heights = Heights::new(5.0, 2.0, 0.0);
         let levels = [-1.0, -2.0];
         for climb in [true, false] {
-            let mut job = frame_clearjob(Clearing { engagement: 2.0, climb });
-            job.plunge = Plunge::Helix { radius: 2.0, pitch: 0.5 };
+            let mut job = frame_clearjob(Clearing {
+                engagement: 2.0,
+                climb,
+            });
+            job.plunge = Plunge::Helix {
+                radius: 2.0,
+                pitch: 0.5,
+            };
             job.lead_in = Lead::Arc { radius: 1.0 }; // hold it on the concentric path
             let mut prog = Program::new();
-            let Ok(_) = clear(&mut prog, &region, &job, &heights, &levels, &CancelToken::new())
-            else {
+            let Ok(_) = clear(
+                &mut prog,
+                &region,
+                &job,
+                &heights,
+                &levels,
+                &CancelToken::new(),
+            ) else {
                 panic!("clear should succeed");
             };
             // The island, grown by the tool radius: no tool centre may enter it.
             let keep = Polygon::new(island.clone()).unwrap();
-            let forbidden =
-                cam_geo::offset(std::slice::from_ref(&keep), job.radius, cam_geo::JoinStyle::Round)
-                    .unwrap();
+            let forbidden = cam_geo::offset(
+                std::slice::from_ref(&keep),
+                job.radius,
+                cam_geo::JoinStyle::Round,
+            )
+            .unwrap();
             // **Depth, not containment.** The island ring is *itself* the island offset by
             // the tool radius, so every point of it lies exactly on this zone's boundary and
             // `contains` — a closed-set test — calls the legitimate cut a violation. What
@@ -1041,15 +1231,31 @@ mod tests {
         let heights = Heights::new(5.0, 2.0, 0.0);
         let levels = [-1.0, -2.0];
         let mut job = frame_clearjob(frame_job()); // climb + cap ⇒ the steered clearer
-        job.plunge = Plunge::Helix { radius: 1.0, pitch: 0.5 };
+        job.plunge = Plunge::Helix {
+            radius: 1.0,
+            pitch: 0.5,
+        };
         let mut prog = Program::new();
-        let Ok(n) = clear(&mut prog, &region, &job, &heights, &levels, &CancelToken::new()) else {
+        let Ok(n) = clear(
+            &mut prog,
+            &region,
+            &job,
+            &heights,
+            &levels,
+            &CancelToken::new(),
+        ) else {
             panic!("clear should succeed");
         };
         assert_eq!(n, 1, "expected the steered path, got {n} rings");
 
-        let arc_plunges = count(&prog, |s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge));
-        let feed_plunges = count(&prog, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge));
+        let arc_plunges = count(
+            &prog,
+            |s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge),
+        );
+        let feed_plunges = count(
+            &prog,
+            |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge),
+        );
         // Two level entries, each a helix of several arcs — and far more plain feed-ins.
         assert!(arc_plunges > 0, "the level entries still helix into solid");
         assert!(
@@ -1067,20 +1273,46 @@ mod tests {
         let levels = [-1.0, -2.0]; // two depth passes
 
         let mut prog = Program::new();
-        let Ok(n) = clear(&mut prog, &region, &job, &heights, &levels, &CancelToken::new()) else {
+        let Ok(n) = clear(
+            &mut prog,
+            &region,
+            &job,
+            &heights,
+            &levels,
+            &CancelToken::new(),
+        ) else {
             panic!("clearing a frame should succeed");
         };
-        assert_eq!(n, 1, "a certified steered clear is one continuous path, got {n}");
+        assert_eq!(
+            n, 1,
+            "a certified steered clear is one continuous path, got {n}"
+        );
 
-        let cuts = count(&prog, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting));
-        let plunges = count(&prog, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge));
-        assert!(cuts > 50, "the frame has substantial cutting motion, got {cuts}");
-        assert!(plunges >= 2, "at least one entry plunge per level, got {plunges}");
+        let cuts = count(
+            &prog,
+            |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting),
+        );
+        let plunges = count(
+            &prog,
+            |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge),
+        );
+        assert!(
+            cuts > 50,
+            "the frame has substantial cutting motion, got {cuts}"
+        );
+        assert!(
+            plunges >= 2,
+            "at least one entry plunge per level, got {plunges}"
+        );
         // Every cutting move stays at a level depth (never above the stock top).
         for s in prog.steps() {
             if let Step::Linear { to, tag, .. } = s {
                 if tag.kind == MoveKind::Cutting {
-                    assert!(to.z <= heights.top_of_stock + 1e-9, "a cut rose above stock: z={}", to.z);
+                    assert!(
+                        to.z <= heights.top_of_stock + 1e-9,
+                        "a cut rose above stock: z={}",
+                        to.z
+                    );
                 }
             }
         }
@@ -1101,12 +1333,21 @@ mod tests {
         let run = |climb: bool, spindle: SpindleDir| {
             // A finishing lead holds both windings on the concentric path, so the two are
             // comparable at all — the adaptive generators emit a single fixed winding.
-            let mut job = frame_clearjob(Clearing { engagement: 2.0, climb });
+            let mut job = frame_clearjob(Clearing {
+                engagement: 2.0,
+                climb,
+            });
             job.spindle = spindle;
             job.lead_in = Lead::Arc { radius: 1.0 };
             let mut prog = Program::new();
-            let Ok(_) = clear(&mut prog, &region, &job, &heights, &levels, &CancelToken::new())
-            else {
+            let Ok(_) = clear(
+                &mut prog,
+                &region,
+                &job,
+                &heights,
+                &levels,
+                &CancelToken::new(),
+            ) else {
                 panic!("clear should succeed")
             };
             prog
@@ -1134,11 +1375,20 @@ mod tests {
         let heights = Heights::new(5.0, 2.0, 0.0);
         let levels = [-1.0];
         let run = |spindle: SpindleDir| {
-            let mut job = frame_clearjob(Clearing { engagement: 2.0, climb: true });
+            let mut job = frame_clearjob(Clearing {
+                engagement: 2.0,
+                climb: true,
+            });
             job.spindle = spindle;
             let mut prog = Program::new();
-            let Ok(n) = clear(&mut prog, &region, &job, &heights, &levels, &CancelToken::new())
-            else {
+            let Ok(n) = clear(
+                &mut prog,
+                &region,
+                &job,
+                &heights,
+                &levels,
+                &CancelToken::new(),
+            ) else {
                 panic!("clear should succeed")
             };
             (n, prog)
@@ -1148,7 +1398,10 @@ mod tests {
         // concentric clearer reports the rings it actually laid.
         let (adaptive, adaptive_prog) = run(SpindleDir::Cw);
         let (concentric, concentric_prog) = run(SpindleDir::Ccw);
-        assert_eq!(adaptive, 1, "M3 climb + cap must reach the steered generator");
+        assert_eq!(
+            adaptive, 1,
+            "M3 climb + cap must reach the steered generator"
+        );
         assert!(
             concentric > 1,
             "M4 must fall through to the concentric clearer, got {concentric}"
@@ -1176,8 +1429,14 @@ mod tests {
         let levels = [-1.0];
         let run = |c: Clearing| {
             let mut prog = Program::new();
-            let Ok(n) = clear(&mut prog, &region, &frame_clearjob(c), &heights, &levels,
-                &CancelToken::new()) else {
+            let Ok(n) = clear(
+                &mut prog,
+                &region,
+                &frame_clearjob(c),
+                &heights,
+                &levels,
+                &CancelToken::new(),
+            ) else {
                 panic!("clear should succeed");
             };
             (n, prog)
@@ -1186,23 +1445,44 @@ mod tests {
             let mut job = frame_clearjob(c);
             job.lead_in = Lead::Arc { radius: 1.0 };
             let mut prog = Program::new();
-            let Ok(n) = clear(&mut prog, &region, &job, &heights, &levels, &CancelToken::new())
-            else {
+            let Ok(n) = clear(
+                &mut prog,
+                &region,
+                &job,
+                &heights,
+                &levels,
+                &CancelToken::new(),
+            ) else {
                 panic!("clear should succeed");
             };
             (n, prog)
         };
 
-        let (tight, _) = run(Clearing { engagement: 1.0, climb: false });
-        let (loose, _) = run(Clearing { engagement: 4.0, climb: false });
+        let (tight, _) = run(Clearing {
+            engagement: 1.0,
+            climb: false,
+        });
+        let (loose, _) = run(Clearing {
+            engagement: 4.0,
+            climb: false,
+        });
         assert!(
             tight > loose,
             "a tighter engagement cap must mean more rings: {tight} vs {loose}"
         );
 
-        let (climb_n, climb_prog) = run_leaded(Clearing { engagement: 2.0, climb: true });
-        let (conv_n, conv_prog) = run_leaded(Clearing { engagement: 2.0, climb: false });
-        assert_eq!(climb_n, conv_n, "same rings either way; only the winding differs");
+        let (climb_n, climb_prog) = run_leaded(Clearing {
+            engagement: 2.0,
+            climb: true,
+        });
+        let (conv_n, conv_prog) = run_leaded(Clearing {
+            engagement: 2.0,
+            climb: false,
+        });
+        assert_eq!(
+            climb_n, conv_n,
+            "same rings either way; only the winding differs"
+        );
 
         // Signed area of the cutting moves: opposite senses.
         let signed = |prog: &Program| -> f64 {
@@ -1214,7 +1494,9 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            pts.windows(2).map(|w| w[0].x * w[1].y - w[1].x * w[0].y).sum()
+            pts.windows(2)
+                .map(|w| w[0].x * w[1].y - w[1].x * w[0].y)
+                .sum()
         };
         let (sc, sv) = (signed(&climb_prog), signed(&conv_prog));
         assert!(

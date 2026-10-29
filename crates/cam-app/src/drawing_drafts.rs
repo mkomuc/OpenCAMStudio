@@ -13,7 +13,7 @@ impl AppController {
             Operation::Engrave(_) => OpKind::Engrave,
             Operation::Carve(_) => OpKind::Carve,
             Operation::Adaptive(_) => OpKind::Adaptive,
-        Operation::Parallel(_) => OpKind::Parallel,
+            Operation::Parallel(_) => OpKind::Parallel,
         }
     }
     /// Resolve a drawing geometry field without committing or resetting cutting data.
@@ -52,7 +52,10 @@ impl AppController {
                 let old = op.additional_chains.clone();
                 op.additional_chains = new.additional_chains;
                 for contour in &mut op.additional_chains {
-                    if let Some(previous) = old.iter().find(|p| p.chain == contour.chain && p.closed == contour.closed) {
+                    if let Some(previous) = old
+                        .iter()
+                        .find(|p| p.chain == contour.chain && p.closed == contour.closed)
+                    {
                         contour.side = previous.side;
                     }
                 }

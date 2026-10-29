@@ -771,7 +771,10 @@ impl GeometryState {
     /// Deterministic dependency key for an immutable asset revision. Display
     /// tessellation does not participate; placement and machining overrides do.
     pub fn binding_fingerprint(&self, binding: &GeometryBinding) -> String {
-        if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
+        if matches!(
+            binding.recipe,
+            ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing
+        ) {
             let mut dependencies: Vec<_> = self
                 .instances
                 .iter()
@@ -943,9 +946,10 @@ impl TopologySnapshot {
         VALID_TOPOLOGIES.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.retain(|entry| entry.strong_count() > 0);
-            if cache.iter().any(|entry| {
-                entry.upgrade().is_some_and(|old| Arc::ptr_eq(&old, self))
-            }) {
+            if cache
+                .iter()
+                .any(|entry| entry.upgrade().is_some_and(|old| Arc::ptr_eq(&old, self)))
+            {
                 return Ok(());
             }
             self.validate()?;

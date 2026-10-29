@@ -98,8 +98,14 @@ impl App {
                 details = details
                     .push(popup_separator())
                     .push(line("Feed length", format_mm(estimate.feed_distance_mm)))
-                    .push(line("Cutting time", format_time(estimate.cutting_seconds())))
-                    .push(line("Ramp/helix time", format_time(estimate.ramp_helix_seconds)))
+                    .push(line(
+                        "Cutting time",
+                        format_time(estimate.cutting_seconds()),
+                    ))
+                    .push(line(
+                        "Ramp/helix time",
+                        format_time(estimate.ramp_helix_seconds),
+                    ))
                     .push(line("Plunge time", format_time(estimate.plunge_seconds)))
                     .push(line("Rapid length", format_mm(estimate.rapid_distance_mm)))
                     .push(line("Rapid time", format_time(estimate.rapid_seconds)))
@@ -122,7 +128,9 @@ impl App {
         let content = column![
             scrollable(details)
                 .width(Length::Fill)
-                .height(Length::Fixed((self.window.height - 240.0).clamp(120.0, 440.0))),
+                .height(Length::Fixed(
+                    (self.window.height - 240.0).clamp(120.0, 440.0)
+                )),
             row![
                 Space::new().width(Length::Fill),
                 inspector_button("Close").on_press(Message::ProcessingTimeClose),

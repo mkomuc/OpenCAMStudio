@@ -39,13 +39,13 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
         // the stacked-teeth silhouette instead).
         return Tool {
             number,
-            diameter: 4.8,        // min cutting ⌀ (smallest hole it threads)
-            neck_diameter: 3.5,   // reduced neck (sets max thread depth = (4.8−3.5)/2)
-            flute_length: 15.0,   // length of cut (reach)
-            shank_diameter: 6.0,  // shank ⌀
-            length: 55.0,         // overall
+            diameter: 4.8,       // min cutting ⌀ (smallest hole it threads)
+            neck_diameter: 3.5,  // reduced neck (sets max thread depth = (4.8−3.5)/2)
+            flute_length: 15.0,  // length of cut (reach)
+            shank_diameter: 6.0, // shank ⌀
+            length: 55.0,        // overall
             flutes: 3,
-            kind,                 // carries the pitch (None = single-point by default)
+            kind, // carries the pitch (None = single-point by default)
             ..Default::default()
         };
     }
@@ -471,7 +471,9 @@ impl ToolLibrary {
                 .iter()
                 .filter(|t| matches!(t.kind, ToolKind::EndMill | ToolKind::FaceMill))
                 .max_by(|a, b| a.diameter.total_cmp(&b.diameter)),
-            OpKind::Profile | OpKind::Pocket | OpKind::Adaptive => middle(|k| matches!(k, ToolKind::EndMill)),
+            OpKind::Profile | OpKind::Pocket | OpKind::Adaptive => {
+                middle(|k| matches!(k, ToolKind::EndMill))
+            }
             OpKind::Parallel => middle(|k| matches!(k, ToolKind::BallMill)),
             OpKind::Drill => middle(|k| matches!(k, ToolKind::Drill { .. })),
             OpKind::Bore => middle(|k| matches!(k, ToolKind::EndMill)),
@@ -508,7 +510,9 @@ impl ToolLibrary {
     /// than always taking `max + 1`.
     fn next_number(&self) -> u32 {
         let used: std::collections::BTreeSet<u32> = self.tools.iter().map(|t| t.number).collect();
-        (1..).find(|n| !used.contains(n)).expect("u32 space is never exhausted")
+        (1..)
+            .find(|n| !used.contains(n))
+            .expect("u32 space is never exhausted")
     }
 
     /// Set the number of the tool at `index` to `new`, **swapping** with whatever tool
@@ -556,7 +560,6 @@ impl ToolLibrary {
         number
     }
 }
-
 
 /// The tool-geometry class as a plain discriminant, for the inspector picker
 /// (a friendlier face on the data-carrying [`ToolKind`], mirroring `PlungeKind`).
@@ -631,8 +634,13 @@ impl ToolKindPick {
 pub fn families_for(kind: OpKind) -> &'static [ToolKindPick] {
     use ToolKindPick as F;
     match kind {
-        OpKind::Profile | OpKind::Pocket | OpKind::Face | OpKind::Drill
-        | OpKind::Bore | OpKind::Adaptive | OpKind::Engrave => &F::ALL,
+        OpKind::Profile
+        | OpKind::Pocket
+        | OpKind::Face
+        | OpKind::Drill
+        | OpKind::Bore
+        | OpKind::Adaptive
+        | OpKind::Engrave => &F::ALL,
         OpKind::Parallel => &[F::BallMill],
         OpKind::Thread => &[F::ThreadMill],
         // A chamfer is cut by the flank, which both of these have.
@@ -681,13 +689,19 @@ mod library_file_tests {
     #[test]
     fn a_library_from_a_newer_build_is_refused_not_read_leniently() {
         let s = Scratch::new("library");
-        let newer = format!(r#"{{"library_version": {}, "tools": []}}"#, LIBRARY_VERSION + 3);
+        let newer = format!(
+            r#"{{"library_version": {}, "tools": []}}"#,
+            LIBRARY_VERSION + 3
+        );
         std::fs::write(s.file("tools.json"), &newer).unwrap();
 
         let (lib, outcome) = ToolLibrary::load_from(&s.file("tools.json"));
         assert!(matches!(outcome, LibraryLoad::Rejected(_)), "{outcome:?}");
         assert_eq!(lib, ToolLibrary::defaults());
-        assert_eq!(std::fs::read_to_string(s.file("tools.json")).unwrap(), newer);
+        assert_eq!(
+            std::fs::read_to_string(s.file("tools.json")).unwrap(),
+            newer
+        );
         // An empty `tools` list read leniently would have looked like "you have no
         // tools" — indistinguishable from a real empty library.
     }
@@ -698,8 +712,14 @@ mod library_file_tests {
         let (lib, outcome) = ToolLibrary::load_from(&s.file("tools.json"));
         assert_eq!(outcome, LibraryLoad::Seeded);
         assert_eq!(lib, ToolLibrary::defaults());
-        assert!(s.file("tools.json").exists(), "first run must seed the library");
-        assert!(!s.file("tools.json.bak").exists(), "a first run has nothing to back up");
+        assert!(
+            s.file("tools.json").exists(),
+            "first run must seed the library"
+        );
+        assert!(
+            !s.file("tools.json.bak").exists(),
+            "a first run has nothing to back up"
+        );
 
         // And it reloads as itself.
         let (again, outcome) = ToolLibrary::load_from(&s.file("tools.json"));
@@ -715,13 +735,20 @@ mod library_file_tests {
         let mut value = serde_json::to_value(&old).unwrap();
         value.as_object_mut().unwrap().remove("library_version");
         assert!(value.get("library_version").is_none());
-        std::fs::write(s.file("tools.json"), serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        std::fs::write(
+            s.file("tools.json"),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
 
         let (lib, outcome) = ToolLibrary::load_from(&s.file("tools.json"));
         assert_eq!(outcome, LibraryLoad::Loaded);
         assert_eq!(lib.library_version, LIBRARY_VERSION);
         assert_eq!(lib.tools, old.tools, "the tools must survive untouched");
-        assert!(!s.file("tools.json.bak").exists(), "an unversioned file is valid, not rejected");
+        assert!(
+            !s.file("tools.json.bak").exists(),
+            "an unversioned file is valid, not rejected"
+        );
     }
 
     #[test]
@@ -730,7 +757,10 @@ mod library_file_tests {
         let lib = ToolLibrary::defaults();
         lib.save_to(&s.file("tools.json")).unwrap();
         let text = std::fs::read_to_string(s.file("tools.json")).unwrap();
-        assert!(text.contains("library_version"), "the version must be written");
+        assert!(
+            text.contains("library_version"),
+            "the version must be written"
+        );
         let (back, outcome) = ToolLibrary::load_from(&s.file("tools.json"));
         assert_eq!(outcome, LibraryLoad::Loaded);
         assert_eq!(back, lib);
@@ -801,7 +831,8 @@ mod tests {
             assert!(
                 families
                     .iter()
-                    .any(|f| std::mem::discriminant(&f.to_kind()) == std::mem::discriminant(&tool.kind)),
+                    .any(|f| std::mem::discriminant(&f.to_kind())
+                        == std::mem::discriminant(&tool.kind)),
                 "{op:?} seeds {} ({}), which is not one of the families it can cut: {families:?}",
                 tool.number,
                 tool.kind
@@ -828,11 +859,8 @@ mod tests {
             let ToolKind::VBit { tip_radius, .. } = t.kind else {
                 unreachable!()
             };
-            let depth = cam_geo::vtip_max_depth(
-                (angle * 0.5_f64).to_radians(),
-                tip_radius,
-                t.radius(),
-            );
+            let depth =
+                cam_geo::vtip_max_depth((angle * 0.5_f64).to_radians(), tip_radius, t.radius());
             assert!(
                 (depth - catalogue_ch).abs() < 0.25,
                 "{angle}°: reaches {depth:.2} mm, catalogue cutting height {catalogue_ch:.2} mm"
@@ -872,8 +900,8 @@ mod tests {
                 mk(2, 12.0, ToolKind::EndMill),
                 mk(3, 8.0, ToolKind::EndMill),
             ],
-                      ..Default::default()
-                  };
+            ..Default::default()
+        };
         let t = lib.default_tool_for(OpKind::Face).unwrap();
         assert_eq!(t.diameter, 12.0);
         assert!(matches!(t.kind, ToolKind::EndMill));
@@ -887,28 +915,39 @@ mod tests {
         // A big chamfer mill must not win facing over a smaller flat end mill.
         let lib = ToolLibrary {
             tools: vec![
-                mk(1, 20.0, ToolKind::ChamferMill {
-                    included_angle_deg: 90.0,
-                    tip_diameter: 0.5,
-                }),
+                mk(
+                    1,
+                    20.0,
+                    ToolKind::ChamferMill {
+                        included_angle_deg: 90.0,
+                        tip_diameter: 0.5,
+                    },
+                ),
                 mk(2, 8.0, ToolKind::EndMill),
                 mk(3, 16.0, ToolKind::FaceMill),
             ],
-                      ..Default::default()
-                  };
+            ..Default::default()
+        };
         let t = lib.default_tool_for(OpKind::Face).unwrap();
         assert_eq!(t.number, 3, "the ⌀16 face mill is the largest flat tool");
 
         // With only non-flat tools, fall back to the first (never leave Face
         // without a tool — the machinist can still change it).
         let only_chamfer = ToolLibrary {
-            tools: vec![mk(1, 20.0, ToolKind::ChamferMill {
-                included_angle_deg: 90.0,
-                tip_diameter: 0.5,
-            })],
-                               ..Default::default()
-                           };
-        assert_eq!(only_chamfer.default_tool_for(OpKind::Face).unwrap().number, 1);
+            tools: vec![mk(
+                1,
+                20.0,
+                ToolKind::ChamferMill {
+                    included_angle_deg: 90.0,
+                    tip_diameter: 0.5,
+                },
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            only_chamfer.default_tool_for(OpKind::Face).unwrap().number,
+            1
+        );
     }
 
     #[test]
@@ -918,19 +957,47 @@ mod tests {
         let lib = ToolLibrary {
             tools: vec![
                 mk(1, 10.0, ToolKind::EndMill),
-                mk(2, 3.2, ToolKind::Drill { point_angle_deg: 118.0 }),
-                mk(3, 6.0, ToolKind::Drill { point_angle_deg: 135.0 }),
-                mk(4, 8.0, ToolKind::ChamferMill {
-                    included_angle_deg: 90.0,
-                    tip_diameter: 0.2,
-                }),
+                mk(
+                    2,
+                    3.2,
+                    ToolKind::Drill {
+                        point_angle_deg: 118.0,
+                    },
+                ),
+                mk(
+                    3,
+                    6.0,
+                    ToolKind::Drill {
+                        point_angle_deg: 135.0,
+                    },
+                ),
+                mk(
+                    4,
+                    8.0,
+                    ToolKind::ChamferMill {
+                        included_angle_deg: 90.0,
+                        tip_diameter: 0.2,
+                    },
+                ),
                 mk(5, 12.0, ToolKind::ThreadMill { pitch: None }),
             ],
-                      ..Default::default()
-                  };
-        assert_eq!(lib.default_tool_for(OpKind::Drill).unwrap().number, 2, "first Drill");
-        assert_eq!(lib.default_tool_for(OpKind::Chamfer).unwrap().number, 4, "first ChamferMill");
-        assert_eq!(lib.default_tool_for(OpKind::Thread).unwrap().number, 5, "first ThreadMill");
+            ..Default::default()
+        };
+        assert_eq!(
+            lib.default_tool_for(OpKind::Drill).unwrap().number,
+            2,
+            "first Drill"
+        );
+        assert_eq!(
+            lib.default_tool_for(OpKind::Chamfer).unwrap().number,
+            4,
+            "first ChamferMill"
+        );
+        assert_eq!(
+            lib.default_tool_for(OpKind::Thread).unwrap().number,
+            5,
+            "first ThreadMill"
+        );
         // Profile/Pocket want the first end mill (tool 1 here).
         assert_eq!(lib.default_tool_for(OpKind::Profile).unwrap().number, 1);
         assert_eq!(lib.default_tool_for(OpKind::Pocket).unwrap().number, 1);
@@ -942,12 +1009,18 @@ mod tests {
         // the size rule is. Of the two end mills, the lower middle of {4, 8} is ⌀4.
         let lib = ToolLibrary {
             tools: vec![
-                mk(1, 6.0, ToolKind::Drill { point_angle_deg: 118.0 }),
+                mk(
+                    1,
+                    6.0,
+                    ToolKind::Drill {
+                        point_angle_deg: 118.0,
+                    },
+                ),
                 mk(2, 8.0, ToolKind::EndMill),
                 mk(3, 4.0, ToolKind::EndMill),
             ],
-                      ..Default::default()
-                  };
+            ..Default::default()
+        };
         for op in [OpKind::Profile, OpKind::Pocket] {
             let t = lib.default_tool_for(op).unwrap();
             assert!(matches!(t.kind, ToolKind::EndMill), "{op:?} took the drill");
@@ -981,7 +1054,10 @@ mod tests {
         let lib = ToolLibrary::defaults();
         for op in [OpKind::Engrave, OpKind::Carve] {
             let v = lib.default_tool_for(op).unwrap();
-            let ToolKind::VBit { included_angle_deg, .. } = v.kind else {
+            let ToolKind::VBit {
+                included_angle_deg, ..
+            } = v.kind
+            else {
                 panic!("{op:?} must seed a V-bit")
             };
             assert_eq!(included_angle_deg, 60.0, "{op:?} seeded the wrong V-bit");
@@ -995,37 +1071,67 @@ mod tests {
     fn the_nearest_v_bit_angle_wins_and_ties_go_to_the_sharper() {
         // No 60° in the library: the nearest angle wins from either side.
         let bit = |n, d, a| {
-            mk(n, d, ToolKind::VBit {
-                included_angle_deg: a,
-                tip_radius: 0.1,
-            })
+            mk(
+                n,
+                d,
+                ToolKind::VBit {
+                    included_angle_deg: a,
+                    tip_radius: 0.1,
+                },
+            )
         };
-        let below = ToolLibrary { tools: vec![bit(1, 6.0, 30.0), bit(2, 6.0, 50.0)], ..Default::default() };
-        assert_eq!(below.default_tool_for(OpKind::Engrave).unwrap().number, 2, "50° is nearer 60");
-        let above = ToolLibrary { tools: vec![bit(1, 6.0, 90.0), bit(2, 6.0, 70.0)], ..Default::default() };
-        assert_eq!(above.default_tool_for(OpKind::Engrave).unwrap().number, 2, "70° is nearer 60");
+        let below = ToolLibrary {
+            tools: vec![bit(1, 6.0, 30.0), bit(2, 6.0, 50.0)],
+            ..Default::default()
+        };
+        assert_eq!(
+            below.default_tool_for(OpKind::Engrave).unwrap().number,
+            2,
+            "50° is nearer 60"
+        );
+        let above = ToolLibrary {
+            tools: vec![bit(1, 6.0, 90.0), bit(2, 6.0, 70.0)],
+            ..Default::default()
+        };
+        assert_eq!(
+            above.default_tool_for(OpKind::Engrave).unwrap().number,
+            2,
+            "70° is nearer 60"
+        );
 
         // Equidistant (45 and 75): the sharper bit wins. A narrow groove can be cut
         // deeper to widen it; a blunt bit can never cut a narrow one.
-        let tie = ToolLibrary { tools: vec![bit(1, 6.0, 75.0), bit(2, 6.0, 45.0)], ..Default::default() };
+        let tie = ToolLibrary {
+            tools: vec![bit(1, 6.0, 75.0), bit(2, 6.0, 45.0)],
+            ..Default::default()
+        };
         let t = tie.default_tool_for(OpKind::Engrave).unwrap();
         assert_eq!(t.number, 2, "a tie must break to the sharper bit");
 
         // A library with no V-bit at all still yields something rather than nothing --
         // the operator can change it, an empty wizard cannot be worked around.
-        let none = ToolLibrary { tools: vec![mk(1, 6.0, ToolKind::EndMill)], ..Default::default() };
+        let none = ToolLibrary {
+            tools: vec![mk(1, 6.0, ToolKind::EndMill)],
+            ..Default::default()
+        };
         assert_eq!(none.default_tool_for(OpKind::Engrave).unwrap().number, 1);
     }
 
     #[test]
     fn a_single_tool_of_a_kind_is_still_chosen() {
         // The median must not misbehave at the edges: one tool, or two.
-        let one = ToolLibrary { tools: vec![mk(1, 6.0, ToolKind::EndMill)], ..Default::default() };
+        let one = ToolLibrary {
+            tools: vec![mk(1, 6.0, ToolKind::EndMill)],
+            ..Default::default()
+        };
         assert_eq!(one.default_tool_for(OpKind::Profile).unwrap().diameter, 6.0);
         let two = ToolLibrary {
-            tools: vec![mk(1, 10.0, ToolKind::EndMill), mk(2, 4.0, ToolKind::EndMill)],
-                      ..Default::default()
-                  };
+            tools: vec![
+                mk(1, 10.0, ToolKind::EndMill),
+                mk(2, 4.0, ToolKind::EndMill),
+            ],
+            ..Default::default()
+        };
         assert_eq!(
             two.default_tool_for(OpKind::Profile).unwrap().diameter,
             4.0,
@@ -1039,9 +1145,12 @@ mod tests {
         // shipped library now *has* drills, V-bits and thread mills, so this rule has to
         // be exercised on a library that deliberately lacks them.
         let lib = ToolLibrary {
-            tools: vec![mk(1, 6.0, ToolKind::EndMill), mk(2, 10.0, ToolKind::EndMill)],
-                      ..Default::default()
-                  };
+            tools: vec![
+                mk(1, 6.0, ToolKind::EndMill),
+                mk(2, 10.0, ToolKind::EndMill),
+            ],
+            ..Default::default()
+        };
         for kind in [OpKind::Drill, OpKind::Thread, OpKind::Chamfer] {
             assert_eq!(
                 lib.default_tool_for(kind).unwrap().number,
@@ -1070,8 +1179,8 @@ mod tests {
                 mk(2, 6.0, ToolKind::EndMill),
                 mk(3, 10.0, ToolKind::EndMill),
             ],
-                          ..Default::default()
-                      };
+            ..Default::default()
+        };
         lib.tools.retain(|t| t.number != 2);
         let idx = lib.add_default();
         assert_eq!(lib.tools[idx].number, 2, "the freed #2 is reused, not #4");
@@ -1088,8 +1197,8 @@ mod tests {
                 mk(2, 6.0, ToolKind::EndMill),
                 mk(3, 10.0, ToolKind::EndMill),
             ],
-                          ..Default::default()
-                      };
+            ..Default::default()
+        };
         // Move #3 (index 2) onto #1 → the two swap.
         lib.set_number(2, 1);
         assert_eq!(lib.tools[2].number, 1, "target adopted");
@@ -1110,18 +1219,30 @@ mod tests {
                 mk(2, 6.0, ToolKind::EndMill),
                 mk(3, 10.0, ToolKind::EndMill),
             ],
-                          ..Default::default()
-                      };
+            ..Default::default()
+        };
         let before = lib.tools.len();
 
         // A genuinely new tool gets the next free number and is inserted.
-        let new = mk(99, 8.0, ToolKind::Drill { point_angle_deg: 118.0 });
+        let new = mk(
+            99,
+            8.0,
+            ToolKind::Drill {
+                point_angle_deg: 118.0,
+            },
+        );
         let n = lib.add_tool(new);
         assert_eq!(n, 4, "next free shop number");
         assert_eq!(lib.tools.len(), before + 1);
 
         // Re-adding the *same geometry* (any number) is a no-op returning its number.
-        let dup = mk(123, 8.0, ToolKind::Drill { point_angle_deg: 118.0 });
+        let dup = mk(
+            123,
+            8.0,
+            ToolKind::Drill {
+                point_angle_deg: 118.0,
+            },
+        );
         let n2 = lib.add_tool(dup);
         assert_eq!(n2, 4, "identical geometry returns the existing number");
         assert_eq!(lib.tools.len(), before + 1, "no duplicate inserted");
@@ -1139,17 +1260,25 @@ mod tests {
         // user an operation that cannot possibly run.
         let lib = ToolLibrary {
             tools: vec![
-                mk(1, 6.0, ToolKind::ChamferMill {
-                    included_angle_deg: 90.0,
-                    tip_diameter: 0.2,
-                }),
-                mk(2, 6.0, ToolKind::VBit {
-                    included_angle_deg: 60.0,
-                    tip_radius: 0.2,
-                }),
+                mk(
+                    1,
+                    6.0,
+                    ToolKind::ChamferMill {
+                        included_angle_deg: 90.0,
+                        tip_diameter: 0.2,
+                    },
+                ),
+                mk(
+                    2,
+                    6.0,
+                    ToolKind::VBit {
+                        included_angle_deg: 60.0,
+                        tip_radius: 0.2,
+                    },
+                ),
             ],
-                      ..Default::default()
-                  };
+            ..Default::default()
+        };
         assert_eq!(
             lib.default_tool_for(OpKind::Engrave).unwrap().number,
             2,
@@ -1158,7 +1287,6 @@ mod tests {
         // Chamfering still prefers the chamfer mill.
         assert_eq!(lib.default_tool_for(OpKind::Chamfer).unwrap().number, 1);
     }
-
 }
 
 #[cfg(test)]
@@ -1170,10 +1298,19 @@ mod preset_file_tests {
     fn malformed_presets_are_rejected_without_overwriting_the_library() {
         let scratch = Scratch::new("preset-library");
         let mut library = ToolLibrary::defaults();
-        library.materials.push(cam_model::Material { id: 17, name: "Aluminum".into() });
+        library.materials.push(cam_model::Material {
+            id: 17,
+            name: "Aluminum".into(),
+        });
         library.tools[0].presets.push(cam_model::ToolPreset {
-            id: 1, name: "Roughing".into(), material_id: Some(17),
-            spindle_rpm: 6000., feed: 500., plunge_feed: 100., stepdown: None, overlap: None,
+            id: 1,
+            name: "Roughing".into(),
+            material_id: Some(17),
+            spindle_rpm: 6000.,
+            feed: 500.,
+            plunge_feed: 100.,
+            stepdown: None,
+            overlap: None,
             cooling: Default::default(),
             entry_feeds: Default::default(),
         });
@@ -1187,6 +1324,9 @@ mod preset_file_tests {
         let (_, outcome) = ToolLibrary::load_from(&path);
         assert!(matches!(outcome, LibraryLoad::Rejected(_)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
-        assert_eq!(std::fs::read_to_string(scratch.file("tools.json.bak")).unwrap(), invalid);
+        assert_eq!(
+            std::fs::read_to_string(scratch.file("tools.json.bak")).unwrap(),
+            invalid
+        );
     }
 }

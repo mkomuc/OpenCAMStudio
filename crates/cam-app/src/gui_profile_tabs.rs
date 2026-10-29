@@ -127,7 +127,10 @@ impl App {
         camera: OrbitCamera,
         browser_width: f32,
     ) -> Option<TabOverlay> {
-        if !self.inspector_active || !self.inspector_enabled || self.operation_position_pick.is_some() {
+        if !self.inspector_active
+            || !self.inspector_enabled
+            || self.operation_position_pick.is_some()
+        {
             return None;
         }
         let (op, z) = self.profile_tab_geometry()?;
@@ -136,7 +139,9 @@ impl App {
         }
         let (vertices, indices) = self.profile_tab_mesh();
         let triangles = indices
-            .as_chunks::<3>().0.iter()
+            .as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
             .map(|(index, triangle)| {
                 (
@@ -767,49 +772,88 @@ mod tests {
         for named in [false, true] {
             let (mut app, id) = selected_cad_profile();
             let rotation = [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
-            app.controller.place_cad_instance(2, RigidTransform {
-                rotation, translation: [60., 20., 0.],
-            }).unwrap();
-            app.controller.edit_setup(|setup| setup.frame.world_from_setup.rotation = rotation);
+            app.controller
+                .place_cad_instance(
+                    2,
+                    RigidTransform {
+                        rotation,
+                        translation: [60., 20., 0.],
+                    },
+                )
+                .unwrap();
+            app.controller
+                .edit_setup(|setup| setup.frame.world_from_setup.rotation = rotation);
             app.begin_operation_draft(id);
             let mut reference = app.controller.geometry_state().bindings[&id].selected[0].clone();
             reference.kind = EntityKind::Silhouette;
             reference.id = reference.body_id;
             reference.instance_id = 2;
             let geometry = app.controller.setup_geometry_state().unwrap();
-            let binding = cam_geometry3d::resolve_selection(&geometry,
-                std::slice::from_ref(&reference), ExtractionRecipe::ProfileSilhouette, 30.).unwrap();
+            let binding = cam_geometry3d::resolve_selection(
+                &geometry,
+                std::slice::from_ref(&reference),
+                ExtractionRecipe::ProfileSilhouette,
+                30.,
+            )
+            .unwrap();
             assert_eq!(binding.heights.bottom, 15.);
             app.operation_binding_preview = Some(binding);
             if named {
-                let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Silhouette,
-                    "Projected body".into());
+                let mut entry = ProfileGeometryEntry::new(
+                    ProfileGeometryKind::Silhouette,
+                    "Projected body".into(),
+                );
                 entry.source = ProfileGeometrySource::Cad(vec![reference]);
-                let Some(Operation::Profile(profile)) = &mut app.operation_draft else { panic!("profile") };
+                let Some(Operation::Profile(profile)) = &mut app.operation_draft else {
+                    panic!("profile")
+                };
                 profile.selections = Some(vec![entry]);
             }
             let before = app.controller.document().clone();
-            let _ = app.update(Message::HeightReferenceChanged(HeightPlaneKind::Bottom,
-                HeightReference::SelectedContours));
+            let _ = app.update(Message::HeightReferenceChanged(
+                HeightPlaneKind::Bottom,
+                HeightReference::SelectedContours,
+            ));
             let camera = OrbitCamera::framed([-20.; 3], [100.; 3]);
             for (offset, expected) in [("-2", 13.), ("-4", 11.)] {
-                let _ = app.update(Message::HeightOffsetChanged(HeightPlaneKind::Bottom, offset.into()));
+                let _ = app.update(Message::HeightOffsetChanged(
+                    HeightPlaneKind::Bottom,
+                    offset.into(),
+                ));
                 assert_eq!(app.resolve_height_editor(id).unwrap().bottom, expected);
                 assert_eq!(app.profile_tab_overlay(camera, 0.).unwrap().z, expected);
                 let frame = &app.controller.inspection_setup().frame;
                 let preview = app.operation_geometry_preview();
                 assert!(!preview.strips.is_empty());
-                assert!(preview.strips.iter().flat_map(|strip| &strip.points)
-                    .all(|point| (frame.to_setup_vector(point.map(f64::from))[2] - expected).abs() < 1e-5));
+                assert!(preview
+                    .strips
+                    .iter()
+                    .flat_map(|strip| &strip.points)
+                    .all(
+                        |point| (frame.to_setup_vector(point.map(f64::from))[2] - expected).abs()
+                            < 1e-5
+                    ));
                 let viewport = app.machining_viewport();
-                let selected: Vec<_> = viewport.vertices.iter()
-                    .filter(|vertex| vertex.color == PICK_BOUNDARY).collect();
+                let selected: Vec<_> = viewport
+                    .vertices
+                    .iter()
+                    .filter(|vertex| vertex.color == PICK_BOUNDARY)
+                    .collect();
                 assert!(!selected.is_empty());
-                assert!(selected.iter().all(|vertex|
-                    (frame.to_setup_vector(vertex.position.map(f64::from))[2] - expected).abs() < 1e-5),
-                    "all silhouette highlights must follow Bottom, named={named}");
+                assert!(
+                    selected.iter().all(|vertex| (frame
+                        .to_setup_vector(vertex.position.map(f64::from))[2]
+                        - expected)
+                        .abs()
+                        < 1e-5),
+                    "all silhouette highlights must follow Bottom, named={named}"
+                );
             }
-            assert_eq!(app.controller.document(), &before, "preview edits must stay transactional");
+            assert_eq!(
+                app.controller.document(),
+                &before,
+                "preview edits must stay transactional"
+            );
         }
     }
 
@@ -818,8 +862,11 @@ mod tests {
     fn supplied_test2_silhouette_preview_uses_bottom() {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
-        app.controller.open_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testfiles/test2.ocam")).unwrap();
+        app.controller
+            .open_project(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/test2.ocam"),
+            )
+            .unwrap();
         let id = app.controller.inspection_setup().operations[0].id();
         app.begin_operation_draft(id);
         let bottom = app.resolve_height_editor(id).unwrap().bottom;
@@ -827,11 +874,17 @@ mod tests {
         assert_eq!(app.profile_selection_geometry().unwrap().1, bottom);
         let viewport = app.machining_viewport();
         let frame = &app.controller.inspection_setup().frame;
-        let selected: Vec<_> = viewport.vertices.iter()
-            .filter(|vertex| vertex.color == PICK_BOUNDARY).collect();
+        let selected: Vec<_> = viewport
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.color == PICK_BOUNDARY)
+            .collect();
         assert!(!selected.is_empty());
-        assert!(selected.iter().all(|vertex|
-            (frame.to_setup_vector(vertex.position.map(f64::from))[2] - bottom).abs() < 1e-5));
+        assert!(selected.iter().all(|vertex| (frame
+            .to_setup_vector(vertex.position.map(f64::from))[2]
+            - bottom)
+            .abs()
+            < 1e-5));
     }
 
     #[test]
@@ -841,7 +894,8 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -974,7 +1028,9 @@ mod tests {
                     .map(|v| v.position[2])
                     .fold(f32::NEG_INFINITY, f32::max);
                 let face = indices[36..]
-                    .as_chunks::<3>().0.iter()
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .find(|t| {
                         t.iter()
                             .all(|i| (vertices[*i as usize].position[2] - top).abs() < 1e-5)
@@ -1018,7 +1074,8 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .last()
             .unwrap()

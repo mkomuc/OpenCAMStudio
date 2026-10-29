@@ -22,6 +22,11 @@ that cannot fit the requested angle is rejected. Arc leads support sweeps up to
 170 degrees. Exit shape can follow entry shape while using an independent exit
 feed. The optional ramp RPM returns to cutting RPM after entry.
 
+For an automatic inside entry, Profile tries edge midpoints when the original
+corner cannot fit the requested leads. Selected entry positions are preserved.
+A lead that cannot fit inside the contour is omitted with a warning; reduce its
+size or select another position.
+
 Holding tabs are configured in Geometry with rectangular or triangular shapes
 and count, distance or manual placement. They require compatible closed contours,
 computed compensation and no roughing or ramps. Tab placement modes cannot be

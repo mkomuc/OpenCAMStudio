@@ -50,9 +50,11 @@ pub(super) fn stock_world_bounds(controller: &AppController) -> Option<([f32; 3]
 /// The configured input blank: a box, or the preceding setup's processed stock.
 pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, Vec<u32>) {
     if controller.inspection_setup().stock == cam_model::Stock::PreviousSetup {
-        return controller.outcome()
+        return controller
+            .outcome()
             .filter(|o| o.completion == JobCompletion::Complete)
-            .and_then(|o| o.initial_stock.clone()).unwrap_or_default();
+            .and_then(|o| o.initial_stock.clone())
+            .unwrap_or_default();
     }
     let (min, max) = controller.stock_box();
     if !controller.has_geometry() || (0..3).any(|axis| max[axis] <= min[axis]) {
@@ -213,8 +215,13 @@ impl App {
         self.cad_hidden.clear();
         self.hidden_assets.clear();
         self.collapsed_assets.clear();
-        self.expanded_setups = self.controller.setups().first()
-            .map(|s| s.id).into_iter().collect();
+        self.expanded_setups = self
+            .controller
+            .setups()
+            .first()
+            .map(|s| s.id)
+            .into_iter()
+            .collect();
         self.expanded_patterns.clear();
         self.expanded_operations.clear();
         self.tools_expanded = false;
@@ -322,7 +329,8 @@ impl App {
         // Keep the browser at a stable sibling index. Optional scene overlays
         // appear/disappear on selection; shifting the browser would discard its
         // mouse-area state between the first and second click.
-        let mut overlays = iced::widget::stack![Space::new().width(Length::Fill).height(Length::Fill)];
+        let mut overlays =
+            iced::widget::stack![Space::new().width(Length::Fill).height(Length::Fill)];
         if let Some(preview) = height_preview {
             overlays = overlays.push(
                 canvas::Canvas::new(preview)
@@ -353,13 +361,14 @@ impl App {
         }
         layers = layers.push(overlays.width(Length::Fill).height(Length::Fill));
         if self.show_project_browser {
-            let browser =
-                container(column![text(self.project_title()).size(13), self.project_tree()].spacing(6))
-                    .width(Length::Fixed(self.project_px.clamp(220., 360.)))
-                    .height(Length::Fill)
-                    .max_height(self.project_browser_height())
-                    .padding(8)
-                    .style(|_| container::Style::default());
+            let browser = container(
+                column![text(self.project_title()).size(13), self.project_tree()].spacing(6),
+            )
+            .width(Length::Fixed(self.project_px.clamp(220., 360.)))
+            .height(Length::Fill)
+            .max_height(self.project_browser_height())
+            .padding(8)
+            .style(|_| container::Style::default());
             layers = layers.push(container(browser).padding(8).height(Length::Fill));
         }
         column![
@@ -398,9 +407,17 @@ impl App {
 
     pub(super) fn machining_viewport(&self) -> Viewport {
         let mut cad_hidden = self.viewport_hidden_instances();
-        if self.simulation.as_ref().is_some_and(|p| !p.options.show_model) {
+        if self
+            .simulation
+            .as_ref()
+            .is_some_and(|p| !p.options.show_model)
+        {
             cad_hidden.extend(
-                self.controller.geometry_state().instances.iter().map(|i| i.id),
+                self.controller
+                    .geometry_state()
+                    .instances
+                    .iter()
+                    .map(|i| i.id),
             );
         }
         let model_view = self.model_view.is_some() || self.controller.setups().is_empty();
@@ -432,7 +449,9 @@ impl App {
             selection: self.controller.selection(),
             pending: self.controller.pending_op(),
             outcome: self.controller.outcome().and_then(|o| o.stamp.clone()),
-            operation_preview: self.operation_preview_outcome().and_then(|o| o.stamp.clone()),
+            operation_preview: self
+                .operation_preview_outcome()
+                .and_then(|o| o.stamp.clone()),
             cad_selection: self.controller.cad_selection().to_vec(),
             cad_hover: self.cad_hover.clone(),
             cad_hidden: cad_hidden.clone(),
@@ -489,11 +508,19 @@ impl App {
             // Resolve the full profile silhouette first. The base viewport can
             // then reuse its outside outline for selection highlighting.
             let editor_preview = editing.then(|| self.operation_geometry_preview());
-            let silhouette_bottom = if selected_geometry.iter()
-                .any(|reference| reference.kind == EntityKind::Silhouette) {
+            let silhouette_bottom = if selected_geometry
+                .iter()
+                .any(|reference| reference.kind == EntityKind::Silhouette)
+            {
                 self.operation_draft.as_ref().and_then(|operation| {
-                    let id = if self.creating_operation() { 0 } else { operation.id() };
-                    self.resolve_height_editor(id).ok().map(|heights| heights.bottom)
+                    let id = if self.creating_operation() {
+                        0
+                    } else {
+                        operation.id()
+                    };
+                    self.resolve_height_editor(id)
+                        .ok()
+                        .map(|heights| heights.bottom)
                 })
             } else {
                 None
@@ -545,7 +572,10 @@ impl App {
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
                 let (vertices, indices) = player.tool_mesh();
                 let (target_vertices, target_indices) = if player.options.transparent_tool {
-                    (&mut viewport.transparent_stock_vertices, &mut viewport.transparent_stock_indices)
+                    (
+                        &mut viewport.transparent_stock_vertices,
+                        &mut viewport.transparent_stock_indices,
+                    )
                 } else {
                     (&mut viewport.mesh_vertices, &mut viewport.mesh_indices)
                 };
@@ -569,7 +599,8 @@ impl App {
                         (min, max)
                     };
                     viewport.setup_geometry = Arc::new(
-                        Arc::unwrap_or_clone(viewport.setup_geometry).with_origin_box(draft, min, max),
+                        Arc::unwrap_or_clone(viewport.setup_geometry)
+                            .with_origin_box(draft, min, max),
                     );
                 }
             }
@@ -635,7 +666,8 @@ impl App {
         viewport.show_gizmo = self.show_gizmo;
         viewport.gizmo_size = self.gizmo_size;
         let pattern_pick = self.pattern_draft.as_ref().and_then(|draft| draft.picking);
-        viewport.setup_axis = self.setup_axis_pick.is_some() || pattern_pick.is_some_and(|axis| axis < 2);
+        viewport.setup_axis =
+            self.setup_axis_pick.is_some() || pattern_pick.is_some_and(|axis| axis < 2);
         if pattern_pick.is_some() {
             viewport.picking = true;
             viewport.cad_filter = EntityKind::Edge;
@@ -644,9 +676,12 @@ impl App {
         }
         viewport.operation_position_picking = self.operation_position_pick.is_some()
             && self.operation_preview_active()
-            && self.operation_tab == OperationTab::Linking && !model_view;
-        viewport.operation_position_color = self.operation_position_pick
-            .unwrap_or(operation_positions::PositionKind::Entry).color();
+            && self.operation_tab == OperationTab::Linking
+            && !model_view;
+        viewport.operation_position_color = self
+            .operation_position_pick
+            .unwrap_or(operation_positions::PositionKind::Entry)
+            .color();
         viewport.setup_hover = self.setup_hover.clone();
         viewport.setup_snaps = if self.settings.snapping.enabled {
             self.snaps.clone()
@@ -667,16 +702,19 @@ impl App {
         viewport.cad_silhouette = self.modifiers.control()
             && self.height_reference_pick.is_none()
             && !self.setup_model_pick;
-        viewport.cad_operation_kind = self.cad_pending_kind.or_else(|| {
-            self.cad_editing_op.and_then(|id| {
-                self.current_operation(id)
-                    .map(AppController::operation_kind)
+        viewport.cad_operation_kind = self
+            .cad_pending_kind
+            .or_else(|| {
+                self.cad_editing_op.and_then(|id| {
+                    self.current_operation(id)
+                        .map(AppController::operation_kind)
+                })
             })
-        }).or_else(|| {
-            (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
-                .then(|| self.geometry_operation_kind())
-                .flatten()
-        });
+            .or_else(|| {
+                (self.geometry_auto_pick && self.operation_tab == OperationTab::Geometry)
+                    .then(|| self.geometry_operation_kind())
+                    .flatten()
+            });
         if self
             .profile_entry_editor
             .as_ref()
@@ -699,7 +737,14 @@ impl App {
         }
         if matches!(
             viewport.cad_operation_kind,
-            Some(OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread)
+            Some(
+                OpKind::Pocket
+                    | OpKind::Chamfer
+                    | OpKind::Engrave
+                    | OpKind::Carve
+                    | OpKind::Bore
+                    | OpKind::Thread
+            )
         ) {
             viewport.cad_silhouette = false;
         }
@@ -733,13 +778,36 @@ impl App {
         };
         if let Some(player) = &self.simulation {
             let p = &player.options;
-            return container(row![
-                toggle("Tool", p.show_tool, Message::SimulationOption(SimulationOption::Tool(!p.show_tool))),
-                toggle("Toolpath", p.show_toolpath, Message::SimulationOption(SimulationOption::Toolpath(!p.show_toolpath))),
-                toggle("Stock · F8", p.show_stock, Message::ToggleStock),
-                toggle("Transparent stock", p.transparent_stock, Message::ToggleTransparentStock),
-                toggle("Model", p.show_model, Message::SimulationOption(SimulationOption::Model(!p.show_model))),
-            ].spacing(6).wrap()).padding(6).width(Length::Fill).into();
+            return container(
+                row![
+                    toggle(
+                        "Tool",
+                        p.show_tool,
+                        Message::SimulationOption(SimulationOption::Tool(!p.show_tool))
+                    ),
+                    toggle(
+                        "Toolpath",
+                        p.show_toolpath,
+                        Message::SimulationOption(SimulationOption::Toolpath(!p.show_toolpath))
+                    ),
+                    toggle("Stock · F8", p.show_stock, Message::ToggleStock),
+                    toggle(
+                        "Transparent stock",
+                        p.transparent_stock,
+                        Message::ToggleTransparentStock
+                    ),
+                    toggle(
+                        "Model",
+                        p.show_model,
+                        Message::SimulationOption(SimulationOption::Model(!p.show_model))
+                    ),
+                ]
+                .spacing(6)
+                .wrap(),
+            )
+            .padding(6)
+            .width(Length::Fill)
+            .into();
         }
         let hint = self
             .setup_hover
@@ -1065,25 +1133,55 @@ mod tests {
         let mut app = picking_app();
         app.end_setup_draft();
         app.controller.edit_setup(|s| s.operations.clear());
-        app.controller.edit_stock(|s| *s = cam_model::Stock::FixedBox {
-            size: [10., 10., 5.], model_position: [0., 0., 1.],
+        app.controller.edit_stock(|s| {
+            *s = cam_model::Stock::FixedBox {
+                size: [10., 10., 5.],
+                model_position: [0., 0., 1.],
+            }
         });
-        app.controller.edit_heights(|h| *h = cam_model::Heights::new(5., 2., 0.));
-        app.controller.edit_tool(0, |t| { t.diameter = 2.; t.flute_length = 12.; });
+        app.controller
+            .edit_heights(|h| *h = cam_model::Heights::new(5., 2., 0.));
+        app.controller.edit_tool(0, |t| {
+            t.diameter = 2.;
+            t.flute_length = 12.;
+        });
         let (min, max) = app.controller.stock_box();
         let center = [(min[0] + max[0]) / 2., (min[1] + max[1]) / 2.];
-        app.controller.add_operation(Operation::Drill(cam_model::DrillOp {
-            id: 0, tool: 1, points: vec![center], depth: 3., start_offset: 0.,
-            peck: None, dwell: None, spindle_rpm: 1000., tool_preset: None,
-            cooling: Default::default(), entry_feeds: Default::default(), work_offset: 1, feed: 100.,
-        }));
+        app.controller
+            .add_operation(Operation::Drill(cam_model::DrillOp {
+                id: 0,
+                tool: 1,
+                points: vec![center],
+                depth: 3.,
+                start_offset: 0.,
+                peck: None,
+                dwell: None,
+                spindle_rpm: 1000.,
+                tool_preset: None,
+                cooling: Default::default(),
+                entry_feeds: Default::default(),
+                work_offset: 1,
+                feed: 100.,
+            }));
         app.controller.add_setup();
-        app.controller.edit_stock(|s| *s = cam_model::Stock::PreviousSetup);
-        assert!(uncut_stock_mesh(&app.controller).0.is_empty(), "uncomputed stock must not appear as a fresh box");
+        app.controller
+            .edit_stock(|s| *s = cam_model::Stock::PreviousSetup);
+        assert!(
+            uncut_stock_mesh(&app.controller).0.is_empty(),
+            "uncomputed stock must not appear as a fresh box"
+        );
         app.rerun();
-        assert!(app.controller.run_pending(), "an empty inherited-stock setup still needs its input blank calculated");
+        assert!(
+            app.controller.run_pending(),
+            "an empty inherited-stock setup still needs its input blank calculated"
+        );
         let outcome = app.controller.run(&cam_toolpath::CancelToken::new());
-        assert_eq!(outcome.completion, JobCompletion::Complete, "{:?}", outcome.diagnostics);
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            outcome.diagnostics
+        );
         let initial = outcome.initial_stock.clone().unwrap();
         assert!(initial.0.iter().any(|v| (v.position[2] + 3.).abs() < 1e-4));
         app.controller.select(Selection::Setup);
@@ -1242,11 +1340,15 @@ mod tests {
             assert_eq!(viewport.mesh_indices.as_slice(), scoped.stock_indices);
             assert!(scoped.stock_operations.contains(&Some(selected)));
             if selected == ids[0] {
-                assert!(!scoped.stock_operations.contains(&Some(ids[1])),
-                    "a later operation must not remove material in this preview");
+                assert!(
+                    !scoped.stock_operations.contains(&Some(ids[1])),
+                    "a later operation must not remove material in this preview"
+                );
             } else {
-                assert!(scoped.stock_operations.contains(&Some(ids[0])),
-                    "earlier cuts remain in the selected operation's starting stock");
+                assert!(
+                    scoped.stock_operations.contains(&Some(ids[0])),
+                    "earlier cuts remain in the selected operation's starting stock"
+                );
             }
             assert_eq!(viewport.path_cones.len(), 2);
             assert!(viewport.path_cones.iter().all(|cone| cone.op == selected));
@@ -1907,16 +2009,33 @@ mod tests {
         app.controller = controller;
         app.modifiers = iced::keyboard::Modifiers::CTRL;
         let _ = app.update(Message::CadPicked(candidates.clone()));
-        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&selected));
-        let bottom = app.controller.document()
-            .height_selection_bounds(std::slice::from_ref(&selected)).unwrap().0[2];
+        assert_eq!(
+            app.controller.cad_selection(),
+            std::slice::from_ref(&selected)
+        );
+        let bottom = app
+            .controller
+            .document()
+            .height_selection_bounds(std::slice::from_ref(&selected))
+            .unwrap()
+            .0[2];
         assert_eq!(bottom, -10.);
         let viewport = app.machining_viewport();
-        let highlights: Vec<_> = viewport.vertices.iter()
-            .filter(|vertex| vertex.color == PICK_BOUNDARY).collect();
-        assert!(!highlights.is_empty(), "the silhouette remains visible through the stock");
-        assert!(highlights.iter().all(|vertex| (f64::from(vertex.position[2]) - bottom).abs() < 1e-6),
-            "inspection silhouettes are projected onto the model bottom");
+        let highlights: Vec<_> = viewport
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.color == PICK_BOUNDARY)
+            .collect();
+        assert!(
+            !highlights.is_empty(),
+            "the silhouette remains visible through the stock"
+        );
+        assert!(
+            highlights
+                .iter()
+                .all(|vertex| (f64::from(vertex.position[2]) - bottom).abs() < 1e-6),
+            "inspection silhouettes are projected onto the model bottom"
+        );
         let _ = app.update(Message::CadPicked(candidates.clone()));
         assert_eq!(app.controller.cad_selection(), &[selected]);
         app.modifiers = iced::keyboard::Modifiers::SHIFT;
@@ -2009,7 +2128,8 @@ mod performance_tests {
         let build = |controller: &AppController,
                      preview: Option<&crate::RunOutcome>,
                      hover: Option<&EntityRef>,
-                     focus: &[u32], show_stock: bool| {
+                     focus: &[u32],
+                     show_stock: bool| {
             Viewport::new(
                 controller,
                 preview,
@@ -2046,14 +2166,26 @@ mod performance_tests {
         assert_eq!(simulated.cad_edges, neutral.cad_edges);
         assert!(simulated.vertices.iter().all(|v| v.width <= 1.));
         let stock = crate::RunOutcome {
-            stock_vertices: vec![MeshVertex { position: [0.; 3], normal: [0., 0., 1.], color: [1., 0., 0., 1.] }; 3],
+            stock_vertices: vec![
+                MeshVertex {
+                    position: [0.; 3],
+                    normal: [0., 0., 1.],
+                    color: [1., 0., 0., 1.]
+                };
+                3
+            ],
             stock_indices: vec![0, 1, 2],
             ..Default::default()
         };
         let with_stock = build(&app.controller, Some(&stock), None, &[], true);
-        assert_eq!(*with_stock.mesh_vertices, stock.stock_vertices,
-            "nominal CAD faces must not hide thread cut faces");
-        assert_eq!(with_stock.cad_edges, neutral.cad_edges, "retain model reference edges");
+        assert_eq!(
+            *with_stock.mesh_vertices, stock.stock_vertices,
+            "nominal CAD faces must not hide thread cut faces"
+        );
+        assert_eq!(
+            with_stock.cad_edges, neutral.cad_edges,
+            "retain model reference edges"
+        );
 
         assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&face));
         let restored = build(&app.controller, None, Some(&face), &focus, false);
@@ -2074,7 +2206,8 @@ mod performance_tests {
         assert!(!transparent.transparent_stock_indices.is_empty());
         assert!(transparent.mesh_indices.len() < opaque.mesh_indices.len());
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .iter()
             .find(|op| matches!(op, Operation::Profile(_)))
@@ -2378,18 +2511,29 @@ mod performance_tests {
         let (mut app, _) = App::new();
         app.settings = crate::Settings::default();
         app.controller = AppController::new(crate::default_machine());
-        let path = std::env::var_os("OPENCAM_BENCH_PROJECT").map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../testfiles/test2.ocam"));
+        let path = std::env::var_os("OPENCAM_BENCH_PROJECT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/test2.ocam")
+            });
         macro_rules! measure {
             ($label:expr, $n:expr, $body:expr) => {{
                 let start = Instant::now();
-                for _ in 0..$n { black_box($body); }
-                eprintln!("{}: {:.3} ms/call", $label,
-                    start.elapsed().as_secs_f64() * 1000. / $n as f64);
+                for _ in 0..$n {
+                    black_box($body);
+                }
+                eprintln!(
+                    "{}: {:.3} ms/call",
+                    $label,
+                    start.elapsed().as_secs_f64() * 1000. / $n as f64
+                );
             }};
         }
-        measure!("open project", 1, app.controller.open_project(&path).unwrap());
+        measure!(
+            "open project",
+            1,
+            app.controller.open_project(&path).unwrap()
+        );
         measure!("initial viewport", 1, app.machining_viewport());
         measure!("setup update + view", 5, {
             let _ = app.update(Message::OrbitBy(0.01, 0.005));
@@ -2401,12 +2545,26 @@ mod performance_tests {
         measure!("dirty check", 100, app.controller.has_unsaved_changes());
         let geometry = app.controller.setup_geometry_state().unwrap();
         let binding = &app.controller.geometry_state().bindings[&id];
-        measure!("first resolve binding", 1,
-            cam_geometry3d::resolve_binding(&geometry, binding).unwrap());
-        measure!("resolve binding (warm)", 3,
-            cam_geometry3d::resolve_binding(&geometry, binding).unwrap());
-        measure!("profile selection geometry", 3, app.profile_selection_geometry());
-        measure!("validate editor geometry", 3, app.validate_active_profile_geometry());
+        measure!(
+            "first resolve binding",
+            1,
+            cam_geometry3d::resolve_binding(&geometry, binding).unwrap()
+        );
+        measure!(
+            "resolve binding (warm)",
+            3,
+            cam_geometry3d::resolve_binding(&geometry, binding).unwrap()
+        );
+        measure!(
+            "profile selection geometry",
+            3,
+            app.profile_selection_geometry()
+        );
+        measure!(
+            "validate editor geometry",
+            3,
+            app.validate_active_profile_geometry()
+        );
         measure!("first editing viewport", 1, app.machining_viewport());
         measure!("cached viewport", 3, app.machining_viewport());
         measure!("inspector", 3, app.inspector());

@@ -322,9 +322,19 @@ fn invalid_inputs_return_errors_without_motions() {
 
 #[test]
 fn depth_beyond_the_flutes_warns_without_clamping_the_requested_interval() {
-    let result = run(BoreOp { z_bottom: -30., ..operation() }, SpindleDir::Cw);
+    let result = run(
+        BoreOp {
+            z_bottom: -30.,
+            ..operation()
+        },
+        SpindleDir::Cw,
+    );
     assert!(!result.has_errors(), "{:?}", result.diagnostics);
-    assert!(result.diagnostics.iter().any(|d| d.severity == cam_toolpath::Severity::Warning && d.message.contains("length of cut")));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == cam_toolpath::Severity::Warning
+            && d.message.contains("length of cut")));
     assert_eq!(cutting(&result).last().unwrap().0.z, -30.);
 }
 

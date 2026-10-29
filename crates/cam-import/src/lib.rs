@@ -245,10 +245,16 @@ mod entity_inventory_tests {
         let (entities, _skipped) = read_dxf_entities(MIXED);
         // The tool-import vet needs to *see* the LWPOLYLINE (to reject it), not have it
         // silently chained away.
-        assert!(entities.iter().any(|e| matches!(e, dxf::Entity::Line { .. })));
-        assert!(entities.iter().any(|e| matches!(e, dxf::Entity::Arc { .. })));
+        assert!(entities
+            .iter()
+            .any(|e| matches!(e, dxf::Entity::Line { .. })));
+        assert!(entities
+            .iter()
+            .any(|e| matches!(e, dxf::Entity::Arc { .. })));
         assert!(
-            entities.iter().any(|e| matches!(e, dxf::Entity::LwPolyline { .. })),
+            entities
+                .iter()
+                .any(|e| matches!(e, dxf::Entity::LwPolyline { .. })),
             "the polyline is visible to the vet, which will reject the whole drawing"
         );
     }
@@ -299,11 +305,21 @@ pub fn read_geometry_file(
     drawing_options: &ImportOptions,
 ) -> Result<GeometryImport, GeometryImportError> {
     let path = path.as_ref();
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match ext.as_str() {
-        "dxf" | "dwg" => read_cad_file(path, drawing_options).map(GeometryImport::Drawing).map_err(GeometryImportError::Drawing),
-        "step" | "stp" => cam_kernel::read_step_file(path, solid_options).map(|solid| GeometryImport::Solid(Box::new(solid))).map_err(GeometryImportError::Solid),
-        "iges" | "igs" => cam_kernel::read_iges_file(path, solid_options).map(|solid| GeometryImport::Solid(Box::new(solid))).map_err(GeometryImportError::Solid),
+        "dxf" | "dwg" => read_cad_file(path, drawing_options)
+            .map(GeometryImport::Drawing)
+            .map_err(GeometryImportError::Drawing),
+        "step" | "stp" => cam_kernel::read_step_file(path, solid_options)
+            .map(|solid| GeometryImport::Solid(Box::new(solid)))
+            .map_err(GeometryImportError::Solid),
+        "iges" | "igs" => cam_kernel::read_iges_file(path, solid_options)
+            .map(|solid| GeometryImport::Solid(Box::new(solid)))
+            .map_err(GeometryImportError::Solid),
         _ => Err(GeometryImportError::UnsupportedFormat(ext)),
     }
 }

@@ -45,6 +45,7 @@ impl App {
             self.fields.insert(Field::Feed, fmt_num(cutting.feed));
             self.fields
                 .insert(Field::PlungeFeed, fmt_num(cutting.plunge_feed));
+            self.refresh_cutting_fields(None);
         }
     }
     pub(super) fn wizard_cutting(&self) -> Option<CuttingData> {
@@ -107,7 +108,16 @@ impl App {
     pub(super) fn sync_creation_geometry_heights(&mut self) {
         if !matches!(
             self.cad_pending_kind,
-            Some(OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Bore | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel)
+            Some(
+                OpKind::Pocket
+                    | OpKind::Chamfer
+                    | OpKind::Engrave
+                    | OpKind::Carve
+                    | OpKind::Bore
+                    | OpKind::Thread
+                    | OpKind::Adaptive
+                    | OpKind::Parallel
+            )
         ) {
             return;
         }
@@ -133,7 +143,11 @@ impl App {
             }
         }
         let defaults = if self.cad_pending_kind == Some(OpKind::Pocket)
-            && !self.controller.cad_selection().first().is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge))
+            && !self
+                .controller
+                .cad_selection()
+                .first()
+                .is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge))
         {
             cam_model::OperationHeightSettings::default()
         } else {
@@ -203,17 +217,19 @@ impl App {
                 profile.selections = self.active_profile_geometry_entries();
             }
             if profile.selections.is_some() {
-                let binding = crate::cad_operations::resolve_profile_entries(
-                    self.controller.document(),
-                    profile,
-                )?;
+                let binding = self.resolve_profile_geometry(profile)?;
                 return Ok((draft, binding));
             }
         }
         if let Some(kind) = self.cad_pending_kind {
             let mut document = self.controller.document().clone();
             for tool in &self.operation_tools {
-                if let Some(existing) = document.setup_mut().tools.iter_mut().find(|t| t.number == tool.number) {
+                if let Some(existing) = document
+                    .setup_mut()
+                    .tools
+                    .iter_mut()
+                    .find(|t| t.number == tool.number)
+                {
                     *existing = tool.clone();
                 } else {
                     document.setup_mut().tools.push(tool.clone());
@@ -287,11 +303,13 @@ impl App {
                     op.z_top = new.z_top;
                     op.z_bottom = new.z_bottom;
                 }
-                (Operation::Adaptive(_), Operation::Adaptive(_)) | (Operation::Parallel(_), Operation::Parallel(_)) => {}
+                (Operation::Adaptive(_), Operation::Adaptive(_))
+                | (Operation::Parallel(_), Operation::Parallel(_)) => {}
                 _ => return Err("Geometry does not match operation".into()),
             }
             if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary {
-                binding.heights.bottom = binding.heights.top - document.operation_base_cutting_heights(&draft).depth();
+                binding.heights.bottom =
+                    binding.heights.top - document.operation_base_cutting_heights(&draft).depth();
             } else if crate::cad_operations::surface_recipe(&binding.recipe) {
                 binding.heights = document.operation_base_cutting_heights(&draft);
             }
@@ -338,7 +356,12 @@ impl App {
             .and_then(|(op, binding)| {
                 let mut document = self.controller.document().clone();
                 for tool in &self.operation_tools {
-                    if let Some(existing) = document.setup_mut().tools.iter_mut().find(|t| t.number == tool.number) {
+                    if let Some(existing) = document
+                        .setup_mut()
+                        .tools
+                        .iter_mut()
+                        .find(|t| t.number == tool.number)
+                    {
                         *existing = tool.clone();
                     } else {
                         document.setup_mut().tools.push(tool.clone());
@@ -364,7 +387,8 @@ impl App {
             col =
                 col.push(self.geometry_list(cad_geometry_labels(self.controller.cad_selection())));
             let valid = self.validate_active_profile_geometry().unwrap_or_else(|| {
-                self.controller.preview_cad_operation(kind, self.controller.cad_selection())
+                self.controller
+                    .preview_cad_operation(kind, self.controller.cad_selection())
                     .map(|_| ())
             });
             if let Err(reason) = valid {

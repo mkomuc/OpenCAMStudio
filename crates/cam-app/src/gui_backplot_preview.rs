@@ -23,6 +23,12 @@ struct PreviewKey {
 // viewed operation prefixes, sharing the active result instead of cloning it.
 const MAX_COMPLETED_PREVIEWS: usize = 8;
 
+// Temporary two-instance patterns let the planner calculate both entry variants.
+// Their second placement is shifted back before the draft places the cached paths.
+pub(super) fn pattern_source_preview_id(op: u32) -> u64 {
+    u64::MAX - u64::from(op)
+}
+
 #[derive(Default)]
 pub(super) struct OperationPreview {
     key: Option<PreviewKey>,
@@ -135,9 +141,34 @@ impl App {
                     .map(Operation::id)
                     .filter(|id| !members.contains(id))
                     .collect();
-                // Repeat the original seeds in the viewport, independently of the
-                // committed pattern's placement, ordering and suppression settings.
+                // Calculate entry variants independently of draft placement. Only
+                // sources with a selected entry need a second cached path.
                 document.setup_mut().patterns.clear();
+                let patterns = document
+                    .setup()
+                    .operations
+                    .iter()
+                    .filter(|op| {
+                        members.contains(&op.id())
+                            && !matches!(op, Operation::Adaptive(_))
+                            && operation_tabs::operation_start(op).is_some()
+                    })
+                    .map(|op| cam_model::OperationPattern {
+                        id: pattern_source_preview_id(op.id()),
+                        name: "Entry preview".into(),
+                        members: vec![op.id()],
+                        kind: cam_model::PatternKind::Rectangular {
+                            nx: 2,
+                            ny: 1,
+                            dx: 1.0,
+                            dy: 0.0,
+                        },
+                        order: cam_model::PatternOrder::ByInstance,
+                        suppressed: false,
+                        options: Default::default(),
+                    })
+                    .collect();
+                document.setup_mut().patterns = patterns;
                 document.excluded_operations.extend(others);
                 inputs.toolpath_preview = true;
             }
@@ -466,6 +497,94 @@ mod tests {
         );
         let _ = app.update(Message::PatternCancel);
         assert!(app.pattern_placement_preview().strips.is_empty());
+    }
+
+    #[test]
+    fn pattern_preview_uses_the_selected_entry_only_at_the_first_placement() {
+        let (mut app, _) = preview_app();
+        app.controller.new_operation(OpKind::Profile);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!()
+        };
+        app.controller.edit_operation(id, |op| {
+            let Operation::Profile(op) = op else { panic!() };
+            op.chain = cam_geo::Contour::new(vec![
+                cam_geo::Point::new(0.0, 0.0),
+                cam_geo::Point::new(30.0, 0.0),
+                cam_geo::Point::new(30.0, 30.0),
+                cam_geo::Point::new(0.0, 30.0),
+            ]);
+            op.start = Some([30.0, 30.0]);
+            op.side = cam_model::Side::On;
+            op.depth = 2.0;
+            op.stepdown = 2.0;
+            op.plunge = cam_model::Plunge::Straight;
+            op.lead_in = cam_model::Lead::None;
+        });
+        app.focus_ops = BTreeSet::from([id]);
+        let document = app.controller.document().clone();
+        let _ = app.update(Message::BeginPattern(false));
+        app.drain_operation_preview();
+        let sources = app.operation_preview.outcome.clone().unwrap();
+        assert_eq!(
+            sources.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            sources.diagnostics
+        );
+        let entries: Vec<_> = (0..2)
+            .map(|variant| {
+                sources
+                    .program
+                    .steps()
+                    .iter()
+                    .find_map(|step| match step {
+                        cam_cldata::Step::Linear { to, tag, .. }
+                            if tag.op_id == id
+                                && tag.kind == cam_cldata::MoveKind::Plunge
+                                && tag.instance_index == Some(variant) =>
+                        {
+                            Some([to.x - f64::from(variant), to.y, to.z])
+                        }
+                        _ => None,
+                    })
+                    .expect("both entry variants were calculated")
+            })
+            .collect();
+        assert_ne!(entries[0], entries[1]);
+        let _ = app.update(Message::PatternValue(0, "3".into()));
+        for reversed in [false, true] {
+            let _ = app.update(Message::PatternKeepOriginal(!reversed));
+            let _ = app.update(Message::PatternReverse(reversed));
+            let indices = if reversed { vec![2, 1] } else { vec![0, 1, 2] };
+            let scene = app.pattern_placement_preview();
+            for (ordinal, index) in indices.into_iter().enumerate() {
+                let entry = entries[usize::from(ordinal > 0)];
+                let expected = [
+                    (entry[0] + f64::from(index) * 20.0) as f32,
+                    entry[1] as f32,
+                    entry[2] as f32,
+                ];
+                assert!(
+                    scene
+                        .strips
+                        .iter()
+                        .filter(|strip| strip.instance_index == Some(index))
+                        .any(|strip| strip.points.windows(2).any(|pair| {
+                            pair[1] == expected
+                                && pair[0][0] == expected[0]
+                                && pair[0][1] == expected[1]
+                                && pair[0][2] > expected[2]
+                        })),
+                    "instance {index} must plunge at {expected:?}"
+                );
+            }
+            assert!(Arc::ptr_eq(
+                app.operation_preview.outcome.as_ref().unwrap(),
+                &sources
+            ));
+        }
+        assert_eq!(app.controller.document(), &document);
     }
 
     #[test]

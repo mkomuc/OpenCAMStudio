@@ -111,12 +111,12 @@ fn document() -> Document {
         plunge: Plunge::Straight,
     };
     Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "first light".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -140,7 +140,18 @@ fn document() -> Document {
 
 fn plan_and_post() -> (Program, String, Vec<cam_toolpath::Diagnostic>) {
     let doc = document();
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
+        &doc,
+        1000.0,
+        SpindleDir::Cw,
+        None,
+        machine().envelope.max.z,
+        &CancelToken::new(),
+    );
     let opts = PostOptions {
         program_name: Some("first_light".into()),
         ..Default::default()
@@ -470,7 +481,10 @@ fn offset_leaves_stock_on_the_wall() {
     };
 
     let base = run_offset(0.0); // right edge 70 + radius 3
-    assert!((base - 73.0).abs() < 1e-6, "path runs at edge + radius, got {base}");
+    assert!(
+        (base - 73.0).abs() < 1e-6,
+        "path runs at edge + radius, got {base}"
+    );
     let left = run_offset(2.0); // + 2 mm allowance
     assert!(
         (left - base - 2.0).abs() < 1e-6,
@@ -533,13 +547,23 @@ fn end_mill_tools() -> [Tool; 1] {
 fn inside_profile_rejects_inapplicable_roughing_and_warns_for_a_plain_finish() {
     let mut op = rough_op(Side::Inside, rect(0., 0., 40., 40.), 4.);
     let tools = end_mill_tools();
-    let env = JobEnv { heights: Heights::new(5., 2., 0.), tools: &tools, stock: None, spindle: cam_cldata::SpindleDir::Cw };
-    let bad=ProfileStrategy::new(op.clone()).compute(&env,&CancelToken::new());
-    assert!(bad.has_errors()); assert!(bad.program.is_empty());
-    op.stepover=0.;
-    let r=ProfileStrategy::new(op).compute(&env,&CancelToken::new());
-    assert!(!r.has_errors(),"{:?}",r.diagnostics); assert_eq!(plunge_count(&r.program),1);
-    assert!(r.diagnostics.iter().any(|d|d.severity==cam_toolpath::Severity::Warning));
+    let env = JobEnv {
+        heights: Heights::new(5., 2., 0.),
+        tools: &tools,
+        stock: None,
+        spindle: cam_cldata::SpindleDir::Cw,
+    };
+    let bad = ProfileStrategy::new(op.clone()).compute(&env, &CancelToken::new());
+    assert!(bad.has_errors());
+    assert!(bad.program.is_empty());
+    op.stepover = 0.;
+    let r = ProfileStrategy::new(op).compute(&env, &CancelToken::new());
+    assert!(!r.has_errors(), "{:?}", r.diagnostics);
+    assert_eq!(plunge_count(&r.program), 1);
+    assert!(r
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == cam_toolpath::Severity::Warning));
 }
 
 #[test]
@@ -565,7 +589,10 @@ fn stepover_roughs_outside_frame_to_the_stock() {
         .filter(|s| matches!(s, Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.kind == MoveKind::Cutting))
         .count();
     let plunges = plunge_count(&r.program);
-    assert!(cuts > 8, "the frame is cleared in several rings, got {cuts} cutting moves");
+    assert!(
+        cuts > 8,
+        "the frame is cleared in several rings, got {cuts} cutting moves"
+    );
     assert!(plunges >= 1, "at least one entry plunge");
     assert!(
         plunges * 2 < cuts,
@@ -585,10 +612,16 @@ fn stepover_roughs_outside_frame_to_the_stock() {
             _ => continue,
         };
         if cutting {
-            assert!(!inside_part(ex, ey), "cutting move ends inside the part at ({ex}, {ey})");
+            assert!(
+                !inside_part(ex, ey),
+                "cutting move ends inside the part at ({ex}, {ey})"
+            );
             if let Some((px, py)) = prev {
                 let (mx, my) = (0.5 * (px + ex), 0.5 * (py + ey));
-                assert!(!inside_part(mx, my), "a cutting link chords through the part at ({mx}, {my})");
+                assert!(
+                    !inside_part(mx, my),
+                    "a cutting link chords through the part at ({mx}, {my})"
+                );
             }
         }
         prev = Some((ex, ey));
@@ -597,11 +630,17 @@ fn stepover_roughs_outside_frame_to_the_stock() {
 
 #[test]
 fn outside_stepover_without_stock_is_an_explicit_error() {
-    let op=rough_op(Side::Outside,rect(10.,10.,50.,50.),4.);
-    let tools=end_mill_tools();
-    let env=JobEnv { heights:Heights::new(5.,2.,0.),tools:&tools,stock:None,spindle:cam_cldata::SpindleDir::Cw };
-    let r=ProfileStrategy::new(op).compute(&env,&CancelToken::new());
-    assert!(r.has_errors()); assert!(r.program.is_empty());
+    let op = rough_op(Side::Outside, rect(10., 10., 50., 50.), 4.);
+    let tools = end_mill_tools();
+    let env = JobEnv {
+        heights: Heights::new(5., 2., 0.),
+        tools: &tools,
+        stock: None,
+        spindle: cam_cldata::SpindleDir::Cw,
+    };
+    let r = ProfileStrategy::new(op).compute(&env, &CancelToken::new());
+    assert!(r.has_errors());
+    assert!(r.program.is_empty());
 }
 
 /// Parse grbl output (modal, absolute) and assert safety/correctness invariants:
@@ -790,12 +829,12 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         ..Default::default()
     };
     let doc = Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "lead_helix".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -816,7 +855,18 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         tool_change_height: None,
     });
 
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
+        &doc,
+        1000.0,
+        SpindleDir::Cw,
+        None,
+        machine().envelope.max.z,
+        &CancelToken::new(),
+    );
     assert!(
         !diags
             .iter()
@@ -883,7 +933,10 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
         work_offset: 1,
         id: 0,
         tool: 1,
-        clear: clear_tool.map(|t| cam_model::CarveClearing { tool: t, params: cam_model::ClearParams::default() }),
+        clear: clear_tool.map(|t| cam_model::CarveClearing {
+            tool: t,
+            params: cam_model::ClearParams::default(),
+        }),
         boundary: rect(0.0, 0.0, 40.0, 40.0),
         islands: Vec::new(),
         top: 0.0,
@@ -932,12 +985,12 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
         }));
     }
     Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "carve".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -976,7 +1029,18 @@ fn a_two_tool_operation_loads_its_first_tool_then_changes_itself() {
     // `tools()[0]` is what has to be in the spindle when the fragment starts. The
     // change to the V-bit belongs to the strategy, which alone knows the order.
     let doc = carve_document(Some(2), None);
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
+        &doc,
+        1000.0,
+        SpindleDir::Cw,
+        None,
+        machine().envelope.max.z,
+        &CancelToken::new(),
+    );
     assert!(
         !diags
             .iter()
@@ -993,7 +1057,14 @@ fn the_planner_resyncs_the_spindle_tool_after_a_multi_tool_fragment() {
     // next operation — while the machine actually holds the V-bit. The carve would be
     // followed by a profile cut with the wrong cutter.
     let doc = carve_document(Some(2), Some(2));
-    let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(
+        &doc,
+        1000.0,
+        SpindleDir::Cw,
+        None,
+        machine().envelope.max.z,
+        &CancelToken::new(),
+    );
     // Clearing tool, hand-back to the V-bit, then genuinely back to tool 2 for the
     // profile — the last change is NOT elided.
     assert_eq!(tool_changes(&program), vec![2, 1, 2]);
@@ -1004,14 +1075,28 @@ fn a_following_operation_on_the_carving_tool_needs_no_change() {
     // The other direction: the fragment really did leave tool 1 loaded, so an operation
     // that wants tool 1 must not be given a redundant change.
     let doc = carve_document(Some(2), Some(1));
-    let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(
+        &doc,
+        1000.0,
+        SpindleDir::Cw,
+        None,
+        machine().envelope.max.z,
+        &CancelToken::new(),
+    );
     assert_eq!(tool_changes(&program), vec![2, 1]);
 }
 
 #[test]
 fn a_single_tool_carve_behaves_like_every_other_operation() {
     let doc = carve_document(None, Some(2));
-    let cam_toolpath::JobResult { program, .. } = build_job(&doc, 1000.0, SpindleDir::Cw, None, machine().envelope.max.z, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } = build_job(
+        &doc,
+        1000.0,
+        SpindleDir::Cw,
+        None,
+        machine().envelope.max.z,
+        &CancelToken::new(),
+    );
     assert_eq!(tool_changes(&program), vec![1, 2]);
 }
 

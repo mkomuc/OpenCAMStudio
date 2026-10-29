@@ -366,7 +366,14 @@ impl Profile2D {
 }
 
 /// Push the interior + end points of the arc `from → to` about `center` onto `out`.
-fn tessellate_arc(from: Point, to: Point, center: Point, ccw: bool, tol: f64, out: &mut Vec<Point>) {
+fn tessellate_arc(
+    from: Point,
+    to: Point,
+    center: Point,
+    ccw: bool,
+    tol: f64,
+    out: &mut Vec<Point>,
+) {
     let radius = ((from.x - center.x).powi(2) + (from.y - center.y).powi(2)).sqrt();
     if radius < 1e-9 {
         out.push(to);
@@ -511,7 +518,12 @@ mod tests {
 
     // --- derived cutting-surface properties (operation guards) ---
 
-    fn spec_of(bottom: BottomShape, radius: f64, flute_length: f64, shank_radius: f64) -> GeneratrixSpec {
+    fn spec_of(
+        bottom: BottomShape,
+        radius: f64,
+        flute_length: f64,
+        shank_radius: f64,
+    ) -> GeneratrixSpec {
         GeneratrixSpec {
             radius,
             flute_length,
@@ -531,10 +543,17 @@ mod tests {
 
     #[test]
     fn a_wider_shank_does_not_hide_the_cutting_flank() {
-        for bottom in [BottomShape::Flat, BottomShape::Ball, BottomShape::BullNose { corner_radius: 0.3 }] {
+        for bottom in [
+            BottomShape::Flat,
+            BottomShape::Ball,
+            BottomShape::BullNose { corner_radius: 0.3 },
+        ] {
             let profile = generatrix(&spec_of(bottom, 1.5, 8., 3.));
             assert_eq!(profile.max_radius(), 3.);
-            assert!((profile.cutting_flank_height() - 8.).abs() < 1e-9, "{bottom:?}");
+            assert!(
+                (profile.cutting_flank_height() - 8.).abs() < 1e-9,
+                "{bottom:?}"
+            );
         }
     }
 
@@ -544,14 +563,20 @@ mod tests {
         // surface, so it can never cut a vertical wall. This is what stops a V-bit
         // being accepted for profiling/pocketing.
         let p = generatrix(&spec_of(
-            BottomShape::VTip { half_angle_rad: (30.0_f64).to_radians(), tip_radius: 0.0 },
+            BottomShape::VTip {
+                half_angle_rad: (30.0_f64).to_radians(),
+                tip_radius: 0.0,
+            },
             3.0,
             0.0,
             3.0,
         ));
         assert_eq!(p.cutting_flank_height(), 0.0);
         let c = generatrix(&spec_of(
-            BottomShape::Cone { half_angle_rad: (45.0_f64).to_radians(), flat_radius: 0.5 },
+            BottomShape::Cone {
+                half_angle_rad: (45.0_f64).to_radians(),
+                flat_radius: 0.5,
+            },
             3.0,
             0.0,
             3.0,
@@ -573,13 +598,25 @@ mod tests {
         assert!(generatrix(&spec_of(BottomShape::Flat, 3.0, 10.0, 3.0)).cuts_flat_bottom());
         assert!(!generatrix(&spec_of(BottomShape::Ball, 3.0, 10.0, 3.0)).cuts_flat_bottom());
         assert!(!generatrix(&spec_of(
-            BottomShape::VTip { half_angle_rad: 0.5, tip_radius: 0.0 }, 3.0, 0.0, 3.0
-        )).cuts_flat_bottom());
+            BottomShape::VTip {
+                half_angle_rad: 0.5,
+                tip_radius: 0.0
+            },
+            3.0,
+            0.0,
+            3.0
+        ))
+        .cuts_flat_bottom());
         // A chamfer mill's flat IS flat but is tagged non-cutting — it would leave an
         // uncut ridge, so it must not pass as a flat-bottomed tool.
         let cham = generatrix(&spec_of(
-            BottomShape::Cone { half_angle_rad: (45.0_f64).to_radians(), flat_radius: 0.5 },
-            3.0, 0.0, 3.0,
+            BottomShape::Cone {
+                half_angle_rad: (45.0_f64).to_radians(),
+                flat_radius: 0.5,
+            },
+            3.0,
+            0.0,
+            3.0,
         ));
         assert!(!cham.cuts_flat_bottom());
     }
@@ -587,13 +624,23 @@ mod tests {
     #[test]
     fn a_chamfer_mill_has_no_cutting_tip_but_a_vbit_does() {
         let cham = generatrix(&spec_of(
-            BottomShape::Cone { half_angle_rad: (45.0_f64).to_radians(), flat_radius: 0.5 },
-            3.0, 0.0, 3.0,
+            BottomShape::Cone {
+                half_angle_rad: (45.0_f64).to_radians(),
+                flat_radius: 0.5,
+            },
+            3.0,
+            0.0,
+            3.0,
         ));
         assert!(!cham.has_cutting_tip(), "the flat tip does not cut");
         let vbit = generatrix(&spec_of(
-            BottomShape::VTip { half_angle_rad: (30.0_f64).to_radians(), tip_radius: 0.1 },
-            3.0, 0.0, 3.0,
+            BottomShape::VTip {
+                half_angle_rad: (30.0_f64).to_radians(),
+                tip_radius: 0.1,
+            },
+            3.0,
+            0.0,
+            3.0,
         ));
         assert!(vbit.has_cutting_tip());
         assert!(generatrix(&spec_of(BottomShape::Flat, 3.0, 10.0, 3.0)).has_cutting_tip());
@@ -624,7 +671,10 @@ mod tests {
             let below = vtip_half_width(a, rt, z_t - 1e-9);
             let at = vtip_half_width(a, rt, z_t);
             let above = vtip_half_width(a, rt, z_t + 1e-9);
-            assert!((at - expect).abs() < 1e-9, "deg={deg} at={at} want={expect}");
+            assert!(
+                (at - expect).abs() < 1e-9,
+                "deg={deg} at={at} want={expect}"
+            );
             assert!((below - at).abs() < 1e-6, "deg={deg} ball side jumps");
             assert!((above - at).abs() < 1e-6, "deg={deg} cone side jumps");
         }
@@ -727,7 +777,7 @@ mod tests {
         let a = (60.0_f64 * 0.5).to_radians(); // α = 30°
         let rt = 0.4;
         let r_t = rt * a.cos(); // ≈ 0.3464 — end of the ball
-        // Ball: the half-width is a chord of the tip circle, so depth is the sagitta.
+                                // Ball: the half-width is a chord of the tip circle, so depth is the sagitta.
         let w = 0.2;
         let expect = rt - (rt * rt - w * w).sqrt();
         assert!((vtip_depth_for_half_width(a, rt, w) - expect).abs() < 1e-12);
@@ -764,7 +814,10 @@ mod tests {
             let r = 3.0;
             let dmax = vtip_max_depth(a, rt, r);
             let d = vtip_depth_for_half_width(a, rt, r);
-            assert!((d - dmax).abs() < 1e-9, "deg={deg} rt={rt} d={d} max={dmax}");
+            assert!(
+                (d - dmax).abs() < 1e-9,
+                "deg={deg} rt={rt} d={d} max={dmax}"
+            );
         }
     }
 
@@ -796,7 +849,12 @@ mod tests {
             p.segs.iter().filter(|s| s.cutting).count() >= 2,
             "bottom + full side cut"
         );
-        let non_cut: Vec<Point> = p.segs.iter().filter(|s| !s.cutting).map(|s| s.end).collect();
+        let non_cut: Vec<Point> = p
+            .segs
+            .iter()
+            .filter(|s| !s.cutting)
+            .map(|s| s.end)
+            .collect();
         assert_eq!(non_cut, vec![Point::new(0.0, 30.0)], "only the top face");
     }
 
@@ -864,7 +922,10 @@ mod tests {
         assert!(p.segs[0].cutting, "the cone cuts");
         assert!((p.segs[0].end.x - 3.0).abs() < 1e-9 && (p.segs[0].end.y - z_cone).abs() < 1e-9);
         assert!(
-            p.segs.iter().filter(|s| s.cutting).all(|s| s.end.y <= z_cone + 1e-9),
+            p.segs
+                .iter()
+                .filter(|s| s.cutting)
+                .all(|s| s.end.y <= z_cone + 1e-9),
             "nothing above the cone cuts"
         );
 
@@ -899,9 +960,19 @@ mod tests {
             .collect();
         assert!(above.contains(&Point::new(2.0, 8.0)), "step in to the neck");
         assert!(above.contains(&Point::new(2.0, 28.0)), "up the neck");
-        assert!(above.contains(&Point::new(3.0, 28.0)), "step back out to the shank");
+        assert!(
+            above.contains(&Point::new(3.0, 28.0)),
+            "step back out to the shank"
+        );
         assert!(above.contains(&Point::new(3.0, 50.0)), "shank to the top");
-        assert!(above.last() == Some(&Point::new(0.0, 50.0)), "close on the axis");
-        assert!(p.segs.iter().filter(|s| s.cutting).all(|s| s.end.y <= 8.0 + 1e-9));
+        assert!(
+            above.last() == Some(&Point::new(0.0, 50.0)),
+            "close on the axis"
+        );
+        assert!(p
+            .segs
+            .iter()
+            .filter(|s| s.cutting)
+            .all(|s| s.end.y <= 8.0 + 1e-9));
     }
 }

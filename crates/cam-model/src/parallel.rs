@@ -43,8 +43,13 @@ mod tests {
         assert_eq!(params.lift_height, 0.);
         assert!(!params.stay_down);
         for (stay_down, lift_height) in [(false, 2.), (true, 0.), (true, 2.)] {
-            let configured = ParallelParams { stay_down, lift_height, ..params };
-            let restored: ParallelParams = serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
+            let configured = ParallelParams {
+                stay_down,
+                lift_height,
+                ..params
+            };
+            let restored: ParallelParams =
+                serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
             assert_eq!(restored, configured);
         }
         let mut operation = crate::Operation::Parallel(crate::ParallelOp {

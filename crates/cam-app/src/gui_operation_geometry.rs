@@ -64,7 +64,14 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
 
 impl App {
     pub(super) fn stock_to_leave_supported(operation: &Operation) -> bool {
-        matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_))
+        matches!(
+            operation,
+            Operation::Profile(_)
+                | Operation::Pocket(_)
+                | Operation::Face(_)
+                | Operation::Adaptive(_)
+                | Operation::Parallel(_)
+        )
     }
 
     pub(super) fn stock_to_leave_enabled(&self) -> bool {
@@ -123,7 +130,9 @@ impl App {
                 } else if kind == OpKind::Thread {
                     "thread"
                 } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel)
-                    && sources.get(index).is_some_and(|r| r.kind == EntityKind::Body)
+                    && sources
+                        .get(index)
+                        .is_some_and(|r| r.kind == EntityKind::Body)
                 {
                     "silhouette"
                 } else if sources
@@ -202,15 +211,31 @@ impl App {
         matches!(self.operation_draft, Some(Operation::Chamfer(ref op)) if !op.faces.is_empty())
     }
 
-    pub(super) fn sync_pocket_geometry_height_defaults(&mut self, binding: &cam_model::GeometryBinding) {
-        let Some(operation @ Operation::Pocket(_)) = self.operation_draft.as_ref() else { return; };
-        let previous = self.operation_binding_preview.as_ref()
-            .or_else(|| self.controller.geometry_state().bindings.get(&operation.id()));
-        let Some(previous) = previous else { return; };
-        if previous.recipe == binding.recipe { return; }
+    pub(super) fn sync_pocket_geometry_height_defaults(
+        &mut self,
+        binding: &cam_model::GeometryBinding,
+    ) {
+        let Some(operation @ Operation::Pocket(_)) = self.operation_draft.as_ref() else {
+            return;
+        };
+        let previous = self.operation_binding_preview.as_ref().or_else(|| {
+            self.controller
+                .geometry_state()
+                .bindings
+                .get(&operation.id())
+        });
+        let Some(previous) = previous else {
+            return;
+        };
+        if previous.recipe == binding.recipe {
+            return;
+        }
         let defaults_for = |recipe: &cam_model::ExtractionRecipe| {
             if *recipe == cam_model::ExtractionRecipe::PocketBoundary {
-                crate::cad_operations::selection_height_defaults(self.controller.document(), operation)
+                crate::cad_operations::selection_height_defaults(
+                    self.controller.document(),
+                    operation,
+                )
             } else {
                 cam_model::OperationHeightSettings::default()
             }
@@ -221,10 +246,15 @@ impl App {
             for plane in cam_model::HeightPlaneKind::ALL {
                 let definition = old.definition(plane);
                 if settings.definition(plane) == definition
-                    && self.height_offsets.get(&plane).and_then(|s| s.parse::<f64>().ok()) == Some(definition.offset)
+                    && self
+                        .height_offsets
+                        .get(&plane)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        == Some(definition.offset)
                 {
                     *settings.definition_mut(plane) = new.definition(plane).clone();
-                    self.height_offsets.insert(plane, fmt_num(new.definition(plane).offset));
+                    self.height_offsets
+                        .insert(plane, fmt_num(new.definition(plane).offset));
                 }
             }
         }
@@ -283,11 +313,25 @@ impl App {
 
     pub(super) fn geometry_operation_fields(&self, operation: &Operation) -> Vec<Field> {
         let mut fields = operation_fields(operation);
+        self.add_cutting_fields(operation, &mut fields);
         if self.stock_to_leave_draft.is_some_and(|stock| stock.enabled) {
-            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Adaptive(_) | Operation::Parallel(_)) {
+            if matches!(
+                operation,
+                Operation::Profile(_)
+                    | Operation::Pocket(_)
+                    | Operation::Adaptive(_)
+                    | Operation::Parallel(_)
+            ) {
                 fields.push(Field::StockLeaveRadial);
             }
-            if matches!(operation, Operation::Profile(_) | Operation::Pocket(_) | Operation::Face(_) | Operation::Adaptive(_) | Operation::Parallel(_)) {
+            if matches!(
+                operation,
+                Operation::Profile(_)
+                    | Operation::Pocket(_)
+                    | Operation::Face(_)
+                    | Operation::Adaptive(_)
+                    | Operation::Parallel(_)
+            ) {
                 fields.push(Field::StockLeaveAxial);
             }
         }
@@ -334,7 +378,9 @@ impl App {
         let (contours, closed): (Vec<_>, _) = match operation {
             Operation::Chamfer(op) => (vec![&op.chain], op.closed),
             Operation::Engrave(op) => (vec![&op.chain], op.closed),
-            Operation::Pocket(cam_model::PocketOp { boundary, islands, .. }) => (
+            Operation::Pocket(cam_model::PocketOp {
+                boundary, islands, ..
+            }) => (
                 std::iter::once(boundary).chain(islands.iter()).collect(),
                 true,
             ),
@@ -374,7 +420,8 @@ impl App {
                     | OpKind::Carve
                     | OpKind::Bore
                     | OpKind::Thread
-                    | OpKind::Adaptive | OpKind::Parallel),
+                    | OpKind::Adaptive
+                    | OpKind::Parallel),
                 ) = self.geometry_operation_kind()
                 else {
                     return;
@@ -529,8 +576,15 @@ impl App {
                     if kind == OpKind::Thread {
                         "thread"
                     } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
-                        if self.cad_filter == CadFilter::Body { "silhouette" } else { "face" }
-                    } else if matches!(kind, OpKind::Pocket | OpKind::Carve) && cad && self.cad_filter == CadFilter::Face {
+                        if self.cad_filter == CadFilter::Body {
+                            "silhouette"
+                        } else {
+                            "face"
+                        }
+                    } else if matches!(kind, OpKind::Pocket | OpKind::Carve)
+                        && cad
+                        && self.cad_filter == CadFilter::Face
+                    {
                         "face"
                     } else {
                         "chain"
@@ -557,7 +611,17 @@ impl App {
             geometry_selection::selected_feature_names(labels),
         ]
         .spacing(9);
-        if cad && matches!(kind, OpKind::Pocket | OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Adaptive | OpKind::Parallel) {
+        if cad
+            && matches!(
+                kind,
+                OpKind::Pocket
+                    | OpKind::Chamfer
+                    | OpKind::Engrave
+                    | OpKind::Carve
+                    | OpKind::Adaptive
+                    | OpKind::Parallel
+            )
+        {
             let options = if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                 vec![
                     (CadFilter::Body, "silhouette", "Whole solid body"),
@@ -571,7 +635,11 @@ impl App {
                 vec![
                     (CadFilter::Face, "face", "Pocket floor and islands"),
                     (CadFilter::Loop, "closed", "Closed boundary loop"),
-                    (CadFilter::Edge, "chain", "Select connected edges forming a closed boundary"),
+                    (
+                        CadFilter::Edge,
+                        "chain",
+                        "Select connected edges forming a closed boundary",
+                    ),
                 ]
             } else if kind == OpKind::Carve {
                 vec![
@@ -705,8 +773,11 @@ mod tests {
         app.controller = AppController::new(crate::default_machine());
         let start = Instant::now();
         app.library.tools.clear();
-        app.open_project(&std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testfiles/tray-parallel.ocam")).unwrap();
+        app.open_project(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testfiles/tray-parallel.ocam"),
+        )
+        .unwrap();
         let deadline = Instant::now() + std::time::Duration::from_secs(120);
         while app.controller.run_needs_poll() {
             let _ = app.update(Message::PollRun);
@@ -715,8 +786,14 @@ mod tests {
         }
         eprintln!("open project {:?}", start.elapsed());
         app.setup_draft = None;
-        let id = app.controller.inspection_setup().operations.iter()
-            .find(|op| matches!(op, Operation::Parallel(_))).unwrap().id();
+        let id = app
+            .controller
+            .inspection_setup()
+            .operations
+            .iter()
+            .find(|op| matches!(op, Operation::Parallel(_)))
+            .unwrap()
+            .id();
         let start = Instant::now();
         app.begin_operation_draft(id);
         eprintln!("open editor {:?}", start.elapsed());
@@ -728,11 +805,20 @@ mod tests {
         let state = app.controller.geometry_state();
         let instance = &state.instances[0];
         let asset = state.asset(instance.asset_id).unwrap();
-        let faces: Vec<_> = asset.topology.faces.iter()
+        let faces: Vec<_> = asset
+            .topology
+            .faces
+            .iter()
             .filter(|face| face.body_id == instance.body_id)
-            .map(|face| EntityRef { asset_id: asset.id, revision: asset.revision,
-                instance_id: instance.id, body_id: instance.body_id,
-                kind: EntityKind::Face, id: face.id }).collect();
+            .map(|face| EntityRef {
+                asset_id: asset.id,
+                revision: asset.revision,
+                instance_id: instance.id,
+                body_id: instance.body_id,
+                kind: EntityKind::Face,
+                id: face.id,
+            })
+            .collect();
         for count in [1, 10, faces.len()] {
             app.controller.set_cad_selection(faces[..count].to_vec());
             let start = Instant::now();
@@ -743,7 +829,10 @@ mod tests {
                 let _ = app.update(Message::OrbitBy(0.01, 0.005));
                 black_box(app.view());
             }
-            eprintln!("{count} faces: {:.3} ms/update+view", start.elapsed().as_secs_f64() * 1000. / 3.);
+            eprintln!(
+                "{count} faces: {:.3} ms/update+view",
+                start.elapsed().as_secs_f64() * 1000. / 3.
+            );
         }
         app.controller.set_cad_selection(saved_faces.clone());
         for face in saved_faces.iter().take(5).chain(saved_faces.iter().take(5)) {
@@ -901,10 +990,16 @@ mod tests {
         let point: [f64; 3] =
             std::array::from_fn(|axis| (face_bounds[0][axis] + face_bounds[1][axis]) / 2.);
         let point = placement.transform_point(point);
-        let cursor = picking_view::project(viewport.camera(), bounds, point).unwrap().0;
+        let cursor = picking_view::project(viewport.camera(), bounds, point)
+            .unwrap()
+            .0;
         let candidates = viewport.cad_candidates_at(cursor, bounds);
-        assert!(candidates.iter().any(|pick| pick.entity.kind == EntityKind::Face));
-        assert!(candidates.iter().any(|pick| pick.entity.kind == EntityKind::Body));
+        assert!(candidates
+            .iter()
+            .any(|pick| pick.entity.kind == EntityKind::Face));
+        assert!(candidates
+            .iter()
+            .any(|pick| pick.entity.kind == EntityKind::Body));
 
         let id = app
             .controller
@@ -914,7 +1009,10 @@ mod tests {
         let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
         assert_eq!(app.cad_editing_op, None, "opening the tab must stay clean");
         assert!(app.geometry_auto_pick);
-        assert_eq!(app.machining_viewport().cad_operation_kind, Some(OpKind::Adaptive));
+        assert_eq!(
+            app.machining_viewport().cad_operation_kind,
+            Some(OpKind::Adaptive)
+        );
         assert!(!app.cad_filter_explicit);
         let _ = app.update(Message::GeometryClear);
         let _ = app.update(Message::CadSelect(face.clone()));
@@ -974,19 +1072,27 @@ mod tests {
         assert_eq!(app.cad_editing_op, None);
 
         let _ = app.update(Message::CadSelect(silhouette.clone()));
-        assert!(app.profile_entry_editor.as_ref().is_some_and(|entry| entry.picking));
+        assert!(app
+            .profile_entry_editor
+            .as_ref()
+            .is_some_and(|entry| entry.picking));
         assert_eq!(app.cad_editing_op, None);
         app.profile_entry_message(profile_entries_view::EntryMessage::Confirm);
-        assert!(app.profile_entry_editor.is_none(), "the picked entry must validate and close");
+        assert!(
+            app.profile_entry_editor.is_none(),
+            "the picked entry must validate and close"
+        );
         assert_eq!(app.cad_editing_op, None);
         assert!(app.profile_entries().iter().any(|entry| {
             matches!(&entry.source, cam_model::ProfileGeometrySource::Cad(refs) if refs.contains(&silhouette))
         }));
         let _ = app.update(Message::Apply);
         assert_eq!(app.cad_editing_op, None);
-        assert!(matches!(app.controller.operation(id), Some(Operation::Profile(profile))
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Profile(profile))
             if profile.selections.as_ref().is_some_and(|entries| entries.iter().any(|entry|
-                matches!(&entry.source, cam_model::ProfileGeometrySource::Cad(refs) if refs.contains(&silhouette))))));
+                matches!(&entry.source, cam_model::ProfileGeometrySource::Cad(refs) if refs.contains(&silhouette)))))
+        );
     }
 
     #[test]

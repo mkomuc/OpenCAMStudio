@@ -419,7 +419,10 @@ pub fn legacy_cutting(op: &Operation, h: &Heights) -> CuttingHeights {
             top: o.top,
             bottom: o.top - o.depth,
         },
-        Operation::Parallel(_) => CuttingHeights { top: h.top_of_stock, bottom: h.top_of_stock - 1.0 },
+        Operation::Parallel(_) => CuttingHeights {
+            top: h.top_of_stock,
+            bottom: h.top_of_stock - 1.0,
+        },
         Operation::Adaptive(o) => {
             let top = h.top_of_stock;
             let stepdown = if o.params.stepdown.is_finite() && o.params.stepdown > 0.0 {
@@ -573,15 +576,17 @@ impl Document {
         let Some(at) = self.setups.iter().position(|s| s.id == setup.id) else {
             return self.height_model_bounds_for(setup);
         };
-        let Some(source) = self.setups[..at].iter().rev()
-            .find(|s| s.stock != crate::Stock::PreviousSetup) else {
+        let Some(source) = self.setups[..at]
+            .iter()
+            .rev()
+            .find(|s| s.stock != crate::Stock::PreviousSetup)
+        else {
             return self.height_model_bounds_for(setup);
         };
         let (min, max) = self.height_model_bounds_for(source);
         let (min, max) = source.stock.resolve_bounds(min, max);
-        let points = box_corners([min, max]).map(|p| {
-            setup.frame.to_setup_vector(source.frame.to_world_vector(p))
-        });
+        let points = box_corners([min, max])
+            .map(|p| setup.frame.to_setup_vector(source.frame.to_world_vector(p)));
         bounds(&points).unwrap_or(([0.; 3], [0.; 3]))
     }
 

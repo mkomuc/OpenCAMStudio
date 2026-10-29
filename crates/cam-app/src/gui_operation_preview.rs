@@ -48,35 +48,46 @@ impl App {
             .patterns
             .iter()
             .find(|pattern| Some(pattern.id) == draft.pattern_id);
-        let source_instance = existing.and_then(|pattern| {
-            pattern
-                .options
-                .instance_indices(pattern.kind)
-                .into_iter()
-                .next()
-        });
-        let mut sources = Scene::new();
-        if let Some(outcome) = self
-            .operation_preview_outcome()
-            .or_else(|| self.controller.outcome())
-        {
-            for strip in outcome.scene.strips.iter().filter(|strip| {
-                strip.op.is_some_and(|op| draft.members.contains(&op))
-                    && (strip.pattern_id.is_none()
-                        || (strip.pattern_id == draft.pattern_id
-                            && strip.instance_index == source_instance.map(|i| i as u32)))
-            }) {
-                let mut strip = strip.clone();
-                // A committed result may omit the original or begin at a reversed
-                // instance. Undo that placement once to recover the seed path.
-                if let Some(pattern) = existing.filter(|_| strip.pattern_id.is_some()) {
-                    let old_center = match pattern.kind {
-                        cam_model::PatternKind::Circular { center_xy, .. } => center_xy,
-                        _ => [0.0, 0.0],
+        let source_indices = existing.map(|pattern| pattern.options.instance_indices(pattern.kind));
+        let preview = self.operation_preview_outcome();
+        let mut sources = [Scene::new(), Scene::new()];
+        if let Some(outcome) = preview.or_else(|| self.controller.outcome()) {
+            for (variant, sources) in sources.iter_mut().enumerate() {
+                let source_instance = source_indices
+                    .as_ref()
+                    .and_then(|indices| indices.get(variant).or_else(|| indices.first()).copied());
+                for strip in outcome.scene.strips.iter().filter(|strip| {
+                    strip.op.is_some_and(|op| draft.members.contains(&op))
+                        && (strip.pattern_id.is_none()
+                            || if preview.is_some() {
+                                strip.pattern_id
+                                    == strip
+                                        .op
+                                        .map(backplot_preview_view::pattern_source_preview_id)
+                                    && strip.instance_index == Some(variant as u32)
+                            } else {
+                                strip.pattern_id == draft.pattern_id
+                                    && strip.instance_index == source_instance.map(|i| i as u32)
+                            })
+                }) {
+                    let mut strip = strip.clone();
+                    // Recover both entry variants in the source coordinate frame.
+                    let placement = if strip.pattern_id.is_none() {
+                        None
+                    } else if preview.is_some() {
+                        Some(([0.0; 2], [variant as f64, 0.0], 0.0))
+                    } else {
+                        existing.and_then(|pattern| {
+                            let old_center = match pattern.kind {
+                                cam_model::PatternKind::Circular { center_xy, .. } => center_xy,
+                                _ => [0.0; 2],
+                            };
+                            source_instance
+                                .and_then(|i| pattern.options.transform_xy(pattern.kind, i))
+                                .map(|(offset, angle)| (old_center, offset, angle))
+                        })
                     };
-                    if let Some((offset, angle)) =
-                        source_instance.and_then(|i| pattern.options.transform_xy(pattern.kind, i))
-                    {
+                    if let Some((old_center, offset, angle)) = placement {
                         let (sin, cos) = (-angle).to_radians().sin_cos();
                         let inverse = [
                             -offset[0] * cos + offset[1] * sin,
@@ -93,17 +104,23 @@ impl App {
                             .map(|v| v as f32);
                         }
                     }
+                    sources.strips.push(strip);
                 }
-                sources.strips.push(strip);
             }
         }
-        let anchor = sources
+        let anchor = sources[0]
             .bounds()
             .map(|(min, max)| std::array::from_fn(|i| (min[i] as f64 + max[i] as f64) / 2.0))
             .unwrap_or_else(|| {
                 frame.to_world_vector(setup.origin_position(self.controller.active_origin()))
             });
-        for index in options.instance_indices(kind).into_iter().take(1000) {
+        for (ordinal, index) in options
+            .instance_indices(kind)
+            .into_iter()
+            .take(1000)
+            .enumerate()
+        {
+            let sources = &sources[usize::from(ordinal > 0)];
             let Some((translation, degrees)) = options.transform_xy(kind, index) else {
                 break;
             };
@@ -371,10 +388,13 @@ impl App {
                         let mut b = a;
                         a[axis] -= 1.0;
                         b[axis] += 1.0;
-                        scene.add_highlight(vec![
-                            frame.to_world_vector(a).map(|v| v as f32),
-                            frame.to_world_vector(b).map(|v| v as f32),
-                        ], kind.color());
+                        scene.add_highlight(
+                            vec![
+                                frame.to_world_vector(a).map(|v| v as f32),
+                                frame.to_world_vector(b).map(|v| v as f32),
+                            ],
+                            kind.color(),
+                        );
                     }
                 }
             }
@@ -392,6 +412,10 @@ impl App {
     }
 
     pub(super) fn profile_tab_locations(&self) -> Vec<[f64; 2]> {
+        if !matches!(self.operation_draft.as_ref(), Some(Operation::Profile(op)) if op.tabs.enabled)
+        {
+            return Vec::new();
+        }
         let Some(op) = self.profile_tab_operation() else {
             return Vec::new();
         };
@@ -417,6 +441,10 @@ impl App {
     pub(super) fn profile_tab_mesh(&self) -> (Vec<MeshVertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        if !matches!(self.operation_draft.as_ref(), Some(Operation::Profile(op)) if op.tabs.enabled)
+        {
+            return (vertices, indices);
+        }
         let Some(op) = self.profile_tab_operation() else {
             return (vertices, indices);
         };
@@ -478,13 +506,26 @@ impl App {
                 ([0, 2, 3, 1], [0., 0., -1.]),
                 ([4, 5, 7, 6], [0., 0., 1.]),
             ] {
-                let normal = if op.tabs.shape==cam_model::TabShape::Triangular {
-                    let a=corners[quad[0]]; let b=corners[quad[1]]; let c=corners[quad[2]];
-                    let ab=[b[0]-a[0],b[1]-a[1],b[2]-a[2]]; let ac=[c[0]-a[0],c[1]-a[1],c[2]-a[2]];
-                    let cross=[ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0]];
-                    let length=cross.iter().map(|v|v*v).sum::<f64>().sqrt();
-                    if length>1e-12 {cross.map(|v|v/length)} else {normal}
-                } else {normal};
+                let normal = if op.tabs.shape == cam_model::TabShape::Triangular {
+                    let a = corners[quad[0]];
+                    let b = corners[quad[1]];
+                    let c = corners[quad[2]];
+                    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                    let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                    let cross = [
+                        ab[1] * ac[2] - ab[2] * ac[1],
+                        ab[2] * ac[0] - ab[0] * ac[2],
+                        ab[0] * ac[1] - ab[1] * ac[0],
+                    ];
+                    let length = cross.iter().map(|v| v * v).sum::<f64>().sqrt();
+                    if length > 1e-12 {
+                        cross.map(|v| v / length)
+                    } else {
+                        normal
+                    }
+                } else {
+                    normal
+                };
                 let base = vertices.len() as u32;
                 vertices.extend(quad.map(|corner| MeshVertex {
                     position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
@@ -547,7 +588,8 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .last()
             .unwrap()

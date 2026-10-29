@@ -9,6 +9,7 @@
 //! by swapping the [`Machine`] it is handed. Dependency isolation is enforced
 //! by `scripts/check_architecture.py`.
 
+mod cutting_data;
 mod pocket;
 pub use pocket::PocketFinishing;
 mod parallel;
@@ -34,11 +35,12 @@ mod validate;
 
 pub use cam_cldata::Point3;
 pub use document::{
-    ParallelOp, AdaptiveContainment, AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace, ChamferOp, ClearParams, Clearing, Comp, Document,
-    DrillOp, EngraveOp, FaceOp, Hand, Heights, Lead, Operation, Origin, Plunge, PocketOp,
-    ProfileContour, ProfileOp, ProfileTabs, Setup, Side, Stock, StockToLeave, ThreadOp, SCHEMA_VERSION,
-    CircularDistribution, ExecutionItem, OperationPattern, PatternDirection, PatternKind, PatternOrder,
-    PatternOptions, PatternSpacing, LinearPatternDirection,
+    AdaptiveContainment, AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace,
+    ChamferOp, CircularDistribution, ClearParams, Clearing, Comp, Document, DrillOp, EngraveOp,
+    ExecutionItem, FaceOp, Hand, Heights, Lead, LinearPatternDirection, Operation,
+    OperationPattern, Origin, ParallelOp, PatternDirection, PatternKind, PatternOptions,
+    PatternOrder, PatternSpacing, Plunge, PocketOp, ProfileContour, ProfileOp, ProfileTabs, Setup,
+    Side, Stock, StockToLeave, ThreadOp, SCHEMA_VERSION,
 };
 pub use geometry::*;
 pub use history::History;

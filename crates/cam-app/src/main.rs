@@ -53,9 +53,15 @@ fn main() -> std::process::ExitCode {
 
 fn serve_mcp(setup: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = cam_app::mcp::Session::from_user_settings();
-    if let Some(path) = setup { session.controller.open_project(path)?; }
-    cam_app::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(),
-        cam_app::mcp::tools(), |name, args| session.call(name, args))?;
+    if let Some(path) = setup {
+        session.controller.open_project(path)?;
+    }
+    cam_app::mcp::serve(
+        std::io::stdin().lock(),
+        std::io::stdout().lock(),
+        cam_app::mcp::tools(),
+        |name, args| session.call(name, args),
+    )?;
     Ok(())
 }
 

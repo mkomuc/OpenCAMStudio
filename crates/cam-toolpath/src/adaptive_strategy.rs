@@ -1,6 +1,6 @@
 //! 3D adaptive roughing over conservative CAD-derived layer shadows.
 use cam_cldata::Program;
-use cam_geo::{Contour, JoinStyle, Point, Polygon, difference, offset};
+use cam_geo::{difference, offset, Contour, JoinStyle, Point, Polygon};
 use cam_geometry3d::AdaptiveGeometry;
 use cam_model::{AdaptiveOp, Clearing, Lead, Plunge, StockToLeave};
 
@@ -39,7 +39,10 @@ impl Strategy for AdaptiveStrategy {
             fail!("operation {}: {reason}", op.id);
         }
         if !op.params.lift_height.is_finite() || op.params.lift_height < 0.0 {
-            fail!("operation {}: lift height must be finite and nonnegative", op.id);
+            fail!(
+                "operation {}: lift height must be finite and nonnegative",
+                op.id
+            );
         }
         if !op.params.tolerance.is_finite() || op.params.tolerance <= 0.0 {
             fail!("operation {}: tolerance must be finite and positive", op.id);
@@ -100,8 +103,11 @@ impl Strategy for AdaptiveStrategy {
             || !env.heights.clearance.is_finite()
             || env.heights.clearance <= self.geometry.model_top
         {
-            fail!("operation {}: clearance must be above every setup body (model top Z{:.4})",
-                op.id, self.geometry.model_top);
+            fail!(
+                "operation {}: clearance must be above every setup body (model top Z{:.4})",
+                op.id,
+                self.geometry.model_top
+            );
         }
         let z_top = self
             .geometry
@@ -160,8 +166,9 @@ impl Strategy for AdaptiveStrategy {
         };
         let user_expansion = match op.params.containment {
             cam_model::AdaptiveContainment::Inside => -op.params.additional_offset,
-            cam_model::AdaptiveContainment::Center
-            | cam_model::AdaptiveContainment::Outside => op.params.additional_offset,
+            cam_model::AdaptiveContainment::Center | cam_model::AdaptiveContainment::Outside => {
+                op.params.additional_offset
+            }
         };
         let domain_expansion = containment_expansion + user_expansion;
         // Clearing insets its input by the cutter radius. Allow the same runout
@@ -173,7 +180,10 @@ impl Strategy for AdaptiveStrategy {
             JoinStyle::Round,
         ) {
             Ok(regions) => regions,
-            Err(e) => fail!("operation {}: could not expand the stock machining limit: {e}", op.id),
+            Err(e) => fail!(
+                "operation {}: could not expand the stock machining limit: {e}",
+                op.id
+            ),
         };
 
         let largest_radius = (tool.diameter.max(tool.shank_dia()).max(tool.neck_dia())) / 2.0;
@@ -185,7 +195,9 @@ impl Strategy for AdaptiveStrategy {
         };
         // Frontier simplification may move a chord inward. Reserve that motion
         // as well as arc refitting before the final swept-cutter check.
-        let protected_growth = extra_shank + allowance + self.geometry.error_bound
+        let protected_growth = extra_shank
+            + allowance
+            + self.geometry.error_bound
             + op.params.simplification_tolerance();
         let mut program = Program::new();
         let mut cleared_levels = 0usize;
@@ -297,7 +309,10 @@ impl Strategy for AdaptiveStrategy {
                     JoinStyle::Round,
                 ) {
                     Ok(regions) => Some(regions),
-                    Err(e) => fail!("operation {}: could not compare fine clearing regions: {e}", op.id),
+                    Err(e) => fail!(
+                        "operation {}: could not compare fine clearing regions: {e}",
+                        op.id
+                    ),
                 }
             } else {
                 None
@@ -314,14 +329,20 @@ impl Strategy for AdaptiveStrategy {
                     match difference(std::slice::from_ref(region), cleared) {
                         Ok(rest) if rest.is_empty() => continue,
                         Ok(_) => {}
-                        Err(e) => fail!("operation {}: could not derive fine rest material: {e}", op.id),
+                        Err(e) => fail!(
+                            "operation {}: could not derive fine rest material: {e}",
+                            op.id
+                        ),
                     }
                 }
                 let radius = tool.radius();
                 let spacing = op.params.optimal_load.min(tool.diameter);
                 let guard = match offset(std::slice::from_ref(region), -radius, JoinStyle::Round) {
                     Ok(regions) => regions,
-                    Err(e) => fail!("operation {}: could not create the cutter-centre entry guard: {e}", op.id),
+                    Err(e) => fail!(
+                        "operation {}: could not create the cutter-centre entry guard: {e}",
+                        op.id
+                    ),
                 };
                 if guard.is_empty() {
                     continue;
@@ -365,10 +386,14 @@ impl Strategy for AdaptiveStrategy {
                     true,
                     |candidate| {
                         crate::adaptive_safety::certify_layer(
-                            candidate, &layer.protected,
+                            candidate,
+                            &layer.protected,
                             largest_radius + allowance + self.geometry.error_bound,
-                            layer.z, env.heights.clearance, cancel,
-                        ).is_ok()
+                            layer.z,
+                            env.heights.clearance,
+                            cancel,
+                        )
+                        .is_ok()
                     },
                 ) {
                     Ok(result) => {
@@ -377,22 +402,37 @@ impl Strategy for AdaptiveStrategy {
                             // Validate the emitted moves independently of the
                             // clearing generator. Reserve the arc-refitting
                             // budget already included in the model envelope.
-                            let certified_radius = largest_radius + allowance
+                            let certified_radius = largest_radius
+                                + allowance
                                 + (self.geometry.error_bound - crate::emit::ARCFIT_TOL).max(0.0);
                             match crate::adaptive_safety::certify_layer(
-                                &layer_program, &layer.protected, certified_radius,
-                                layer.z, env.heights.clearance, cancel,
+                                &layer_program,
+                                &layer.protected,
+                                certified_radius,
+                                layer.z,
+                                env.heights.clearance,
+                                cancel,
                             ) {
                                 Ok(()) => {}
                                 Err(crate::adaptive_safety::SafetyFailure::Cancelled) => {
-                                    return StrategyResult { program, diagnostics, cancelled: true };
+                                    return StrategyResult {
+                                        program,
+                                        diagnostics,
+                                        cancelled: true,
+                                    };
                                 }
-                                Err(crate::adaptive_safety::SafetyFailure::Motion { index, reason }) => {
+                                Err(crate::adaptive_safety::SafetyFailure::Motion {
+                                    index,
+                                    reason,
+                                }) => {
                                     diagnostics.push(Diagnostic::error(format!(
                                         "operation {}: 3D Adaptive safety check rejected move {} at Z{:.4}: {reason}",
                                         op.id, index + 1, layer.z,
                                     )).with_code(crate::DiagnosticCode::InvalidMotion).for_op(op.id));
-                                    return StrategyResult { diagnostics, ..Default::default() };
+                                    return StrategyResult {
+                                        diagnostics,
+                                        ..Default::default()
+                                    };
                                 }
                             }
                             program.extend(layer_program);
@@ -401,10 +441,14 @@ impl Strategy for AdaptiveStrategy {
                             // pass was emitted. Small skipped changes must
                             // accumulate until they exceed the tolerance.
                             cleared_slice = match cam_geo::union(
-                                &cleared_slice, std::slice::from_ref(region),
+                                &cleared_slice,
+                                std::slice::from_ref(region),
                             ) {
                                 Ok(regions) => regions,
-                                Err(e) => fail!("operation {}: could not track cleared Adaptive regions: {e}", op.id),
+                                Err(e) => fail!(
+                                    "operation {}: could not track cleared Adaptive regions: {e}",
+                                    op.id
+                                ),
                             };
                         }
                     }
@@ -521,8 +565,10 @@ mod tests {
         strategy.geometry.layers.truncate(1);
         strategy.op.params.climb = false; // Exercise concentric layer links.
         let env = JobEnv {
-            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
-            stock: Some(([0., 0.], [30., 30.])), spindle: SpindleDir::Cw,
+            heights: Heights::new(15., 12., 10.),
+            tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 30.])),
+            spindle: SpindleDir::Cw,
         };
         let baseline = strategy.compute(&env, &CancelToken::new());
         assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
@@ -548,8 +594,10 @@ mod tests {
         let (mut strategy, tool) = fixture();
         strategy.geometry.layers.truncate(1);
         let env = JobEnv {
-            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
-            stock: Some(([0., 0.], [30., 30.])), spindle: SpindleDir::Cw,
+            heights: Heights::new(15., 12., 10.),
+            tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 30.])),
+            spindle: SpindleDir::Cw,
         };
         let baseline = strategy.compute(&env, &CancelToken::new());
         assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
@@ -564,9 +612,16 @@ mod tests {
         assert_ne!(baseline.program, result.program);
         assert!(result.program.validate().is_ok());
         assert_ne!(entry_only.program, result.program);
-        let exit = result.program.steps().iter().rev().find_map(|s| match s {
-            Step::Rapid { to, .. } => Some(*to), _ => None,
-        }).unwrap();
+        let exit = result
+            .program
+            .steps()
+            .iter()
+            .rev()
+            .find_map(|s| match s {
+                Step::Rapid { to, .. } => Some(*to),
+                _ => None,
+            })
+            .unwrap();
         assert!((exit.x - 5.).hypot(exit.y - 25.) < 3.0, "{exit:?}");
         // compute() certifies the new exit as well as every other emitted move.
     }
@@ -574,26 +629,37 @@ mod tests {
     #[test]
     fn fine_passes_only_revisit_regions_with_newly_exposed_material() {
         let (mut strategy, tool) = fixture();
-        let rectangle = |x: f64| Polygon::new(Contour::new(vec![
-            Point::new(x, 0.), Point::new(x + 12., 0.),
-            Point::new(x + 12., 12.), Point::new(x, 12.),
-        ])).unwrap();
+        let rectangle = |x: f64| {
+            Polygon::new(Contour::new(vec![
+                Point::new(x, 0.),
+                Point::new(x + 12., 0.),
+                Point::new(x + 12., 12.),
+                Point::new(x, 12.),
+            ]))
+            .unwrap()
+        };
         let left = rectangle(0.);
         let right = rectangle(30.);
         strategy.stock_to_leave = StockToLeave::default();
         strategy.geometry.layers = vec![
             cam_geometry3d::AdaptiveLayer {
-                z: 8., protected: vec![right.clone()],
-                body_domains: vec![], face_domains: vec![left.clone(), right.clone()],
+                z: 8.,
+                protected: vec![right.clone()],
+                body_domains: vec![],
+                face_domains: vec![left.clone(), right.clone()],
             },
             cam_geometry3d::AdaptiveLayer {
-                z: 9., protected: vec![],
-                body_domains: vec![], face_domains: vec![left, right],
+                z: 9.,
+                protected: vec![],
+                body_domains: vec![],
+                face_domains: vec![left, right],
             },
         ];
         let env = JobEnv {
-            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
-            stock: Some(([0., 0.], [42., 12.])), spindle: SpindleDir::Cw,
+            heights: Heights::new(15., 12., 10.),
+            tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [42., 12.])),
+            spindle: SpindleDir::Cw,
         };
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
@@ -610,7 +676,10 @@ mod tests {
                 assert!(point.x < 12.);
             } else if (point.z - 9.).abs() < 1e-9 {
                 fine += 1;
-                assert!(point.x > 30., "fine pass repeats an unchanged region: {point:?}");
+                assert!(
+                    point.x > 30.,
+                    "fine pass repeats an unchanged region: {point:?}"
+                );
             }
         }
         assert!(coarse > 0 && fine > 0);
@@ -619,19 +688,29 @@ mod tests {
     #[test]
     fn small_skipped_refinements_accumulate_against_the_last_cut() {
         let (mut strategy, tool) = fixture();
-        let rectangle = |width: f64| Polygon::new(Contour::new(vec![
-            Point::new(0., 0.), Point::new(width, 0.),
-            Point::new(width, 20.), Point::new(0., 20.),
-        ])).unwrap();
+        let rectangle = |width: f64| {
+            Polygon::new(Contour::new(vec![
+                Point::new(0., 0.),
+                Point::new(width, 0.),
+                Point::new(width, 20.),
+                Point::new(0., 20.),
+            ]))
+            .unwrap()
+        };
         strategy.stock_to_leave = StockToLeave::default();
-        strategy.geometry.layers = (0..4).map(|i| cam_geometry3d::AdaptiveLayer {
-            z: 8.0 + i as f64 * 0.25,
-            protected: vec![rectangle(10.0 - i as f64 * 0.03)],
-            body_domains: vec![], face_domains: vec![rectangle(30.)],
-        }).collect();
+        strategy.geometry.layers = (0..4)
+            .map(|i| cam_geometry3d::AdaptiveLayer {
+                z: 8.0 + i as f64 * 0.25,
+                protected: vec![rectangle(10.0 - i as f64 * 0.03)],
+                body_domains: vec![],
+                face_domains: vec![rectangle(30.)],
+            })
+            .collect();
         let env = JobEnv {
-            heights: Heights::new(15., 12., 10.), tools: std::slice::from_ref(&tool),
-            stock: Some(([0., 0.], [30., 20.])), spindle: SpindleDir::Cw,
+            heights: Heights::new(15., 12., 10.),
+            tools: std::slice::from_ref(&tool),
+            stock: Some(([0., 0.], [30., 20.])),
+            spindle: SpindleDir::Cw,
         };
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
@@ -663,7 +742,10 @@ mod tests {
             let result = strategy.compute(&env, &CancelToken::new());
             assert!(result.has_errors(), "must reject tolerance {value}");
             assert!(result.program.steps().is_empty());
-            assert!(result.diagnostics.iter().any(|d| d.message.contains("tolerance must be finite and positive")));
+            assert!(result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("tolerance must be finite and positive")));
         }
     }
 
@@ -810,13 +892,19 @@ mod tests {
         let run = |containment, additional_offset| {
             let (mut strategy, tool) = fixture();
             let face = Polygon::new(Contour::new(vec![
-                Point::new(10., 10.), Point::new(30., 10.),
-                Point::new(30., 30.), Point::new(10., 30.),
-            ])).unwrap();
+                Point::new(10., 10.),
+                Point::new(30., 10.),
+                Point::new(30., 30.),
+                Point::new(10., 30.),
+            ]))
+            .unwrap();
             let protected = Polygon::new(Contour::new(vec![
-                Point::new(18., 18.), Point::new(22., 18.),
-                Point::new(22., 22.), Point::new(18., 22.),
-            ])).unwrap();
+                Point::new(18., 18.),
+                Point::new(22., 18.),
+                Point::new(22., 22.),
+                Point::new(18., 22.),
+            ]))
+            .unwrap();
             strategy.geometry.layers.truncate(1);
             for layer in &mut strategy.geometry.layers {
                 layer.face_domains = vec![face.clone()];
@@ -833,13 +921,21 @@ mod tests {
             };
             let result = strategy.compute(&env, &CancelToken::new());
             assert!(!result.has_errors(), "{:?}", result.diagnostics);
-            let x_values: Vec<_> = result.program.steps().iter().filter_map(|step| match step {
-                Step::Linear { to, .. } => Some(to.x),
-                Step::Arc { end, .. } => Some(end.x),
-                _ => None,
-            }).collect();
+            let x_values: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, .. } => Some(to.x),
+                    Step::Arc { end, .. } => Some(end.x),
+                    _ => None,
+                })
+                .collect();
             assert!(!x_values.is_empty());
-            (*x_values.iter().min_by(|a, b| a.total_cmp(b)).unwrap(), *x_values.iter().max_by(|a, b| a.total_cmp(b)).unwrap())
+            (
+                *x_values.iter().min_by(|a, b| a.total_cmp(b)).unwrap(),
+                *x_values.iter().max_by(|a, b| a.total_cmp(b)).unwrap(),
+            )
         };
         use cam_model::AdaptiveContainment::{Center, Inside, Outside};
         let inside = run(Inside, 0.0);
@@ -850,11 +946,26 @@ mod tests {
         let center_negative = run(Center, -1.0);
         let outside = run(Outside, 0.0);
         let outside_offset = run(Outside, 1.0);
-        assert!(inside_offset.0 > inside.0 + 0.8, "inside positive offset should shrink the region: {inside:?} -> {inside_offset:?}");
-        assert!(inside_negative.0 < inside.0 - 0.8, "inside negative offset should expand the region: {inside:?} -> {inside_negative:?}");
-        assert!(center_offset.0 < center.0 - 0.8, "center positive offset should expand the region: {center:?} -> {center_offset:?}");
-        assert!(center_negative.0 > center.0 + 0.8, "center negative offset should shrink the region: {center:?} -> {center_negative:?}");
-        assert!(outside_offset.0 < outside.0 - 0.8, "outside positive offset should expand the region: {outside:?} -> {outside_offset:?}");
+        assert!(
+            inside_offset.0 > inside.0 + 0.8,
+            "inside positive offset should shrink the region: {inside:?} -> {inside_offset:?}"
+        );
+        assert!(
+            inside_negative.0 < inside.0 - 0.8,
+            "inside negative offset should expand the region: {inside:?} -> {inside_negative:?}"
+        );
+        assert!(
+            center_offset.0 < center.0 - 0.8,
+            "center positive offset should expand the region: {center:?} -> {center_offset:?}"
+        );
+        assert!(
+            center_negative.0 > center.0 + 0.8,
+            "center negative offset should shrink the region: {center:?} -> {center_negative:?}"
+        );
+        assert!(
+            outside_offset.0 < outside.0 - 0.8,
+            "outside positive offset should expand the region: {outside:?} -> {outside_offset:?}"
+        );
         assert!(inside.0 > center.0 && center.0 > outside.0, "tool center should move outward by containment mode: {inside:?}, {center:?}, {outside:?}");
     }
 
@@ -871,29 +982,42 @@ mod tests {
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(result.has_errors());
         assert!(result.program.is_empty());
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("clearance must be above every setup body")));
+        assert!(result.diagnostics.iter().any(|d| d
+            .message
+            .contains("clearance must be above every setup body")));
     }
 
     #[test]
     fn outside_entries_keep_the_entire_cutter_clear_of_a_sloped_part() {
         use cam_cldata::{ArcDir, MoveKind, Point3};
         let (mut strategy, tool) = fixture();
-        let rectangle = |x0, y0, x1, y1| Polygon::new(Contour::new(vec![
-            Point::new(x0, y0), Point::new(x1, y0),
-            Point::new(x1, y1), Point::new(x0, y1),
-        ])).unwrap();
+        let rectangle = |x0, y0, x1, y1| {
+            Polygon::new(Contour::new(vec![
+                Point::new(x0, y0),
+                Point::new(x1, y0),
+                Point::new(x1, y1),
+                Point::new(x0, y1),
+            ]))
+            .unwrap()
+        };
         strategy.stock_to_leave = StockToLeave::default();
         strategy.op.params.containment = cam_model::AdaptiveContainment::Outside;
         // The solid's top is the plane z=y+40 over the front slope, then z=20.
         // Its side edges at x=+/-50 leave narrow runout strips for entry.
-        strategy.geometry.layers = [19., 15., 10.5].into_iter().map(|z| {
-            cam_geometry3d::AdaptiveLayer {
+        strategy.geometry.layers = [19., 15., 10.5]
+            .into_iter()
+            .map(|z| cam_geometry3d::AdaptiveLayer {
                 z,
-                protected: vec![rectangle(-50., z - 40. - strategy.geometry.error_bound, 50., 30.)],
+                protected: vec![rectangle(
+                    -50.,
+                    z - 40. - strategy.geometry.error_bound,
+                    50.,
+                    30.,
+                )],
                 body_domains: vec![],
                 face_domains: vec![rectangle(-50., -30., 50., -20.)],
-            }
-        }).collect();
+            })
+            .collect();
         let env = JobEnv {
             heights: Heights::new(36., 26., 21.),
             tools: std::slice::from_ref(&tool),
@@ -914,8 +1038,11 @@ mod tests {
                 let reach = (tool.radius().powi(2) - dx * dx).max(0.).sqrt();
                 if dx < tool.radius() && p.y + reach > -30. && p.y - reach < 30. {
                     let surface = (p.y + reach).min(-20.) + 40.;
-                    assert!(p.z >= surface - 0.02,
-                        "cutter gouges slope by {:.4} mm at {p:?}: {step:?}", surface - p.z);
+                    assert!(
+                        p.z >= surface - 0.02,
+                        "cutter gouges slope by {:.4} mm at {p:?}: {step:?}",
+                        surface - p.z
+                    );
                 }
                 samples += 1;
             };
@@ -923,21 +1050,28 @@ mod tests {
                 Step::Rapid { to, .. } | Step::Linear { to, .. } => {
                     if let Some(a) = current {
                         let n = ((to.x - a.x).hypot(to.y - a.y).hypot(to.z - a.z) / 0.05)
-                            .ceil().max(1.) as usize;
+                            .ceil()
+                            .max(1.) as usize;
                         for i in 0..=n {
                             let t = i as f64 / n as f64;
-                            check(Point3::new(a.x + (to.x - a.x) * t,
-                                a.y + (to.y - a.y) * t, a.z + (to.z - a.z) * t));
+                            check(Point3::new(
+                                a.x + (to.x - a.x) * t,
+                                a.y + (to.y - a.y) * t,
+                                a.z + (to.z - a.z) * t,
+                            ));
                         }
                     }
                     if matches!(step, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge)
-                        && to.x.abs() > 50. && to.x.abs() < 50. + tool.radius()
+                        && to.x.abs() > 50.
+                        && to.x.abs() < 50. + tool.radius()
                     {
                         side_entries += 1;
                     }
                     current = Some(*to);
                 }
-                Step::Arc { end, center, dir, .. } => {
+                Step::Arc {
+                    end, center, dir, ..
+                } => {
                     if let Some(a) = current {
                         let radius = (a.x - center.x).hypot(a.y - center.y);
                         let start = (a.y - center.y).atan2(a.x - center.x);
@@ -950,8 +1084,11 @@ mod tests {
                         for i in 0..=n {
                             let t = i as f64 / n as f64;
                             let angle = start + sweep * t;
-                            check(Point3::new(center.x + radius * angle.cos(),
-                                center.y + radius * angle.sin(), a.z + (end.z - a.z) * t));
+                            check(Point3::new(
+                                center.x + radius * angle.cos(),
+                                center.y + radius * angle.sin(),
+                                a.z + (end.z - a.z) * t,
+                            ));
                         }
                     }
                     current = Some(*end);
@@ -960,7 +1097,10 @@ mod tests {
             }
         }
         assert!(samples > 0);
-        assert!(side_entries > 0, "exercise entries whose cutter overlaps the side edge");
+        assert!(
+            side_entries > 0,
+            "exercise entries whose cutter overlaps the side edge"
+        );
     }
 
     #[test]
@@ -975,9 +1115,12 @@ mod tests {
             ] {
                 let (mut strategy, tool) = fixture();
                 let boundary = Polygon::new(Contour::new(vec![
-                    Point::new(0., 0.), Point::new(30., 0.),
-                    Point::new(30., 30.), Point::new(0., 30.),
-                ])).unwrap();
+                    Point::new(0., 0.),
+                    Point::new(30., 0.),
+                    Point::new(30., 30.),
+                    Point::new(0., 30.),
+                ]))
+                .unwrap();
                 strategy.geometry.layers.truncate(1);
                 let layer = &mut strategy.geometry.layers[0];
                 if body_selection {
@@ -1000,9 +1143,13 @@ mod tests {
                 for step in result.program.steps() {
                     let point = match step {
                         Step::Linear { to, tag, .. }
-                            if tag.kind == cam_cldata::MoveKind::Cutting => to,
-                        Step::Arc { end, tag, .. }
-                            if tag.kind == cam_cldata::MoveKind::Cutting => end,
+                            if tag.kind == cam_cldata::MoveKind::Cutting =>
+                        {
+                            to
+                        }
+                        Step::Arc { end, tag, .. } if tag.kind == cam_cldata::MoveKind::Cutting => {
+                            end
+                        }
                         _ => continue,
                     };
                     min_x = min_x.min(point.x);
@@ -1010,8 +1157,10 @@ mod tests {
                 }
                 assert!((min_x - expected_min).abs() < 0.15,
                     "{containment:?}, offset {extra}, body={body_selection}: min X {min_x}, expected {expected_min}");
-                assert!((max_x - (30.0 - expected_min)).abs() < 0.15,
-                    "{containment:?}, offset {extra}, body={body_selection}: max X {max_x}");
+                assert!(
+                    (max_x - (30.0 - expected_min)).abs() < 0.15,
+                    "{containment:?}, offset {extra}, body={body_selection}: max X {max_x}"
+                );
             }
         }
     }
@@ -1128,19 +1277,15 @@ mod tests {
         };
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(result.has_errors());
-        assert!(
-            result
+        assert!(result
             .diagnostics
             .iter()
-                .any(|diagnostic| diagnostic.message.contains("no accessible stock"))
-        );
-        assert!(
-            !result
+            .any(|diagnostic| diagnostic.message.contains("no accessible stock")));
+        assert!(!result
             .program
             .steps()
             .iter()
-                .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. }))
-        );
+            .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. })));
 
         strategy
             .geometry
@@ -1149,19 +1294,15 @@ mod tests {
             .for_each(|layer| layer.z += 10.);
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(result.has_errors());
-        assert!(
-            result
+        assert!(result
             .diagnostics
             .iter()
-                .any(|diagnostic| diagnostic.message.contains("no accessible stock"))
-        );
-        assert!(
-            !result
+            .any(|diagnostic| diagnostic.message.contains("no accessible stock")));
+        assert!(!result
             .program
             .steps()
             .iter()
-                .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. }))
-        );
+            .any(|step| matches!(step, Step::Linear { .. } | Step::Arc { .. })));
     }
 
     #[test]
@@ -1177,11 +1318,9 @@ mod tests {
         token.cancel();
         assert!(strategy.compute(&env, &token).cancelled);
         let no_stock = JobEnv { stock: None, ..env };
-        assert!(
-            strategy
+        assert!(strategy
             .compute(&no_stock, &CancelToken::new())
-                .has_errors()
-        );
+            .has_errors());
     }
 
     #[test]
@@ -1199,12 +1338,10 @@ mod tests {
         let result = strategy.compute(&env, &CancelToken::new());
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
         assert!(!result.program.is_empty());
-        assert!(
-            result
+        assert!(result
             .diagnostics
             .iter()
-                .any(|d| d.severity == crate::Severity::Warning && d.message.contains("drill bit"))
-        );
+            .any(|d| d.severity == crate::Severity::Warning && d.message.contains("drill bit")));
 
         let short_flute = Tool {
             flute_length: 2.,
@@ -1220,9 +1357,10 @@ mod tests {
         assert!(!result.program.is_empty());
         assert!(
             result
-            .diagnostics
-            .iter()
-                .any(|d| d.severity == crate::Severity::Warning && d.message.contains("length of cut"))
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == crate::Severity::Warning
+                    && d.message.contains("length of cut"))
         );
     }
 }

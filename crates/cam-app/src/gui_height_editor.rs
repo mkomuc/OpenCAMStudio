@@ -19,7 +19,8 @@ impl App {
             .map_or(self.controller.active_origin(), Operation::work_offset);
         let value = value
             - self
-                .controller.inspection_setup()
+                .controller
+                .inspection_setup()
                 .origin_position(work_offset)[2];
         fn precision(text: &str) -> usize {
             let (mantissa, exponent) = text
@@ -84,7 +85,8 @@ impl App {
             return;
         };
         let settings = self
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .height_settings
             .get(&id)
             .cloned()
@@ -106,7 +108,8 @@ impl App {
             return false;
         };
         let baseline = self
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .height_settings
             .get(&id)
             .cloned()
@@ -219,34 +222,43 @@ impl App {
             return text("Open the operation editor to set heights").into();
         };
         let resolved = self.resolve_height_editor(id);
-        let mut controls = column![
-            row![
-                help_wrap(
-                    inspector_section_label("Reference planes and offsets").width(Length::Fill),
-                    "Offsets are in mm along setup Z. Planes are shown while Heights is selected.",
-                    self.tooltips,
-                ),
-                inspector_button("Use defaults").on_press(Message::HeightDefaults),
-            ]
-            .spacing(8),
+        let mut controls = column![row![
+            help_wrap(
+                inspector_section_label("Reference planes and offsets").width(Length::Fill),
+                "Offsets are in mm along setup Z. Planes are shown while Heights is selected.",
+                self.tooltips,
+            ),
+            inspector_button("Use defaults").on_press(Message::HeightDefaults),
         ]
+        .spacing(8),]
         .spacing(10);
         for plane in Plane::ALL {
             let d = settings.definition(plane);
             let enabled = d.reference != Reference::Disabled;
             let collapsed = !enabled || self.collapsed_heights.contains(&plane);
             let toggle = (plane == Plane::Feed).then(|| {
-                Element::from(checkbox(enabled).size(14).on_toggle(Message::HeightFeedEnabled))
+                Element::from(
+                    checkbox(enabled)
+                        .size(14)
+                        .on_toggle(Message::HeightFeedEnabled),
+                )
             });
             let heading = inspector_disclosure_heading(
-                &plane.to_string(), collapsed, Message::HeightSectionToggle(plane), toggle,
+                &plane.to_string(),
+                collapsed,
+                Message::HeightSectionToggle(plane),
+                toggle,
             );
             let heading = help_wrap(heading, illustrated_help::height_help(plane), self.tooltips);
             let mut section = column![heading].spacing(10);
             if !collapsed {
                 section = section.push(
                     row![
-                        help_wrap(text("From").size(12).width(50), illustrated_help::height_help(plane), self.tooltips),
+                        help_wrap(
+                            text("From").size(12).width(50),
+                            illustrated_help::height_help(plane),
+                            self.tooltips
+                        ),
                         super::height_reference::picker(plane, d.reference)
                     ]
                     .spacing(8)
@@ -265,7 +277,11 @@ impl App {
                         .is_none_or(|v| !v.is_finite());
                     section = section.push(
                         row![
-                            help_wrap(text("Offset").size(12).width(50), illustrated_help::height_help(plane), self.tooltips),
+                            help_wrap(
+                                text("Offset").size(12).width(50),
+                                illustrated_help::height_help(plane),
+                                self.tooltips
+                            ),
                             inspector_input("0", &value)
                                 .id(plane_input_id(plane))
                                 .on_input(move |v| Message::HeightOffsetChanged(plane, v))
@@ -401,9 +417,12 @@ impl App {
                     if let Ok(heights) = resolved {
                         if let Some(z) = heights.plane(plane) {
                             section = section.push(
-                                text(format!("WCS Z {} mm", self.height_display_value(id, plane, z)))
-                                    .size(11)
-                                    .color(INSPECTOR_MUTED),
+                                text(format!(
+                                    "WCS Z {} mm",
+                                    self.height_display_value(id, plane, z)
+                                ))
+                                .size(11)
+                                .color(INSPECTOR_MUTED),
                             );
                         }
                     }
@@ -431,16 +450,23 @@ mod tests {
         app.refresh_fields();
         assert_eq!(app.field_value(Field::ToolChangeHeight), Some(50.));
         assert_eq!(
-            app.controller.inspection_setup().resolved_tool_change_height(50.),
+            app.controller
+                .inspection_setup()
+                .resolved_tool_change_height(50.),
             104.
         );
         app.fields.insert(Field::ToolChangeHeight, "40".into());
         app.apply_inspector();
-        assert_eq!(app.controller.inspection_setup().tool_change_height, Some(94.));
+        assert_eq!(
+            app.controller.inspection_setup().tool_change_height,
+            Some(94.)
+        );
         assert_eq!(app.field_value(Field::ToolChangeHeight), Some(40.));
         // An explicit stored plane must not receive the datum offset twice.
         assert_eq!(
-            app.controller.inspection_setup().resolved_tool_change_height(50.),
+            app.controller
+                .inspection_setup()
+                .resolved_tool_change_height(50.),
             94.
         );
     }
@@ -462,7 +488,11 @@ mod tests {
 
         let _ = app.update(Message::HeightFeedEnabled(false));
         assert_eq!(
-            app.height_draft.as_ref().unwrap().definition(Plane::Feed).reference,
+            app.height_draft
+                .as_ref()
+                .unwrap()
+                .definition(Plane::Feed)
+                .reference,
             Reference::Disabled
         );
         assert!(app.height_reference_pick.is_none());
@@ -485,7 +515,11 @@ mod tests {
         app.height_draft = Some(settings);
         let _ = app.update(Message::HeightFeedEnabled(true));
         assert_eq!(
-            app.height_draft.as_ref().unwrap().definition(Plane::Feed).reference,
+            app.height_draft
+                .as_ref()
+                .unwrap()
+                .definition(Plane::Feed)
+                .reference,
             Reference::Plane(Plane::Top)
         );
         app.height_reference_selected(Plane::Feed, Reference::ModelTop);

@@ -261,7 +261,13 @@ impl Operation {
                 Some(&mut o.clear.overlap),
                 &mut o.tool_preset,
             ),
-            Self::Parallel(o) => (&mut o.params.feed, Some(&mut o.params.plunge_feed), None, None, &mut o.tool_preset),
+            Self::Parallel(o) => (
+                &mut o.params.feed,
+                Some(&mut o.params.plunge_feed),
+                None,
+                None,
+                &mut o.tool_preset,
+            ),
             Self::Adaptive(o) => (
                 &mut o.params.feed,
                 Some(&mut o.params.plunge_feed),

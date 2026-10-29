@@ -161,14 +161,20 @@ fn enter_with_plunge(
         // traverse, then use the requested entry strategy at the next ring.
         let link = Tag::new(id, MoveKind::Link);
         prog.push(Step::Linear {
-            to: Point3::new(from.x, from.y, from_z), feed, tag: link,
+            to: Point3::new(from.x, from.y, from_z),
+            feed,
+            tag: link,
         });
         prog.push(Step::Linear {
-            to: Point3::new(down_at.x, down_at.y, from_z), feed, tag: link,
+            to: Point3::new(down_at.x, down_at.y, from_z),
+            feed,
+            tag: link,
         });
         if arrive_at < from_z {
             prog.push(Step::Linear {
-                to: Point3::new(down_at.x, down_at.y, arrive_at), feed, tag: link,
+                to: Point3::new(down_at.x, down_at.y, arrive_at),
+                feed,
+                tag: link,
             });
         }
     } else {
@@ -257,8 +263,21 @@ fn approach(
     }
     if hop <= link_threshold {
         return enter_with_plunge(
-            prog, p, tan, out, (z + lift_height).min(h.clearance), z, h,
-            plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path, guard,
+            prog,
+            p,
+            tan,
+            out,
+            (z + lift_height).min(h.clearance),
+            z,
+            h,
+            plunge,
+            plunge_feed,
+            entry_feeds,
+            feed,
+            id,
+            ring,
+            lead_path,
+            guard,
             Some(prev_end),
         );
     }
@@ -267,7 +286,22 @@ fn approach(
         tag: Tag::new(id, MoveKind::Link),
     });
     enter_with_plunge(
-        prog, p, tan, out, from_z, z, h, plunge, plunge_feed, entry_feeds, feed, id, ring, lead_path, guard, None,
+        prog,
+        p,
+        tan,
+        out,
+        from_z,
+        z,
+        h,
+        plunge,
+        plunge_feed,
+        entry_feeds,
+        feed,
+        id,
+        ring,
+        lead_path,
+        guard,
+        None,
     )
 }
 
@@ -346,7 +380,11 @@ pub(crate) fn emit_wall_ring(
         // re-machined at depth.
         Some(on_ring) => {
             let perim = crate::profile::loop_perimeter(&ri);
-            let walked = crate::profile::walk_loop(&ri, on_ring, perim + crate::profile::exit_overlap(&ri, on_ring, lead_overlap, end));
+            let walked = crate::profile::walk_loop(
+                &ri,
+                on_ring,
+                perim + crate::profile::exit_overlap(&ri, on_ring, lead_overlap, end),
+            );
             let last = walked[walked.len() - 1];
             let prev = walked[walked.len().saturating_sub(2)];
             let tan_out = crate::profile::unit(last.x - prev.x, last.y - prev.y);
@@ -493,12 +531,25 @@ pub(crate) fn emit_stay_down(
         let mut prev_end = match on_ring {
             Some(from) => {
                 let perim = crate::profile::loop_perimeter(&r0);
-                let overlap = crate::profile::exit_overlap(&r0, from, lead_overlap, end.filter(|_| rings.len() == 1));
+                let overlap = crate::profile::exit_overlap(
+                    &r0,
+                    from,
+                    lead_overlap,
+                    end.filter(|_| rings.len() == 1),
+                );
                 let walked = crate::profile::walk_loop(&r0, from, perim + overlap);
                 crate::emit::cut_polyline(prog, &walked, feed, cut, z);
                 walked[walked.len() - 1]
             }
-            None => cut_ring(prog, &r0, feed, cut, lead_overlap, end.filter(|_| rings.len() == 1), z),
+            None => cut_ring(
+                prog,
+                &r0,
+                feed,
+                cut,
+                lead_overlap,
+                end.filter(|_| rings.len() == 1),
+                z,
+            ),
         };
 
         for (index, ring) in rings[1..].iter().enumerate() {
@@ -567,7 +618,17 @@ pub(crate) fn emit_stay_down(
             prev_end = match on_ring {
                 Some(from) => {
                     let perim = crate::profile::loop_perimeter(&ri);
-                    let walked = crate::profile::walk_loop(&ri, from, perim + crate::profile::exit_overlap(&ri, from, lead_overlap, exit_preference));
+                    let walked = crate::profile::walk_loop(
+                        &ri,
+                        from,
+                        perim
+                            + crate::profile::exit_overlap(
+                                &ri,
+                                from,
+                                lead_overlap,
+                                exit_preference,
+                            ),
+                    );
                     crate::emit::cut_polyline(prog, &walked, feed, cut, z);
                     walked[walked.len() - 1]
                 }

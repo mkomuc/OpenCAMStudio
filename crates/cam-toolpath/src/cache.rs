@@ -10,6 +10,8 @@ use std::sync::Arc;
 struct Dependencies {
     #[serde(default)]
     adaptive_domain_revision: u32,
+    #[serde(default)]
+    profile_lead_revision: u32,
     operation: Operation,
     heights: Heights,
     tools: Vec<Tool>,
@@ -95,7 +97,11 @@ impl OperationCache {
             axial,
         };
         let key = Dependencies {
-            adaptive_domain_revision: if matches!(op, Operation::Parallel(_)) { crate::ParallelStrategy::DOMAIN_REVISION } else if matches!(op, Operation::Adaptive(_)) {
+            // Recompute persisted profiles generated before automatic lead placement.
+            profile_lead_revision: u32::from(matches!(op, Operation::Profile(_))),
+            adaptive_domain_revision: if matches!(op, Operation::Parallel(_)) {
+                crate::ParallelStrategy::DOMAIN_REVISION
+            } else if matches!(op, Operation::Adaptive(_)) {
                 crate::AdaptiveStrategy::DOMAIN_REVISION
             } else {
                 0
@@ -194,7 +200,9 @@ mod tests {
         });
         let env = JobEnv {
             heights: Heights::new(10., 5., 0.),
-            tools: &[], stock: None, spindle: SpindleDir::Cw,
+            tools: &[],
+            stock: None,
+            spindle: SpindleDir::Cw,
         };
         let token = CancelToken::new();
         let mut cache = OperationCache::default();
@@ -202,7 +210,10 @@ mod tests {
         for old_revision in 0..crate::AdaptiveStrategy::DOMAIN_REVISION {
             let mut saved = serde_json::to_value(&cache).unwrap();
             if old_revision == 0 {
-                saved["entries"][0]["key"].as_object_mut().unwrap().remove("adaptive_domain_revision");
+                saved["entries"][0]["key"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("adaptive_domain_revision");
             } else {
                 saved["entries"][0]["key"]["adaptive_domain_revision"] = old_revision.into();
             }
@@ -210,7 +221,9 @@ mod tests {
             reopened.compute(&adaptive, &env, &token, StrategyResult::default);
             assert_eq!(reopened.stats.computed, 1);
             assert_eq!(reopened.stats.reused, 0);
-            reopened.compute(&adaptive, &env, &token, || panic!("current path must be reused"));
+            reopened.compute(&adaptive, &env, &token, || {
+                panic!("current path must be reused")
+            });
             assert_eq!(reopened.stats.reused, 1);
         }
     }

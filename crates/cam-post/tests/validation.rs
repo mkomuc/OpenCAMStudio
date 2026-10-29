@@ -2,7 +2,9 @@ use cam_cldata::{
     ArcDir, DrillCycle, MoveKind, Point3, Program, ProgramBuilder, SpindleDir, Step, Tag,
 };
 use cam_model::{Envelope, Machine};
-use cam_post::{EstlcamPost, FanucPost, GrblPost, OkumaPost, Post, PostError, PostKind, PostOptions};
+use cam_post::{
+    EstlcamPost, FanucPost, GrblPost, OkumaPost, Post, PostError, PostKind, PostOptions,
+};
 
 fn machine() -> Machine {
     Machine {

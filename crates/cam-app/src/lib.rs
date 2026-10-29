@@ -10,8 +10,8 @@
 //!   not in headless tests.
 
 mod config;
-mod geometry_verification;
 mod controller;
+mod geometry_verification;
 mod import_jobs;
 mod jobs;
 pub use jobs::{JobPhase, JobProgress, JobStamp};

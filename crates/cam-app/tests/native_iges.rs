@@ -224,7 +224,12 @@ fn exact_conic_boundaries_are_usable_as_profile_geometry() {
 fn supplied_cold_end_spline_bore_is_recognized() {
     let mut app = new_app();
     app.edit_stock(|stock| {
-        *stock = Stock::BoundingBox { x_offset: 0., y_offset: 0., top: 18., thickness: 18. };
+        *stock = Stock::BoundingBox {
+            x_offset: 0.,
+            y_offset: 0.,
+            top: 18.,
+            thickness: 18.,
+        };
     });
     let cutter = app.use_tool(cam_model::Tool {
         number: 3,

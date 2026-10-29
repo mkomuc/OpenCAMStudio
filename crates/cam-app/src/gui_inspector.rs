@@ -3,7 +3,9 @@ use super::*;
 use iced::widget::column;
 impl App {
     pub(super) fn inspector(&self) -> Element<'_, Message> {
-        if self.pattern_draft.is_some() { return self.pattern_editor(); }
+        if self.pattern_draft.is_some() {
+            return self.pattern_editor();
+        }
         if self.library_mode() {
             return self.library_editor();
         }
@@ -110,8 +112,13 @@ impl App {
                 Message::PostKindChanged,
                 INSPECTOR_PICKER_W,
             ));
-            if self.machine_post_edit.unwrap_or(self.controller.post_kind()) == PostKind::Estlcam {
-                let options = self.machine_estlcam_edit
+            if self
+                .machine_post_edit
+                .unwrap_or(self.controller.post_kind())
+                == PostKind::Estlcam
+            {
+                let options = self
+                    .machine_estlcam_edit
                     .unwrap_or(self.controller.estlcam_options());
                 list = list
                     .push(text("Coolant / MMS outputs").size(12))

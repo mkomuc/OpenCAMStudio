@@ -36,12 +36,19 @@ impl AppController {
             if self.setup().stock != Stock::PreviousSetup {
                 return None;
             }
-            let at = document.setups.iter()
-                .position(|s| s.id == self.active_setup_id).unwrap();
-            let start = document.setups[..at].iter()
-                .rposition(|s| s.stock != Stock::PreviousSetup).unwrap_or(0);
+            let at = document
+                .setups
+                .iter()
+                .position(|s| s.id == self.active_setup_id)
+                .unwrap();
+            let start = document.setups[..at]
+                .iter()
+                .rposition(|s| s.stock != Stock::PreviousSetup)
+                .unwrap_or(0);
             document.setups[start..at].iter().find_map(|s| {
-                self.validate_setup_frame(s).err().map(|e| format!("{}: {e}", s.name))
+                self.validate_setup_frame(s)
+                    .err()
+                    .map(|e| format!("{}: {e}", s.name))
             })
         });
         JobInputs {
@@ -100,11 +107,22 @@ impl AppController {
         if let Some(id) = operation {
             let document = Arc::make_mut(&mut inputs.document);
             let operations = &document.setup().operations;
-            let target = operations.iter().position(|op| op.id() == id)
+            let target = operations
+                .iter()
+                .position(|op| op.id() == id)
                 .ok_or_else(|| "The selected operation no longer exists.".to_string())?;
-            let ids: Vec<u32> = operations.iter().enumerate()
-                .filter(|(index, op)| if include_predecessors { *index > target } else { op.id() != id })
-                .map(|(_, op)| op.id()).collect();
+            let ids: Vec<u32> = operations
+                .iter()
+                .enumerate()
+                .filter(|(index, op)| {
+                    if include_predecessors {
+                        *index > target
+                    } else {
+                        op.id() != id
+                    }
+                })
+                .map(|(_, op)| op.id())
+                .collect();
             document.excluded_operations.extend(ids);
         }
         let ids: Vec<_> = inputs
@@ -112,7 +130,11 @@ impl AppController {
             .setup()
             .operations
             .iter()
-            .filter(|op| inputs.document.operation_is_included(inputs.document.setup().id, op.id()))
+            .filter(|op| {
+                inputs
+                    .document
+                    .operation_is_included(inputs.document.setup().id, op.id())
+            })
             .map(Operation::id)
             .collect();
         if ids.is_empty() {
@@ -130,17 +152,47 @@ impl AppController {
     }
 
     /// Run exactly one pattern, retaining every included source at each instance.
-    pub fn start_pattern_toolpath_run(&mut self, pattern_id: u64, recompute: bool) -> Result<JobStamp, String> {
-        if self.setups().is_empty() { return Err("Create a setup before generating toolpaths.".into()); }
+    pub fn start_pattern_toolpath_run(
+        &mut self,
+        pattern_id: u64,
+        recompute: bool,
+    ) -> Result<JobStamp, String> {
+        if self.setups().is_empty() {
+            return Err("Create a setup before generating toolpaths.".into());
+        }
         let mut inputs = self.job_inputs();
-        let members: BTreeSet<u32> = inputs.document.setup().patterns.iter().find(|p| p.id == pattern_id)
-            .ok_or_else(|| "Pattern no longer exists.".to_string())?.members.iter().copied().collect();
+        let members: BTreeSet<u32> = inputs
+            .document
+            .setup()
+            .patterns
+            .iter()
+            .find(|p| p.id == pattern_id)
+            .ok_or_else(|| "Pattern no longer exists.".to_string())?
+            .members
+            .iter()
+            .copied()
+            .collect();
         let document = Arc::make_mut(&mut inputs.document);
-        let ids_all: Vec<u32> = document.setup().operations.iter().map(Operation::id).collect();
-        document.excluded_operations.extend(ids_all.into_iter().filter(|id| !members.contains(id)));
+        let ids_all: Vec<u32> = document
+            .setup()
+            .operations
+            .iter()
+            .map(Operation::id)
+            .collect();
+        document
+            .excluded_operations
+            .extend(ids_all.into_iter().filter(|id| !members.contains(id)));
         let setup_id = document.setup().id;
-        let ids: Vec<_> = document.setup().operations.iter().filter(|op| document.operation_is_included(setup_id, op.id())).map(Operation::id).collect();
-        if ids.is_empty() { return Err("No included source operations in this pattern.".into()); }
+        let ids: Vec<_> = document
+            .setup()
+            .operations
+            .iter()
+            .filter(|op| document.operation_is_included(setup_id, op.id()))
+            .map(Operation::id)
+            .collect();
+        if ids.is_empty() {
+            return Err("No included source operations in this pattern.".into());
+        }
         if recompute {
             self.operation_cache.invalidate_operations(&ids);
             self.toolpath_fingerprints.retain(|id, _| !ids.contains(id));
@@ -315,7 +367,11 @@ impl AppController {
                     patterns,
                 ))
                 .expect("operation dependencies serialize");
-                if matches!(op, Operation::Parallel(_)) { bytes.extend_from_slice(&cam_toolpath::ParallelStrategy::DOMAIN_REVISION.to_le_bytes()); }
+                if matches!(op, Operation::Parallel(_)) {
+                    bytes.extend_from_slice(
+                        &cam_toolpath::ParallelStrategy::DOMAIN_REVISION.to_le_bytes(),
+                    );
+                }
                 if matches!(op, Operation::Adaptive(_)) {
                     bytes.extend_from_slice(
                         &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),
@@ -635,29 +691,90 @@ mod tests {
     fn pattern_job_scope_keeps_full_membership_and_skips_suppressed_bad_cad_sources() {
         let mut app = app();
         let setup_id = app.active_setup_id();
-        let ids: Vec<_> = app.document().setup().operations.iter().map(Operation::id).collect();
-        let kind = cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 10.0, dy: 0.0 };
-        let first = app.create_pattern(setup_id, &[ids[0]], "First".into(), kind, cam_model::PatternOrder::ByInstance).unwrap();
-        let second = app.create_pattern(setup_id, &[ids[1]], "Second".into(), kind, cam_model::PatternOrder::ByOperation).unwrap();
+        let ids: Vec<_> = app
+            .document()
+            .setup()
+            .operations
+            .iter()
+            .map(Operation::id)
+            .collect();
+        let kind = cam_model::PatternKind::Rectangular {
+            nx: 2,
+            ny: 1,
+            dx: 10.0,
+            dy: 0.0,
+        };
+        let first = app
+            .create_pattern(
+                setup_id,
+                &[ids[0]],
+                "First".into(),
+                kind,
+                cam_model::PatternOrder::ByInstance,
+            )
+            .unwrap();
+        let second = app
+            .create_pattern(
+                setup_id,
+                &[ids[1]],
+                "Second".into(),
+                kind,
+                cam_model::PatternOrder::ByOperation,
+            )
+            .unwrap();
         app.edit_document(|doc| {
             doc.cad_linked_operations.insert(ids[1]);
         });
         app.set_pattern_suppressed(setup_id, second, true);
         let full = app.job_inputs();
-        assert_eq!(full.document.setup().patterns.len(), 2, "worker snapshots retain both groups");
-        assert!(full.document.setup().patterns.iter().find(|p| p.id == second).unwrap().members.contains(&ids[1]));
+        assert_eq!(
+            full.document.setup().patterns.len(),
+            2,
+            "worker snapshots retain both groups"
+        );
+        assert!(full
+            .document
+            .setup()
+            .patterns
+            .iter()
+            .find(|p| p.id == second)
+            .unwrap()
+            .members
+            .contains(&ids[1]));
 
         app.start_pattern_toolpath_run(first, false).unwrap();
         drain(&mut app);
         let outcome = app.outcome().unwrap();
-        assert_eq!(outcome.completion, JobCompletion::Complete, "excluded stale CAD sources are not resolved: {:?}", outcome.diagnostics);
-        assert!(outcome.scene.strips.iter().filter_map(|strip| strip.op).all(|id| id == ids[0]));
-        assert!(app.document().setup().patterns.iter().any(|p| p.id == second && p.suppressed));
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "excluded stale CAD sources are not resolved: {:?}",
+            outcome.diagnostics
+        );
+        assert!(outcome
+            .scene
+            .strips
+            .iter()
+            .filter_map(|strip| strip.op)
+            .all(|id| id == ids[0]));
+        assert!(app
+            .document()
+            .setup()
+            .patterns
+            .iter()
+            .any(|p| p.id == second && p.suppressed));
 
         app.start_run();
         drain(&mut app);
         assert_eq!(app.outcome().unwrap().completion, JobCompletion::Complete);
-        assert!(app.outcome().unwrap().scene.strips.iter().filter_map(|strip| strip.op).all(|id| id == ids[0]));
+        assert!(app
+            .outcome()
+            .unwrap()
+            .scene
+            .strips
+            .iter()
+            .filter_map(|strip| strip.op)
+            .all(|id| id == ids[0]));
     }
     #[test]
     fn long_worker_leaves_controller_responsive_and_edit_cancels_it() {

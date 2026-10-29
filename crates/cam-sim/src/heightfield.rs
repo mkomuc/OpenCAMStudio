@@ -238,7 +238,12 @@ impl Heightfield {
     fn operation_at(&self, x: usize, y: usize) -> Option<u32> {
         let winner = self.winners[y * self.nx + x];
         self.cuts.get(winner as usize).map_or_else(
-            || self.inherited_operations.get(y * self.nx + x).copied().flatten(),
+            || {
+                self.inherited_operations
+                    .get(y * self.nx + x)
+                    .copied()
+                    .flatten()
+            },
             |cut| cut.operation,
         )
     }

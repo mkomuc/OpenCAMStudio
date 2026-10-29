@@ -142,7 +142,8 @@ mod tests {
     fn close_warns_for_uncommitted_editor_changes_in_a_clean_project() {
         let mut app = app();
         app.controller.add_setup();
-        let path = std::env::temp_dir().join(format!("clean-setup-editor-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("clean-setup-editor-{}.ocam", std::process::id()));
         app.controller.save_project(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         let id = iced::window::Id::unique();

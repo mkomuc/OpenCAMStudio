@@ -277,7 +277,12 @@ impl Project {
     /// Operation identities are document-wide because CAD bindings are keyed by
     /// operation ID, even though operation lists live under individual setups.
     pub fn validate(&self) -> Result<(), String> {
-        if self.document.setups.first().is_some_and(|s| s.stock == cam_model::Stock::PreviousSetup) {
+        if self
+            .document
+            .setups
+            .first()
+            .is_some_and(|s| s.stock == cam_model::Stock::PreviousSetup)
+        {
             return Err("The first setup has no previous setup; choose box stock".into());
         }
         let mut setup_ids = BTreeSet::new();
@@ -491,17 +496,24 @@ mod tests {
     #[test]
     fn large_project_arrays_save_compactly_and_keep_exact_geometry() {
         let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
-        else { panic!("expected project") };
-        project.open_paths.push(Polyline::new((0..10_000).map(|i| {
-            cam_geo::Point::new(i as f64 * 0.123456789012345, (i as f64).sin())
-        }).collect()));
+        else {
+            panic!("expected project")
+        };
+        project.open_paths.push(Polyline::new(
+            (0..10_000)
+                .map(|i| cam_geo::Point::new(i as f64 * 0.123456789012345, (i as f64).sin()))
+                .collect(),
+        ));
         let pretty = serde_json::to_string_pretty(&project).unwrap();
         let compact = project.to_json().unwrap();
         assert!(compact.len() * 3 < pretty.len() * 2);
         assert_eq!(Project::from_json(&compact).unwrap(), project);
         let tagged = OcamFile::Project(project.clone()).to_json().unwrap();
         assert!(tagged.len() * 3 < pretty.len() * 2);
-        assert_eq!(OcamFile::from_json(&tagged).unwrap(), OcamFile::Project(project));
+        assert_eq!(
+            OcamFile::from_json(&tagged).unwrap(),
+            OcamFile::Project(project)
+        );
     }
 
     #[test]
@@ -662,7 +674,8 @@ mod tests {
 
     #[test]
     fn project_round_trip_preserves_operation_stock_to_leave() {
-        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
+        else {
             panic!("expected a project");
         };
         let operation_id = project.document.setups[0].operations[0].id();
@@ -779,21 +792,38 @@ mod tests {
 
     #[test]
     fn project_loader_rejects_malformed_pattern_membership() {
-        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
+        else {
             panic!("expected a project");
         };
-        project.document.setup_mut().patterns.push(cam_model::OperationPattern {
-            id: 1,
-            name: "Invalid source".into(),
-            members: vec![999],
-            kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
-            order: cam_model::PatternOrder::ByInstance,
-            suppressed: false,
-            options: Default::default(),
-        });
-        assert!(OcamFile::Project(project.clone()).to_json().unwrap_err().to_string().contains("missing operation 999"));
+        project
+            .document
+            .setup_mut()
+            .patterns
+            .push(cam_model::OperationPattern {
+                id: 1,
+                name: "Invalid source".into(),
+                members: vec![999],
+                kind: cam_model::PatternKind::Rectangular {
+                    nx: 2,
+                    ny: 1,
+                    dx: 1.0,
+                    dy: 0.0,
+                },
+                order: cam_model::PatternOrder::ByInstance,
+                suppressed: false,
+                options: Default::default(),
+            });
+        assert!(OcamFile::Project(project.clone())
+            .to_json()
+            .unwrap_err()
+            .to_string()
+            .contains("missing operation 999"));
         let json = serde_json::to_string(&OcamFile::Project(project)).unwrap();
-        assert!(OcamFile::from_json(&json).unwrap_err().to_string().contains("missing operation 999"));
+        assert!(OcamFile::from_json(&json)
+            .unwrap_err()
+            .to_string()
+            .contains("missing operation 999"));
     }
 
     #[test]

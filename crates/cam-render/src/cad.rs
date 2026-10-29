@@ -598,13 +598,18 @@ impl CadScene {
         let mut loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
         loops.retain(|c| self.planar_loops.contains(&c.entity));
         if loops.is_empty() {
-            loops = self.pick_candidates(ray, EntityKind::Face, aperture, select_through)
-                .into_iter().filter_map(|mut candidate| {
+            loops = self
+                .pick_candidates(ray, EntityKind::Face, aperture, select_through)
+                .into_iter()
+                .filter_map(|mut candidate| {
                     let wire = self.face_outer_loops.get(&candidate.entity)?;
-                    if !self.planar_loops.contains(wire) { return None; }
+                    if !self.planar_loops.contains(wire) {
+                        return None;
+                    }
                     candidate.entity = wire.clone();
                     Some(candidate)
-                }).collect();
+                })
+                .collect();
         }
         deduplicate_candidates(&mut loops);
         loops
@@ -1049,7 +1054,9 @@ mod tests {
             .all(|kind| kinds.contains(&kind)),
             "available kinds: {kinds:?}"
         );
-        assert!(candidates.windows(2).all(|pair| pair[0].depth <= pair[1].depth));
+        assert!(candidates
+            .windows(2)
+            .all(|pair| pair[0].depth <= pair[1].depth));
     }
     #[test]
     fn profile_face_interior_selects_its_outer_loop_with_instance_identity() {
@@ -1104,14 +1111,27 @@ mod tests {
     fn pocket_can_pick_a_downward_facing_planar_boundary() {
         let mut geometry = geometry();
         let topology = std::sync::Arc::make_mut(&mut geometry.assets[0].topology);
-        let face = topology.faces.iter_mut().find(|face| face.id == 10).unwrap();
-        face.surface = CadSurface::Plane { origin: [0., 0., 0.], normal: [0., 0., -1.] };
+        let face = topology
+            .faces
+            .iter_mut()
+            .find(|face| face.id == 10)
+            .unwrap();
+        face.surface = CadSurface::Plane {
+            origin: [0., 0., 0.],
+            normal: [0., 0., -1.],
+        };
         face.loop_ids.push(60);
         topology.loops.push(CadLoop {
-            id: 60, body_id: 1, face_id: 10, edge_uses: vec![], is_outer: true,
+            id: 60,
+            body_id: 1,
+            face_id: 10,
+            edge_uses: vec![],
+            is_outer: true,
         });
         let scene = CadScene::from_geometry(&geometry, &BTreeSet::new());
-        assert!(scene.pick_surface_loop_candidates(down(), 0.1, false).is_empty());
+        assert!(scene
+            .pick_surface_loop_candidates(down(), 0.1, false)
+            .is_empty());
         let hits = scene.pick_pocket_loop_candidates(down(), 0.1, false);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entity.kind, EntityKind::Loop);

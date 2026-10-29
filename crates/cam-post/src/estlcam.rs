@@ -4,7 +4,7 @@
 //! Units must be configured in Estlcam as mm and mm/min; G20/G21/G94 have no effect.
 
 use cam_cldata::{arc_sweep, ArcDir, Coolant, CutterComp, Point3, Program, SpindleDir, Step};
-use cam_model::Machine;
+use cam_model::{Machine, Tool, ToolKind};
 
 use crate::words::{compact, num, sanitize};
 use crate::writer::Writer;
@@ -73,7 +73,8 @@ impl Post for EstlcamPost {
         outputs(&mut w, options.estlcam, false);
         let header = options.program_name.as_deref().map(sanitize);
         let mut dedupe = header.is_some();
-        for step in program.steps() {
+        let mut spindle_rpm = None;
+        for (index, step) in program.steps().iter().enumerate() {
             match step {
                 Step::Comment(text) => {
                     let text = sanitize(text);
@@ -89,6 +90,7 @@ impl Post for EstlcamPost {
                     dir: SpindleDir::Cw,
                     rpm,
                 } => {
+                    spindle_rpm = Some(*rpm);
                     w.line(format!("M3 S{}", compact(*rpm, 0)));
                 }
                 Step::Spindle {
@@ -98,7 +100,34 @@ impl Post for EstlcamPost {
                 Step::SpindleOff => w.line("M5".into()),
                 Step::Coolant(c) => outputs(&mut w, options.estlcam, *c != Coolant::Off),
                 Step::ToolChange { tool } => {
-                    w.line(format!("T{tool} M6"));
+                    // Estlcam displays the comment attached to M6 during the manual
+                    // change. Use the upcoming spindle command, not library defaults:
+                    // an operation can override the tool's nominal speed.
+                    let rpm = program.steps()[index + 1..]
+                        .iter()
+                        .take_while(|s| {
+                            !matches!(
+                                s,
+                                Step::ToolChange { .. }
+                                    | Step::Rapid { .. }
+                                    | Step::Linear { .. }
+                                    | Step::Arc { .. }
+                                    | Step::Drill(_)
+                                    | Step::Stop
+                            )
+                        })
+                        .find_map(|s| match s {
+                            Step::Spindle { rpm, .. } => Some(*rpm),
+                            _ => None,
+                        })
+                        .or(spindle_rpm);
+                    let details = tool_change_details(
+                        *tool,
+                        options.tools.iter().find(|t| t.number == *tool),
+                        rpm,
+                        options.precision,
+                    );
+                    w.line(format!("T{tool} M6 ({details})"));
                     w.reset_modal();
                 }
                 Step::Stop => w.line("M0".into()),
@@ -139,6 +168,39 @@ impl Post for EstlcamPost {
         // End at EOF: M2/M30 are not supported by Estlcam.
         Ok(w.finish())
     }
+}
+
+fn tool_change_details(
+    number: u32,
+    tool: Option<&Tool>,
+    rpm: Option<f64>,
+    precision: usize,
+) -> String {
+    let mut details = format!("T{number}");
+    if let Some(tool) = tool {
+        let description = sanitize(&tool.description);
+        if !description.trim().is_empty() {
+            details.push_str(&format!(" - {}", description.trim()));
+        }
+        let corner_radius = match tool.kind {
+            ToolKind::BallMill => tool.diameter / 2.0,
+            ToolKind::BullNose { corner_radius } => corner_radius,
+            ToolKind::VBit { tip_radius, .. } => tip_radius,
+            _ => 0.0,
+        };
+        details.push_str(&format!(
+            " - {} - D{} - FL{} - CR={} - F{}",
+            tool.kind,
+            num(tool.diameter, precision),
+            num(tool.flute_len(), precision),
+            num(corner_radius, precision),
+            tool.flutes,
+        ));
+    }
+    if let Some(rpm) = rpm {
+        details.push_str(&format!(" - RPM {}", compact(rpm, 0)));
+    }
+    details
 }
 
 fn unsupported(feature: &str) -> PostError {

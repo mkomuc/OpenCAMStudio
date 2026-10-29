@@ -53,7 +53,8 @@ mod tests {
     /// come to disagree.
     #[test]
     fn every_config_file_shares_one_directory() {
-        let (Some(tools), Some(settings)) = (config_file("tools.json"), config_file("settings.json"))
+        let (Some(tools), Some(settings)) =
+            (config_file("tools.json"), config_file("settings.json"))
         else {
             return; // no config dir on this machine; nothing to compare
         };

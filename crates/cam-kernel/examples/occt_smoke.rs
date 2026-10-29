@@ -10,7 +10,10 @@ fn main() {
         read_step_file(&paths[0], &options).expect("packaged STEP import failed"),
         read_iges_file(&paths[1], &options).expect("packaged IGES import failed"),
     ] {
-        import.topology.validate().expect("invalid imported topology");
+        import
+            .topology
+            .validate()
+            .expect("invalid imported topology");
         assert_eq!(import.topology.bodies.len(), 1);
         assert!(import.topology.bodies[0].valid_solid);
         assert_eq!(import.backend, "OCCT 7.9.3");
