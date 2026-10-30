@@ -312,8 +312,9 @@ jobs:
           # upgrading it. The wxs is committed, reviewed, and its UpgradeCode is fixed
           # for the life of the product.
           test -f crates/cam-app/wix/main.wxs
+          # cargo-wix discovers wix/main.wxs automatically; include only the runtime fragment.
           cargo wix -p cam-app --no-build --nocapture \
-            --include crates/cam-app/wix/main.wxs --include target/occt-runtime.wxs \
+            --include target/occt-runtime.wxs \
             --output "OpenCAMStudio-$V-windows-x86_64-installer.msi"
       - name: Verify the artifacts
         shell: bash
