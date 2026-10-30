@@ -218,8 +218,7 @@ jobs:
           mkdir -p dmg && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname "Open CAM Studio" -srcfolder dmg -ov -format UDZO \
             "OpenCAMStudio-$V-macos-arm64.dmg"
-      # Neither of us has a Mac, so this is the only verification the .dmg gets
-      # before a user opens it. It proves everything except that a window appears:
+      # Verify the .dmg before publishing it. This checks everything except that a window appears:
       # the bundle is well-formed, the plist parses, the architecture is right, the
       # icon is a real icns, the image mounts, and the binary is the GUI build. The
       # packaging verification also starts it with --help after hiding the OCCT SDK.
@@ -235,12 +234,15 @@ jobs:
           file "$APP/Contents/Resources/opencamstudio.icns" | grep -qi 'icon' \
             || { echo "::error::icns is not a Mac OS X icon file"; exit 1; }
           # Mount it as a user would, confirm the app is inside, then detach.
-          MNT=$(hdiutil attach OpenCAMStudio-*.dmg -nobrowse -readonly \
-                | tail -1 | awk '{ $1=""; $2=""; sub(/^  */,""); print }')
+          MNT=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/opencam-dmg.XXXXXX")
+          trap 'hdiutil detach "$MNT" >/dev/null 2>&1 || true; rmdir "$MNT" 2>/dev/null || true' EXIT
+          hdiutil attach OpenCAMStudio-*.dmg -nobrowse -readonly -mountpoint "$MNT"
           echo "mounted at: $MNT"
           test -x "$MNT/Open CAM Studio.app/Contents/MacOS/opencamstudio"
           test -L "$MNT/Applications"
           hdiutil detach "$MNT" >/dev/null
+          if [ -d "$MNT" ]; then rmdir "$MNT"; fi
+          trap - EXIT
       - name: Checksum
         run: .github/scripts/sha256.sh OpenCAMStudio-*.dmg
       - uses: actions/upload-artifact@v4
