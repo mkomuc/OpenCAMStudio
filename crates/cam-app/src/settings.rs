@@ -96,12 +96,41 @@ pub struct Settings {
     pub panes: PanePrefs,
     pub simulation: SimulationPrefs,
     pub session: SessionState,
+    pub tool_table: ToolTablePrefs,
     /// Keys this build does not know about, carried through a save untouched.
     ///
     /// So that running an older build after a newer one does not quietly delete the
     /// newer build's preferences. Costs one map; buys forward compatibility.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Tool table layout and active filters, independent of the current project.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolTablePrefs {
+    pub visible: [bool; 8],
+    pub widths: [f32; 8],
+    pub order: [usize; 8],
+    pub grouped: bool,
+    pub search: String,
+    pub filters: [Option<std::collections::BTreeSet<String>>; 8],
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for ToolTablePrefs {
+    fn default() -> Self {
+        Self {
+            visible: [true; 8],
+            widths: [70.0, 220.0, 140.0, 140.0, 120.0, 80.0, 90.0, 130.0],
+            order: [0, 1, 2, 3, 4, 5, 6, 7],
+            grouped: false,
+            search: String::new(),
+            filters: Default::default(),
+            extra: Default::default(),
+        }
+    }
 }
 
 /// Viewport furniture: what is shown, and how big the orientation cube draws.
@@ -403,6 +432,7 @@ impl Default for Settings {
             panes: PanePrefs::default(),
             simulation: SimulationPrefs::default(),
             session: SessionState::default(),
+            tool_table: ToolTablePrefs::default(),
             extra: Default::default(),
         }
     }
@@ -468,6 +498,14 @@ impl Settings {
     pub fn clamp_all(&mut self) {
         let d = Settings::default();
         self.number_decimals = self.number_decimals.min(8);
+        for (width, fallback) in self.tool_table.widths.iter_mut().zip(d.tool_table.widths) {
+            *width = clamp(*width, (55.0, 600.0), fallback);
+        }
+        let mut order = self.tool_table.order;
+        order.sort_unstable();
+        if order != [0, 1, 2, 3, 4, 5, 6, 7] {
+            self.tool_table.order = d.tool_table.order;
+        }
         self.simulation.accuracy = clamp_simulation_accuracy(self.simulation.accuracy);
         self.simulation.comparison_tolerance =
             clamp(self.simulation.comparison_tolerance, (0.001, 2.0), 0.05);
@@ -682,6 +720,29 @@ mod tests {
             d.session.machine, None,
             "nothing selected until there is a library"
         );
+    }
+
+    #[test]
+    fn tool_table_preferences_round_trip_and_invalid_layout_is_clamped() {
+        let scratch = Scratch::new("tool-table");
+        let path = scratch.file("settings.json");
+        let mut settings = Settings::default();
+        settings.tool_table.visible[2] = false;
+        settings.tool_table.widths[2] = 235.0;
+        settings.tool_table.order.swap(0, 2);
+        settings.tool_table.grouped = true;
+        settings.tool_table.search = "mill".into();
+        settings.tool_table.filters[5] = Some(["6.00".to_string()].into_iter().collect());
+        settings.save_to(&path).unwrap();
+        let (loaded, outcome) = load_from(&path);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(loaded.tool_table, settings.tool_table);
+        let mut invalid = loaded;
+        invalid.tool_table.order = [0; 8];
+        invalid.tool_table.widths[0] = 9000.0;
+        invalid.clamp_all();
+        assert_eq!(invalid.tool_table.order, ToolTablePrefs::default().order);
+        assert_eq!(invalid.tool_table.widths[0], 600.0);
     }
 
     #[test]

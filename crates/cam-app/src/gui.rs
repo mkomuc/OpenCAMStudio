@@ -2198,6 +2198,16 @@ struct App {
     preset_editor_snapshot: Option<tool_presets::LibraryToolDraft>,
     /// Which internal tab the Tool Library pane shows (Serial / Family).
     library_view: LibraryView,
+    tool_table_columns: [bool; 8],
+    tool_table_widths: [f32; 8],
+    tool_table_order: [usize; 8],
+    tool_table_drag: Option<workspace_view::ToolColumnDrag>,
+    tool_table_menu: Option<(usize, bool)>,
+    tool_table_menu_pos: iced::Point,
+    tool_table_menu_search: String,
+    tool_table_filter_draft: BTreeSet<String>,
+    tool_table_search: String,
+    tool_table_filters: [Option<BTreeSet<String>>; 8],
     /// The operation whose right-click context menu is open, and where to anchor it
     /// (window-absolute coords, captured from `window_cursor` at right-click time).
     open_op_menu: Option<u32>,
@@ -2947,6 +2957,21 @@ enum Message {
     DeleteTool,
     /// Switch the Tool Library pane's internal tab (Serial / Family).
     SetLibraryView(LibraryView),
+    ToolColumnResizeStart(usize),
+    ToolColumnReorderStart(usize),
+    ToolColumnHover(usize, bool),
+    ToolColumnLeave(usize),
+    ToolColumnRelease,
+    OpenToolTableMenu(usize, bool),
+    CloseToolTableMenu,
+    ToolTableMenuSearch(String),
+    ToolTableFilterValue(String, bool),
+    ToolTableFilterAll(bool),
+    ApplyToolTableFilter,
+    ClearToolTableColumnFilter,
+    SetToolTableColumn(usize, bool),
+    ToolTableSearch(String),
+    ClearToolTableFilters,
     /// Open the Library-pane right-click menu for the library tool at this index.
     LibToolMenu(usize),
     /// Morph the Library menu into the "set number" input.
@@ -3571,7 +3596,21 @@ impl App {
             show_materials: false,
             show_preset_editor: false,
             preset_editor_snapshot: None,
-            library_view: LibraryView::Ordered,
+            library_view: if settings.tool_table.grouped {
+                LibraryView::Grouped
+            } else {
+                LibraryView::Ordered
+            },
+            tool_table_columns: settings.tool_table.visible,
+            tool_table_widths: settings.tool_table.widths,
+            tool_table_order: settings.tool_table.order,
+            tool_table_drag: None,
+            tool_table_menu: None,
+            tool_table_menu_pos: iced::Point::ORIGIN,
+            tool_table_menu_search: String::new(),
+            tool_table_filter_draft: BTreeSet::new(),
+            tool_table_search: settings.tool_table.search.clone(),
+            tool_table_filters: settings.tool_table.filters.clone(),
             open_op_menu: None,
             pending_toolpath_export: None,
             pending_simulation: None,
@@ -3650,6 +3689,10 @@ impl App {
             .set_simulation_accuracy(app.settings.simulation.accuracy);
         app.controller.select(Selection::Setup);
         app.restore_pane_preferences();
+        // Always open on Home, regardless of the workspace last used.
+        app.workspace = Workspace::Machining;
+        app.active_tab = RibbonTab::Home;
+        app.machining_tab = RibbonTab::Home;
         app.refresh_fields();
         app.sync_inspector_visibility();
         // Seed the fixed layout against the assumed window size; the first real
@@ -7109,6 +7152,7 @@ impl App {
                 // resets *everything* — pane sizes and minimums included — and applies
                 // at once rather than behind a confirm they might not be able to reach.
                 self.settings = crate::Settings::default();
+                self.restore_tool_table_preferences();
                 self.edited_preset_input = None;
                 self.edited_tool_input = None;
                 let s = &self.settings;
@@ -7653,7 +7697,132 @@ impl App {
                 }
             }
             Message::SelectLibraryTool(i) => self.select_library_tool(i),
-            Message::SetLibraryView(view) => self.library_view = view,
+            Message::SetLibraryView(view) => {
+                self.library_view = view;
+                self.remember_tool_table();
+            }
+            Message::ToolColumnResizeStart(column) => {
+                self.tool_table_drag = Some(workspace_view::ToolColumnDrag::Resize {
+                    column,
+                    start_x: self.window_cursor.x,
+                    width: self.tool_table_widths[column],
+                });
+            }
+            Message::ToolColumnReorderStart(column) => {
+                self.tool_table_drag = Some(workspace_view::ToolColumnDrag::Reorder {
+                    column,
+                    start: self.window_cursor,
+                    target: None,
+                });
+            }
+            Message::ToolColumnHover(column, after) => {
+                if let Some(workspace_view::ToolColumnDrag::Reorder { target, .. }) =
+                    &mut self.tool_table_drag
+                {
+                    *target = Some((column, after));
+                }
+            }
+            Message::ToolColumnLeave(column) => {
+                if let Some(workspace_view::ToolColumnDrag::Reorder { target, .. }) =
+                    &mut self.tool_table_drag
+                {
+                    if target.is_some_and(|(hover, _)| hover == column) {
+                        *target = None;
+                    }
+                }
+            }
+            Message::ToolColumnRelease => {
+                let had_drag = self.tool_table_drag.is_some();
+                if let Some(workspace_view::ToolColumnDrag::Reorder {
+                    column,
+                    start,
+                    target: Some((target, after)),
+                }) = self.tool_table_drag.take()
+                {
+                    if (self.window_cursor.x - start.x).abs() >= 5.0 {
+                        workspace_view::reorder_tool_column(
+                            &mut self.tool_table_order,
+                            column,
+                            target,
+                            after,
+                        );
+                    }
+                }
+                if had_drag {
+                    self.remember_tool_table();
+                }
+            }
+            Message::OpenToolTableMenu(index, visibility) => {
+                if index < 8 || (visibility && index == 8) {
+                    self.tool_table_menu = Some((index, visibility));
+                    self.tool_table_menu_pos = self.window_cursor;
+                    self.tool_table_menu_search.clear();
+                    self.tool_table_filter_draft = if index < 8 {
+                        self.tool_table_filters[index]
+                            .clone()
+                            .unwrap_or_else(|| self.tool_table_values(index))
+                    } else {
+                        BTreeSet::new()
+                    };
+                }
+            }
+            Message::CloseToolTableMenu => self.tool_table_menu = None,
+            Message::ToolTableMenuSearch(value) => self.tool_table_menu_search = value,
+            Message::ToolTableFilterValue(value, checked) => {
+                if checked {
+                    self.tool_table_filter_draft.insert(value);
+                } else {
+                    self.tool_table_filter_draft.remove(&value);
+                }
+            }
+            Message::ToolTableFilterAll(checked) => {
+                if let Some((index, _)) = self.tool_table_menu {
+                    let search = self.tool_table_menu_search.trim().to_lowercase();
+                    for value in self.tool_table_values(index) {
+                        if value.to_lowercase().contains(&search) {
+                            if checked {
+                                self.tool_table_filter_draft.insert(value);
+                            } else {
+                                self.tool_table_filter_draft.remove(&value);
+                            }
+                        }
+                    }
+                }
+            }
+            Message::ApplyToolTableFilter => {
+                if let Some((index, _)) = self.tool_table_menu {
+                    let all = self.tool_table_values(index);
+                    self.tool_table_filters[index] = if all == self.tool_table_filter_draft {
+                        None
+                    } else {
+                        Some(self.tool_table_filter_draft.clone())
+                    };
+                }
+                self.tool_table_menu = None;
+                self.remember_tool_table();
+            }
+            Message::ClearToolTableColumnFilter => {
+                if let Some((index, _)) = self.tool_table_menu {
+                    self.tool_table_filters[index] = None;
+                }
+                self.tool_table_menu = None;
+                self.remember_tool_table();
+            }
+            Message::SetToolTableColumn(index, visible) => {
+                if let Some(column) = self.tool_table_columns.get_mut(index) {
+                    *column = visible;
+                    self.remember_tool_table();
+                }
+            }
+            Message::ToolTableSearch(value) => {
+                self.tool_table_search = value;
+                self.remember_tool_table();
+            }
+            Message::ClearToolTableFilters => {
+                self.tool_table_search.clear();
+                self.tool_table_filters = Default::default();
+                self.remember_tool_table();
+            }
             Message::LibToolMenu(i) => {
                 self.select_library_tool(i);
                 self.lib_menu = Some(LibMenu {
@@ -7744,6 +7913,14 @@ impl App {
             Message::WindowCursor(p) => {
                 self.window_cursor = p;
                 self.tree_pointer_moved(p);
+                if let Some(workspace_view::ToolColumnDrag::Resize {
+                    column,
+                    start_x,
+                    width,
+                }) = self.tool_table_drag
+                {
+                    self.tool_table_widths[column] = (width + p.x - start_x).clamp(55.0, 600.0);
+                }
             }
             Message::SelectRibbonTab(tab) => {
                 let target = if tab == RibbonTab::Tools {
@@ -7823,6 +8000,12 @@ impl App {
                 | iced::Event::Keyboard(iced::keyboard::Event::KeyReleased { .. }) => {
                     Some(Message::CheckHeightFocus)
                 }
+                _ => None,
+            }),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::ToolColumnRelease),
                 _ => None,
             }),
             // Track the window-absolute cursor so overlays (the op context menu)
@@ -8032,6 +8215,33 @@ impl App {
         self.active_machine = settled;
         self.machines.save();
         self.remember();
+    }
+
+    fn restore_tool_table_preferences(&mut self) {
+        let prefs = &self.settings.tool_table;
+        self.tool_table_columns = prefs.visible;
+        self.tool_table_widths = prefs.widths;
+        self.tool_table_order = prefs.order;
+        self.library_view = if prefs.grouped {
+            LibraryView::Grouped
+        } else {
+            LibraryView::Ordered
+        };
+        self.tool_table_search = prefs.search.clone();
+        self.tool_table_filters = prefs.filters.clone();
+        self.tool_table_drag = None;
+        self.tool_table_menu = None;
+    }
+
+    fn remember_tool_table(&mut self) {
+        let prefs = &mut self.settings.tool_table;
+        prefs.visible = self.tool_table_columns;
+        prefs.widths = self.tool_table_widths;
+        prefs.order = self.tool_table_order;
+        prefs.grouped = self.library_view == LibraryView::Grouped;
+        prefs.search = self.tool_table_search.clone();
+        prefs.filters = self.tool_table_filters.clone();
+        self.settings.save();
     }
 
     /// Copy the live view/snap/pane state into the preferences and write them out.
@@ -9455,6 +9665,11 @@ impl App {
         if let Some(menu) = self.lib_menu_overlay() {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::CloseLibMenu);
+            layers = layers.push(catcher).push(menu);
+        }
+        if let Some(menu) = self.tool_table_menu_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::CloseToolTableMenu);
             layers = layers.push(catcher).push(menu);
         }
         if let Some(pickbox) = self.pickbox_overlay() {
