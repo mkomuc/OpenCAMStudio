@@ -87,8 +87,10 @@ impl JobInputs {
         if self.document.setups.is_empty() {
             return RunOutcome {
                 completion: JobCompletion::Failed,
-                diagnostics: vec![Diagnostic::error("Create a setup before generating toolpaths.")
-                    .with_code(DiagnosticCode::InvalidInput)],
+                diagnostics: vec![
+                    Diagnostic::error("Create a setup before generating toolpaths.")
+                        .with_code(DiagnosticCode::InvalidInput),
+                ],
                 ..Default::default()
             };
         }

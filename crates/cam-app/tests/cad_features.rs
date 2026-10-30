@@ -600,7 +600,9 @@ fn inside_profile_accepts_a_certified_top_entry_rim() {
             vec![reference(entry_loop, EntityKind::Loop)],
         )
         .unwrap();
-    assert!(matches!(app.operation(id), Some(Operation::Profile(profile)) if profile.side == Side::Inside));
+    assert!(
+        matches!(app.operation(id), Some(Operation::Profile(profile)) if profile.side == Side::Inside)
+    );
 }
 
 #[test]

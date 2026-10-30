@@ -72,7 +72,10 @@ fn embed_windows_resources() {
     // The spaced display name, matching the window title, the .desktop entry and the
     // macOS bundle. Identifiers stay concatenated; this is a string a human reads.
     res.set("ProductName", "Open CAM Studio");
-    res.set("FileDescription", "CAM application for CNC toolpath generation");
+    res.set(
+        "FileDescription",
+        "CAM application for CNC toolpath generation",
+    );
     res.set("CompanyName", "Andreas Bertsatos");
     res.set(
         "LegalCopyright",

@@ -191,7 +191,16 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
-        Operation::Parallel(_) => vec![Field::LiftHeight, Field::ParallelStepover, Field::ParallelAngle, Field::AdaptiveTolerance, Field::AdaptiveOffset, Field::SpindleRpm, Field::Feed, Field::PlungeFeed],
+        Operation::Parallel(_) => vec![
+            Field::LiftHeight,
+            Field::ParallelStepover,
+            Field::ParallelAngle,
+            Field::AdaptiveTolerance,
+            Field::AdaptiveOffset,
+            Field::SpindleRpm,
+            Field::Feed,
+            Field::PlungeFeed,
+        ],
         Operation::Adaptive(_) => vec![
             Field::LiftHeight,
             Field::AdaptiveTolerance,
@@ -253,7 +262,10 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
     if matches!(op, Operation::Profile(p) if p.closed)
         || matches!(
             op,
-            Operation::Pocket(_) | Operation::Carve(_) | Operation::Adaptive(_) | Operation::Bore(_)
+            Operation::Pocket(_)
+                | Operation::Carve(_)
+                | Operation::Adaptive(_)
+                | Operation::Bore(_)
         )
     {
         fields.push(Field::RampFeed);

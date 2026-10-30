@@ -67,12 +67,12 @@ fn end_mill(number: u32, diameter: f64) -> Tool {
 
 fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
     Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "clearing".into(),
         heights: Heights::new(CLEARANCE, RETRACT, TOP),
         stock: Stock::BoundingBox {
@@ -97,8 +97,17 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
 fn post(doc: &Document, name: &str) -> (Program, String) {
     // A roughing fixture must provide real stock rather than exercising the old
     // silent single-pass fallback. Other strategies do not consume these bounds.
-    let stock=doc.setup().operations.iter().any(|op|matches!(op,Operation::Profile(p) if p.stepover>0.)).then_some(([0.,0.],[60.,50.]));
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
+    let stock = doc
+        .setup()
+        .operations
+        .iter()
+        .any(|op| matches!(op,Operation::Profile(p) if p.stepover>0.))
+        .then_some(([0., 0.], [60., 50.]));
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
         doc,
         1000.0,
         SpindleDir::Cw,
@@ -296,7 +305,10 @@ fn carve_doc() -> Document {
         work_offset: 1,
         id: 0,
         tool: 1,
-        clear: Some(cam_model::CarveClearing { tool: 2, params: cam_model::ClearParams::default() }),
+        clear: Some(cam_model::CarveClearing {
+            tool: 2,
+            params: cam_model::ClearParams::default(),
+        }),
         boundary: rect(0.0, 0.0, 40.0, 40.0),
         islands: Vec::new(),
         top: TOP,
@@ -327,9 +339,15 @@ fn a_ramped_clearing_entry_never_drops_vertically_and_re_machines_its_ramp() {
     if let cam_model::Operation::Pocket(p) = &mut d.setups[0].operations[0] {
         p.clear.plunge = Plunge::Ramp { angle_deg: 5.0 };
     }
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
     assert!(
-        diags.iter().all(|x| x.severity != cam_toolpath::Severity::Error),
+        diags
+            .iter()
+            .all(|x| x.severity != cam_toolpath::Severity::Error),
         "{diags:?}"
     );
 
@@ -353,7 +371,10 @@ fn a_ramped_clearing_entry_never_drops_vertically_and_re_machines_its_ramp() {
         }
         pos = to;
     }
-    assert_eq!(vertical, 0, "a ramped clearing entry dropped vertically {vertical} times");
+    assert_eq!(
+        vertical, 0,
+        "a ramped clearing entry dropped vertically {vertical} times"
+    );
     assert!(ramped > 0, "no ramp was emitted at all");
 
     // And the cutting that follows each ramp must be at least a full ring — the ramp
@@ -500,13 +521,22 @@ fn lifted_pocket_links_preserve_floor_coverage_and_simulate_clean() {
     for (engagement, plunge, leads) in [
         (0., Plunge::Straight, false),
         (0., Plunge::Ramp { angle_deg: 5. }, true),
-        (0., Plunge::Helix { radius: 1., pitch: 0.5 }, true),
+        (
+            0.,
+            Plunge::Helix {
+                radius: 1.,
+                pitch: 0.5,
+            },
+            true,
+        ),
         (2., Plunge::Straight, false),
     ] {
         let mut baseline = None;
         for lift in [0., 2., 100.] {
             let mut doc = pocket_doc();
-            let Operation::Pocket(op) = &mut doc.setups[0].operations[0] else { unreachable!() };
+            let Operation::Pocket(op) = &mut doc.setups[0].operations[0] else {
+                unreachable!()
+            };
             op.clear.lift_height = lift;
             op.clear.clearing.engagement = engagement;
             op.clear.plunge = plunge;
@@ -529,17 +559,32 @@ fn lifted_pocket_links_preserve_floor_coverage_and_simulate_clean() {
                 }
             }
             let sim = simulate(
-                &program, [-5., -5., -10.], [65., 45., TOP],
-                &SimOptions { resolution: 0.5, tool_radius: 3. },
-                &[SimTool { number: 1, profile: ToolProfile::flat(3.), noncutting_tip_radius: None }],
+                &program,
+                [-5., -5., -10.],
+                [65., 45., TOP],
+                &SimOptions {
+                    resolution: 0.5,
+                    tool_radius: 3.,
+                },
+                &[SimTool {
+                    number: 1,
+                    profile: ToolProfile::flat(3.),
+                    noncutting_tip_radius: None,
+                }],
             );
-            assert!(sim.is_clean(), "lift {lift}, engagement {engagement}, {plunge:?}: {:?}", sim.collisions);
+            assert!(
+                sim.is_clean(),
+                "lift {lift}, engagement {engagement}, {plunge:?}: {:?}",
+                sim.collisions
+            );
             if lift == 0. {
                 baseline = Some(sim.field);
             } else {
                 let difference = sim.field.compare(baseline.as_ref().unwrap(), 0.01);
-                assert!(difference.residual_volume <= 1.,
-                    "lift left extra stock: {difference:?}, {plunge:?}");
+                assert!(
+                    difference.residual_volume <= 1.,
+                    "lift left extra stock: {difference:?}, {plunge:?}"
+                );
             }
         }
     }
@@ -554,10 +599,17 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
         other => panic!("expected a pocket, got {other:?}"),
     };
     // An engagement cap + climb is what routes a holed region to the steered clearer.
-    op.clear.clearing = Clearing { engagement: 2.0, climb: true };
+    op.clear.clearing = Clearing {
+        engagement: 2.0,
+        climb: true,
+    };
     let doc = setup(vec![Operation::Pocket(op)], vec![end_mill(1, 6.0)]);
 
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
         &doc,
         1000.0,
         SpindleDir::Cw,
@@ -576,7 +628,10 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
         &program,
         [-5.0, -5.0, TOP - 10.0],
         [65.0, 45.0, TOP],
-        &SimOptions { resolution: 0.5, tool_radius: 3.0 },
+        &SimOptions {
+            resolution: 0.5,
+            tool_radius: 3.0,
+        },
         &[SimTool {
             number: 1,
             profile: ToolProfile::flat(3.0),
@@ -589,7 +644,6 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
         sim.collisions
     );
 }
-
 
 /// A steered clear must actually **traverse** the stock it has already removed.
 ///
@@ -606,7 +660,10 @@ fn a_steered_clear_traverses_the_stock_it_has_already_removed() {
         Operation::Pocket(p) => p,
         other => panic!("expected a pocket, got {other:?}"),
     };
-    op.clear.clearing = Clearing { engagement: 2.0, climb: true };
+    op.clear.clearing = Clearing {
+        engagement: 2.0,
+        climb: true,
+    };
     let doc = setup(vec![Operation::Pocket(op)], vec![end_mill(1, 6.0)]);
     let cam_toolpath::JobResult { program, .. } = build_job(
         &doc,
@@ -680,14 +737,17 @@ fn a_ramped_entry_flies_its_arc_lead_in_as_one_arc() {
         p.clear.lead_in = Lead::Arc { radius: 3.0 };
         p.clear.lead_out = Lead::Arc { radius: 3.0 };
     }
-    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } =
+        build_job(&d, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
 
     // The first thing the entry does is a *descending arc* — the lead, flown in air.
     let first_plunge = program
         .steps()
         .iter()
-        .find(|s| matches!(s, Step::Arc { tag, .. } | Step::Linear { tag, .. }
-                           if tag.kind == MoveKind::Plunge))
+        .find(|s| {
+            matches!(s, Step::Arc { tag, .. } | Step::Linear { tag, .. }
+                           if tag.kind == MoveKind::Plunge)
+        })
         .expect("a ramped entry");
     match first_plunge {
         Step::Arc { end, center, .. } => {

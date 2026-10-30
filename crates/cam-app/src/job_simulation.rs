@@ -193,7 +193,8 @@ impl JobInputs {
         let verify = |program: &Program, simulation: &mut SimulationCache| {
             if let Some((key, field)) = initial {
                 simulation.simulate_from_stock_controlled(
-                    program, self.min, self.max, &options, &sim_tools, field, key, &cancelled, report,
+                    program, self.min, self.max, &options, &sim_tools, field, key, &cancelled,
+                    report,
                 )
             } else {
                 simulation.simulate_controlled(
@@ -203,7 +204,9 @@ impl JobInputs {
         };
         let mut result = verify(program, simulation)?;
         if self.preview_program.is_none() {
-            if let Some(repaired) = self.reroute_parallel_stock_links(program, &result.collisions, cancel) {
+            if let Some(repaired) =
+                self.reroute_parallel_stock_links(program, &result.collisions, cancel)
+            {
                 *program = repaired;
                 // Re-run the unchanged collision checks on the actual output.
                 // Clearance entries can only remove additional stock, so a

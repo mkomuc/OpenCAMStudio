@@ -146,8 +146,9 @@ fn ring_area(ring: &[Point]) -> f64 {
     if n < 3 {
         return 0.0;
     }
-    let s: f64 =
-        (0..n).map(|i| ring[i].x * ring[(i + 1) % n].y - ring[(i + 1) % n].x * ring[i].y).sum();
+    let s: f64 = (0..n)
+        .map(|i| ring[i].x * ring[(i + 1) % n].y - ring[(i + 1) % n].x * ring[i].y)
+        .sum();
     0.5 * s.abs()
 }
 
@@ -239,16 +240,20 @@ fn standoff_open(polys: &[Polygon], rho: f64) -> Vec<Polygon> {
 /// deleting it. That is where the next investigation should start.
 /// The largest polygon by area (the body of a boolean/offset result).
 fn largest(polys: Vec<Polygon>) -> Option<Polygon> {
-    polys
-        .into_iter()
-        .max_by(|a, b| a.area().partial_cmp(&b.area()).unwrap_or(std::cmp::Ordering::Equal))
+    polys.into_iter().max_by(|a, b| {
+        a.area()
+            .partial_cmp(&b.area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 /// Centroid of a contour's vertices.
 fn centroid(poly: &Polygon) -> Point {
     let pts = poly.outer().points();
     let n = pts.len().max(1) as f64;
-    let (sx, sy) = pts.iter().fold((0.0, 0.0), |(sx, sy), p| (sx + p.x, sy + p.y));
+    let (sx, sy) = pts
+        .iter()
+        .fold((0.0, 0.0), |(sx, sy), p| (sx + p.x, sy + p.y));
     Point::new(sx / n, sy / n)
 }
 
@@ -271,8 +276,8 @@ fn seg_dist(p: Point, a: Point, b: Point) -> f64 {
 /// Distance from `p` to the nearest point of `poly`'s boundary — **including its holes**,
 /// so an island counts as a wall the plunge must stand clear of.
 pub(crate) fn boundary_dist(poly: &Polygon, p: Point) -> f64 {
-    let rings = std::iter::once(poly.outer().points())
-        .chain(poly.holes().iter().map(|h| h.points()));
+    let rings =
+        std::iter::once(poly.outer().points()).chain(poly.holes().iter().map(|h| h.points()));
     let mut best = f64::MAX;
     for ring in rings {
         let n = ring.len();
@@ -375,8 +380,11 @@ fn simplify_polys(polys: &[Polygon], eps: f64) -> Vec<Polygon> {
         .iter()
         .filter_map(|p| {
             let outer = Contour::new(simplify_ring(p.outer().points(), eps));
-            let holes: Vec<Contour> =
-                p.holes().iter().map(|h| Contour::new(simplify_ring(h.points(), eps))).collect();
+            let holes: Vec<Contour> = p
+                .holes()
+                .iter()
+                .map(|h| Contour::new(simplify_ring(h.points(), eps)))
+                .collect();
             if holes.is_empty() {
                 Polygon::new(outer).ok()
             } else {
@@ -619,7 +627,10 @@ fn at_len(pts: &[Point], cum: &[f64], u: f64) -> Point {
         return pts[0];
     }
     let u = u.clamp(0.0, total);
-    let i = cum.partition_point(|&c| c <= u).saturating_sub(1).min(pts.len() - 1);
+    let i = cum
+        .partition_point(|&c| c <= u)
+        .saturating_sub(1)
+        .min(pts.len() - 1);
     let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
     let seg = cum[i + 1] - cum[i];
     if seg <= 1e-12 {
@@ -651,7 +662,14 @@ fn pitch_for_cap(rho: f64, r: f64, cap: f64) -> f64 {
 
 /// Integrate a variable-pitch spiral out from `center`, scaling every pitch by `lambda`.
 /// Returns the points and the angle at which `radius` was reached.
-fn spiral_march(center: Point, radius: f64, r: f64, cap: f64, e: f64, lambda: f64) -> (Vec<Point>, f64) {
+fn spiral_march(
+    center: Point,
+    radius: f64,
+    r: f64,
+    cap: f64,
+    e: f64,
+    lambda: f64,
+) -> (Vec<Point>, f64) {
     let dth = std::f64::consts::TAU / CORE_SAMPLES as f64;
     let mut rho = 0.0_f64;
     let mut th = 0.0_f64;
@@ -664,7 +682,10 @@ fn spiral_march(center: Point, radius: f64, r: f64, cap: f64, e: f64, lambda: f6
         let p = (lambda * pitch_for_cap(rho, r, cap)).clamp(MIN_CORE_PITCH * e, e);
         rho = (rho + p * dth / std::f64::consts::TAU).min(radius);
         th += dth;
-        pts.push(Point::new(center.x + rho * th.cos(), center.y + rho * th.sin()));
+        pts.push(Point::new(
+            center.x + rho * th.cos(),
+            center.y + rho * th.sin(),
+        ));
     }
     (pts, th)
 }
@@ -805,7 +826,10 @@ fn connect_seam_spiral(
             let t = i as f64 / SEAM_SAMPLES as f64;
             let a = at_len(cur, ccur, total - delta + t * delta);
             let b = at_len(nxt, cnxt, tot_n - delta + t * delta);
-            path.push((Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t), true));
+            path.push((
+                Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t),
+                true,
+            ));
         }
     }
     Some(path)
@@ -837,8 +861,9 @@ fn sharp_corners(tc: &Polygon, simplification_tolerance: f64) -> Vec<Corner> {
     }
     // Winding sign: a CCW contour has positive signed area, and its convex vertices turn
     // left. Comparing each vertex's turn against this makes the test winding-agnostic.
-    let area2: f64 =
-        (0..n).map(|i| pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y).sum();
+    let area2: f64 = (0..n)
+        .map(|i| pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y)
+        .sum();
     let ccw = area2 > 0.0;
     let mut out = Vec::new();
     for i in 0..n {
@@ -868,7 +893,11 @@ fn sharp_corners(tc: &Polygon, simplification_tolerance: f64) -> Vec<Corner> {
         if bl < 1e-9 {
             continue;
         }
-        out.push(Corner { v, bisector: (bx / bl, by / bl), half: theta / 2.0 });
+        out.push(Corner {
+            v,
+            bisector: (bx / bl, by / bl),
+            half: theta / 2.0,
+        });
     }
     out
 }
@@ -934,7 +963,10 @@ fn corner_relief_tuned(c: Corner, r: f64, e: f64, reach: f64, pitch: f64) -> Vec
             let phi = std::f64::consts::TAU * turns * t;
             // Start each turn pointing back down the bisector (into cleared stock) so the
             // loop dips toward the vertex and retreats through what it just cut.
-            let (cs, sn) = ((phi + std::f64::consts::PI).cos(), (phi + std::f64::consts::PI).sin());
+            let (cs, sn) = (
+                (phi + std::f64::consts::PI).cos(),
+                (phi + std::f64::consts::PI).sin(),
+            );
             let dir = (bx * cs + nx * sn, by * cs + ny * sn);
             Point::new(c.v.x + s * bx + rho * dir.0, c.v.y + s * by + rho * dir.1)
         })
@@ -989,10 +1021,17 @@ pub(crate) fn front_advance_certified(
     if !simplification_tolerance.is_finite() || simplification_tolerance < 0.0 {
         return None;
     }
-    let mut path = front_advance_tuned(region, r, finish, e, start, Tuning {
-        simplification_tolerance,
-        ..Tuning::new(r, e)
-    })?;
+    let mut path = front_advance_tuned(
+        region,
+        r,
+        finish,
+        e,
+        start,
+        Tuning {
+            simplification_tolerance,
+            ..Tuning::new(r, e)
+        },
+    )?;
     compact_repositions(&mut path);
     // The material to remove (skin left on the walls) — the same region the generator
     // clears, recomputed here so the certifier scores against the true target. `largest`
@@ -1097,12 +1136,23 @@ fn frontier_tuned(
     start: Option<[f64; 2]>,
     tuning: Tuning,
 ) -> Option<Frontier> {
-    let Tuning { standoff, entry_target, simplification_tolerance, .. } = tuning;
+    let Tuning {
+        standoff,
+        entry_target,
+        simplification_tolerance,
+        ..
+    } = tuning;
     let to_clear = largest(offset(std::slice::from_ref(region), -finish, JoinStyle::Round).ok()?)?;
-    let tc = largest(offset(std::slice::from_ref(region), -(r + finish), JoinStyle::Round).ok()?)?;
+    let tc = largest(
+        offset(
+            std::slice::from_ref(region),
+            -(r + finish),
+            JoinStyle::Round,
+        )
+        .ok()?,
+    )?;
 
-    let entry = preferred_entry(&tc, start, e.min(r) * 0.5)
-        .or_else(|| entry_point(&tc))?;
+    let entry = preferred_entry(&tc, start, e.min(r) * 0.5).or_else(|| entry_point(&tc))?;
 
     let clear_slice = std::slice::from_ref(&to_clear);
     let to_clear_area = to_clear.area();
@@ -1140,7 +1190,8 @@ fn frontier_tuned(
         let rho = (total_area(&cleared) / std::f64::consts::PI).sqrt() - r;
         let adv = pitch_for_cap(rho.max(0.0), r, entry_target).clamp(MIN_CORE_PITCH * e, e);
         // Advance the frontier into fresh material, clipped to the stock.
-        let grown = intersection(&offset(&cleared, adv, JoinStyle::Round).ok()?, clear_slice).ok()?;
+        let grown =
+            intersection(&offset(&cleared, adv, JoinStyle::Round).ok()?, clear_slice).ok()?;
         if grown.is_empty() {
             break;
         }
@@ -1195,7 +1246,10 @@ fn frontier_tuned(
         // decimated at the requested tolerance to limit vertex growth from
         // repeated round offsets. The completed path still has to certify.
         let opened = offset(&pass, r, JoinStyle::Round).ok()?;
-        cleared = simplify_polys(&union(&cleared, &opened).ok().unwrap_or(opened), simplification_tolerance);
+        cleared = simplify_polys(
+            &union(&cleared, &opened).ok().unwrap_or(opened),
+            simplification_tolerance,
+        );
         // Done once the frontier fills the stock — stable, unlike an area-delta check
         // (which the decimation jitter would trip early or never).
         if to_clear_area - total_area(&grown) < covered_tol {
@@ -1205,7 +1259,14 @@ fn frontier_tuned(
     if passes.is_empty() {
         return None;
     }
-    Some(Frontier { entry, tc, to_clear, passes, split, simplification_tolerance })
+    Some(Frontier {
+        entry,
+        tc,
+        to_clear,
+        passes,
+        split,
+        simplification_tolerance,
+    })
 }
 
 /// Resolve a model-space preference onto an eligible cutter-centre region.
@@ -1237,11 +1298,18 @@ fn frontier(
     standoff: f64,
     entry_target: f64,
 ) -> Option<Frontier> {
-    frontier_tuned(region, r, finish, e, start, Tuning {
-        standoff,
-        entry_target,
-        ..Tuning::new(r, e)
-    })
+    frontier_tuned(
+        region,
+        r,
+        finish,
+        e,
+        start,
+        Tuning {
+            standoff,
+            entry_target,
+            ..Tuning::new(r, e)
+        },
+    )
 }
 
 /// [`front_advance_path`] with the tuning exposed, so it can be swept.
@@ -1253,7 +1321,12 @@ fn front_advance_tuned(
     start: Option<[f64; 2]>,
     t: Tuning,
 ) -> Option<Vec<(Point, bool)>> {
-    let Tuning { seam_arc, entry_target, relief_reach, .. } = t;
+    let Tuning {
+        seam_arc,
+        entry_target,
+        relief_reach,
+        ..
+    } = t;
     if !(e > 0.0 && e < 2.0 * r) {
         return None;
     }
@@ -1327,7 +1400,8 @@ mod tests {
             (Point::new(32., 4.), false),
         ];
         let cutting_segments = |moves: &[(Point, bool)]| {
-            moves.windows(2)
+            moves
+                .windows(2)
                 .filter(|pair| pair[1].1)
                 .map(|pair| (pair[0].0, pair[1].0))
                 .collect::<Vec<_>>()
@@ -1347,10 +1421,7 @@ mod tests {
 
     #[test]
     fn entirely_rejected_path_has_no_reentries() {
-        let mut path = vec![
-            (Point::new(4., 4.), false),
-            (Point::new(8., 4.), false),
-        ];
+        let mut path = vec![(Point::new(4., 4.), false), (Point::new(8., 4.), false)];
         compact_repositions(&mut path);
         assert!(path.is_empty());
     }
@@ -1420,25 +1491,44 @@ mod tests {
         vec![
             (
                 "square 40, island 12 centred",
-                Polygon::with_holes(rect_at(0.0, 0.0, 40.0, 40.0), vec![rect_at(14.0, 14.0, 26.0, 26.0)]).unwrap(),
+                Polygon::with_holes(
+                    rect_at(0.0, 0.0, 40.0, 40.0),
+                    vec![rect_at(14.0, 14.0, 26.0, 26.0)],
+                )
+                .unwrap(),
             ),
             (
                 "square 40, island 12 offset",
-                Polygon::with_holes(rect_at(0.0, 0.0, 40.0, 40.0), vec![rect_at(22.0, 14.0, 34.0, 26.0)]).unwrap(),
+                Polygon::with_holes(
+                    rect_at(0.0, 0.0, 40.0, 40.0),
+                    vec![rect_at(22.0, 14.0, 34.0, 26.0)],
+                )
+                .unwrap(),
             ),
             (
                 "circle r20, island r6",
-                Polygon::with_holes(ring_at(0.0, 0.0, 20.0, 64), vec![ring_at(0.0, 0.0, 6.0, 32)]).unwrap(),
+                Polygon::with_holes(
+                    ring_at(0.0, 0.0, 20.0, 64),
+                    vec![ring_at(0.0, 0.0, 6.0, 32)],
+                )
+                .unwrap(),
             ),
             (
                 "square 60, island 20 centred",
-                Polygon::with_holes(rect_at(0.0, 0.0, 60.0, 60.0), vec![rect_at(20.0, 20.0, 40.0, 40.0)]).unwrap(),
+                Polygon::with_holes(
+                    rect_at(0.0, 0.0, 60.0, 60.0),
+                    vec![rect_at(20.0, 20.0, 40.0, 40.0)],
+                )
+                .unwrap(),
             ),
             (
                 "square 60, two islands",
                 Polygon::with_holes(
                     rect_at(0.0, 0.0, 60.0, 60.0),
-                    vec![rect_at(12.0, 12.0, 24.0, 24.0), rect_at(36.0, 36.0, 48.0, 48.0)],
+                    vec![
+                        rect_at(12.0, 12.0, 24.0, 24.0),
+                        rect_at(36.0, 36.0, 48.0, 48.0),
+                    ],
                 )
                 .unwrap(),
             ),
@@ -1453,7 +1543,8 @@ mod tests {
         println!("\n| case | passes | split | a_e | uncut | reach | gouge | verdict |");
         println!("|---|---|---|---|---|---|---|---|");
         for (name, region) in island_cases() {
-            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET) else {
+            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET)
+            else {
                 println!("| {name} | — | — | — | — | — | — | **no frontier** |");
                 continue;
             };
@@ -1463,7 +1554,10 @@ mod tests {
                 continue;
             };
             let v = crate::clearsim::certify_moves(&path, R, &region);
-            let reach: f64 = crate::clearsim::reachable(&region, R).iter().map(|p| p.area()).sum();
+            let reach: f64 = crate::clearsim::reachable(&region, R)
+                .iter()
+                .map(|p| p.area())
+                .sum();
             let ok = v.max_engagement <= engagement_bound(E, R)
                 && v.uncut_area <= 0.02 * reach + 1.0
                 && v.gouge_area <= 0.02 * reach + 1.0;
@@ -1593,7 +1687,10 @@ mod tests {
     #[ignore = "diagnostic"]
     fn standoff_sweep_over_islands() {
         let fracs = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-        println!("\n| case | narrowest | {} |", fracs.map(|f| format!("{f}·r")).join(" | "));
+        println!(
+            "\n| case | narrowest | {} |",
+            fracs.map(|f| format!("{f}·r")).join(" | ")
+        );
         println!("|---|---|{}", "---|".repeat(fracs.len()));
         let mut cases = vec![("CONTROL square 40 (no island)", square(40.0))];
         cases.extend(island_cases());
@@ -1613,7 +1710,10 @@ mod tests {
             let mut cells = vec![format!("{narrow:.0} mm")];
             for f in fracs {
                 let standoff = f * R;
-                let t = Tuning { standoff, ..Tuning::new(R, E) };
+                let t = Tuning {
+                    standoff,
+                    ..Tuning::new(R, E)
+                };
                 match front_advance_tuned(&region, R, 0.0, E, None, t) {
                     Some(path) => {
                         let v = crate::clearsim::certify_moves(&path, R, &region);
@@ -1685,7 +1785,8 @@ mod tests {
     #[ignore = "diagnostic"]
     fn locate_the_island_gouge() {
         for (name, region) in island_cases().into_iter().take(3) {
-            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET) else {
+            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET)
+            else {
                 continue;
             };
             let Some((path, _)) = connect(&f, R, E, SEAM_ARC, RELIEF_REACH, ENTRY_TARGET) else {
@@ -1717,8 +1818,15 @@ mod tests {
             println!(
                 "{name}: worst excursion {:.3} mm at ({:.1},{:.1}) on a {:.2} mm step (move {}) | \
                  longest step {:.2} mm at move {} of {} | rapids {}",
-                worst.0, worst.1.x, worst.1.y, worst.2, worst.3,
-                longest_step.0, longest_step.1, path.len(), rapids(&path),
+                worst.0,
+                worst.1.x,
+                worst.1.y,
+                worst.2,
+                worst.3,
+                longest_step.0,
+                longest_step.1,
+                path.len(),
+                rapids(&path),
             );
         }
     }
@@ -1731,7 +1839,8 @@ mod tests {
     #[ignore = "diagnostic"]
     fn ring_internal_steps() {
         for (name, region) in island_cases().into_iter().take(2) {
-            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET) else {
+            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET)
+            else {
                 continue;
             };
             let mut worst = (0.0_f64, 0usize, 0usize, 0usize);
@@ -1765,8 +1874,14 @@ mod tests {
     fn derived_regions_keep_their_holes() {
         for (name, region) in island_cases() {
             for finish in [0.0, 0.5] {
-                let tc_polys = offset(std::slice::from_ref(&region), -(R + finish), JoinStyle::Round).unwrap();
-                let clear_polys = offset(std::slice::from_ref(&region), -finish, JoinStyle::Round).unwrap();
+                let tc_polys = offset(
+                    std::slice::from_ref(&region),
+                    -(R + finish),
+                    JoinStyle::Round,
+                )
+                .unwrap();
+                let clear_polys =
+                    offset(std::slice::from_ref(&region), -finish, JoinStyle::Round).unwrap();
                 let to_clear = largest(clear_polys.clone()).unwrap();
                 let tc = largest(tc_polys.clone()).unwrap();
                 println!(
@@ -1789,18 +1904,32 @@ mod tests {
     #[ignore = "diagnostic"]
     fn island_connection_provenance() {
         for (name, region) in island_cases() {
-            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET) else {
+            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET)
+            else {
                 println!("{name}: no frontier");
                 continue;
             };
-            let Some((path, seamed)) = connect(&f, R, E, SEAM_ARC, RELIEF_REACH, ENTRY_TARGET) else {
+            let Some((path, seamed)) = connect(&f, R, E, SEAM_ARC, RELIEF_REACH, ENTRY_TARGET)
+            else {
                 println!("{name}: no connection");
                 continue;
             };
             // **How far** outside the tool-centre region does the path stray — not how many
             // points do, which cannot tell tessellation noise from driving over an island.
-            let depth = |p: &Point| if f.tc.contains(*p) { 0.0 } else { boundary_dist(&f.tc, *p) };
-            let ring_worst = f.passes.iter().flatten().flatten().map(depth).fold(0.0_f64, f64::max);
+            let depth = |p: &Point| {
+                if f.tc.contains(*p) {
+                    0.0
+                } else {
+                    boundary_dist(&f.tc, *p)
+                }
+            };
+            let ring_worst = f
+                .passes
+                .iter()
+                .flatten()
+                .flatten()
+                .map(depth)
+                .fold(0.0_f64, f64::max);
             let path_worst = path.iter().map(|(p, _)| depth(p)).fold(0.0_f64, f64::max);
             // And how far into an *island* specifically (the gouge that matters).
             let isl_worst = region
@@ -1809,7 +1938,13 @@ mod tests {
                 .map(|h| {
                     let hp = Polygon::new(h.clone()).unwrap();
                     path.iter()
-                        .map(|&(p, _)| if hp.contains(p) { boundary_dist(&hp, p) } else { 0.0 })
+                        .map(|&(p, _)| {
+                            if hp.contains(p) {
+                                boundary_dist(&hp, p)
+                            } else {
+                                0.0
+                            }
+                        })
                         .fold(0.0_f64, f64::max)
                 })
                 .fold(0.0_f64, f64::max);
@@ -1833,20 +1968,33 @@ mod tests {
             ("square 40 (control, no island)", square(40.0)),
             (
                 "square 40, island 12 centred",
-                Polygon::with_holes(rect_at(0.0, 0.0, 40.0, 40.0), vec![rect_at(14.0, 14.0, 26.0, 26.0)]).unwrap(),
+                Polygon::with_holes(
+                    rect_at(0.0, 0.0, 40.0, 40.0),
+                    vec![rect_at(14.0, 14.0, 26.0, 26.0)],
+                )
+                .unwrap(),
             ),
             (
                 "circle r20, island r6",
-                Polygon::with_holes(ring_at(0.0, 0.0, 20.0, 64), vec![ring_at(0.0, 0.0, 6.0, 32)]).unwrap(),
+                Polygon::with_holes(
+                    ring_at(0.0, 0.0, 20.0, 64),
+                    vec![ring_at(0.0, 0.0, 6.0, 32)],
+                )
+                .unwrap(),
             ),
             (
                 "square 60, island 20 centred",
-                Polygon::with_holes(rect_at(0.0, 0.0, 60.0, 60.0), vec![rect_at(20.0, 20.0, 40.0, 40.0)]).unwrap(),
+                Polygon::with_holes(
+                    rect_at(0.0, 0.0, 60.0, 60.0),
+                    vec![rect_at(20.0, 20.0, 40.0, 40.0)],
+                )
+                .unwrap(),
             ),
         ];
         for (name, region) in cases {
             println!("\n=== {name} ===");
-            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET) else {
+            let Some(f) = frontier(&region, R, 0.0, E, None, STANDOFF_RADII * R, ENTRY_TARGET)
+            else {
                 println!("  frontier: None");
                 continue;
             };
@@ -1930,7 +2078,9 @@ mod tests {
 
     /// Peak `a_e` over the readings taken where `keep` holds.
     fn peak(rs: &[(f64, Point)], keep: impl Fn(Point) -> bool) -> f64 {
-        rs.iter().filter(|(_, p)| keep(*p)).fold(0.0f64, |m, (ae, _)| m.max(*ae))
+        rs.iter()
+            .filter(|(_, p)| keep(*p))
+            .fold(0.0f64, |m, (ae, _)| m.max(*ae))
     }
 
     /// Distance to the nearest corner of the `s`-square.
@@ -1973,8 +2123,15 @@ mod tests {
             //
             // 60 s still catches everything it was written for by an order of magnitude: the
             // 120 s pre-decimation grind and the 37-minute split-front `MAX_PASSES` loop.
-            assert!(gen < 60.0, "{name}: generation regressed to a grind, took {gen:.2}s");
-            assert!(path.len() < 4000, "{name}: sane point count, got {}", path.len());
+            assert!(
+                gen < 60.0,
+                "{name}: generation regressed to a grind, took {gen:.2}s"
+            );
+            assert!(
+                path.len() < 4000,
+                "{name}: sane point count, got {}",
+                path.len()
+            );
         }
     }
 
@@ -1997,9 +2154,13 @@ mod tests {
         ] {
             // Away from the entry and from any concave corner — i.e. where only the
             // links used to spike. Was ≈ the diameter here; now near the cap.
-            let body =
-                peak(rs, |p| p.distance(ctr) > 3.0 * E && d_corner(p, 40.0) > 8.0 * E);
-            assert!(body <= 1.5 * E, "{name}: link slot should be gone, body a_e {body}");
+            let body = peak(rs, |p| {
+                p.distance(ctr) > 3.0 * E && d_corner(p, 40.0) > 8.0 * E
+            });
+            assert!(
+                body <= 1.5 * E,
+                "{name}: link slot should be gone, body a_e {body}"
+            );
         }
     }
 
@@ -2010,15 +2171,23 @@ mod tests {
     /// than smeared through the path.
     #[test]
     fn the_path_body_holds_engagement_near_the_cap_on_every_shape() {
-        let body = peak(circle_readings(), |p| p.distance(Point::new(0.0, 0.0)) > 3.0 * E);
-        assert!(body <= 1.5 * E, "round pocket body should sit near the cap, got {body}");
+        let body = peak(circle_readings(), |p| {
+            p.distance(Point::new(0.0, 0.0)) > 3.0 * E
+        });
+        assert!(
+            body <= 1.5 * E,
+            "round pocket body should sit near the cap, got {body}"
+        );
 
         // A corner's influence reaches ~8 stepovers along the walls into it (measured);
         // beyond that the square matches the circle exactly.
         let body = peak(square_readings(), |p| {
             p.distance(Point::new(20.0, 20.0)) > 3.0 * E && d_corner(p, 40.0) > 8.0 * E
         });
-        assert!(body <= 1.5 * E, "square pocket body should sit near the cap, got {body}");
+        assert!(
+            body <= 1.5 * E,
+            "square pocket body should sit near the cap, got {body}"
+        );
     }
 
     /// **The concave corner is answered — this test replaces the one that pinned it as the
@@ -2045,7 +2214,10 @@ mod tests {
         let body = peak(rs, |p| {
             p.distance(Point::new(20.0, 20.0)) > 3.0 * E && d_corner(p, 40.0) > 8.0 * E
         });
-        assert!(near <= 1.5 * E, "corner should sit at the body's floor, got {near}");
+        assert!(
+            near <= 1.5 * E,
+            "corner should sit at the body's floor, got {near}"
+        );
         assert!(
             near <= body + 0.1 * E,
             "corner should be indistinguishable from the body: {near} vs {body}"
@@ -2068,7 +2240,10 @@ mod tests {
             0.0,
             E,
             Some([20.0, 20.0]),
-            Tuning { standoff: 0.0, ..Tuning::new(R, E) },
+            Tuning {
+                standoff: 0.0,
+                ..Tuning::new(R, E)
+            },
         )
         .map(|m| pts(&m))
         .unwrap();
@@ -2113,7 +2288,10 @@ mod tests {
             ("square 40", square_readings(), Point::new(20.0, 20.0)),
         ] {
             let entry = peak(rs, |p| p.distance(c) <= 3.0 * E);
-            assert!(entry <= 1.5 * E, "{name}: entry should sit at the floor, got {entry} (was 3.52)");
+            assert!(
+                entry <= 1.5 * E,
+                "{name}: entry should sit at the floor, got {entry} (was 3.52)"
+            );
         }
     }
 
@@ -2136,7 +2314,10 @@ mod tests {
             0.0,
             E,
             Some([0.0, 0.0]),
-            Tuning { entry_target: 4.0 * E, ..Tuning::new(R, E) },
+            Tuning {
+                entry_target: 4.0 * E,
+                ..Tuning::new(R, E)
+            },
         )
         .map(|m| pts(&m))
         .unwrap();
@@ -2151,7 +2332,9 @@ mod tests {
             }
             m.commit(w[0], w[1]);
         }
-        let tuned = peak(circle_readings(), |p| p.distance(Point::new(0.0, 0.0)) <= 3.0 * E);
+        let tuned = peak(circle_readings(), |p| {
+            p.distance(Point::new(0.0, 0.0)) <= 3.0 * E
+        });
         assert!(
             worst > tuned + 0.3 * E,
             "a flat advance should over-engage the entry: {worst} vs {tuned}"
@@ -2171,17 +2354,19 @@ mod tests {
         let peaks: Vec<f64> = [1.0, 12.0]
             .iter()
             .map(|&sa| {
-                let raw =
-                    front_advance_tuned(
-                        &region,
-                        r,
-                        0.0,
-                        e,
-                        Some([20.0, 20.0]),
-                        Tuning { seam_arc: sa, ..Tuning::new(r, e) },
-                    )
-                    .map(|mv| pts(&mv))
-                    .unwrap();
+                let raw = front_advance_tuned(
+                    &region,
+                    r,
+                    0.0,
+                    e,
+                    Some([20.0, 20.0]),
+                    Tuning {
+                        seam_arc: sa,
+                        ..Tuning::new(r, e)
+                    },
+                )
+                .map(|mv| pts(&mv))
+                .unwrap();
                 let mut m = crate::clearsim::ClearedModel::bounded(r, region.clone());
                 m.seed_disc(raw[0]);
                 let mut pk = 0.0f64;
@@ -2198,7 +2383,6 @@ mod tests {
         );
     }
 
-
     /// A corner relief **cannot gouge**, at any pitch or reach, because every loop is a
     /// maximal inscribed circle of the tool-centre region: its centre sits at `s` along
     /// the bisector and its radius is exactly that centre's distance to the walls. This is
@@ -2208,15 +2392,15 @@ mod tests {
     #[test]
     fn a_corner_relief_never_leaves_the_tool_centre_region() {
         let r = 3.0;
-        for (name, region) in [
-            ("square 40", square(40.0)),
-            ("square 24", square(24.0)),
-        ] {
-            let tc =
-                largest(offset(std::slice::from_ref(&region), -r, JoinStyle::Round).unwrap())
-                    .unwrap();
+        for (name, region) in [("square 40", square(40.0)), ("square 24", square(24.0))] {
+            let tc = largest(offset(std::slice::from_ref(&region), -r, JoinStyle::Round).unwrap())
+                .unwrap();
             let corners = sharp_corners(&tc, SIMPLIFY_EPS);
-            assert_eq!(corners.len(), 4, "{name}: a square pocket has four sharp corners");
+            assert_eq!(
+                corners.len(),
+                4,
+                "{name}: a square pocket has four sharp corners"
+            );
             for c in &corners {
                 for (reach, pitch) in [(0.75, 0.35), (1.0, 1.0), (0.5, 0.2)] {
                     for p in corner_relief_tuned(*c, r, E, reach, pitch) {
@@ -2239,10 +2423,18 @@ mod tests {
     #[test]
     fn a_round_pocket_has_no_sharp_corners_to_relieve() {
         let tc = largest(
-            offset(std::slice::from_ref(&circle(30.0, 96)), -R, JoinStyle::Round).unwrap(),
+            offset(
+                std::slice::from_ref(&circle(30.0, 96)),
+                -R,
+                JoinStyle::Round,
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert!(sharp_corners(&tc, SIMPLIFY_EPS).is_empty(), "a circle has no sharp corner");
+        assert!(
+            sharp_corners(&tc, SIMPLIFY_EPS).is_empty(),
+            "a circle has no sharp corner"
+        );
     }
 
     #[test]
@@ -2263,7 +2455,10 @@ mod tests {
                     outline.reverse();
                 }
                 let tc = Polygon::new(Contour::new(outline)).unwrap();
-                assert!(!sharp_corners(&tc, 0.0).is_empty(), "zero must disable noise simplification");
+                assert!(
+                    !sharp_corners(&tc, 0.0).is_empty(),
+                    "zero must disable noise simplification"
+                );
                 assert!(
                     sharp_corners(&tc, SIMPLIFY_EPS).is_empty(),
                     "projection noise must not request corner relief (shift {shift}, reverse {reverse})"
@@ -2281,7 +2476,11 @@ mod tests {
             .expect("default approximation must certify");
         assert_ne!(fine, coarse, "the operation setting must affect the path");
         let ring = region.outer().points();
-        assert_eq!(simplify_ring(ring, 0.), ring, "zero retains the original outline");
+        assert_eq!(
+            simplify_ring(ring, 0.),
+            ring,
+            "zero retains the original outline"
+        );
     }
 
     #[test]
@@ -2316,15 +2515,15 @@ mod tests {
         let path = pts(&front_advance_path(&square(40.0), R, 0.0, E, Some([20.0, 20.0])).unwrap());
         // The closing lap is the exact tool-centre square; cutting it twice would put two
         // separate visits to the same corner in the path.
-        let visits = path.iter().filter(|p| p.distance(Point::new(37.0, 37.0)) < 1e-6).count();
-        assert!(visits <= 1, "the closing lap's corner should be visited once, got {visits}");
+        let visits = path
+            .iter()
+            .filter(|p| p.distance(Point::new(37.0, 37.0)) < 1e-6)
+            .count();
+        assert!(
+            visits <= 1,
+            "the closing lap's corner should be visited once, got {visits}"
+        );
     }
-
-
-
-
-
-
 
     /// **The raster gate never under-reads the exact oracle.** This is the safety property
     /// the whole certified-or-fallback contract rests on: the raster is what a gate can
@@ -2376,6 +2575,4 @@ mod tests {
             );
         }
     }
-
-
 }

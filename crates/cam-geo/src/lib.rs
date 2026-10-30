@@ -60,11 +60,11 @@ pub use offset::{offset, JoinStyle};
 pub use point::Point;
 pub use polygon::{Containment, Polygon};
 pub use polyline::Polyline;
+pub use stroke::{stroke_path, CapStyle};
 pub use toolprofile::{
     generatrix, vtip_depth_for_half_width, vtip_half_width, vtip_max_depth, BottomShape,
     GeneratrixSpec, Profile2D, ProfileSeg, SegShape,
 };
-pub use stroke::{stroke_path, CapStyle};
 
 /// The internal integer grid resolution, in millimetres.
 ///

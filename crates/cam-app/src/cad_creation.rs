@@ -11,7 +11,9 @@ impl AppController {
         cutting: CuttingData,
     ) -> Result<u32, String> {
         if self.setups().is_empty() {
-            return Err("Create a setup and select its models before creating an operation.".into());
+            return Err(
+                "Create a setup and select its models before creating an operation.".into(),
+            );
         }
         if ![cutting.rpm, cutting.feed, cutting.plunge_feed]
             .iter()
@@ -126,7 +128,10 @@ impl AppController {
         }
         document.setup_mut().height_settings.insert(id, settings);
         if stock_to_leave.enabled {
-            document.setup_mut().stock_to_leave.insert(id, stock_to_leave);
+            document
+                .setup_mut()
+                .stock_to_leave
+                .insert(id, stock_to_leave);
         } else {
             document.setup_mut().stock_to_leave.remove(&id);
         }
@@ -147,7 +152,12 @@ impl AppController {
         if stock_to_leave.enabled {
             setups::validate_stock_to_leave(
                 &document,
-                document.setup().operations.iter().find(|op| op.id() == id).unwrap(),
+                document
+                    .setup()
+                    .operations
+                    .iter()
+                    .find(|op| op.id() == id)
+                    .unwrap(),
                 stock_to_leave,
             )?;
         }

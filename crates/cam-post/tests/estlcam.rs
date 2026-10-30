@@ -2,7 +2,7 @@ use cam_cldata::{
     ArcDir, Coolant, CutterComp, DrillCycle, MoveKind, Point3, Program, ProgramBuilder, SpindleDir,
     Step, Tag,
 };
-use cam_model::{Envelope, Machine};
+use cam_model::{Envelope, Machine, Tool, ToolKind};
 use cam_post::{EstlcamOptions, EstlcamPost, Post, PostError, PostKind, PostOptions, WorkOffset};
 
 fn machine() -> Machine {
@@ -38,6 +38,102 @@ fn cycle() -> DrillCycle {
         feed: 100.0,
         tag: Tag::new(1, MoveKind::Plunge),
     }
+}
+
+#[test]
+fn manual_tool_changes_show_cutter_details_and_the_upcoming_operation_rpm() {
+    let options = PostOptions {
+        tools: vec![
+            Tool {
+                number: 7,
+                description: "6 mm rougher".into(),
+                diameter: 6.0,
+                length: 40.0,
+                flute_length: 18.0,
+                flutes: 3,
+                nominal_rpm: 8000.0,
+                ..Default::default()
+            },
+            Tool {
+                number: 2,
+                description: "Ball finisher".into(),
+                diameter: 4.0,
+                length: 20.0,
+                flutes: 2,
+                kind: ToolKind::BallMill,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let program = ProgramBuilder::new()
+        .tool_change(7)
+        .comment("first operation")
+        .spindle_on(12000.0, SpindleDir::Cw)
+        .spindle_off()
+        .tool_change(2)
+        .spindle_on(16000.0, SpindleDir::Cw)
+        .spindle_off()
+        .tool_change(7)
+        .spindle_on(9000.0, SpindleDir::Cw)
+        .build();
+    let nc = post(&program, &options);
+    let changes: Vec<_> = nc.lines().filter(|l| l.contains(" M6 ")).collect();
+    assert_eq!(changes, [
+        "T7 M6 (T7 - 6 mm rougher - Square End Mill - D6.000 - FL18.000 - CR=0.000 - F3 - RPM 12000)",
+        "T2 M6 (T2 - Ball finisher - Ball Nose End Mill - D4.000 - FL20.000 - CR=2.000 - F2 - RPM 16000)",
+        "T7 M6 (T7 - 6 mm rougher - Square End Mill - D6.000 - FL18.000 - CR=0.000 - F3 - RPM 9000)",
+    ]);
+    assert!(nc.contains("M3 S12000\n"));
+    assert!(!nc.contains("RPM 8000"));
+}
+
+#[test]
+fn tool_change_names_cannot_break_out_of_the_inline_comment() {
+    let options = PostOptions {
+        precision: 2,
+        tools: vec![Tool {
+            number: 1,
+            description: "⌀6 (rougher)\n)\rM3 S24000(".into(),
+            diameter: 6.0,
+            length: 30.0,
+            flutes: 2,
+            kind: ToolKind::BullNose { corner_radius: 0.5 },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let nc = post(&ProgramBuilder::new().tool_change(1).build(), &options);
+    let line = nc.lines().find(|l| l.starts_with("T1 M6")).unwrap();
+    assert_eq!(line, "T1 M6 (T1 - dia6 rougherM3 S24000 - Rounded-Edge End Mill - D6.00 - FL30.00 - CR=0.50 - F2)");
+    assert_eq!(line.matches('(').count(), 1);
+    assert_eq!(line.matches(')').count(), 1);
+    assert!(nc.is_ascii());
+    assert!(!nc.lines().any(|l| l.starts_with("M3")));
+}
+
+#[test]
+fn unchanged_modal_rpm_is_shown_without_using_a_later_operations_speed() {
+    let program = ProgramBuilder::new()
+        .tool_change(1)
+        .spindle_on(12000.0, SpindleDir::Cw)
+        .tool_change(2)
+        .rapid(Point3::new(10.0, 10.0, 5.0), MoveKind::Link)
+        .spindle_on(9000.0, SpindleDir::Cw)
+        .build();
+    let nc = post(&program, &PostOptions::default());
+    assert!(nc.contains("T2 M6 (T2 - RPM 12000)\n"), "{nc}");
+}
+
+#[test]
+fn missing_tool_metadata_still_identifies_the_tool_without_borrowing_another_tools_rpm() {
+    let program = ProgramBuilder::new()
+        .tool_change(9)
+        .tool_change(4)
+        .spindle_on(6000.0, SpindleDir::Cw)
+        .build();
+    let nc = post(&program, &PostOptions::default());
+    assert!(nc.contains("T9 M6 (T9)\nT4 M6 (T4 - RPM 6000)\nM3 S6000\n"));
 }
 
 #[test]

@@ -62,7 +62,10 @@ fn inherited_stock_persists_and_cannot_lose_its_first_source() {
     let first = app.active_setup_id();
     let mut settings = app.document().setup().clone();
     settings.stock = Stock::PreviousSetup;
-    assert!(app.apply_setup_settings(settings).unwrap_err().contains("first setup"));
+    assert!(app
+        .apply_setup_settings(settings)
+        .unwrap_err()
+        .contains("first setup"));
     let second = app.add_setup();
     let mut settings = app.document().setup().clone();
     settings.stock = Stock::PreviousSetup;
@@ -94,7 +97,10 @@ fn duplicated_setups_continue_the_source_stock_chain_with_undo_and_redo() {
     let stock = app.document().setup().stock;
     let later = app.add_setup();
     let copy = app.duplicate_setup(source).unwrap();
-    assert_eq!(app.setups().iter().map(|s| s.id).collect::<Vec<_>>(), [source, copy, later]);
+    assert_eq!(
+        app.setups().iter().map(|s| s.id).collect::<Vec<_>>(),
+        [source, copy, later]
+    );
     assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
     assert_eq!(app.setups()[0].stock, stock);
     assert_eq!(app.stock_box(), ([0.; 3], [50., 50., 20.]));
@@ -105,7 +111,10 @@ fn duplicated_setups_continue_the_source_stock_chain_with_undo_and_redo() {
     assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
     let next = app.duplicate_setup(copy).unwrap();
     assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
-    assert_eq!(app.setups().iter().map(|s| s.id).collect::<Vec<_>>(), [source, copy, next, later]);
+    assert_eq!(
+        app.setups().iter().map(|s| s.id).collect::<Vec<_>>(),
+        [source, copy, next, later]
+    );
     assert!(app.reorder_setup_to(next, Some(source)).is_err());
 }
 

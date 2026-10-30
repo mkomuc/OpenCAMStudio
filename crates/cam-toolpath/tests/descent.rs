@@ -17,7 +17,7 @@ use cam_cldata::{MoveKind, Step};
 use cam_geo::{Contour, Point};
 use cam_model::{
     ChamferOp, ClearParams, Clearing, Comp, Document, Envelope, Heights, Lead, Machine, Operation,
-    Plunge, Point3, PocketOp, ProfileOp, Setup, Side, Stock, Tool, ToolKind,
+    Plunge, PocketOp, Point3, ProfileOp, Setup, Side, Stock, Tool, ToolKind,
 };
 use cam_toolpath::{build_job, CancelToken};
 
@@ -33,7 +33,10 @@ fn machine() -> Machine {
         tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
-        envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),
+        envelope: Envelope::new(
+            Point3::new(0.0, 0.0, -50.0),
+            Point3::new(300.0, 180.0, 50.0),
+        ),
         safe_z: 5.0,
         tool_change_pos: None,
     }
@@ -76,11 +79,18 @@ fn assert_no_rapid_lands_on_a_cut_floor(steps: &[Step], what: &str) {
             _ => {}
         }
     }
-    assert!(checked > 0, "{what}: no rapid followed a cut, so this proves nothing");
+    assert!(
+        checked > 0,
+        "{what}: no rapid followed a cut, so this proves nothing"
+    );
 }
 
 fn steps_of(d: &Document) -> Vec<Step> {
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
         d,
         1000.0,
         cam_cldata::SpindleDir::Cw,
@@ -89,7 +99,9 @@ fn steps_of(d: &Document) -> Vec<Step> {
         &CancelToken::new(),
     );
     assert!(
-        !diags.iter().any(|x| x.severity == cam_toolpath::Severity::Error),
+        !diags
+            .iter()
+            .any(|x| x.severity == cam_toolpath::Severity::Error),
         "the fixture must actually cut: {diags:?}"
     );
     program.steps().to_vec()
@@ -311,12 +323,12 @@ fn tool(number: u32, kind: ToolKind) -> Tool {
 
 fn doc(ops: Vec<Operation>) -> Document {
     Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "descent".into(),
         heights: heights(),
         stock: Stock::BoundingBox {
@@ -325,7 +337,16 @@ fn doc(ops: Vec<Operation>) -> Document {
             top: 0.0,
             thickness: 10.0,
         },
-        tools: vec![tool(1, ToolKind::EndMill), tool(2, ToolKind::ChamferMill { included_angle_deg: 90.0, tip_diameter: 0.5 })],
+        tools: vec![
+            tool(1, ToolKind::EndMill),
+            tool(
+                2,
+                ToolKind::ChamferMill {
+                    included_angle_deg: 90.0,
+                    tip_diameter: 0.5,
+                },
+            ),
+        ],
         operations: ops,
         patterns: Vec::new(),
         origin: [0.0, 0.0, 0.0],

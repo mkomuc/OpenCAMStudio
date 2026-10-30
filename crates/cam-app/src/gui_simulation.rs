@@ -632,8 +632,7 @@ impl SimulationPlayer {
                     ))
                     .size(12),
                     text(format!("{:.0}%", self.position / duration * 100.)).size(12),
-                    text(self.error.as_deref().unwrap_or(""))
-                    .size(12),
+                    text(self.error.as_deref().unwrap_or("")).size(12),
                     text(format!("Speed {:.2}×", self.speed)).size(12),
                     slider(0.25..=10., self.speed, Message::SimulationSpeed)
                         .step(0.25)

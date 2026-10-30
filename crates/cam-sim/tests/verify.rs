@@ -59,12 +59,12 @@ fn profile_square(id: u32, chain: Contour) -> ProfileOp {
 
 fn setup(operations: Vec<Operation>) -> Document {
     Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "verify".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -94,7 +94,11 @@ fn setup(operations: Vec<Operation>) -> Document {
 }
 
 fn run(doc: &Document) -> cam_sim::SimResult {
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
     assert!(
         !diags
             .iter()
@@ -223,7 +227,13 @@ fn pocket_op() -> PocketOp {
 #[test]
 fn pocket_finishing_clears_walls_without_crossing_islands_or_rapiding_through_stock() {
     for climb in [true, false] {
-        for plunge in [Plunge::Straight, Plunge::Helix { radius: 0.5, pitch: 1. }] {
+        for plunge in [
+            Plunge::Straight,
+            Plunge::Helix {
+                radius: 0.5,
+                pitch: 1.,
+            },
+        ] {
             let mut op = pocket_op();
             op.islands = vec![square(17., 17., 23., 23.)];
             op.clear.clearing.climb = climb;
@@ -233,15 +243,37 @@ fn pocket_finishing_clears_walls_without_crossing_islands_or_rapiding_through_st
             op.clear.lead_in = Lead::Arc { radius: 0.75 };
             op.clear.lead_out = Lead::Arc { radius: 0.75 };
             op.finishing = cam_model::PocketFinishing {
-                enabled: true, count: 2, stepover: 0.4, feed: 123.,
-                lead_in_out_all: true, repeat_pass: true, overlap: 0.5,
+                enabled: true,
+                count: 2,
+                stepover: 0.4,
+                feed: 123.,
+                lead_in_out_all: true,
+                repeat_pass: true,
+                overlap: 0.5,
+                finish_only_final: false,
             };
             let sim = run(&setup(vec![Operation::Pocket(op)]));
-            assert!(sim.is_clean(), "climb={climb}, plunge={plunge:?}: {:?}", sim.collisions);
-            assert!(sim.field.sample(20., 20.) > -0.1, "island must remain intact");
-            assert!(sim.field.sample(6., 20.) < -3.9, "finishing must reach the wall");
-            assert!(sim.field.sample(16., 20.) < -3.9, "finishing must reach the island wall");
-            assert!(sim.field.sample(4., 20.) > -0.1, "outer wall must remain intact");
+            assert!(
+                sim.is_clean(),
+                "climb={climb}, plunge={plunge:?}: {:?}",
+                sim.collisions
+            );
+            assert!(
+                sim.field.sample(20., 20.) > -0.1,
+                "island must remain intact"
+            );
+            assert!(
+                sim.field.sample(6., 20.) < -3.9,
+                "finishing must reach the wall"
+            );
+            assert!(
+                sim.field.sample(16., 20.) < -3.9,
+                "finishing must reach the island wall"
+            );
+            assert!(
+                sim.field.sample(4., 20.) > -0.1,
+                "outer wall must remain intact"
+            );
         }
     }
 }
@@ -282,12 +314,12 @@ fn a_bad_setup_that_rapids_low_is_caught() {
     // hide it. (A single-loop op only *lifts* vertically at the low plane, which is safe:
     // the tool retreats up through the column it cut — so the hazard is the lateral move.)
     let doc = Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "unsafe".into(),
         heights: Heights::new(-1.0, -1.0, 0.0), // clearance below stock top!
         stock: Stock::BoundingBox {
@@ -320,16 +352,35 @@ fn a_bad_setup_that_rapids_low_is_caught() {
         stock_to_leave: Default::default(),
         tool_change_height: None,
     });
-    let rejected=build_job(&doc,1000.,SpindleDir::Cw,None,50.,&CancelToken::new());
-    assert!(rejected.diagnostics.iter().any(|d|d.severity==cam_toolpath::Severity::Error),"The strategy must reject unsafe safety planes before emission");
+    let rejected = build_job(&doc, 1000., SpindleDir::Cw, None, 50., &CancelToken::new());
+    assert!(
+        rejected
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == cam_toolpath::Severity::Error),
+        "The strategy must reject unsafe safety planes before emission"
+    );
     // The simulator must also catch unsafe imported/programmatic IR independently
     // of the now-stricter generator. Only the first entry column has been cleared.
-    use cam_cldata::{MoveKind,Point3,Program,Step,Tag};
-    let mut program=Program::new();
-    program.push(Step::Rapid {to:Point3::new(5.,5.,5.),tag:Tag::new(0,MoveKind::Link)});
-    program.push(Step::Linear {to:Point3::new(5.,5.,-2.),feed:100.,tag:Tag::new(0,MoveKind::Plunge)});
-    program.push(Step::Rapid {to:Point3::new(5.,5.,-1.),tag:Tag::new(0,MoveKind::Retract)});
-    program.push(Step::Rapid {to:Point3::new(25.,25.,-1.),tag:Tag::new(1,MoveKind::Link)});
+    use cam_cldata::{MoveKind, Point3, Program, Step, Tag};
+    let mut program = Program::new();
+    program.push(Step::Rapid {
+        to: Point3::new(5., 5., 5.),
+        tag: Tag::new(0, MoveKind::Link),
+    });
+    program.push(Step::Linear {
+        to: Point3::new(5., 5., -2.),
+        feed: 100.,
+        tag: Tag::new(0, MoveKind::Plunge),
+    });
+    program.push(Step::Rapid {
+        to: Point3::new(5., 5., -1.),
+        tag: Tag::new(0, MoveKind::Retract),
+    });
+    program.push(Step::Rapid {
+        to: Point3::new(25., 25., -1.),
+        tag: Tag::new(1, MoveKind::Link),
+    });
     let sim = simulate(
         &program,
         STOCK_MIN,

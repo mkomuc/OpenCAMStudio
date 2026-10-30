@@ -17,7 +17,10 @@ fn machine() -> Machine {
         tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
-        envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),
+        envelope: Envelope::new(
+            Point3::new(0.0, 0.0, -50.0),
+            Point3::new(300.0, 180.0, 50.0),
+        ),
         safe_z: 5.0,
         tool_change_pos: None,
     }
@@ -85,7 +88,10 @@ fn linuxcnc_is_canned_but_unwrapped() {
     assert!(l.contains("G83"), "LinuxCNC uses a canned peck cycle:\n{l}");
     assert!(l.contains("G80"), "and cancels it");
     assert!(!l.contains('%'), "LinuxCNC is not %-wrapped");
-    assert!(l.contains("G40 G49"), "RS-274NGC safe-start cancels comp/length");
+    assert!(
+        l.contains("G40 G49"),
+        "RS-274NGC safe-start cancels comp/length"
+    );
 }
 
 #[test]
@@ -102,9 +108,18 @@ fn fanuc_family_wraps_and_uses_canned_cycles() {
 fn okuma_is_its_own_family() {
     let o = nc(PostKind::Okuma);
     // Canned, but through the OSP return-level frame, not the Fanuc G98/G99 one.
-    assert!(o.contains("G83") && o.contains("G80"), "canned peck cycle:\n{o}");
-    assert!(o.contains("G71 Z"), "OSP return-level frame declares the retract:\n{o}");
-    assert!(o.contains("M53"), "and the drill cycle carries the M53 return:\n{o}");
+    assert!(
+        o.contains("G83") && o.contains("G80"),
+        "canned peck cycle:\n{o}"
+    );
+    assert!(
+        o.contains("G71 Z"),
+        "OSP return-level frame declares the retract:\n{o}"
+    );
+    assert!(
+        o.contains("M53"),
+        "and the drill cycle carries the M53 return:\n{o}"
+    );
     // Not a Fanuc parameterisation: unwrapped, M02 end (not M30), no O-number.
     assert!(!o.contains('%'), "Okuma is not %-wrapped:\n{o}");
     assert!(!o.contains("M30"), "Okuma ends with M02, not M30:\n{o}");

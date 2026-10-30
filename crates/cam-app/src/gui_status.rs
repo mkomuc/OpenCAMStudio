@@ -330,7 +330,8 @@ mod tests {
     fn operation_click_scopes_messages_and_setup_click_collects_them() {
         let mut app = app();
         let ids: Vec<_> = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .iter()
             .map(Operation::id)
@@ -401,7 +402,8 @@ mod tests {
     fn recalculating_one_operation_preserves_sibling_messages_and_clears_its_old_error() {
         let mut app = app();
         let ids: Vec<_> = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .iter()
             .map(Operation::id)

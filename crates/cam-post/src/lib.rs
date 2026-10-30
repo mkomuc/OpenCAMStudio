@@ -21,8 +21,8 @@ mod validate;
 mod words;
 mod writer;
 
-pub use fanuc::FanucPost;
 pub use estlcam::{EstlcamOptions, EstlcamPost};
+pub use fanuc::FanucPost;
 pub use grbl::GrblPost;
 pub use okuma::OkumaPost;
 
@@ -38,9 +38,7 @@ use cam_model::{Machine, MachineValidationError};
 /// the control it was built for. The names are therefore **on disk** from schema v11:
 /// renaming a variant is a file-format change and needs a migration step, not just a
 /// find-and-replace.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PostKind {
     /// grbl (Arduino/ESP32 hobby control).
     #[default]
@@ -115,8 +113,9 @@ impl PostKind {
     pub fn datum_label(self, datum: u32, base: WorkOffset) -> Option<String> {
         let steps_up = datum.checked_sub(1)?;
         match self {
-            PostKind::Estlcam => (datum == 1 && base == WorkOffset::G54)
-                .then(|| "Estlcam origin".to_string()),
+            PostKind::Estlcam => {
+                (datum == 1 && base == WorkOffset::G54).then(|| "Estlcam origin".to_string())
+            }
             // OSP work-coordinate select; the emitter states any index it is given, so
             // no ceiling is claimed here that the post would not honour.
             PostKind::Okuma => Some(format!("H{datum}")),
@@ -151,7 +150,8 @@ impl PostKind {
 
     /// Whether the selected post can emit controller radius compensation.
     pub fn supports_cutter_comp(self) -> bool {
-        self.dialect().map_or(self == Self::Okuma, |d| d.cutter_comp)
+        self.dialect()
+            .map_or(self == Self::Okuma, |d| d.cutter_comp)
     }
 
     /// Post `program` in this dialect.
@@ -308,6 +308,9 @@ pub struct PostOptions {
     pub program_name: Option<String>,
     /// Estlcam's two auxiliary outputs, ignored by other posts.
     pub estlcam: EstlcamOptions,
+    /// Tools in the exported setup, used for Estlcam's manual tool-change prompt.
+    /// Other posts ignore this display metadata; motion remains defined by CL-data.
+    pub tools: Vec<cam_model::Tool>,
 }
 
 impl Default for PostOptions {
@@ -317,6 +320,7 @@ impl Default for PostOptions {
             precision: 3,
             program_name: None,
             estlcam: EstlcamOptions::default(),
+            tools: Vec::new(),
         }
     }
 }

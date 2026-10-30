@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct PocketFinishing {
     pub enabled: bool,
-    /// Radial cuts including the final wall, after roughing at each depth.
+    /// Radial cuts including the final wall, after roughing.
     pub count: u32,
     /// Material reserved per finishing cut, mm. Independent of roughing overlap.
     pub stepover: f64,
@@ -14,6 +14,8 @@ pub struct PocketFinishing {
     pub feed: f64,
     /// One extra cut along the final wall to remove tool-deflection marks.
     pub repeat_pass: bool,
+    /// Run all finishing cuts only at the final depth instead of at each level.
+    pub finish_only_final: bool,
     /// Distance cut beyond each loop's closure, mm.
     pub overlap: f64,
 }
@@ -27,6 +29,7 @@ impl Default for PocketFinishing {
             lead_in_out_all: false,
             feed: 0.,
             repeat_pass: false,
+            finish_only_final: false,
             overlap: 0.,
         }
     }

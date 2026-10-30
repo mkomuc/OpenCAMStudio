@@ -44,6 +44,12 @@ order within each tool, and runs each source at every placement. Expand a patter
 in the tree to edit its source operations. Groups can be suppressed, dissolved or
 deleted.
 
+A source operation's selected **Lead-in position** applies only to its first
+executed instance. Later instances use automatic entry placement and the normal
+linking moves. The first instance follows the configured traversal order, including
+**Reverse instance order** and **Keep original**. Lead geometry and selected
+lead-out positions retain their operation settings.
+
 The viewport previews the pattern live on every editor tab. Source toolpaths are
 calculated in the background when the editor opens, even before a full job has
 been generated. Changes to counts, distances, directions, type and original/order

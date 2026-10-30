@@ -60,10 +60,7 @@ impl Strategy for FaceStrategy {
             fail!("operation {}: stepdown must be positive", op.id);
         }
         if !(0.0..1.0).contains(&op.overlap) {
-            fail!(
-                "operation {}: overlap must be a fraction in [0, 1)",
-                op.id
-            );
+            fail!("operation {}: overlap must be a fraction in [0, 1)", op.id);
         }
         if op.depth <= 0.0 {
             diagnostics.push(Diagnostic::warning(format!(
@@ -128,8 +125,7 @@ impl Strategy for FaceStrategy {
                 "operation {}: overshoot {:.3} mm is negative — the cutter edge starts \
                  that far inside the stock edge, so the tool enters over material and \
                  feeds down into it instead of entering clear of the edge",
-                op.id,
-                -op.overshoot
+                op.id, -op.overshoot
             )));
         }
 
@@ -254,11 +250,7 @@ impl Strategy for FaceStrategy {
                     } else {
                         to_world(u_lo, nv)
                     };
-                    let outward = if forward {
-                        tdir
-                    } else {
-                        (-tdir.0, -tdir.1)
-                    };
+                    let outward = if forward { tdir } else { (-tdir.0, -tdir.1) };
                     turnaround(&mut program, end, next_start, outward, z, op.feed, cut);
                 } else {
                     cur = end;
@@ -300,7 +292,15 @@ fn bounds(pts: &[Point]) -> ((f64, f64), (f64, f64)) {
 /// Emit a 180° turnaround arc `s → e` at height `z`, bulging toward `outward` (a
 /// unit direction) so the semicircle swings clear of the part. The centre is the
 /// midpoint of `s`/`e` (they are one pass-spacing apart).
-fn turnaround(prog: &mut Program, s: Point, e: Point, outward: (f64, f64), z: f64, feed: f64, tag: Tag) {
+fn turnaround(
+    prog: &mut Program,
+    s: Point,
+    e: Point,
+    outward: (f64, f64),
+    z: f64,
+    feed: f64,
+    tag: Tag,
+) {
     let centre = Point::new(0.5 * (s.x + e.x), 0.5 * (s.y + e.y));
     let radius = 0.5 * ((e.x - s.x).hypot(e.y - s.y));
     let apex = Point::new(centre.x + outward.0 * radius, centre.y + outward.1 * radius);
@@ -385,13 +385,25 @@ mod tests {
         let r = run(face_op());
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
 
-        let plunges = count(&r, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge));
-        assert_eq!(plunges, 1, "one plunge for the single level, not one per pass");
+        let plunges = count(
+            &r,
+            |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge),
+        );
+        assert_eq!(
+            plunges, 1,
+            "one plunge for the single level, not one per pass"
+        );
 
-        let passes = count(&r, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting));
+        let passes = count(
+            &r,
+            |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting),
+        );
         assert_eq!(passes, 8, "eight parallel passes");
 
-        let arcs = count(&r, |s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::Cutting));
+        let arcs = count(
+            &r,
+            |s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::Cutting),
+        );
         assert_eq!(arcs, 7, "seven turnaround arcs linking the passes");
 
         // The whole cut sits on the faced plane Z=0.
@@ -444,7 +456,11 @@ mod tests {
             Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(to.x),
             _ => None,
         });
-        assert_eq!(first_pass_end_x, Some(67.0), "far end = edge + radius + overshoot");
+        assert_eq!(
+            first_pass_end_x,
+            Some(67.0),
+            "far end = edge + radius + overshoot"
+        );
     }
 
     fn run_stock(op: FaceOp, stock: ([f64; 2], [f64; 2])) -> StrategyResult {
@@ -527,9 +543,15 @@ mod tests {
         let mut op = face_op();
         op.overshoot = os;
         let x = first_plunge_x(&run_stock(op, ([-5.0, -5.0], [65.0, 45.0])));
-        assert!((x - (-5.0 - 5.0 - os)).abs() < 1e-6, "plunge centre -5-r-overshoot: {x}");
+        assert!(
+            (x - (-5.0 - 5.0 - os)).abs() < 1e-6,
+            "plunge centre -5-r-overshoot: {x}"
+        );
         // Edge (= centre + r) sits `overshoot` clear of the stock edge.
-        assert!((x + 5.0 - (-5.0 - os)).abs() < 1e-6, "edge clears stock by overshoot");
+        assert!(
+            (x + 5.0 - (-5.0 - os)).abs() < 1e-6,
+            "edge clears stock by overshoot"
+        );
     }
 
     #[test]
@@ -538,7 +560,11 @@ mod tests {
         op.overshoot = 0.0;
         let r = run_stock(op, ([-5.0, -5.0], [65.0, 45.0]));
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
-        assert!(r.diagnostics.is_empty(), "tangent is not a warning: {:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.is_empty(),
+            "tangent is not a warning: {:?}",
+            r.diagnostics
+        );
         // Edge at the stock edge: centre = -5 - r.
         assert!((first_plunge_x(&r) - (-10.0)).abs() < 1e-6);
     }
@@ -548,7 +574,11 @@ mod tests {
         let mut op = face_op();
         op.overshoot = -2.0;
         let r = run_stock(op, ([-5.0, -5.0], [65.0, 45.0]));
-        assert!(!r.has_errors(), "a warning, not an error: {:?}", r.diagnostics);
+        assert!(
+            !r.has_errors(),
+            "a warning, not an error: {:?}",
+            r.diagnostics
+        );
         // Checked for substance rather than a phrase: the operator needs to be told
         // *how far* inside the edge the cutter starts, and that the whole entry is over
         // material — not merely that a number was negative.
@@ -595,9 +625,15 @@ mod tests {
         op.stepdown = 1.5;
         let r = run(op);
         assert!(!r.has_errors(), "{:?}", r.diagnostics);
-        let plunges = count(&r, |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge));
+        let plunges = count(
+            &r,
+            |s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::Plunge),
+        );
         assert_eq!(plunges, 2, "one plunge per level");
-        let retracts = count(&r, |s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract));
+        let retracts = count(
+            &r,
+            |s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract),
+        );
         assert_eq!(retracts, 1, "a single retract at the very end");
     }
 
@@ -625,12 +661,12 @@ mod tests {
                     let from = pos.expect("an arc needs a prior position");
                     let rs = (from.x - center.x).hypot(from.y - center.y);
                     let re = (end.x - center.x).hypot(end.y - center.y);
-                    assert!((rs - re).abs() < 1e-6, "arc centre equidistant ({rs} vs {re})");
-                    assert!((rs - 2.5).abs() < 1e-6, "turnaround radius is p/2 = 2.5");
                     assert!(
-                        (from.z - end.z).abs() < 1e-9,
-                        "turnaround stays at depth"
+                        (rs - re).abs() < 1e-6,
+                        "arc centre equidistant ({rs} vs {re})"
                     );
+                    assert!((rs - 2.5).abs() < 1e-6, "turnaround radius is p/2 = 2.5");
+                    assert!((from.z - end.z).abs() < 1e-9, "turnaround stays at depth");
                     pos = Some(*end);
                 }
                 _ => {}

@@ -477,9 +477,14 @@ pub(super) struct WorkpieceOverlay {
 impl WorkpieceOverlay {
     fn axis_at(&self, bounds: iced::Rectangle, cursor: iced::mouse::Cursor) -> Option<usize> {
         if !self.interactive
-            || cursor
-                .position()
-                .is_some_and(|point| browser_region_contains(point, bounds, self.browser_overlay_width, self.browser_overlay_height))
+            || cursor.position().is_some_and(|point| {
+                browser_region_contains(
+                    point,
+                    bounds,
+                    self.browser_overlay_width,
+                    self.browser_overlay_height,
+                )
+            })
         {
             return None;
         }
@@ -1055,7 +1060,7 @@ mod tests {
                     scale: 1.,
                     interactive: true,
                     browser_overlay_width: 0.,
-            browser_overlay_height: f32::INFINITY,
+                    browser_overlay_height: f32::INFINITY,
                 };
                 let (origin, tips) = overlay.projected(size).unwrap();
                 let expected = picking_view::project(

@@ -607,6 +607,7 @@ impl ProfileStrategy {
                 comp,
                 air_sign,
                 layouts[index].as_ref(),
+                &mut diagnostics,
                 cancel,
             );
         }
@@ -868,6 +869,7 @@ fn emit_loop(
     comp: Option<(CutterComp, f64)>,
     air_sign: f64,
     tabs: Option<&TabLayout>,
+    diagnostics: &mut Vec<Diagnostic>,
     cancel: &CancelToken,
 ) {
     if pts.len() < 3 {
@@ -884,7 +886,18 @@ fn emit_loop(
         || op.end.is_some()
         || op.plunge != Plunge::Straight
     {
-        emit_loop_rich(prog, pts, op, h, levels, comp, air_sign, tabs, cancel);
+        emit_loop_rich(
+            prog,
+            pts,
+            op,
+            h,
+            levels,
+            comp,
+            air_sign,
+            tabs,
+            diagnostics,
+            cancel,
+        );
         return;
     }
 
@@ -975,6 +988,48 @@ fn control_air_point(point: Point, normal: (f64, f64), comp: Option<(CutterComp,
     )
 }
 
+/// Build the legal cutter-centre region for a profile entry helix. The toolpath
+/// loop bounds the protected side of the cut. For an outside profile, represent
+/// the unbounded exterior as a large rectangle with that loop removed; its outer
+/// edge is placed far enough away that it cannot constrain a valid entry.
+fn profile_plunge_guard(pts: &[Point], air_sign: f64, plunge: Plunge, entry: Point) -> Option<Vec<Polygon>> {
+    let Plunge::Helix { radius, .. } = plunge else {
+        return Some(Vec::new());
+    };
+    if pts.len() < 3 || !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let contour = Contour::new(pts.to_vec());
+    if air_sign < 0.0 {
+        return Polygon::new(contour).ok().map(|region| vec![region]);
+    }
+    if air_sign <= 0.0 {
+        return None;
+    }
+
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for p in pts {
+        lo[0] = lo[0].min(p.x);
+        lo[1] = lo[1].min(p.y);
+        hi[0] = hi[0].max(p.x);
+        hi[1] = hi[1].max(p.y);
+    }
+    lo[0] = lo[0].min(entry.x);
+    lo[1] = lo[1].min(entry.y);
+    hi[0] = hi[0].max(entry.x);
+    hi[1] = hi[1].max(entry.y);
+    let margin = radius * 3.0 + 1.0;
+    let outer = Contour::new(vec![
+        Point::new(lo[0] - margin, lo[1] - margin),
+        Point::new(hi[0] + margin, lo[1] - margin),
+        Point::new(hi[0] + margin, hi[1] + margin),
+        Point::new(lo[0] - margin, hi[1] + margin),
+    ]);
+    Polygon::with_holes(outer, vec![contour])
+        .ok()
+        .map(|region| vec![region])
+}
+
 /// The rich profile emission (leads and/or a non-straight plunge). Per level: rapid
 /// to the entry footprint (off the contour when there is a lead-in), rapid down
 /// through the already-cut air to the previous level, enter Z per the plunge
@@ -989,9 +1044,14 @@ fn emit_loop_rich(
     comp: Option<(CutterComp, f64)>,
     air_sign: f64,
     tabs: Option<&TabLayout>,
+    diagnostics: &mut Vec<Diagnostic>,
     cancel: &CancelToken,
 ) {
-    let end = op.end.map(|point| tabs.map_or(point, |layout| layout.eligible_exit(pts, point, lead_extent(op.lead_out))));
+    let end = op.end.map(|point| {
+        tabs.map_or(point, |layout| {
+            layout.eligible_exit(pts, point, lead_extent(op.lead_out))
+        })
+    });
     let start = pts[0];
     let tan_in = start_tangent(pts); // leaving start, into the cut
                                      // The cleared/air side the lead eases in from. For an outside profile that is
@@ -1034,11 +1094,15 @@ fn emit_loop_rich(
     // empty for outside profiles, so this leaves them untouched).
     let lead_in = crate::leads::guard_lead(&guard, start, tan_in, out, op.lead_in, true);
     let lead_out = crate::leads::guard_lead(&guard, exit_on, tan_out, out_exit, op.lead_out, false);
+    warn_omitted_lead("lead-in", op.lead_in, lead_in, diagnostics);
     let entry = control_air_point(
         crate::leads::lead_start_point(start, tan_in, out, lead_in),
         out,
         comp,
     );
+    // Bound the exterior around both the contour and lead entry so the artificial
+    // outer edge cannot reject a helix that is safely outside the part.
+    let plunge_guard = profile_plunge_guard(pts, air_sign, op.plunge, entry);
     let exit = control_air_point(
         crate::leads::lead_end_point(exit_on, tan_out, out_exit, lead_out),
         out_exit,
@@ -1095,7 +1159,11 @@ fn emit_loop_rich(
         // A full perimeter from there, so the ramped stretch is re-machined, plus the
         // operator's overlap.
         let (loop_pts, exit_on, tan_out) = if ramps {
-            let walked = walk_loop(pts, cut_from, perimeter + exit_overlap(pts, cut_from, op.lead_overlap, end));
+            let walked = walk_loop(
+                pts,
+                cut_from,
+                perimeter + exit_overlap(pts, cut_from, op.lead_overlap, end),
+            );
             let last = walked[walked.len() - 1];
             let prev = walked[walked.len().saturating_sub(2)];
             (walked, last, unit(last.x - prev.x, last.y - prev.y))
@@ -1108,6 +1176,7 @@ fn emit_loop_rich(
         };
         let lead_out =
             crate::leads::guard_lead(&guard, exit_on, tan_out, out_exit, op.lead_out, false);
+        warn_omitted_lead("lead-out", op.lead_out, lead_out, diagnostics);
         let exit = control_air_point(
             crate::leads::lead_end_point(exit_on, tan_out, out_exit, lead_out),
             out_exit,
@@ -1161,7 +1230,9 @@ fn emit_loop_rich(
                 out,
                 prev_z,
                 z,
-                op.plunge,
+                plunge_guard.as_ref().map_or(Plunge::Straight, |guard| {
+                    crate::leads::guard_plunge(guard, entry, out, op.plunge)
+                }),
                 op.plunge_feed,
                 op.entry_feeds.ramp(op.feed),
                 plunge_tag,
@@ -1234,18 +1305,102 @@ fn profile_loop_points(points: &[Point], op: &ProfileOp, spindle: SpindleDir) ->
     if is_ccw(&points) != want_ccw && points.len() > 1 {
         points[1..].reverse();
     }
-    rotate_to_start(&points, op.start)
+    let points = rotate_to_start(&points, op.start);
+    if op.start.is_none()
+        && op.side == Side::Inside
+        && (op.lead_in != Lead::None || op.lead_out != Lead::None)
+    {
+        automatic_lead_seam(points, op)
+    } else {
+        points
+    }
+}
+
+/// A corner often leaves no room behind the entry tangent. Before dropping an
+/// automatic inside lead, try the middle of the longest edges in the same legal
+/// cutter-centre region used by the emitter. Explicit start preferences stay put.
+fn automatic_lead_seam(points: Vec<Point>, op: &ProfileOp) -> Vec<Point> {
+    let Ok(region) = Polygon::new(Contour::new(points.clone())) else {
+        return points;
+    };
+    let guard = [region];
+    let score = |path: &[Point]| {
+        let tangent = start_tangent(path);
+        let normal = outward_normal(path);
+        let entry_fits = crate::leads::guard_lead(
+            &guard,
+            path[0],
+            tangent,
+            (-normal.0, -normal.1),
+            op.lead_in,
+            true,
+        ) == op.lead_in;
+        let (_, exit, tangent) = crate::emit::loop_with_exit(path, op.lead_overlap, op.end);
+        let normal = outward_normal_at(tangent, is_ccw(path));
+        let exit_fits = crate::leads::guard_lead(
+            &guard,
+            exit,
+            tangent,
+            (-normal.0, -normal.1),
+            op.lead_out,
+            false,
+        ) == op.lead_out;
+        // Prefer preserving entry if both requested leads cannot fit together.
+        2 * usize::from(entry_fits) + usize::from(exit_fits)
+    };
+    let mut best_score = score(&points);
+    if best_score == 3 {
+        return points;
+    }
+    let mut edges: Vec<_> = points.iter().zip(points.iter().cycle().skip(1)).collect();
+    edges.sort_by(|(a, b), (c, d)| c.distance_sq(**d).total_cmp(&a.distance_sq(**b)));
+    let mut best = points.clone();
+    // Bound containment work for finely tessellated CAD contours.
+    for (a, b) in edges.into_iter().take(32) {
+        let candidate = rotate_to_start(&points, Some([(a.x + b.x) * 0.5, (a.y + b.y) * 0.5]));
+        let candidate_score = score(&candidate);
+        if candidate_score > best_score {
+            best = candidate;
+            best_score = candidate_score;
+            if best_score == 3 {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn warn_omitted_lead(name: &str, requested: Lead, actual: Lead, diagnostics: &mut Vec<Diagnostic>) {
+    if requested != actual {
+        let warning = Diagnostic::warning(format!(
+            "Profile {name} does not fit inside the contour and was omitted; choose another position or reduce its size"
+        ));
+        if !diagnostics.contains(&warning) {
+            diagnostics.push(warning);
+        }
+    }
 }
 
 /// Additional travel after a complete contour, ending at the requested exit.
 /// Minimum overlap is preserved by adding whole laps when necessary.
-pub(crate) fn exit_overlap(points: &[Point], from: f64, minimum: f64, end: Option<[f64; 2]>) -> f64 {
-    let Some(end) = end.filter(|p| p.iter().all(|v| v.is_finite())) else { return minimum; };
+pub(crate) fn exit_overlap(
+    points: &[Point],
+    from: f64,
+    minimum: f64,
+    end: Option<[f64; 2]>,
+) -> f64 {
+    let Some(end) = end.filter(|p| p.iter().all(|v| v.is_finite())) else {
+        return minimum;
+    };
     let perimeter = loop_perimeter(points);
-    if perimeter <= 1e-12 { return minimum; }
+    if perimeter <= 1e-12 {
+        return minimum;
+    }
     let minimum = minimum.min(perimeter);
     let mut extra = (nearest_on_loop(points, end).0 - from).rem_euclid(perimeter);
-    if extra + 1e-9 < minimum { extra += ((minimum - extra) / perimeter).ceil() * perimeter; }
+    if extra + 1e-9 < minimum {
+        extra += ((minimum - extra) / perimeter).ceil() * perimeter;
+    }
     extra
 }
 
@@ -1464,13 +1619,25 @@ impl TabLayout {
         let desired = nearest_on_loop(pts, point).0;
         let mut best = (0.0, f64::INFINITY);
         for index in 0..=self.spans.len() {
-            let low = if index == 0 { 0.0 } else { self.spans[index - 1].1 + room + 1e-6 };
-            let high = if index == self.spans.len() { self.perimeter } else { self.spans[index].0 - room - 1e-6 };
-            if low > high { continue; }
+            let low = if index == 0 {
+                0.0
+            } else {
+                self.spans[index - 1].1 + room + 1e-6
+            };
+            let high = if index == self.spans.len() {
+                self.perimeter
+            } else {
+                self.spans[index].0 - room - 1e-6
+            };
+            if low > high {
+                continue;
+            }
             let at = desired.clamp(low, high);
             let delta = (desired - at).abs();
             let distance = delta.min(self.perimeter - delta);
-            if distance < best.1 { best = (at, distance); }
+            if distance < best.1 {
+                best = (at, distance);
+            }
         }
         let at = walk_loop(pts, best.0, 0.0)[0];
         [at.x, at.y]
@@ -2173,23 +2340,41 @@ mod tests {
                 };
                 if let Some(p) = previous {
                     let p: Point3 = p;
-                    if tag.kind == MoveKind::Cutting { cut_length += (point.x - p.x).hypot(point.y - p.y); }
-                    if tag.kind == MoveKind::LeadOut { lead_out_at = Some(p); }
+                    if tag.kind == MoveKind::Cutting {
+                        cut_length += (point.x - p.x).hypot(point.y - p.y);
+                    }
+                    if tag.kind == MoveKind::LeadOut {
+                        lead_out_at = Some(p);
+                    }
                 }
                 previous = Some(point);
             }
             let exit = lead_out_at.expect("lead-out generated");
-            assert!((exit.x - 37.0).hypot(exit.y - 20.0) < 0.01, "{plunge:?}: {exit:?}");
-            assert!(cut_length >= 4.0 * 34.0 - 0.05, "complete contour before exit: {cut_length}");
+            assert!(
+                (exit.x - 37.0).hypot(exit.y - 20.0) < 0.01,
+                "{plunge:?}: {exit:?}"
+            );
+            assert!(
+                cut_length >= 4.0 * 34.0 - 0.05,
+                "complete contour before exit: {cut_length}"
+            );
         }
     }
 
     #[test]
     fn exit_preserves_minimum_overlap_even_when_it_requires_another_lap() {
-        let pts = vec![Point::new(0., 0.), Point::new(10., 0.), Point::new(10., 10.), Point::new(0., 10.)];
+        let pts = vec![
+            Point::new(0., 0.),
+            Point::new(10., 0.),
+            Point::new(10., 10.),
+            Point::new(0., 10.),
+        ];
         let (path, exit, _) = crate::emit::loop_with_exit(&pts, 5.0, Some([2.0, 0.0]));
         assert_eq!(exit, Point::new(2.0, 0.0));
-        let length: f64 = path.windows(2).map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y)).sum();
+        let length: f64 = path
+            .windows(2)
+            .map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y))
+            .sum();
         assert!((length - 82.0).abs() < 1e-9);
     }
 
@@ -2855,7 +3040,11 @@ mod tests {
                     let p = [a.x + t * (point.x - a.x), a.y + t * (point.y - a.y)];
                     let z = a.z + t * (point.z - a.z);
                     let at = nearest_on_loop(&points, p).0;
-                    if layout.spans.iter().any(|(lo, hi)| at > lo + 1e-6 && at < hi - 1e-6) {
+                    if layout
+                        .spans
+                        .iter()
+                        .any(|(lo, hi)| at > lo + 1e-6 && at < hi - 1e-6)
+                    {
                         assert!(z >= layout.top - 1e-6, "tab cut at {p:?} Z{z}");
                     }
                 }

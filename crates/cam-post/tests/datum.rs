@@ -30,7 +30,10 @@ fn machine() -> Machine {
         tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
-        envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),
+        envelope: Envelope::new(
+            Point3::new(0.0, 0.0, -50.0),
+            Point3::new(300.0, 180.0, 50.0),
+        ),
         safe_z: 5.0,
         tool_change_pos: None,
     }
@@ -134,8 +137,14 @@ fn a_datum_past_g59_is_refused_rather_than_wrapped() {
     let PostError::Unsupported(msg) = err else {
         panic!("expected Unsupported, got {err:?}");
     };
-    assert!(msg.contains("G54-G59"), "the message names the word space: {msg}");
-    assert!(msg.contains("Fanuc"), "and the control it applies to: {msg}");
+    assert!(
+        msg.contains("G54-G59"),
+        "the message names the word space: {msg}"
+    );
+    assert!(
+        msg.contains("Fanuc"),
+        "and the control it applies to: {msg}"
+    );
 }
 
 #[test]
@@ -152,7 +161,10 @@ fn a_raised_base_lowers_the_ceiling() {
     let PostError::Unsupported(msg) = err else {
         panic!("expected Unsupported, got {err:?}");
     };
-    assert!(msg.contains("G58"), "the message names the base in force: {msg}");
+    assert!(
+        msg.contains("G58"),
+        "the message names the base in force: {msg}"
+    );
 }
 
 #[test]
@@ -164,7 +176,10 @@ fn datum_zero_is_refused() {
     let PostError::Unsupported(msg) = err else {
         panic!("expected Unsupported, got {err:?}");
     };
-    assert!(msg.contains("datum 0"), "the message names the bad index: {msg}");
+    assert!(
+        msg.contains("datum 0"),
+        "the message names the bad index: {msg}"
+    );
 }
 
 #[test]
@@ -217,7 +232,11 @@ fn the_label_is_the_word_the_post_actually_emits() {
                         "{kind:?} datum {datum} from {}: label {l:?} disagrees with the \
                          post ({})",
                         base.code(),
-                        if p.is_ok() { "which posted" } else { "which refused" }
+                        if p.is_ok() {
+                            "which posted"
+                        } else {
+                            "which refused"
+                        }
                     ),
                 }
             }
@@ -238,7 +257,10 @@ fn okuma_labels_its_own_number_space_and_ignores_the_base() {
     let nc = PostKind::Okuma
         .post(&two_datum_program(7), &machine(), &PostOptions::default())
         .expect("OSP states any index");
-    assert!(nc.contains("G15 H7"), "the label's word is in the file:\n{nc}");
+    assert!(
+        nc.contains("G15 H7"),
+        "the label's word is in the file:\n{nc}"
+    );
 }
 
 #[test]

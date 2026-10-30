@@ -8,7 +8,11 @@ pub(crate) fn validate_stock_to_leave(
     operation: &Operation,
     stock: cam_model::StockToLeave,
 ) -> Result<(), String> {
-    if !stock.radial.is_finite() || !stock.axial.is_finite() || stock.radial < 0.0 || stock.axial < 0.0 {
+    if !stock.radial.is_finite()
+        || !stock.axial.is_finite()
+        || stock.radial < 0.0
+        || stock.axial < 0.0
+    {
         return Err("Stock to Leave values must be finite and nonnegative.".into());
     }
     if !stock.enabled {
@@ -150,13 +154,20 @@ impl AppController {
         let mut next_pattern_id = self.next_pattern_id();
         for pattern in &mut copy.patterns {
             pattern.id = next_pattern_id;
-            next_pattern_id = next_pattern_id.checked_add(1).ok_or("Pattern ID range exhausted")?;
+            next_pattern_id = next_pattern_id
+                .checked_add(1)
+                .ok_or("Pattern ID range exhausted")?;
             for member in &mut pattern.members {
-                *member = *operation_ids.get(member).ok_or("Pattern refers to a missing operation")?;
+                *member = *operation_ids
+                    .get(member)
+                    .ok_or("Pattern refers to a missing operation")?;
             }
         }
         let new_id = copy.id;
-        let excluded: Vec<u32> = self.document().excluded_operations.iter()
+        let excluded: Vec<u32> = self
+            .document()
+            .excluded_operations
+            .iter()
             .filter_map(|old| operation_ids.get(old).copied())
             .collect();
         let disabled_origins = self.document().disabled_origins.get(&id).cloned();
@@ -249,7 +260,13 @@ impl AppController {
         if from == at {
             return Ok(());
         }
-        let first = if at == 0 { from } else if from == 0 { 1 } else { 0 };
+        let first = if at == 0 {
+            from
+        } else if from == 0 {
+            1
+        } else {
+            0
+        };
         if self.setups()[first].stock == Stock::PreviousSetup {
             return Err("The first setup needs box stock; it has no previous setup".into());
         }
@@ -289,25 +306,48 @@ impl AppController {
             None => target.operations.len(),
         };
         let source_pattern = source.patterns.iter().find(|p| p.members.contains(&id));
-        let target_pattern = before.and_then(|anchor| target.patterns.iter().find(|p| p.members.contains(&anchor)));
+        let target_pattern =
+            before.and_then(|anchor| target.patterns.iter().find(|p| p.members.contains(&anchor)));
         if let Some(pattern) = source_pattern {
             if source.id != destination || target_pattern.map(|p| p.id) != Some(pattern.id) {
                 return Err("Pattern members move within their group; dissolve the pattern before moving a source elsewhere".into());
             }
-            if before == Some(id) { return Ok(()); }
+            if before == Some(id) {
+                return Ok(());
+            }
             let mut reordered = pattern.members.clone();
             reordered.retain(|member| *member != id);
-            let insert_at = before.and_then(|anchor| reordered.iter().position(|member| *member == anchor)).unwrap_or(reordered.len());
+            let insert_at = before
+                .and_then(|anchor| reordered.iter().position(|member| *member == anchor))
+                .unwrap_or(reordered.len());
             reordered.insert(insert_at, id);
-            let first = target.operations.iter().position(|op| op.id() == pattern.members[0]).unwrap();
+            let first = target
+                .operations
+                .iter()
+                .position(|op| op.id() == pattern.members[0])
+                .unwrap();
             let pattern_id = pattern.id;
             let selected: BTreeSet<u32> = pattern.members.iter().copied().collect();
-            let by_id: std::collections::HashMap<u32, Operation> = target.operations.iter().filter(|op| selected.contains(&op.id())).cloned().map(|op| (op.id(), op)).collect();
+            let by_id: std::collections::HashMap<u32, Operation> = target
+                .operations
+                .iter()
+                .filter(|op| selected.contains(&op.id()))
+                .cloned()
+                .map(|op| (op.id(), op))
+                .collect();
             self.edit_document(move |doc| {
                 let setup = doc.setups.iter_mut().find(|s| s.id == destination).unwrap();
                 setup.operations.drain(first..first + reordered.len());
-                setup.operations.splice(first..first, reordered.iter().filter_map(|id| by_id.get(id).cloned()));
-                setup.patterns.iter_mut().find(|p| p.id == pattern_id).unwrap().members = reordered;
+                setup.operations.splice(
+                    first..first,
+                    reordered.iter().filter_map(|id| by_id.get(id).cloned()),
+                );
+                setup
+                    .patterns
+                    .iter_mut()
+                    .find(|p| p.id == pattern_id)
+                    .unwrap()
+                    .members = reordered;
             });
             self.invalidate();
             return Ok(());
@@ -354,37 +394,91 @@ impl AppController {
 
     /// Reorder a tree source and change pattern membership in one undo step.
     /// A pattern header appends; a member row inserts before its anchor.
-    pub fn move_operation_in_tree(&mut self, id: u32, destination: u64, before: Option<u32>, pattern: Option<u64>) -> Result<(), String> {
-        let source = self.setups().iter().find(|s| s.operations.iter().any(|op| op.id() == id)).ok_or("Missing operation")?;
+    pub fn move_operation_in_tree(
+        &mut self,
+        id: u32,
+        destination: u64,
+        before: Option<u32>,
+        pattern: Option<u64>,
+    ) -> Result<(), String> {
+        let source = self
+            .setups()
+            .iter()
+            .find(|s| s.operations.iter().any(|op| op.id() == id))
+            .ok_or("Missing operation")?;
         if source.id != destination {
-            if pattern.is_some() { return Err("Move the operation to the destination setup before adding it to a pattern".into()); }
+            if pattern.is_some() {
+                return Err(
+                    "Move the operation to the destination setup before adding it to a pattern"
+                        .into(),
+                );
+            }
             return self.reorder_operation_to(id, destination, before);
         }
         let original = source.clone();
         let mut setup = original.clone();
-        let from = setup.operations.iter().position(|op| op.id() == id).unwrap();
+        let from = setup
+            .operations
+            .iter()
+            .position(|op| op.id() == id)
+            .unwrap();
         if let Some(anchor) = before {
-            let anchor = setup.operations.iter().find(|op| op.id() == anchor).ok_or("Missing drop target")?;
+            let anchor = setup
+                .operations
+                .iter()
+                .find(|op| op.id() == anchor)
+                .ok_or("Missing drop target")?;
             if anchor.work_offset() != setup.operations[from].work_offset() {
                 return Err("Operations execute in work-origin groups; use Move to Origin before reordering across groups".into());
             }
         }
         if let Some(pattern_id) = pattern {
-            let target = setup.patterns.iter().find(|p| p.id == pattern_id).ok_or("Missing pattern")?;
-            if target.members.iter().filter(|member| **member != id).any(|member| setup.operations.iter().any(|op| op.id() == *member && op.work_offset() != setup.operations[from].work_offset())) {
+            let target = setup
+                .patterns
+                .iter()
+                .find(|p| p.id == pattern_id)
+                .ok_or("Missing pattern")?;
+            if target
+                .members
+                .iter()
+                .filter(|member| **member != id)
+                .any(|member| {
+                    setup.operations.iter().any(|op| {
+                        op.id() == *member
+                            && op.work_offset() != setup.operations[from].work_offset()
+                    })
+                })
+            {
                 return Err("Pattern sources must share one work datum".into());
             }
         }
-        if before == Some(id) { return Ok(()); }
+        if before == Some(id) {
+            return Ok(());
+        }
         let operation = setup.operations.remove(from);
-        for group in &mut setup.patterns { group.members.retain(|member| *member != id); }
-        let mut insertion = before.and_then(|anchor| setup.operations.iter().position(|op| op.id() == anchor)).unwrap_or(setup.operations.len());
+        for group in &mut setup.patterns {
+            group.members.retain(|member| *member != id);
+        }
+        let mut insertion = before
+            .and_then(|anchor| setup.operations.iter().position(|op| op.id() == anchor))
+            .unwrap_or(setup.operations.len());
         if let Some(pattern_id) = pattern {
-            let group = setup.patterns.iter_mut().find(|p| p.id == pattern_id).unwrap();
-            let member_at = before.and_then(|anchor| group.members.iter().position(|member| *member == anchor)).unwrap_or(group.members.len());
+            let group = setup
+                .patterns
+                .iter_mut()
+                .find(|p| p.id == pattern_id)
+                .unwrap();
+            let member_at = before
+                .and_then(|anchor| group.members.iter().position(|member| *member == anchor))
+                .unwrap_or(group.members.len());
             if member_at == group.members.len() {
                 if let Some(last) = group.members.last() {
-                    insertion = setup.operations.iter().position(|op| op.id() == *last).unwrap() + 1;
+                    insertion = setup
+                        .operations
+                        .iter()
+                        .position(|op| op.id() == *last)
+                        .unwrap()
+                        + 1;
                 }
             }
             group.members.insert(member_at, id);
@@ -393,13 +487,27 @@ impl AppController {
         setup.operations.insert(insertion, operation);
         // Preserve each group's contiguous execution block when extracting a source.
         for group in &setup.patterns {
-            let first = setup.operations.iter().position(|op| group.members.contains(&op.id())).unwrap();
-            let members: Vec<_> = group.members.iter().filter_map(|id| setup.operations.iter().find(|op| op.id() == *id).cloned()).collect();
-            setup.operations.retain(|op| !group.members.contains(&op.id()));
+            let first = setup
+                .operations
+                .iter()
+                .position(|op| group.members.contains(&op.id()))
+                .unwrap();
+            let members: Vec<_> = group
+                .members
+                .iter()
+                .filter_map(|id| setup.operations.iter().find(|op| op.id() == *id).cloned())
+                .collect();
+            setup
+                .operations
+                .retain(|op| !group.members.contains(&op.id()));
             setup.operations.splice(first..first, members);
         }
-        if setup == original { return Ok(()); }
-        self.edit_document(move |doc| *doc.setups.iter_mut().find(|s| s.id == destination).unwrap() = setup);
+        if setup == original {
+            return Ok(());
+        }
+        self.edit_document(move |doc| {
+            *doc.setups.iter_mut().find(|s| s.id == destination).unwrap() = setup
+        });
         self.invalidate();
         Ok(())
     }
@@ -427,8 +535,15 @@ impl AppController {
             .iter()
             .find(|s| s.operations.iter().any(|op| op.id() == id))
             .ok_or("Missing operation")?;
-        if source.patterns.iter().any(|pattern| pattern.members.contains(&id)) {
-            return Err("Dissolve the pattern before transferring or copying one of its source operations".into());
+        if source
+            .patterns
+            .iter()
+            .any(|pattern| pattern.members.contains(&id))
+        {
+            return Err(
+                "Dissolve the pattern before transferring or copying one of its source operations"
+                    .into(),
+            );
         }
         let target = self
             .setups()
@@ -633,11 +748,19 @@ impl AppController {
         let mut document =
             self.prepare_operation_settings(operation, overrides, tools, geometry, heights)?;
         if stock_to_leave.enabled {
-            let operation = document.setup().operations.iter().find(|op| op.id() == id).unwrap();
+            let operation = document
+                .setup()
+                .operations
+                .iter()
+                .find(|op| op.id() == id)
+                .unwrap();
             validate_stock_to_leave(&document, operation, stock_to_leave)?;
         }
         if stock_to_leave.enabled {
-            document.setup_mut().stock_to_leave.insert(id, stock_to_leave);
+            document
+                .setup_mut()
+                .stock_to_leave
+                .insert(id, stock_to_leave);
         } else {
             document.setup_mut().stock_to_leave.remove(&id);
         }
@@ -694,13 +817,26 @@ impl AppController {
             self.prepare_operation_settings(operation, overrides, tools, geometry, None)?;
         settings.resolve(
             &document,
-            document.setup().operations.iter().find(|o| o.id() == id).unwrap(),
+            document
+                .setup()
+                .operations
+                .iter()
+                .find(|o| o.id() == id)
+                .unwrap(),
         )?;
         document.setup_mut().height_settings.insert(id, settings);
         if stock_to_leave.enabled {
-            let operation = document.setup().operations.iter().find(|op| op.id() == id).unwrap();
+            let operation = document
+                .setup()
+                .operations
+                .iter()
+                .find(|op| op.id() == id)
+                .unwrap();
             validate_stock_to_leave(&document, operation, stock_to_leave)?;
-            document.setup_mut().stock_to_leave.insert(id, stock_to_leave);
+            document
+                .setup_mut()
+                .stock_to_leave
+                .insert(id, stock_to_leave);
         } else {
             document.setup_mut().stock_to_leave.remove(&id);
         }
@@ -795,8 +931,12 @@ impl AppController {
                     .get(&id)
                     .is_some_and(|b| b.selected != *selected)
                 {
-                    let binding =
-                        cam_geometry3d::resolve_selection_advisory(&geometry, selected, recipe.clone(), 0.)?;
+                    let binding = cam_geometry3d::resolve_selection_advisory(
+                        &geometry,
+                        selected,
+                        recipe.clone(),
+                        0.,
+                    )?;
                     let input = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
                     if let Operation::Profile(profile) = &mut operation {
                         let previous: Vec<_> = profile.contours().collect();
@@ -1160,7 +1300,9 @@ impl AppController {
 
     pub fn setup_geometry_state(&self) -> Result<cam_model::GeometryState, String> {
         if self.setups().is_empty() {
-            return Err("Create a setup and select its models before creating an operation.".into());
+            return Err(
+                "Create a setup and select its models before creating an operation.".into(),
+            );
         }
         self.validate_setup_frame(self.setup())?;
         crate::cad_operations::geometry_for_setup(self.document())

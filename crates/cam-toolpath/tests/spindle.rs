@@ -53,12 +53,12 @@ fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
 
 fn doc(ops: Vec<Operation>) -> Document {
     Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "spindle".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -89,7 +89,8 @@ fn doc(ops: Vec<Operation>) -> Document {
 
 /// The RPMs of every `Step::Spindle` the job emits, in order.
 fn spindle_rpms(doc: &Document) -> Vec<f64> {
-    let cam_toolpath::JobResult { program, .. } = build_job(doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } =
+        build_job(doc, 1000.0, SpindleDir::Cw, None, 50.0, &CancelToken::new());
     program
         .steps()
         .iter()
@@ -136,9 +137,17 @@ fn an_unset_rpm_falls_back_to_the_job_default() {
 #[test]
 fn ramp_spindle_restoration_keeps_the_next_operations_modal_speed_correct() {
     let mut first = profile(0, rect(10., 10., 70., 50.), Side::Outside, 4000.);
-    let Operation::Profile(p) = &mut first else { unreachable!() };
-    p.plunge = Plunge::Helix { radius: 1., pitch: 1. };
+    let Operation::Profile(p) = &mut first else {
+        unreachable!()
+    };
+    p.plunge = Plunge::Helix {
+        radius: 1.,
+        pitch: 1.,
+    };
     p.passes.ramp_rpm = 2000.;
-    let d = doc(vec![first, profile(1, rect(35., 25., 45., 35.), Side::Inside, 4000.)]);
+    let d = doc(vec![
+        first,
+        profile(1, rect(35., 25., 45., 35.), Side::Inside, 4000.),
+    ]);
     assert_eq!(spindle_rpms(&d), vec![4000., 2000., 4000., 2000., 4000.]);
 }

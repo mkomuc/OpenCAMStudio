@@ -52,7 +52,11 @@ fn seg_dist_sq(p: Point, a: Point, b: Point) -> f64 {
     let (vx, vy) = (b.x - a.x, b.y - a.y);
     let (wx, wy) = (p.x - a.x, p.y - a.y);
     let vv = vx * vx + vy * vy;
-    let t = if vv < 1e-18 { 0.0 } else { ((wx * vx + wy * vy) / vv).clamp(0.0, 1.0) };
+    let t = if vv < 1e-18 {
+        0.0
+    } else {
+        ((wx * vx + wy * vy) / vv).clamp(0.0, 1.0)
+    };
     let (cx, cy) = (a.x + t * vx, a.y + t * vy);
     (p.x - cx).powi(2) + (p.y - cy).powi(2)
 }
@@ -85,7 +89,15 @@ impl OccGrid {
     fn new(min: [f64; 2], max: [f64; 2], cell: f64) -> Self {
         let nx = (((max[0] - min[0]) / cell).ceil() as usize + 1).max(1);
         let ny = (((max[1] - min[1]) / cell).ceil() as usize + 1).max(1);
-        Self { ox: min[0], oy: min[1], cell, nx, ny, occ: vec![false; nx * ny], filled: 0 }
+        Self {
+            ox: min[0],
+            oy: min[1],
+            cell,
+            nx,
+            ny,
+            occ: vec![false; nx * ny],
+            filled: 0,
+        }
     }
 
     /// Whether the cell containing `q` is marked cleared (out-of-grid ⇒ not cleared).
@@ -989,7 +1001,11 @@ pub(crate) fn certify_moves(moves: &[(Point, bool)], r: f64, to_clear: &Polygon)
     let (uncut_area, gouge_area) = model
         .coverage(to_clear, &reach)
         .unwrap_or_else(|| coverage_exact(moves, r, to_clear));
-    Verdict { max_engagement: max_e, uncut_area, gouge_area }
+    Verdict {
+        max_engagement: max_e,
+        uncut_area,
+        gouge_area,
+    }
 }
 
 /// Peak engagement measured **at a fixed spatial cadence**, independent of how the path
@@ -1085,7 +1101,10 @@ mod tests {
         // rejected.
         let model = ClearedModel::new(3.0);
         let e = model.engagement(Point::new(0.0, 0.0), Point::new(40.0, 0.0));
-        assert!((5.9..6.05).contains(&e), "a full slot should read the diameter 6, got {e}");
+        assert!(
+            (5.9..6.05).contains(&e),
+            "a full slot should read the diameter 6, got {e}"
+        );
     }
 
     #[test]
@@ -1098,7 +1117,10 @@ mod tests {
         let mut model = ClearedModel::new(3.0);
         model.commit(Point::new(-10.0, 0.0), Point::new(50.0, 0.0));
         let e = model.engagement(Point::new(0.0, 2.0), Point::new(40.0, 2.0));
-        assert!((1.85..2.15).contains(&e), "a 2 mm peel should read a_e ≈ 2, got {e}");
+        assert!(
+            (1.85..2.15).contains(&e),
+            "a 2 mm peel should read a_e ≈ 2, got {e}"
+        );
     }
 
     #[test]
@@ -1109,7 +1131,10 @@ mod tests {
         let mut model = ClearedModel::new(3.0);
         model.commit(Point::new(0.0, 0.0), Point::new(40.0, 0.0));
         let e = model.engagement(Point::new(0.0, 2.0), Point::new(40.0, 2.0));
-        assert!(e > 3.5, "running off the swath end bites virgin stock, got {e}");
+        assert!(
+            e > 3.5,
+            "running off the swath end bites virgin stock, got {e}"
+        );
     }
 
     #[test]
@@ -1128,8 +1153,16 @@ mod tests {
             forward = !forward;
         }
         let v = certify(&path, r, &square(0.0, 20.0));
-        assert!(v.uncut_area < 3.0, "reachable target should be covered, uncut {}", v.uncut_area);
-        assert!(v.gouge_area < 1e-3, "centres held inside ⇒ no gouge, got {}", v.gouge_area);
+        assert!(
+            v.uncut_area < 3.0,
+            "reachable target should be covered, uncut {}",
+            v.uncut_area
+        );
+        assert!(
+            v.gouge_area < 1e-3,
+            "centres held inside ⇒ no gouge, got {}",
+            v.gouge_area
+        );
     }
 
     /// **The oracle's independent cross-check.** [`ClearedModel::engagement`] derives `a_e`
@@ -1155,16 +1188,28 @@ mod tests {
         let m = ClearedModel::new(r);
         let (a, b) = (Point::new(0.0, 0.0), Point::new(40.0, 0.0));
         let (angle, area) = (m.engagement(a, b), m.engagement_area(a, b));
-        assert!((5.9..6.1).contains(&angle), "slot by arc should read 6, got {angle}");
-        assert!((5.9..6.1).contains(&area), "slot by area should read 6, got {area}");
+        assert!(
+            (5.9..6.1).contains(&angle),
+            "slot by arc should read 6, got {angle}"
+        );
+        assert!(
+            (5.9..6.1).contains(&area),
+            "slot by area should read 6, got {area}"
+        );
 
         // A 2 mm peel alongside a cleared swath: both must read the stepover.
         let mut m = ClearedModel::new(r);
         m.commit(Point::new(-10.0, 0.0), Point::new(50.0, 0.0));
         let (a, b) = (Point::new(0.0, 2.0), Point::new(40.0, 2.0));
         let (angle, area) = (m.engagement(a, b), m.engagement_area(a, b));
-        assert!((1.85..2.15).contains(&angle), "peel by arc should read 2, got {angle}");
-        assert!((1.85..2.15).contains(&area), "peel by area should read 2, got {area}");
+        assert!(
+            (1.85..2.15).contains(&angle),
+            "peel by arc should read 2, got {angle}"
+        );
+        assert!(
+            (1.85..2.15).contains(&area),
+            "peel by area should read 2, got {area}"
+        );
     }
 
     fn holed_60() -> Polygon {
@@ -1251,7 +1296,11 @@ mod tests {
                 (0..n).map(|k| ring[k].distance(ring[(k + 1) % n])).sum()
             };
             let perim = ring_len(region.outer().points())
-                + region.holes().iter().map(|h| ring_len(h.points())).sum::<f64>();
+                + region
+                    .holes()
+                    .iter()
+                    .map(|h| ring_len(h.points()))
+                    .sum::<f64>();
             let tol = 0.1 * perim + 2.0; // 0.1 mm cells
             assert!(
                 (g_uncut - x_uncut).abs() < tol,
@@ -1306,8 +1355,8 @@ mod tests {
         )
         .unwrap();
         let (r, e) = (3.0, 2.0);
-        let moves = crate::frontadvance::front_advance_path(&region, r, 0.0, e, None)
-            .expect("a path");
+        let moves =
+            crate::frontadvance::front_advance_path(&region, r, 0.0, e, None).expect("a path");
         println!("\npath: {} moves", moves.len());
 
         let t = std::time::Instant::now();
@@ -1368,7 +1417,11 @@ mod tests {
         let r = 2.0;
         let path = vec![Point::new(10.0, 10.0), Point::new(30.0, 10.0)];
         let v = certify(&path, r, &square(0.0, 20.0));
-        assert!(v.gouge_area > 1.0, "a cut past the edge must register a gouge, got {}", v.gouge_area);
+        assert!(
+            v.gouge_area > 1.0,
+            "a cut past the edge must register a gouge, got {}",
+            v.gouge_area
+        );
     }
 
     /// A serpentine over `[0,20]²` at 2·`r` spacing (tangent passes, so each strip is
@@ -1379,7 +1432,11 @@ mod tests {
         let mut y = r;
         let mut forward = true;
         while y <= 20.0 - r + 1e-9 {
-            let (a, b) = if forward { (r, 20.0 - r) } else { (20.0 - r, r) };
+            let (a, b) = if forward {
+                (r, 20.0 - r)
+            } else {
+                (20.0 - r, r)
+            };
             moves.push((Point::new(a, y), !moves.is_empty()));
             moves.push((Point::new(b, y), true));
             y += 2.0 * r;
@@ -1392,7 +1449,12 @@ mod tests {
     fn cut_runs_split_at_rapids_and_begin_at_the_plunge_point() {
         let p = |x: f64| Point::new(x, 0.0);
         // a --rapid--> b --cut--> c --rapid--> d --cut--> e
-        let moves = vec![(p(0.0), false), (p(1.0), true), (p(2.0), false), (p(3.0), true)];
+        let moves = vec![
+            (p(0.0), false),
+            (p(1.0), true),
+            (p(2.0), false),
+            (p(3.0), true),
+        ];
         let runs = cut_runs(&moves);
         assert_eq!(runs.len(), 2, "two cutting runs, split by the rapid");
         // Each run starts at the point the cut departed *from* — the plunge point — so
@@ -1413,8 +1475,16 @@ mod tests {
         ];
         let v = certify_moves(&moves, r, &square(0.0, 40.0));
         assert_eq!(v.max_engagement, 0.0, "a rapid cannot cut");
-        assert!(v.gouge_area < 1e-6, "a rapid cannot gouge, got {}", v.gouge_area);
-        assert!(v.uncut_area > 1000.0, "nothing was cleared, uncut {}", v.uncut_area);
+        assert!(
+            v.gouge_area < 1e-6,
+            "a rapid cannot gouge, got {}",
+            v.gouge_area
+        );
+        assert!(
+            v.uncut_area > 1000.0,
+            "nothing was cleared, uncut {}",
+            v.uncut_area
+        );
     }
 
     #[test]
@@ -1427,14 +1497,21 @@ mod tests {
         let target = square(0.0, 20.0);
         let all = serpentine_moves(r);
         let covered = certify_moves(&all, r, &target);
-        assert!(covered.uncut_area < 8.0, "tangent passes tile the square, uncut {}", covered.uncut_area);
+        assert!(
+            covered.uncut_area < 8.0,
+            "tangent passes tile the square, uncut {}",
+            covered.uncut_area
+        );
 
         // Reflag the third pass (its terminating point) as a rapid.
         let mut gapped = all.clone();
         gapped[5].1 = false;
         let v = certify_moves(&gapped, r, &target);
         let strip = v.uncut_area - covered.uncut_area;
-        assert!(strip > 40.0, "the flown-over strip must read as uncut, gained only {strip}");
+        assert!(
+            strip > 40.0,
+            "the flown-over strip must read as uncut, gained only {strip}"
+        );
     }
 
     /// **A lift launders nothing.** Engagement is measured against the running cleared
@@ -1451,6 +1528,10 @@ mod tests {
             (Point::new(38.0, 30.0), true), // slot into virgin stock again
         ];
         let v = certify_moves(&moves, r, &square(0.0, 40.0));
-        assert!(v.max_engagement > 5.5, "a slot reads the diameter, got {}", v.max_engagement);
+        assert!(
+            v.max_engagement > 5.5,
+            "a slot reads the diameter, got {}",
+            v.max_engagement
+        );
     }
 }

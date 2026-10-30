@@ -269,7 +269,12 @@ pub(crate) fn steer_path(
     seed: Seed,
     cancel: &CancelToken,
 ) -> Option<SteerRun> {
-    let Seed { start, dir: dir0, open_r, resume_budget } = seed;
+    let Seed {
+        start,
+        dir: dir0,
+        open_r,
+        resume_budget,
+    } = seed;
     if !(e > 0.0 && e < 2.0 * r) {
         return None;
     }
@@ -277,7 +282,14 @@ pub(crate) fn steer_path(
         offset(std::slice::from_ref(region), -finish, JoinStyle::Round).ok()?,
     )?;
     // Tool centres may not leave this: inside `tc` ⇔ the tool is inside the part.
-    let tc = largest(offset(std::slice::from_ref(region), -(r + finish), JoinStyle::Round).ok()?)?;
+    let tc = largest(
+        offset(
+            std::slice::from_ref(region),
+            -(r + finish),
+            JoinStyle::Round,
+        )
+        .ok()?,
+    )?;
     let mut model = ClearedModel::bounded(r, to_clear.clone());
 
     let h = STEP_RADII * r;
@@ -430,7 +442,18 @@ pub(crate) fn steer_path(
     // point at the wrong move, standing stock included.
     debug_assert_eq!(path.len(), air_flags.len());
     debug_assert_eq!(path.len(), hunting.len());
-    Some(SteerRun { path, buried_steps, resumes, starved_steps, cut_len, air_len, hunting, air: air_flags, reentries: resumes, stopped })
+    Some(SteerRun {
+        path,
+        buried_steps,
+        resumes,
+        starved_steps,
+        cut_len,
+        air_len,
+        hunting,
+        air: air_flags,
+        reentries: resumes,
+        stopped,
+    })
 }
 
 /// One step's decision: which way to turn, and what kind of step it is.
@@ -473,7 +496,10 @@ fn decide_step(
     // 648 mm². Tool-centre containment is a hard constraint, not a term to trade against the
     // target bite.
     let samples: Vec<(f64, f64)> = (0..=SAMPLES)
-        .map(|k| { let m = max_turn(h, r); -m + 2.0 * m * (k as f64 / SAMPLES as f64) })
+        .map(|k| {
+            let m = max_turn(h, r);
+            -m + 2.0 * m * (k as f64 / SAMPLES as f64)
+        })
         .filter(|&t| tc.contains(step_to(d, t)))
         .map(|t| (t, model.engagement_grid(p, step_to(d, t))))
         .collect();
@@ -512,7 +538,12 @@ fn decide_step(
                 }
             })
             .0;
-        return Some(Step { turn, got: 0.0, buried: false, starving: true });
+        return Some(Step {
+            turn,
+            got: 0.0,
+            buried: false,
+            starving: true,
+        });
     }
     let ok_max = target * OK_SLACK;
     let (mut turn, buried) = choose_turn(&samples, ok_max);
@@ -526,7 +557,11 @@ fn decide_step(
                 break;
             }
             if model.engagement_grid(p, q) <= ok_max {
-                if turn < t2 { lo = mid } else { hi = mid }
+                if turn < t2 {
+                    lo = mid
+                } else {
+                    hi = mid
+                }
             } else if turn < t2 {
                 hi = mid
             } else {
@@ -536,7 +571,12 @@ fn decide_step(
         turn = if turn < t2 { lo } else { hi };
     }
     let got = model.engagement_grid(p, step_to(d, turn));
-    Some(Step { turn, got, buried, starving: false })
+    Some(Step {
+        turn,
+        got,
+        buried,
+        starving: false,
+    })
 }
 
 /// **The control rule**, in one place.
@@ -550,11 +590,21 @@ fn decide_step(
 ///
 /// Returns the turn and whether the front was buried (nothing light enough available).
 fn choose_turn(samples: &[(f64, f64)], ok_max: f64) -> (f64, bool) {
-    let holding: Vec<(f64, f64)> = samples.iter().copied().filter(|&(_, a)| a <= ok_max).collect();
+    let holding: Vec<(f64, f64)> = samples
+        .iter()
+        .copied()
+        .filter(|&(_, a)| a <= ok_max)
+        .collect();
     if holding.is_empty() {
         let t = samples
             .iter()
-            .fold((samples[0].0, f64::MAX), |acc, &(t, a)| if a < acc.1 { (t, a) } else { acc })
+            .fold((samples[0].0, f64::MAX), |acc, &(t, a)| {
+                if a < acc.1 {
+                    (t, a)
+                } else {
+                    acc
+                }
+            })
             .0;
         return (t, true);
     }
@@ -685,7 +735,11 @@ fn find_seed(
                 SEED_TRACE.with(|t| {
                     let mut t = t.borrow_mut();
                     t.0 += 1;
-                    if survives { t.2 += 1 } else { t.1 += 1 }
+                    if survives {
+                        t.2 += 1
+                    } else {
+                        t.1 += 1
+                    }
                 });
                 if !survives {
                     continue;
@@ -707,7 +761,14 @@ pub(crate) fn steer_region(
     start: Option<[f64; 2]>,
     cancel: &CancelToken,
 ) -> Option<SteerRun> {
-    let tc = largest(offset(std::slice::from_ref(region), -(r + finish), JoinStyle::Round).ok()?)?;
+    let tc = largest(
+        offset(
+            std::slice::from_ref(region),
+            -(r + finish),
+            JoinStyle::Round,
+        )
+        .ok()?,
+    )?;
     let entry = crate::frontadvance::preferred_entry(&tc, start, e.min(r) * 0.5)
         .or_else(|| crate::frontadvance::entry_point(&tc))?;
     let open_r = opening_radius(&tc, entry, e);
@@ -716,7 +777,12 @@ pub(crate) fn steer_region(
         r,
         finish,
         e,
-        Seed { start: entry, dir: (1.0, 0.0), open_r, resume_budget: 400 },
+        Seed {
+            start: entry,
+            dir: (1.0, 0.0),
+            open_r,
+            resume_budget: 400,
+        },
         cancel,
     )
 }
@@ -764,9 +830,11 @@ pub(crate) fn steer_certified(
 
 /// The largest polygon by area.
 fn largest(polys: Vec<Polygon>) -> Option<Polygon> {
-    polys
-        .into_iter()
-        .max_by(|a, b| a.area().partial_cmp(&b.area()).unwrap_or(std::cmp::Ordering::Equal))
+    polys.into_iter().max_by(|a, b| {
+        a.area()
+            .partial_cmp(&b.area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 #[cfg(test)]
@@ -791,7 +859,10 @@ mod tests {
     fn steered_over_every_shape() {
         let (r, e) = (3.0, 2.0);
         let cases: Vec<(&str, Polygon)> = vec![
-            ("CONTROL square 40", Polygon::new(rect(0.0, 0.0, 40.0, 40.0)).unwrap()),
+            (
+                "CONTROL square 40",
+                Polygon::new(rect(0.0, 0.0, 40.0, 40.0)).unwrap(),
+            ),
             ("CONTROL circle r30", {
                 let pts = (0..96)
                     .map(|i| {
@@ -803,34 +874,40 @@ mod tests {
             }),
             (
                 "square 40, island 12 centred",
-                Polygon::with_holes(rect(0.0, 0.0, 40.0, 40.0), vec![rect(14.0, 14.0, 26.0, 26.0)])
-                    .unwrap(),
+                Polygon::with_holes(
+                    rect(0.0, 0.0, 40.0, 40.0),
+                    vec![rect(14.0, 14.0, 26.0, 26.0)],
+                )
+                .unwrap(),
             ),
             (
                 "square 40, island 12 offset",
-                Polygon::with_holes(rect(0.0, 0.0, 40.0, 40.0), vec![rect(22.0, 14.0, 34.0, 26.0)])
-                    .unwrap(),
+                Polygon::with_holes(
+                    rect(0.0, 0.0, 40.0, 40.0),
+                    vec![rect(22.0, 14.0, 34.0, 26.0)],
+                )
+                .unwrap(),
             ),
-            (
-                "circle r20, island r6",
-                {
-                    let ring = |rad: f64, n: usize| {
-                        Contour::new(
-                            (0..n)
-                                .map(|i| {
-                                    let a = std::f64::consts::TAU * (i as f64) / (n as f64);
-                                    Point::new(rad * a.cos(), rad * a.sin())
-                                })
-                                .collect(),
-                        )
-                    };
-                    Polygon::with_holes(ring(20.0, 64), vec![ring(6.0, 32)]).unwrap()
-                },
-            ),
+            ("circle r20, island r6", {
+                let ring = |rad: f64, n: usize| {
+                    Contour::new(
+                        (0..n)
+                            .map(|i| {
+                                let a = std::f64::consts::TAU * (i as f64) / (n as f64);
+                                Point::new(rad * a.cos(), rad * a.sin())
+                            })
+                            .collect(),
+                    )
+                };
+                Polygon::with_holes(ring(20.0, 64), vec![ring(6.0, 32)]).unwrap()
+            }),
             (
                 "square 60, island 20 centred",
-                Polygon::with_holes(rect(0.0, 0.0, 60.0, 60.0), vec![rect(20.0, 20.0, 40.0, 40.0)])
-                    .unwrap(),
+                Polygon::with_holes(
+                    rect(0.0, 0.0, 60.0, 60.0),
+                    vec![rect(20.0, 20.0, 40.0, 40.0)],
+                )
+                .unwrap(),
             ),
             (
                 "square 60, two islands",
@@ -853,8 +930,10 @@ mod tests {
             };
             let secs = t0.elapsed().as_secs_f64();
             let v = crate::clearsim::certify_moves(&run.path, r, &region);
-            let reach: f64 =
-                crate::clearsim::reachable(&region, r).iter().map(|p| p.area()).sum();
+            let reach: f64 = crate::clearsim::reachable(&region, r)
+                .iter()
+                .map(|p| p.area())
+                .sum();
             let tol = 0.02 * reach + 1.0;
             let ok = v.max_engagement <= crate::frontadvance::engagement_bound(e, r)
                 && v.uncut_area <= tol
@@ -899,9 +978,11 @@ mod tests {
     #[ignore = "diagnostic"]
     fn where_did_the_higher_peak_come_from() {
         let (r, e) = (3.0, 2.0);
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 60.0, 60.0), vec![rect(20.0, 20.0, 40.0, 40.0)])
-                .unwrap();
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 60.0, 60.0),
+            vec![rect(20.0, 20.0, 40.0, 40.0)],
+        )
+        .unwrap();
         let run = steer_region(&region, r, 0.0, e, None, &CancelToken::new()).expect("a path");
 
         // Four walks: {whole move, 0.5 mm cadence} x {polygon oracle, grid oracle}. Each
@@ -922,10 +1003,8 @@ mod tests {
                             let mut a = pp;
                             for k in 1..=n {
                                 let t = k as f64 / n as f64;
-                                let b = Point::new(
-                                    pp.x + (p.x - pp.x) * t,
-                                    pp.y + (p.y - pp.y) * t,
-                                );
+                                let b =
+                                    Point::new(pp.x + (p.x - pp.x) * t, pp.y + (p.y - pp.y) * t);
                                 let v = if use_grid {
                                     model.engagement_grid(a, b)
                                 } else {
@@ -995,24 +1074,33 @@ mod tests {
         let shapes: [(&str, Polygon); 3] = [
             (
                 "sq40 island12",
-                Polygon::with_holes(rect(0.0, 0.0, 40.0, 40.0), vec![rect(14.0, 14.0, 26.0, 26.0)])
-                    .unwrap(),
+                Polygon::with_holes(
+                    rect(0.0, 0.0, 40.0, 40.0),
+                    vec![rect(14.0, 14.0, 26.0, 26.0)],
+                )
+                .unwrap(),
             ),
             (
                 "sq60 island20",
-                Polygon::with_holes(rect(0.0, 0.0, 60.0, 60.0), vec![rect(20.0, 20.0, 40.0, 40.0)])
-                    .unwrap(),
+                Polygon::with_holes(
+                    rect(0.0, 0.0, 60.0, 60.0),
+                    vec![rect(20.0, 20.0, 40.0, 40.0)],
+                )
+                .unwrap(),
             ),
-            ("circle r20", {
-                let pts = (0..96)
-                    .map(|i| {
-                        let a = std::f64::consts::TAU * (i as f64) / 96.0;
-                        Point::new(20.0 * a.cos(), 20.0 * a.sin())
-                    })
-                    .collect();
-                ("circle r20", Polygon::new(Contour::new(pts)).unwrap())
-            }
-            .1),
+            (
+                "circle r20",
+                {
+                    let pts = (0..96)
+                        .map(|i| {
+                            let a = std::f64::consts::TAU * (i as f64) / 96.0;
+                            Point::new(20.0 * a.cos(), 20.0 * a.sin())
+                        })
+                        .collect();
+                    ("circle r20", Polygon::new(Contour::new(pts)).unwrap())
+                }
+                .1,
+            ),
         ];
         println!("\n| shape | e=1.0 | e=1.5 | e=2.0 | e=3.0 |");
         println!("|---|---|---|---|---|");
@@ -1021,9 +1109,8 @@ mod tests {
             for e in [1.0, 1.5, 2.0, 3.0] {
                 let cell = match steer_region(&region, r, 0.0, e, None, &CancelToken::new()) {
                     Some(run) => {
-                        let v = crate::clearsim::peak_engagement_at_cadence(
-                            &run.path, r, &region, 0.5,
-                        );
+                        let v =
+                            crate::clearsim::peak_engagement_at_cadence(&run.path, r, &region, 0.5);
                         format!(" {v:.2} (**{:.2}**·e) |", v / e)
                     }
                     None => " — |".to_string(),
@@ -1077,9 +1164,11 @@ mod tests {
     #[ignore = "diagnostic"]
     fn engagement_is_a_property_of_the_path_not_its_vertices() {
         let (r, e) = (3.0, 2.0);
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 60.0, 60.0), vec![rect(20.0, 20.0, 40.0, 40.0)])
-                .unwrap();
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 60.0, 60.0),
+            vec![rect(20.0, 20.0, 40.0, 40.0)],
+        )
+        .unwrap();
         let run = steer_region(&region, r, 0.0, e, None, &CancelToken::new()).expect("a path");
 
         // Part 1: the two oracles, walked identically. They must agree — if they diverge, the
@@ -1125,9 +1214,11 @@ mod tests {
     #[ignore = "diagnostic"]
     fn seed_acceptance() {
         let (r, e) = (3.0, 2.0);
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 60.0, 40.0), vec![rect(25.0, 15.0, 35.0, 25.0)])
-                .unwrap();
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 60.0, 40.0),
+            vec![rect(25.0, 15.0, 35.0, 25.0)],
+        )
+        .unwrap();
         SEED_TRACE.with(|t| *t.borrow_mut() = (0, 0, 0));
         let run = steer_region(&region, r, 0.0, e, None, &CancelToken::new()).expect("a path");
         let (tried, rejected, accepted) = SEED_TRACE.with(|t| *t.borrow());
@@ -1149,11 +1240,13 @@ mod tests {
     #[ignore = "diagnostic"]
     fn why_the_radius_floor_breaks_it() {
         let (r, e) = (3.0, 2.0);
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 60.0, 40.0), vec![rect(25.0, 15.0, 35.0, 25.0)])
-                .unwrap();
-        let tc = largest(offset(std::slice::from_ref(&region), -r, JoinStyle::Round).unwrap())
-            .unwrap();
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 60.0, 40.0),
+            vec![rect(25.0, 15.0, 35.0, 25.0)],
+        )
+        .unwrap();
+        let tc =
+            largest(offset(std::slice::from_ref(&region), -r, JoinStyle::Round).unwrap()).unwrap();
         let to_clear = region.clone();
         let mut model = ClearedModel::bounded(r, to_clear);
         let h = STEP_RADII * r;
@@ -1163,7 +1256,9 @@ mod tests {
         let (mut p, mut d) = (entry, (1.0, 0.0));
         let (mut bands, mut bearing_when_low, mut steps) = ([0usize; 5], 0usize, 0usize);
         for _ in 0..4000 {
-            let Some(st) = decide_step(&model, &tc, p, d, h, r, e) else { break };
+            let Some(st) = decide_step(&model, &tc, p, d, h, r, e) else {
+                break;
+            };
             if st.starving {
                 bands[0] += 1;
                 if model.material_bearing(p).is_some() {
@@ -1172,8 +1267,17 @@ mod tests {
                 break; // one front only — this is about how it dies
             }
             let f = st.got / e;
-            let b = if f < 0.3 { 0 } else if f < 0.6 { 1 } else if f < 0.9 { 2 }
-                    else if f < 1.1 { 3 } else { 4 };
+            let b = if f < 0.3 {
+                0
+            } else if f < 0.6 {
+                1
+            } else if f < 0.9 {
+                2
+            } else if f < 1.1 {
+                3
+            } else {
+                4
+            };
             bands[b] += 1;
             if f < 0.6 && model.material_bearing(p).is_some() {
                 bearing_when_low += 1;
@@ -1185,7 +1289,10 @@ mod tests {
             steps += 1;
         }
         println!("\nMIN_TURN_RADII = {MIN_TURN_RADII}·r, one front, {steps} steps before it died");
-        for (i, l) in ["<0.3", "0.3-0.6", "0.6-0.9", "0.9-1.1", ">1.1"].iter().enumerate() {
+        for (i, l) in ["<0.3", "0.3-0.6", "0.6-0.9", "0.9-1.1", ">1.1"]
+            .iter()
+            .enumerate()
+        {
             println!("  bite {l:>8} × target: {:5} steps", bands[i]);
         }
         println!("  steps with a low bite *and* material still on the tool: {bearing_when_low}");
@@ -1200,9 +1307,11 @@ mod tests {
     #[ignore = "diagnostic"]
     fn turn_sharpness() {
         let (r, e) = (3.0, 2.0);
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 60.0, 40.0), vec![rect(25.0, 15.0, 35.0, 25.0)])
-                .unwrap();
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 60.0, 40.0),
+            vec![rect(25.0, 15.0, 35.0, 25.0)],
+        )
+        .unwrap();
         let run = steer_region(&region, r, 0.0, e, None, &CancelToken::new()).expect("a path");
         // **Measure the radius each corner actually has, from the chords either side of it.**
         // This used to divide a constant `STEP_RADII·r` by the turn angle, which is right only
@@ -1219,8 +1328,10 @@ mod tests {
         let mut path_mm = 0.0_f64;
         let idx: Vec<usize> = (0..run.path.len()).filter(|&i| run.path[i].1).collect();
         let pts: Vec<Point> = idx.iter().map(|&i| run.path[i].0).collect();
-        let hunt: Vec<bool> =
-            idx.iter().map(|&i| run.hunting.get(i).copied().unwrap_or(false)).collect();
+        let hunt: Vec<bool> = idx
+            .iter()
+            .map(|&i| run.hunting.get(i).copied().unwrap_or(false))
+            .collect();
         for (k, w) in pts.windows(3).enumerate() {
             let (a, b, c) = (w[0], w[1], w[2]);
             let (ux, uy) = (b.x - a.x, b.y - a.y);
@@ -1230,14 +1341,20 @@ mod tests {
                 continue;
             }
             path_mm += lv;
-            let ang = ((ux * vy - uy * vx) / (lu * lv)).clamp(-1.0, 1.0).asin().abs();
+            let ang = ((ux * vy - uy * vx) / (lu * lv))
+                .clamp(-1.0, 1.0)
+                .asin()
+                .abs();
             // The circle through the three points: chord over twice the sine of the half-turn.
             let radius = if ang > 1e-6 {
                 0.5 * (lu + lv) / (2.0 * (ang / 2.0).sin())
             } else {
                 f64::INFINITY
             };
-            corners.push(Corner { radius, cutting: !hunt.get(k + 1).copied().unwrap_or(false) });
+            corners.push(Corner {
+                radius,
+                cutting: !hunt.get(k + 1).copied().unwrap_or(false),
+            });
         }
         let mut radii: Vec<f64> = corners.iter().map(|c| c.radius).collect();
         radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1280,25 +1397,38 @@ mod tests {
     #[test]
     fn a_steered_island_pocket_clears_and_holds_the_cap() {
         let (r, e) = (3.0, 2.0);
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 30.0, 30.0), vec![rect(11.0, 11.0, 19.0, 19.0)])
-                .unwrap();
-        let run = steer_region(&region, r, 0.0, e, None, &CancelToken::new()).expect("a steered path");
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 30.0, 30.0),
+            vec![rect(11.0, 11.0, 19.0, 19.0)],
+        )
+        .unwrap();
+        let run =
+            steer_region(&region, r, 0.0, e, None, &CancelToken::new()).expect("a steered path");
         let v = crate::clearsim::certify_moves(&run.path, r, &region);
-        let reach: f64 = crate::clearsim::reachable(&region, r).iter().map(|p| p.area()).sum();
+        let reach: f64 = crate::clearsim::reachable(&region, r)
+            .iter()
+            .map(|p| p.area())
+            .sum();
         let tol = 0.02 * reach + 1.0;
         assert!(
             v.max_engagement <= 1.5 * e,
             "engagement must hold the geometric-floor bound, got {:.2}",
             v.max_engagement
         );
-        assert!(v.gouge_area <= tol, "must not gouge, got {:.1}", v.gouge_area);
+        assert!(
+            v.gouge_area <= tol,
+            "must not gouge, got {:.1}",
+            v.gouge_area
+        );
         assert!(
             v.uncut_area <= tol,
             "must clear the reachable target, {:.1} left of {tol:.1}",
             v.uncut_area
         );
-        assert_eq!(run.stopped, "region clear", "must terminate by finishing the region");
+        assert_eq!(
+            run.stopped, "region clear",
+            "must terminate by finishing the region"
+        );
     }
 
     /// A long front can become overloaded after its seed's lookahead ends. Retiring
@@ -1309,12 +1439,15 @@ mod tests {
         let region = Polygon::with_holes(
             rect(0.0, 0.0, 60.0, 60.0),
             vec![rect(20.0, 20.0, 40.0, 40.0)],
-        ).unwrap();
-        let run = steer_region(&region, r, 0.0, e, None, &CancelToken::new())
-            .expect("a steered path");
+        )
+        .unwrap();
+        let run =
+            steer_region(&region, r, 0.0, e, None, &CancelToken::new()).expect("a steered path");
         let verdict = crate::clearsim::certify_moves(&run.path, r, &region);
         let reach: f64 = crate::clearsim::reachable(&region, r)
-            .iter().map(Polygon::area).sum();
+            .iter()
+            .map(Polygon::area)
+            .sum();
         let tolerance = 0.02 * reach + 1.0;
         let bound = crate::frontadvance::engagement_bound(e, r);
 
@@ -1342,7 +1475,8 @@ mod tests {
         let region = Polygon::with_holes(
             rect(0.0, 0.0, 40.0, 40.0),
             vec![rect(22.0, 14.0, 34.0, 26.0)],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             steer_certified(&region, 3.0, 0.0, 2.0, None, &CancelToken::new()).is_none(),
             "a full-width channel must not be accepted as a certified adaptive path",
@@ -1357,9 +1491,11 @@ mod tests {
     #[test]
     #[ignore = "measurement harness for ADAPTIVE_PLAN.md §10"]
     fn the_offset_island_is_geometry_not_generator() {
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 40.0, 40.0), vec![rect(22.0, 14.0, 34.0, 26.0)])
-                .unwrap();
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 40.0, 40.0),
+            vec![rect(22.0, 14.0, 34.0, 26.0)],
+        )
+        .unwrap();
         println!("\n| tool ⌀ | strip / ⌀ | a_e | uncut/tol | gouge | verdict |");
         println!("|---|---|---|---|---|---|");
         // `e` held fixed, so the only variable is the tool against the strip.
@@ -1370,8 +1506,10 @@ mod tests {
                 continue;
             };
             let v = crate::clearsim::certify_moves(&run.path, r, &region);
-            let reach: f64 =
-                crate::clearsim::reachable(&region, r).iter().map(|p| p.area()).sum();
+            let reach: f64 = crate::clearsim::reachable(&region, r)
+                .iter()
+                .map(|p| p.area())
+                .sum();
             let tol = 0.02 * reach + 1.0;
             let ok = v.max_engagement <= crate::frontadvance::engagement_bound(e, r)
                 && v.uncut_area <= tol
@@ -1399,12 +1537,17 @@ mod tests {
         let (r, e) = (3.0, 2.0);
         // The case front-advance slots on: 40 mm square, 12 mm island, an 8 mm-wide
         // tool-centre band around it.
-        let region =
-            Polygon::with_holes(rect(0.0, 0.0, 40.0, 40.0), vec![rect(14.0, 14.0, 26.0, 26.0)])
-                .unwrap();
+        let region = Polygon::with_holes(
+            rect(0.0, 0.0, 40.0, 40.0),
+            vec![rect(14.0, 14.0, 26.0, 26.0)],
+        )
+        .unwrap();
         // Seed in the middle of the band on the left, heading "up" along it.
         let start = Point::new(7.0, 20.0);
-        let reach: f64 = crate::clearsim::reachable(&region, r).iter().map(|p| p.area()).sum();
+        let reach: f64 = crate::clearsim::reachable(&region, r)
+            .iter()
+            .map(|p| p.area())
+            .sum();
         println!("\n| regime | moves | stopped | overloads rejected | starved | resumes | a_e | uncut/tol | gouge | verdict |");
         println!("|---|---|---|---|---|---|---|---|---|---|");
         for (label, budget) in [("one front", 0usize), ("with resumption", 400)] {
@@ -1455,7 +1598,12 @@ mod tests {
                 }
                 println!(
                     "    peak {:.2} at ({:.1},{:.1}), move {} of {}, {} steps after the last rapid",
-                    worst.0, worst.1.x, worst.1.y, worst.2, run.path.len(), worst.3
+                    worst.0,
+                    worst.1.x,
+                    worst.1.y,
+                    worst.2,
+                    run.path.len(),
+                    worst.3
                 );
             }
             // The caller's own certification predicate, verbatim — engagement at the

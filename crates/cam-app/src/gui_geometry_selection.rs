@@ -33,9 +33,15 @@ pub(super) fn cad_geometry_labels(selected: &[EntityRef]) -> Vec<String> {
         .iter()
         .map(|entity| {
             if entity.kind == EntityKind::Silhouette {
-                format!("XY silhouette · Instance {} · Body {}", entity.instance_id, entity.body_id)
+                format!(
+                    "XY silhouette · Instance {} · Body {}",
+                    entity.instance_id, entity.body_id
+                )
             } else {
-                format!("{:?} {} · Instance {} · Body {}", entity.kind, entity.id, entity.instance_id, entity.body_id)
+                format!(
+                    "{:?} {} · Instance {} · Body {}",
+                    entity.kind, entity.id, entity.instance_id, entity.body_id
+                )
             }
         })
         .collect()
@@ -137,7 +143,8 @@ pub(super) fn selection_hint<'a>(
         control,
         illustrated_help::content(&label.into()),
         tooltip::Position::Left,
-    ).into()
+    )
+    .into()
 }
 
 /// Shared frame, rows and toolbar placement for every operation's collection.
@@ -214,7 +221,8 @@ impl App {
             | OpKind::Carve
             | OpKind::Bore
             | OpKind::Thread
-            | OpKind::Adaptive | OpKind::Parallel),
+            | OpKind::Adaptive
+            | OpKind::Parallel),
         ) = self.geometry_operation_kind()
         {
             return self.operation_geometry_collection(kind, labels);
@@ -436,7 +444,10 @@ impl App {
             } else {
                 selected.clear();
             }
-            let result = if matches!(self.geometry_operation_kind(), Some(OpKind::Adaptive | OpKind::Parallel)) {
+            let result = if matches!(
+                self.geometry_operation_kind(),
+                Some(OpKind::Adaptive | OpKind::Parallel)
+            ) {
                 self.controller.try_set_adaptive_cad_selection(selected)
             } else {
                 self.controller.try_set_cad_selection(selected)

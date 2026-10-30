@@ -82,12 +82,12 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
     }
 
     let doc = Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "part.dxf".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -115,7 +115,11 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
         tool_change_height: None,
     });
 
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
         &doc,
         1000.0,
         SpindleDir::Cw,

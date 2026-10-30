@@ -99,7 +99,12 @@ impl Tag {
     /// Construct a tag.
     #[inline]
     pub const fn new(op_id: u32, kind: MoveKind) -> Self {
-        Self { op_id, kind, pattern_id: None, instance_index: None }
+        Self {
+            op_id,
+            kind,
+            pattern_id: None,
+            instance_index: None,
+        }
     }
 }
 
@@ -281,16 +286,54 @@ impl Program {
     pub fn transformed_xy(&self, center: [f64; 2], translation: [f64; 2], degrees: f64) -> Program {
         let (s, c) = degrees.to_radians().sin_cos();
         let point = |p: Point3| {
-            let x = p.x - center[0]; let y = p.y - center[1];
-            Point3::new(center[0] + x*c - y*s + translation[0], center[1] + x*s + y*c + translation[1], p.z)
+            let x = p.x - center[0];
+            let y = p.y - center[1];
+            Point3::new(
+                center[0] + x * c - y * s + translation[0],
+                center[1] + x * s + y * c + translation[1],
+                p.z,
+            )
         };
-        let steps = self.steps.iter().map(|step| match step {
-            Step::Rapid { to, tag } => Step::Rapid { to: point(*to), tag: *tag },
-            Step::Linear { to, feed, tag } => Step::Linear { to: point(*to), feed: *feed, tag: *tag },
-            Step::Arc { end, center, dir, feed, tag } => Step::Arc { end: point(*end), center: point(*center), dir: *dir, feed: *feed, tag: *tag },
-            Step::Drill(cycle) => Step::Drill(DrillCycle { points: cycle.points.iter().map(|[x,y]| { let p=point(Point3::new(*x,*y,0.0)); [p.x,p.y] }).collect(), ..cycle.clone() }),
-            other => other.clone(),
-        }).collect();
+        let steps = self
+            .steps
+            .iter()
+            .map(|step| match step {
+                Step::Rapid { to, tag } => Step::Rapid {
+                    to: point(*to),
+                    tag: *tag,
+                },
+                Step::Linear { to, feed, tag } => Step::Linear {
+                    to: point(*to),
+                    feed: *feed,
+                    tag: *tag,
+                },
+                Step::Arc {
+                    end,
+                    center,
+                    dir,
+                    feed,
+                    tag,
+                } => Step::Arc {
+                    end: point(*end),
+                    center: point(*center),
+                    dir: *dir,
+                    feed: *feed,
+                    tag: *tag,
+                },
+                Step::Drill(cycle) => Step::Drill(DrillCycle {
+                    points: cycle
+                        .points
+                        .iter()
+                        .map(|[x, y]| {
+                            let p = point(Point3::new(*x, *y, 0.0));
+                            [p.x, p.y]
+                        })
+                        .collect(),
+                    ..cycle.clone()
+                }),
+                other => other.clone(),
+            })
+            .collect();
         Program { steps }
     }
 
@@ -298,8 +341,17 @@ impl Program {
     pub fn with_pattern_owner(&self, pattern_id: u64, instance_index: u32) -> Program {
         let mut result = self.clone();
         for step in &mut result.steps {
-            let tag = match step { Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(tag), Step::Drill(c) => Some(&mut c.tag), _ => None };
-            if let Some(tag) = tag { tag.pattern_id = Some(pattern_id); tag.instance_index = Some(instance_index); }
+            let tag = match step {
+                Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
+                    Some(tag)
+                }
+                Step::Drill(c) => Some(&mut c.tag),
+                _ => None,
+            };
+            if let Some(tag) = tag {
+                tag.pattern_id = Some(pattern_id);
+                tag.instance_index = Some(instance_index);
+            }
         }
         result
     }
@@ -330,7 +382,9 @@ impl Step {
     /// Provenance carried by a motion step, when this step represents motion.
     pub fn tag(&self) -> Option<Tag> {
         match self {
-            Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(*tag),
+            Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
+                Some(*tag)
+            }
             Step::Drill(cycle) => Some(cycle.tag),
             _ => None,
         }
@@ -340,7 +394,10 @@ impl Step {
     pub fn translated(&self, d: [f64; 3]) -> Step {
         let p = |q: Point3| Point3::new(q.x + d[0], q.y + d[1], q.z + d[2]);
         match self {
-            Step::Rapid { to, tag } => Step::Rapid { to: p(*to), tag: *tag },
+            Step::Rapid { to, tag } => Step::Rapid {
+                to: p(*to),
+                tag: *tag,
+            },
             Step::Linear { to, feed, tag } => Step::Linear {
                 to: p(*to),
                 feed: *feed,
@@ -435,8 +492,11 @@ mod translate_tests {
 
     #[test]
     fn rigid_xy_transform_rotates_about_center_and_preserves_z_and_tags() {
-        let prog = ProgramBuilder::new().op(9).feed(100.0)
-            .linear(Point3::new(3.0, 2.0, -4.0), MoveKind::Cutting).build();
+        let prog = ProgramBuilder::new()
+            .op(9)
+            .feed(100.0)
+            .linear(Point3::new(3.0, 2.0, -4.0), MoveKind::Cutting)
+            .build();
         let transformed = prog.transformed_xy([1.0, 1.0], [0.0, 0.0], 90.0);
         match &transformed.steps()[0] {
             Step::Linear { to, tag, .. } => {

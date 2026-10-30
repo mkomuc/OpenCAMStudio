@@ -31,7 +31,10 @@ impl AppController {
         if noncutting > 0 {
             return Err(ExportError::NonCuttingThroughStock(noncutting));
         }
-        let options = self.post_options();
+        let mut options = self.post_options();
+        if self.post_kind == PostKind::Estlcam {
+            options.tools = self.setup().tools.clone();
+        }
         // Re-reference each group to its own workpiece origin (datum): shift every
         // coordinate by −origin so that group's chosen part point becomes G-code
         // (0,0,0), matched by the operator's touch-off for `G15 H<n>`. Operations under

@@ -120,7 +120,9 @@ pub fn adaptive_heights(
     Ok(heights)
 }
 
-pub(super) fn checked_projection(topology: &TopologySnapshot) -> Result<&CadProjectionMesh, String> {
+pub(super) fn checked_projection(
+    topology: &TopologySnapshot,
+) -> Result<&CadProjectionMesh, String> {
     let projection = topology.projection.as_ref().ok_or(
         "This solid has no independent CAD machining projection; reimport it before 3D Adaptive",
     )?;
@@ -539,7 +541,8 @@ pub fn resolve_adaptive(
                 &protected,
                 (tolerance - error_bound).max(0.0),
                 cam_geo::JoinStyle::Round,
-            ).map_err(|e| format!("could not offset Adaptive refinement shadow: {e}"))?;
+            )
+            .map_err(|e| format!("could not offset Adaptive refinement shadow: {e}"))?;
             let newly_exposed = cam_geo::difference(&previous.protected, &comparison_shadow)
                 .map_err(|e| format!("could not compare Adaptive refinement shadows: {e}"))?;
             if newly_exposed.is_empty() {
@@ -556,8 +559,12 @@ pub fn resolve_adaptive(
     Ok(AdaptiveGeometry {
         layers,
         fingerprint: state.binding_fingerprint(binding),
-        model_top: triangles.iter().flatten().map(|p| p[2])
-            .fold(f64::NEG_INFINITY, f64::max) + obstacle_error_bound,
+        model_top: triangles
+            .iter()
+            .flatten()
+            .map(|p| p[2])
+            .fold(f64::NEG_INFINITY, f64::max)
+            + obstacle_error_bound,
         error_bound,
     })
 }
@@ -624,10 +631,16 @@ fn closed_vertical_cylinder_domain(
                     ..
                 } => {
                     let world_normal = transform_vector(placement, *normal);
-                    let axis_dot = world_normal.iter().zip(world_axis).map(|(a, b)| a * b).sum::<f64>().abs();
+                    let axis_dot = world_normal
+                        .iter()
+                        .zip(world_axis)
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>()
+                        .abs();
                     let world_center = transform_point(placement, *arc_center);
                     let axis_center = transform_point(placement, *origin);
-                    if (edge_radius - radius).abs() > T || axis_dot < 1.0 - T
+                    if (edge_radius - radius).abs() > T
+                        || axis_dot < 1.0 - T
                         || (world_center[0] - axis_center[0]).abs() > T
                         || (world_center[1] - axis_center[1]).abs() > T
                     {
@@ -639,16 +652,24 @@ fn closed_vertical_cylinder_domain(
                 CadCurve::Line { start, end } => {
                     let a = transform_point(placement, *start);
                     let b = transform_point(placement, *end);
-                    if (a[0] - b[0]).abs() > T || (a[1] - b[1]).abs() > T || (a[2] - b[2]).abs() <= T {
+                    if (a[0] - b[0]).abs() > T
+                        || (a[1] - b[1]).abs() > T
+                        || (a[2] - b[2]).abs() <= T
+                    {
                         closed = false;
                         break;
                     }
                     seam_uses.entry(edge.id).or_default().push(use_.reversed);
                 }
-                _ => { closed = false; break; }
+                _ => {
+                    closed = false;
+                    break;
+                }
             }
         }
-        let seams_cancel = seam_uses.values().all(|uses| uses.len() == 2 && uses[0] != uses[1]);
+        let seams_cancel = seam_uses
+            .values()
+            .all(|uses| uses.len() == 2 && uses[0] != uses[1]);
         if !closed || first_vertex != previous_vertex || !seams_cancel || angle < TAU - 1e-3 {
             return Ok(None);
         }
@@ -772,25 +793,81 @@ mod tests {
     #[test]
     fn projected_cylindrical_face_accepts_canceled_axial_seam() {
         let face = CadFace {
-            id: 3, body_id: 1,
-            surface: CadSurface::Cylinder { origin: [-30., 10., 20.], axis: [0., 0., -1.], radius: 15., inward: true },
-            loop_ids: vec![70], bounds: [[-45., -5., 0.], [-15., 25., 16.]],
+            id: 3,
+            body_id: 1,
+            surface: CadSurface::Cylinder {
+                origin: [-30., 10., 20.],
+                axis: [0., 0., -1.],
+                radius: 15.,
+                inward: true,
+            },
+            loop_ids: vec![70],
+            bounds: [[-45., -5., 0.], [-15., 25., 16.]],
         };
         let circle = |id, z, normal| CadEdge {
-            id, body_id: 1, vertices: [if z == 16. { 49 } else { 50 }; 2], face_ids: vec![3],
-            curve: CadCurve::CircleArc { center: [-30., 10., z], normal, x_axis: [-1., 0., 0.], radius: 15., start_angle: std::f64::consts::PI, end_angle: 3. * std::f64::consts::PI },
+            id,
+            body_id: 1,
+            vertices: [if z == 16. { 49 } else { 50 }; 2],
+            face_ids: vec![3],
+            curve: CadCurve::CircleArc {
+                center: [-30., 10., z],
+                normal,
+                x_axis: [-1., 0., 0.],
+                radius: 15.,
+                start_angle: std::f64::consts::PI,
+                end_angle: 3. * std::f64::consts::PI,
+            },
         };
-        let seam = CadEdge { id: 19, body_id: 1, vertices: [49, 50], face_ids: vec![3, 3], curve: CadCurve::Line { start: [-15., 10., 16.], end: [-15., 10., 0.] } };
+        let seam = CadEdge {
+            id: 19,
+            body_id: 1,
+            vertices: [49, 50],
+            face_ids: vec![3, 3],
+            curve: CadCurve::Line {
+                start: [-15., 10., 16.],
+                end: [-15., 10., 0.],
+            },
+        };
         let topology = TopologySnapshot {
-            version: 1, bodies: vec![], faces: vec![face.clone()],
-            edges: vec![circle(18, 16., [0., 0., -1.]), seam.clone(), circle(20, 0., [0., 0., 1.])],
-            loops: vec![CadLoop { id: 70, body_id: 1, face_id: 3, edge_uses: vec![
-                EdgeUse { edge_id: 19, reversed: true }, EdgeUse { edge_id: 18, reversed: true },
-                EdgeUse { edge_id: 19, reversed: false }, EdgeUse { edge_id: 20, reversed: true },
-            ], is_outer: true }],
-            vertices: vec![], mesh: CadMesh::default(), projection: None,
+            version: 1,
+            bodies: vec![],
+            faces: vec![face.clone()],
+            edges: vec![
+                circle(18, 16., [0., 0., -1.]),
+                seam.clone(),
+                circle(20, 0., [0., 0., 1.]),
+            ],
+            loops: vec![CadLoop {
+                id: 70,
+                body_id: 1,
+                face_id: 3,
+                edge_uses: vec![
+                    EdgeUse {
+                        edge_id: 19,
+                        reversed: true,
+                    },
+                    EdgeUse {
+                        edge_id: 18,
+                        reversed: true,
+                    },
+                    EdgeUse {
+                        edge_id: 19,
+                        reversed: false,
+                    },
+                    EdgeUse {
+                        edge_id: 20,
+                        reversed: true,
+                    },
+                ],
+                is_outer: true,
+            }],
+            vertices: vec![],
+            mesh: CadMesh::default(),
+            projection: None,
         };
-        let domain = closed_vertical_cylinder_domain(&face, &topology, RigidTransform::default()).unwrap().unwrap();
+        let domain = closed_vertical_cylinder_domain(&face, &topology, RigidTransform::default())
+            .unwrap()
+            .unwrap();
         assert!((domain.area() - std::f64::consts::PI * 225.).abs() < 1.0);
     }
 
@@ -975,9 +1052,16 @@ mod tests {
         let (state, binding) = state(true);
         for fine in [1.0, 0.25] {
             let result = resolve_adaptive(
-                &state, &binding, binding.heights, StockToLeave::default(),
-                4.0, fine, 0.02, || false,
-            ).unwrap();
+                &state,
+                &binding,
+                binding.heights,
+                StockToLeave::default(),
+                4.0,
+                fine,
+                0.02,
+                || false,
+            )
+            .unwrap();
             let levels: Vec<_> = result.layers.iter().map(|layer| layer.z).collect();
             assert_eq!(levels, vec![10., 6., 2., 0.]);
         }
@@ -987,9 +1071,16 @@ mod tests {
     fn fine_levels_refine_exposed_shelves_after_the_deep_roughing_pass() {
         let (state, binding) = state(false);
         let result = resolve_adaptive(
-            &state, &binding, binding.heights, StockToLeave::default(),
-            6.0, 1.0, 0.02, || false,
-        ).unwrap();
+            &state,
+            &binding,
+            binding.heights,
+            StockToLeave::default(),
+            6.0,
+            1.0,
+            0.02,
+            || false,
+        )
+        .unwrap();
         let levels: Vec<_> = result.layers.iter().map(|layer| layer.z).collect();
         assert_eq!(levels, vec![10., 4., 6., 0.]);
         assert!(result.layers[1].protected[0].area() > result.layers[2].protected[0].area());
@@ -1005,9 +1096,16 @@ mod tests {
             vertex[2] = vertex[0] + 2.0;
         }
         let result = resolve_adaptive(
-            &state, &binding, binding.heights, StockToLeave::default(),
-            4.0, 1.0, 0.02, || false,
-        ).unwrap();
+            &state,
+            &binding,
+            binding.heights,
+            StockToLeave::default(),
+            4.0,
+            1.0,
+            0.02,
+            || false,
+        )
+        .unwrap();
         let levels: Vec<_> = result.layers.iter().map(|layer| layer.z).collect();
         assert!(levels.starts_with(&[10., 6., 7., 8., 9.]), "{levels:?}");
         assert!(levels.ends_with(&[2., 0.]), "{levels:?}");
@@ -1021,8 +1119,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .chord_tolerance = 0.01;
-        assert!(
-            resolve_adaptive(
+        assert!(resolve_adaptive(
             &state,
             &binding,
             CuttingHeights {
@@ -1039,8 +1136,7 @@ mod tests {
             0.02,
             || false
         )
-            .is_err()
-        );
+        .is_err());
     }
 
     #[test]
@@ -1151,9 +1247,19 @@ mod tests {
         neighbor.placement.translation = [15., 0., 25.];
         state.instances.push(neighbor);
         let result = resolve_adaptive(
-            &state, &binding, CuttingHeights { top: 10., bottom: 0. },
-            StockToLeave::default(), 4., 1., 0.02, || false,
-        ).unwrap();
+            &state,
+            &binding,
+            CuttingHeights {
+                top: 10.,
+                bottom: 0.,
+            },
+            StockToLeave::default(),
+            4.,
+            1.,
+            0.02,
+            || false,
+        )
+        .unwrap();
         assert!((result.model_top - 35.0025).abs() < 1e-9);
     }
 
@@ -1342,12 +1448,10 @@ mod tests {
             || false,
         )
         .unwrap();
-        assert!(
-            near_existing
+        assert!(near_existing
             .layers
             .iter()
-                .any(|layer| (layer.z - near_floor_tip).abs() < 1e-9)
-        );
+            .any(|layer| (layer.z - near_floor_tip).abs() < 1e-9));
         assert!(
             near_existing
                 .layers
@@ -1399,28 +1503,22 @@ mod tests {
         assert!(error.contains("no positive-area XY projection"), "{error}");
 
         binding.selected[0].id = 2;
-        assert!(
-            adaptive_heights(&state, &binding.selected, 10.)
+        assert!(adaptive_heights(&state, &binding.selected, 10.)
             .unwrap_err()
-                .contains("no cutting depth")
-        );
+            .contains("no cutting depth"));
     }
 
     #[test]
     fn adaptive_selection_rejects_duplicate_and_stale_references() {
         let (state, binding) = state(false);
         let duplicate = [binding.selected[0].clone(), binding.selected[0].clone()];
-        assert!(
-            validate_adaptive_selection(&state, &duplicate)
+        assert!(validate_adaptive_selection(&state, &duplicate)
             .unwrap_err()
-                .contains("duplicate")
-        );
+            .contains("duplicate"));
         let mut stale = binding.selected[0].clone();
         stale.revision += 1;
-        assert!(
-            validate_adaptive_selection(&state, &[stale])
+        assert!(validate_adaptive_selection(&state, &[stale])
             .unwrap_err()
-                .contains("stale")
-        );
+            .contains("stale"));
     }
 }

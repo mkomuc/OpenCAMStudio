@@ -347,12 +347,9 @@ impl Scene {
                         ] {
                             let start = [x as f32, y as f32, a as f32];
                             let end = [x as f32, y as f32, b as f32];
-                            if let Some(mut cone) = PathCone::on_segment(
-                                start,
-                                end,
-                                color,
-                                cycle.tag.op_id,
-                            ) {
+                            if let Some(mut cone) =
+                                PathCone::on_segment(start, end, color, cycle.tag.op_id)
+                            {
                                 cone.at = if color == PATH_IN { start } else { end };
                                 scene.path_cones.push(cone);
                             }
@@ -713,7 +710,14 @@ fn push_arc(
             [p.x as f32, p.y as f32, z as f32]
         })
         .collect();
-    scene.add_strip_with_owner(pts, color_for(tag.kind), Some(tag.op_id), dashed_for(tag.kind), tag.pattern_id, tag.instance_index);
+    scene.add_strip_with_owner(
+        pts,
+        color_for(tag.kind),
+        Some(tag.op_id),
+        dashed_for(tag.kind),
+        tag.pattern_id,
+        tag.instance_index,
+    );
 }
 
 #[cfg(test)]

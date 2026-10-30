@@ -172,7 +172,10 @@ fn fallback(
             if contours.len() != 1 || !contours[0].closed {
                 return Err("Pocket requires one closed boundary chain".into());
             }
-            heights = CuttingHeights { top: z, bottom: z - binding.heights.depth() };
+            heights = CuttingHeights {
+                top: z,
+                bottom: z - binding.heights.depth(),
+            };
             vec![Polygon::new(contours[0].chain.clone()).map_err(|e| e.to_string())?]
         }
         ExtractionRecipe::ChamferLoop | ExtractionRecipe::EngravePath => {

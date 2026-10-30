@@ -153,7 +153,8 @@ impl MachineLibrary {
     /// different machine than the one you left on is precisely the failure this whole
     /// area exists to prevent.
     pub fn resolve(&self, name: Option<&str>) -> Option<&MachineEntry> {
-        name.and_then(|n| self.by_name(n)).or_else(|| self.machines.first())
+        name.and_then(|n| self.by_name(n))
+            .or_else(|| self.machines.first())
     }
 
     /// Whether `name` names a machine that is actually present.
@@ -344,7 +345,10 @@ mod tests {
             std::fs::read_to_string(s.file("machines.json.bak")).unwrap(),
             precious
         );
-        assert!(!lib.machines.is_empty(), "never leave the app with no machine");
+        assert!(
+            !lib.machines.is_empty(),
+            "never leave the app with no machine"
+        );
     }
 
     /// A hand-edited file can arrive with an empty list, which would leave nothing to
@@ -434,14 +438,20 @@ mod tests {
     fn estlcam_output_wiring_round_trips_per_machine() {
         let mut router = named("Estlcam router");
         router.post = cam_post::PostKind::Estlcam;
-        router.estlcam = cam_post::EstlcamOptions { output_1: false, output_2: true };
+        router.estlcam = cam_post::EstlcamOptions {
+            output_1: false,
+            output_2: true,
+        };
         let mut lib = MachineLibrary::default();
         lib.add(router.clone());
         lib.add(named("Other machine"));
         let saved = serde_json::to_string(&lib).unwrap();
         let restored: MachineLibrary = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored.by_name("Estlcam router"), Some(&router));
-        assert_eq!(restored.by_name("Other machine").unwrap().estlcam, cam_post::EstlcamOptions::default());
+        assert_eq!(
+            restored.by_name("Other machine").unwrap().estlcam,
+            cam_post::EstlcamOptions::default()
+        );
     }
 
     /// Editing the active machine can rename it — and the name is the handle the
@@ -472,7 +482,10 @@ mod tests {
         lib.add(named("Router"));
         lib.add(named("Mill"));
         let settled = lib.replace("Router", named("Mill"));
-        assert_eq!(settled, "Mill (2)", "the caller must be told, not left guessing");
+        assert_eq!(
+            settled, "Mill (2)",
+            "the caller must be told, not left guessing"
+        );
         assert!(lib.by_name("Mill (2)").is_some());
         assert!(lib.by_name("Router").is_none());
         assert_eq!(lib.machines.len(), 2);

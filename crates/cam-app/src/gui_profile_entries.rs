@@ -69,13 +69,7 @@ impl App {
             return None;
         };
         profile.selections = Some(entries);
-        Some(
-            crate::cad_operations::resolve_profile_entries(
-                self.controller.document(),
-                &mut profile,
-            )
-            .map(|_| ()),
-        )
+        Some(self.resolve_profile_geometry(&mut profile).map(|_| ()))
     }
 
     pub(super) fn profile_entries(&self) -> Vec<ProfileGeometryEntry> {
@@ -153,20 +147,19 @@ impl App {
                 entry.source = ProfileGeometrySource::Contours(vec![contour]);
                 entries.push(entry);
             }
-        } else if let Ok(geometry) =
-            crate::cad_operations::geometry_for_setup(self.controller.document())
-        {
+        } else if !self.creating_operation() {
             let saved: Vec<_> = profile.contours().collect();
-            for entry in &mut entries {
-                if let Ok((contours, _)) = cam_geometry3d::profile_entry_contours(&geometry, entry)
-                {
-                    for (index, contour) in contours.iter().enumerate() {
-                        if let Some(old) = saved
-                            .iter()
-                            .find(|p| p.chain == contour.chain && p.closed == contour.closed)
-                        {
-                            if old.side != contour.side {
-                                entry.side_overrides.insert(index, old.side);
+            if let Some(resolved) = self.cached_profile_contours(&entries) {
+                for (entry, result) in entries.iter_mut().zip(resolved.iter()) {
+                    if let Ok((contours, _)) = result {
+                        for (index, contour) in contours.iter().enumerate() {
+                            if let Some(old) = saved
+                                .iter()
+                                .find(|p| p.chain == contour.chain && p.closed == contour.closed)
+                            {
+                                if old.side != contour.side {
+                                    entry.side_overrides.insert(index, old.side);
+                                }
                             }
                         }
                     }
@@ -190,7 +183,8 @@ impl App {
             .instances
             .iter()
             .filter(|i| {
-                self.controller.inspection_setup()
+                self.controller
+                    .inspection_setup()
                     .model_instances
                     .contains(&i.id)
             })
@@ -763,10 +757,7 @@ impl App {
         if let Some(error) = &editor.error {
             body = body.push(text(error).size(11).color(palette::WARN));
         }
-        if let Some(info) = crate::cad_operations::geometry_for_setup(self.controller.document())
-            .ok()
-            .and_then(|geometry| cam_geometry3d::verify_profile_entry(&geometry, entry))
-        {
+        if let Some(info) = self.cached_profile_entry_verification(entry) {
             body = body.push(text(format!("Info: Automatic verification: {info}. The selected geometry and operation settings are used."))
                 .size(11).color(INSPECTOR_MUTED));
         }

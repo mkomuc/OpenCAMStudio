@@ -38,12 +38,24 @@ enum ToolKindId {
     EndMill,
     BallMill,
     FaceMill,
-    BullNose { corner_um: i64 },
-    ChamferMill { angle_mdeg: i64, tip_um: i64 },
-    Drill { angle_mdeg: i64 },
+    BullNose {
+        corner_um: i64,
+    },
+    ChamferMill {
+        angle_mdeg: i64,
+        tip_um: i64,
+    },
+    Drill {
+        angle_mdeg: i64,
+    },
     /// `pitch_um == 0` ⇒ single-form (`None`).
-    ThreadMill { pitch_um: i64 },
-    VBit { angle_mdeg: i64, tip_um: i64 },
+    ThreadMill {
+        pitch_um: i64,
+    },
+    VBit {
+        angle_mdeg: i64,
+        tip_um: i64,
+    },
 }
 
 fn kind_id(k: &ToolKind) -> ToolKindId {
@@ -254,7 +266,11 @@ mod tests {
     fn identity_ignores_number_but_not_geometry() {
         let a = t(1, 12.0, ToolKind::EndMill);
         let b = t(7, 12.0, ToolKind::EndMill);
-        assert_eq!(a.identity(), b.identity(), "same tool, different number ⇒ same id");
+        assert_eq!(
+            a.identity(),
+            b.identity(),
+            "same tool, different number ⇒ same id"
+        );
 
         // Differing flutes, length, diameter, or kind ⇒ different identity.
         let mut c = a.clone();
@@ -263,8 +279,16 @@ mod tests {
         let mut d = a.clone();
         d.length = 45.0;
         assert_ne!(a.identity(), d.identity(), "overall length (reach)");
-        assert_ne!(a.identity(), t(1, 10.0, ToolKind::EndMill).identity(), "diameter");
-        assert_ne!(a.identity(), t(1, 12.0, ToolKind::BallMill).identity(), "kind");
+        assert_ne!(
+            a.identity(),
+            t(1, 10.0, ToolKind::EndMill).identity(),
+            "diameter"
+        );
+        assert_ne!(
+            a.identity(),
+            t(1, 12.0, ToolKind::BallMill).identity(),
+            "kind"
+        );
 
         // Cutting direction is a physical property, so it distinguishes tools too.
         let mut up = a.clone();
@@ -292,7 +316,10 @@ mod tests {
         assert_eq!(map[&7], 1, "⌀12 end mill adopts shop #1");
         assert_eq!(rep.matched_remapped, vec![(7, 1)]);
         assert!(rep.changed());
-        assert_eq!(rep.summary().as_deref(), Some("1 tool remapped to shop numbers, 0 kept project-local"));
+        assert_eq!(
+            rep.summary().as_deref(),
+            Some("1 tool remapped to shop numbers, 0 kept project-local")
+        );
     }
 
     #[test]
@@ -309,7 +336,13 @@ mod tests {
     #[test]
     fn unmatched_tool_stays_project_local() {
         let shop = [t(1, 12.0, ToolKind::EndMill)];
-        let incoming = [t(5, 3.0, ToolKind::Drill { point_angle_deg: 118.0 })];
+        let incoming = [t(
+            5,
+            3.0,
+            ToolKind::Drill {
+                point_angle_deg: 118.0,
+            },
+        )];
         let (map, rep) = plan_numbers(&incoming, &shop);
         assert_eq!(map[&5], 5, "no match ⇒ keeps its own number");
         assert_eq!(rep.local_kept, vec![5]);
@@ -430,10 +463,17 @@ mod tests {
         };
         assert_eq!(op_tool(1), 4, "op on the ⌀12 tool points at shop #4");
         let moved = rep.local_renumbered[0].1;
-        assert_eq!(op_tool(2), moved, "op on the ⌀8 follows it to its new number");
+        assert_eq!(
+            op_tool(2),
+            moved,
+            "op on the ⌀8 follows it to its new number"
+        );
         // Every op still points at a tool that exists.
         for op in &setup.operations {
-            assert!(setup.tools.iter().any(|t| t.number == op.tool()), "no dangling ref");
+            assert!(
+                setup.tools.iter().any(|t| t.number == op.tool()),
+                "no dangling ref"
+            );
         }
     }
 }

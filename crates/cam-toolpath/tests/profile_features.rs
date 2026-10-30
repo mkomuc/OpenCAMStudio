@@ -84,6 +84,114 @@ fn plunges(r: &StrategyResult) -> Vec<Point3> {
 }
 
 #[test]
+fn automatic_inside_entry_preserves_the_requested_lead_shape() {
+    for (lead, climb, finishing) in [
+        Lead::Linear { length: 3. },
+        Lead::Arc { radius: 3. },
+        Lead::ArcSweep {
+            radius: 3.,
+            angle_deg: 45.,
+        },
+    ]
+    .into_iter()
+    .flat_map(|lead| {
+        [true, false]
+            .into_iter()
+            .flat_map(move |climb| [true, false].map(|finishing| (lead, climb, finishing)))
+    }) {
+        let mut op = profile();
+        op.side = Side::Inside;
+        op.start = None;
+        op.lead_in = lead;
+        op.lead_out = lead;
+        op.clearing.climb = climb;
+        op.passes.finishing = finishing;
+        let r = run(op);
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        let entries: Vec<_> = r
+            .program
+            .steps()
+            .iter()
+            .filter(|step| {
+                matches!(step, Step::Linear { tag, .. } | Step::Arc { tag, .. }
+                if tag.kind == MoveKind::LeadIn)
+            })
+            .collect();
+        assert_eq!(entries.len(), 2, "{lead:?}: {:?}", r.program.steps());
+        for entry in entries {
+            assert_eq!(
+                matches!(entry, Step::Arc { .. }),
+                !matches!(lead, Lead::Linear { .. })
+            );
+        }
+        assert_eq!(
+            r.program
+                .steps()
+                .iter()
+                .filter(|step| matches!(step,
+            Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.kind == MoveKind::LeadOut))
+                .count(),
+            2
+        );
+        assert!(!r.diagnostics.iter().any(|d| d.message.contains("omitted")));
+    }
+}
+
+#[test]
+fn leads_that_cannot_fit_warn_once_and_preserve_selected_positions() {
+    for start in [None, Some([0., 20.])] {
+        let mut op = profile();
+        op.side = Side::Inside;
+        op.start = start;
+        let radius = if start.is_some() { 3. } else { 30. };
+        op.lead_in = Lead::Arc { radius };
+        op.lead_out = Lead::Arc { radius };
+        let r = run(op);
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+        assert!(!r.program.steps().iter().any(|s| matches!(s,
+            Step::Linear { tag, .. } | Step::Arc { tag, .. }
+                if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut))));
+        assert_eq!(
+            r.diagnostics
+                .iter()
+                .filter(|d| d.message.contains("omitted"))
+                .count(),
+            2
+        );
+        if start.is_some() {
+            assert!(plunges(&r).iter().all(|p| p.x == 3. && p.y == 17.));
+        }
+    }
+}
+
+#[test]
+fn saved_profiles_without_the_lead_placement_revision_are_recomputed() {
+    let op = Operation::Profile(profile());
+    let env = JobEnv {
+        heights: Heights::new(8., 3., 0.),
+        tools: &[],
+        stock: None,
+        spindle: SpindleDir::Cw,
+    };
+    let token = CancelToken::new();
+    let mut cache = cam_toolpath::OperationCache::default();
+    cache.compute(&op, &env, &token, StrategyResult::default);
+    let mut saved = serde_json::to_value(cache).unwrap();
+    saved["entries"][0]["key"]
+        .as_object_mut()
+        .unwrap()
+        .remove("profile_lead_revision");
+    let mut cache: cam_toolpath::OperationCache = serde_json::from_value(saved).unwrap();
+    cache.compute(&op, &env, &token, StrategyResult::default);
+    assert_eq!(cache.stats.computed, 1);
+    assert_eq!(cache.stats.reused, 0);
+    cache.compute(&op, &env, &token, || {
+        panic!("current profile must be reused")
+    });
+    assert_eq!(cache.stats.reused, 1);
+}
+
+#[test]
 fn invalid_and_excessive_depth_requests_fail_atomically() {
     for value in [f64::NAN, f64::INFINITY, 1e-20, 0., -1.] {
         let mut op = profile();

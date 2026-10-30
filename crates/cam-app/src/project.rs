@@ -13,6 +13,8 @@
 //! version, so the migrating path is the ordinary path rather than a rarely-exercised
 //! branch.
 
+use std::collections::BTreeSet;
+
 use cam_geo::{Polygon, Polyline};
 use cam_model::{migrate, Document};
 
@@ -173,11 +175,55 @@ pub struct StoredToolpaths {
     pub fingerprints: std::collections::BTreeMap<u32, String>,
 }
 
+/// A stable project-browser node, shared with the persisted view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TreeNode {
+    #[default]
+    Models,
+    Setups,
+    Asset(u64),
+    Model(u64),
+    Setup(u64),
+    Pattern(u64),
+    Operation(u32),
+}
+
+/// Project-local browser, selection and viewport visibility at the last save.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ProjectView {
+    pub active_setup: u64,
+    pub active_origin: u32,
+    pub selection: crate::Selection,
+    pub cad_selection: Vec<cam_model::EntityRef>,
+    pub expanded_setups: BTreeSet<u64>,
+    pub collapsed_assets: BTreeSet<u64>,
+    pub expanded_operations: BTreeSet<u32>,
+    pub expanded_patterns: BTreeSet<u64>,
+    pub tools_expanded: bool,
+    pub hidden_assets: BTreeSet<u64>,
+    pub model_view: Option<TreeNode>,
+    pub browser_view: TreeNode,
+    pub models_collapsed: bool,
+    pub setups_collapsed: bool,
+    pub hidden_setups: BTreeSet<u64>,
+    pub hidden_ops: BTreeSet<u32>,
+    pub cad_hidden: BTreeSet<u64>,
+    pub focus_ops: BTreeSet<u32>,
+    pub planar_selection: Vec<crate::LoopRef>,
+    pub show_stock: bool,
+    pub show_origin: bool,
+    pub show_project_browser: bool,
+}
+
 /// A saved OpenCAMStudio project: the editable document plus the imported geometry
 /// it was built from and the seed defaults. Self-contained — no references to
 /// external CAD files — so opening it needs nothing else on disk.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
+    /// Absent in older projects, which retain the default opening view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ProjectView>,
     #[serde(default)]
     pub toolpaths: StoredToolpaths,
     /// Schema version (mirrors [`cam_model::SCHEMA_VERSION`]).
@@ -231,9 +277,12 @@ impl Project {
     /// Operation identities are document-wide because CAD bindings are keyed by
     /// operation ID, even though operation lists live under individual setups.
     pub fn validate(&self) -> Result<(), String> {
-        use std::collections::BTreeSet;
-
-        if self.document.setups.first().is_some_and(|s| s.stock == cam_model::Stock::PreviousSetup) {
+        if self
+            .document
+            .setups
+            .first()
+            .is_some_and(|s| s.stock == cam_model::Stock::PreviousSetup)
+        {
             return Err("The first setup has no previous setup; choose box stock".into());
         }
         let mut setup_ids = BTreeSet::new();
@@ -447,17 +496,24 @@ mod tests {
     #[test]
     fn large_project_arrays_save_compactly_and_keep_exact_geometry() {
         let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
-        else { panic!("expected project") };
-        project.open_paths.push(Polyline::new((0..10_000).map(|i| {
-            cam_geo::Point::new(i as f64 * 0.123456789012345, (i as f64).sin())
-        }).collect()));
+        else {
+            panic!("expected project")
+        };
+        project.open_paths.push(Polyline::new(
+            (0..10_000)
+                .map(|i| cam_geo::Point::new(i as f64 * 0.123456789012345, (i as f64).sin()))
+                .collect(),
+        ));
         let pretty = serde_json::to_string_pretty(&project).unwrap();
         let compact = project.to_json().unwrap();
         assert!(compact.len() * 3 < pretty.len() * 2);
         assert_eq!(Project::from_json(&compact).unwrap(), project);
         let tagged = OcamFile::Project(project.clone()).to_json().unwrap();
         assert!(tagged.len() * 3 < pretty.len() * 2);
-        assert_eq!(OcamFile::from_json(&tagged).unwrap(), OcamFile::Project(project));
+        assert_eq!(
+            OcamFile::from_json(&tagged).unwrap(),
+            OcamFile::Project(project)
+        );
     }
 
     #[test]
@@ -618,7 +674,8 @@ mod tests {
 
     #[test]
     fn project_round_trip_preserves_operation_stock_to_leave() {
-        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
+        else {
             panic!("expected a project");
         };
         let operation_id = project.document.setups[0].operations[0].id();
@@ -735,21 +792,38 @@ mod tests {
 
     #[test]
     fn project_loader_rejects_malformed_pattern_membership() {
-        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap() else {
+        let OcamFile::Project(mut project) = OcamFile::from_json(&v9_project_json()).unwrap()
+        else {
             panic!("expected a project");
         };
-        project.document.setup_mut().patterns.push(cam_model::OperationPattern {
-            id: 1,
-            name: "Invalid source".into(),
-            members: vec![999],
-            kind: cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
-            order: cam_model::PatternOrder::ByInstance,
-            suppressed: false,
-            options: Default::default(),
-        });
-        assert!(OcamFile::Project(project.clone()).to_json().unwrap_err().to_string().contains("missing operation 999"));
+        project
+            .document
+            .setup_mut()
+            .patterns
+            .push(cam_model::OperationPattern {
+                id: 1,
+                name: "Invalid source".into(),
+                members: vec![999],
+                kind: cam_model::PatternKind::Rectangular {
+                    nx: 2,
+                    ny: 1,
+                    dx: 1.0,
+                    dy: 0.0,
+                },
+                order: cam_model::PatternOrder::ByInstance,
+                suppressed: false,
+                options: Default::default(),
+            });
+        assert!(OcamFile::Project(project.clone())
+            .to_json()
+            .unwrap_err()
+            .to_string()
+            .contains("missing operation 999"));
         let json = serde_json::to_string(&OcamFile::Project(project)).unwrap();
-        assert!(OcamFile::from_json(&json).unwrap_err().to_string().contains("missing operation 999"));
+        assert!(OcamFile::from_json(&json)
+            .unwrap_err()
+            .to_string()
+            .contains("missing operation 999"));
     }
 
     #[test]

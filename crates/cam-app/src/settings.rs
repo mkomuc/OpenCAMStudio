@@ -89,6 +89,8 @@ impl From<crate::config::ConfigLoad> for LoadOutcome {
 pub struct Settings {
     /// Format version — see [`SETTINGS_VERSION`].
     pub settings_version: u32,
+    /// Decimal places used to display tool dimensions and cutting data.
+    pub number_decimals: u8,
     pub view: ViewPrefs,
     pub snapping: SnapPrefs,
     pub panes: PanePrefs,
@@ -282,6 +284,11 @@ pub const SNAP_CATCH_MULTIPLE: f32 = 1.5;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PanePrefs {
+    pub show_project_browser: bool,
+    pub show_library: bool,
+    /// Whether the inspector may appear when editing; idle visibility is automatic.
+    pub inspector_enabled: bool,
+    pub show_output: bool,
     pub project_px: f32,
     pub inspector_px: f32,
     pub output_px: f32,
@@ -364,6 +371,10 @@ impl Default for SnapPrefs {
 impl Default for PanePrefs {
     fn default() -> Self {
         Self {
+            show_project_browser: true,
+            show_library: false,
+            inspector_enabled: true,
+            show_output: true,
             project_px: 220.0,
             inspector_px: 250.0,
             output_px: 140.0,
@@ -386,6 +397,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             settings_version: SETTINGS_VERSION,
+            number_decimals: 2,
             view: ViewPrefs::default(),
             snapping: SnapPrefs::default(),
             panes: PanePrefs::default(),
@@ -423,6 +435,29 @@ fn clamp(v: f32, (lo, hi): (f32, f32), fallback: f32) -> f32 {
 }
 
 impl Settings {
+    /// Display rounding never changes the stored machining values.
+    pub fn format_number(&self, value: f64) -> String {
+        let digits = usize::from(self.number_decimals.min(8));
+        let formatted = format!("{value:.digits$}");
+        if formatted.starts_with('-') && formatted.parse::<f64>() == Ok(0.) {
+            formatted[1..].to_owned()
+        } else {
+            formatted
+        }
+    }
+
+    /// Keep in-progress text intact; format only inactive numeric inputs.
+    pub fn format_numeric_input(&self, value: &str, editing: bool) -> String {
+        if !editing {
+            if let Ok(number) = value.parse::<f64>() {
+                if number.is_finite() {
+                    return self.format_number(number);
+                }
+            }
+        }
+        value.to_owned()
+    }
+
     /// Force every value into range.
     ///
     /// Applied **on load**, not merely on edit: `settings.json` is a plain text file a
@@ -432,6 +467,7 @@ impl Settings {
     /// propagating through every comparison as a silent false.
     pub fn clamp_all(&mut self) {
         let d = Settings::default();
+        self.number_decimals = self.number_decimals.min(8);
         self.simulation.accuracy = clamp_simulation_accuracy(self.simulation.accuracy);
         self.simulation.comparison_tolerance =
             clamp(self.simulation.comparison_tolerance, (0.001, 2.0), 0.05);
@@ -654,6 +690,30 @@ mod tests {
         let text = serde_json::to_string_pretty(&d).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(d, back);
+    }
+
+    #[test]
+    fn decimal_display_defaults_persists_and_preserves_editing_precision() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.number_decimals, 2);
+        assert_eq!(settings.format_number(12.3456), "12.35");
+        assert_eq!(settings.format_number(-0.001), "0.00");
+        assert_eq!(settings.format_numeric_input("0.123456", true), "0.123456");
+        assert_eq!(settings.format_numeric_input("1.", true), "1.");
+        assert_eq!(settings.format_numeric_input("invalid", false), "invalid");
+        settings.number_decimals = 4;
+        assert_eq!(settings.format_number(12.3456), "12.3456");
+        let scratch = Scratch::new("number-decimals");
+        let path = scratch.file("settings.json");
+        settings.save_to(&path).unwrap();
+        let (loaded, outcome) = load_from(&path);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(loaded.number_decimals, 4);
+        settings.number_decimals = 255;
+        settings.clamp_all();
+        assert_eq!(settings.number_decimals, 8);
+        settings.number_decimals = 0;
+        assert_eq!(settings.format_number(12.9), "13");
     }
 
     #[test]
@@ -1009,6 +1069,10 @@ mod tests {
         written.snapping.default_snaps = vec![SnapKind::End, SnapKind::Nearest];
         written.panes.project_px = 310.0;
         written.panes.min_inspector_px = 180.0;
+        written.panes.show_project_browser = false;
+        written.panes.show_library = true;
+        written.panes.inspector_enabled = false;
+        written.panes.show_output = false;
         written.session.machine = Some("Router".into());
         written.save_to(&s.file("settings.json")).unwrap();
 

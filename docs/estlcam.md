@@ -24,6 +24,21 @@ the single workpiece origin in Estlcam. The exporter repeats every motion G word
 uses relative I/J arcs, splits full circles and helices into half arcs, and expands
 drilling into explicit moves.
 
+Manual tool changes carry the tool details directly on the `M6` line so Estlcam
+can display them while waiting for the cutter to be changed, for example:
+
+```gcode
+T1 M6 (T1 - 6 mm rougher - Square End Mill - D6.000 - FL18.000 - CR=0.000 - F3 - RPM 12000)
+```
+
+The prompt includes the cutter description, type, diameter (`D`), effective flute
+length (`FL`), corner radius (`CR`), flute count (`F`), and upcoming operation's
+spindle speed (`RPM`). Dimensions are in mm; `F` inside this comment is the flute
+count, not a feed command. RPM comes from the toolpath, including operation
+overrides. Names are sanitized for G-code comments. Direct post callers can pass
+the setup's tools through `PostOptions.tools`; without tool metadata, the prompt
+still identifies the tool number and any upcoming RPM.
+
 Timed dwells, reverse spindle, controller cutter compensation, and multiple work
 datums are rejected. Use computed compensation and export origins separately.
 

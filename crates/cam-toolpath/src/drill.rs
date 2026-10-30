@@ -156,7 +156,9 @@ mod tests {
         };
         let res = DrillStrategy::new(op).compute(&env, &CancelToken::new());
         assert!(
-            !res.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            !res.diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error),
             "no errors"
         );
         match res.program.steps().iter().find_map(|s| match s {

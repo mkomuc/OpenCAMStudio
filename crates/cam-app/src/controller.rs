@@ -14,9 +14,10 @@ use cam_import::{read_dxf_str, ImportError, ImportOptions};
 
 use crate::project::{OcamFile, Project};
 use cam_model::{
-    reconcile_tool_numbers, Axis, CarveOp, ChamferOp, ClearParams, Comp, Document, DrillOp,
-    EngraveOp, FaceOp, Hand, Heights, History, Lead, Machine, Operation, Origin, Plunge, PocketOp,
-    ParallelOp, ParallelParams, AdaptiveOp, AdaptiveParams, ProfileOp, ReconcileReport, Setup, Side, Stock, ThreadOp, Tool, ToolKind,
+    reconcile_tool_numbers, AdaptiveOp, AdaptiveParams, Axis, CarveOp, ChamferOp, ClearParams,
+    Comp, Document, DrillOp, EngraveOp, FaceOp, Hand, Heights, History, Lead, Machine, Operation,
+    Origin, ParallelOp, ParallelParams, Plunge, PocketOp, ProfileOp, ReconcileReport, Setup, Side,
+    Stock, ThreadOp, Tool, ToolKind,
 };
 use cam_post::{PostError, PostKind, PostOptions};
 use cam_render::{MeshVertex, Scene};
@@ -250,6 +251,7 @@ pub struct AppController {
     /// The `.ocam` path this project was last saved to / opened from.
     current_path: Option<PathBuf>,
     saved_project: Option<ProjectSnapshot>,
+    project_view: Option<crate::project::ProjectView>,
     /// An operation being created, awaiting a geometry pick in the viewport.
     pending_op: Option<PendingOp>,
     outcome: Option<RunOutcome>,
@@ -563,6 +565,7 @@ impl AppController {
             source_name: String::new(),
             current_path: None,
             saved_project: None,
+            project_view: None,
             pending_op: None,
             outcome: None,
             nc: None,
@@ -664,7 +667,9 @@ impl AppController {
     }
 
     pub fn next_pattern_id(&self) -> u64 {
-        self.pattern_id_floor.max(self.document().pattern_id_floor).max(1)
+        self.pattern_id_floor
+            .max(self.document().pattern_id_floor)
+            .max(1)
     }
 
     /// The current setup, or read-only creation defaults before one exists.
@@ -675,7 +680,9 @@ impl AppController {
     /// Read-only values for inspectors and the viewport before a setup exists.
     /// Machining still requires an actual entry in `document.setups`.
     pub fn inspection_setup(&self) -> &Setup {
-        self.document().active_setup().unwrap_or(&self.setup_defaults)
+        self.document()
+            .active_setup()
+            .unwrap_or(&self.setup_defaults)
     }
 
     /// The seed defaults used when a document is generated on import.
@@ -728,10 +735,7 @@ impl AppController {
 
     /// The operation with `id`, if present.
     pub fn operation(&self, id: u32) -> Option<&Operation> {
-        self.setup()
-            .operations
-            .iter()
-            .find(|o| o.id() == id)
+        self.setup().operations.iter().find(|o| o.id() == id)
     }
 
     /// The currently-selected operation, if an operation is selected.
@@ -816,7 +820,11 @@ impl AppController {
         entity: cam_model::EntityRef,
         additive: bool,
     ) -> Result<(), String> {
-        let mut selected = if additive { self.cad_selection.clone() } else { Vec::new() };
+        let mut selected = if additive {
+            self.cad_selection.clone()
+        } else {
+            Vec::new()
+        };
         if let Some(index) = selected.iter().position(|reference| *reference == entity) {
             selected.remove(index);
         } else {
@@ -910,6 +918,7 @@ impl AppController {
                 let count = import.regions.len() + import.open_chains.len();
                 if self.source_name.is_empty() {
                     self.source_name = name;
+                    self.project_view = None;
                 }
                 self.edit_document(move |doc| {
                     doc.geometry.drawing_regions.extend(import.regions);
@@ -1120,17 +1129,28 @@ impl AppController {
         {
             op.set_cooling(cooling);
         }
-        if let Some(preset) = self.setup().tools.iter().find(|t| t.number == tool)
-            .and_then(|t| t.preset_for_material(self.setup().material_id)) {
+        if let Some(preset) = self
+            .setup()
+            .tools
+            .iter()
+            .find(|t| t.number == tool)
+            .and_then(|t| t.preset_for_material(self.setup().material_id))
+        {
             op.apply_tool_preset(preset)?;
         }
         let mut preview = self.document().clone();
         preview.geometry.bindings.insert(id, binding.clone());
-        let settings = if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary || matches!(
-            kind,
-            OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Thread | OpKind::Adaptive | OpKind::Parallel
-                | OpKind::Bore
-        ) {
+        let settings = if binding.recipe == cam_model::ExtractionRecipe::PocketBoundary
+            || matches!(
+                kind,
+                OpKind::Chamfer
+                    | OpKind::Engrave
+                    | OpKind::Carve
+                    | OpKind::Thread
+                    | OpKind::Adaptive
+                    | OpKind::Parallel
+                    | OpKind::Bore
+            ) {
             crate::cad_operations::selection_height_defaults(&preview, &op)
         } else {
             cam_model::OperationHeightSettings::default()
@@ -1151,20 +1171,31 @@ impl AppController {
         entities: Vec<cam_model::EntityRef>,
     ) -> Result<(), String> {
         let mut doc = self.document().clone();
-        if matches!(self.operation(id), Some(Operation::Adaptive(_) | Operation::Parallel(_))) {
+        if matches!(
+            self.operation(id),
+            Some(Operation::Adaptive(_) | Operation::Parallel(_))
+        ) {
             cam_geometry3d::validate_adaptive_selection(self.geometry_state(), &entities)?;
         } else {
             crate::cad_operations::validate_selection(self.geometry_state(), &entities)?;
         }
         let pocket_recipe = if matches!(self.operation(id), Some(Operation::Pocket(_))) {
-            Some(crate::cad_operations::recipe(OpKind::Pocket, &crate::cad_operations::geometry_for_setup(&doc)?, &entities)?)
-        } else { None };
+            Some(crate::cad_operations::recipe(
+                OpKind::Pocket,
+                &crate::cad_operations::geometry_for_setup(&doc)?,
+                &entities,
+            )?)
+        } else {
+            None
+        };
         let binding = doc
             .geometry
             .bindings
             .get_mut(&id)
             .ok_or("Operation has explicit geometry")?;
-        if let Some(recipe) = pocket_recipe { binding.recipe = recipe; }
+        if let Some(recipe) = pocket_recipe {
+            binding.recipe = recipe;
+        }
         binding.selected = entities;
         binding.status = cam_model::ResolutionStatus::Resolved;
         crate::cad_operations::validate_binding_edit(&mut doc, id)?;
@@ -1323,6 +1354,7 @@ impl AppController {
         self.regions = regions;
         self.open_paths = open_paths;
         self.source_name = name;
+        self.project_view = None;
         let mut document = self.generate_document(seed_ops);
         document.geometry.drawing_regions = self.regions.clone();
         document.geometry.drawing_paths = self.open_paths.clone();
@@ -1334,7 +1366,8 @@ impl AppController {
         self.active_origin = self.setup().origin_index;
         self.pending_op = None;
         self.current_path = None;
-        self.selection = self.setup()
+        self.selection = self
+            .setup()
             .operations
             .first()
             .map(|op| Selection::Operation(op.id()))
@@ -1356,6 +1389,7 @@ impl AppController {
         self.active_setup_id = 0;
         self.active_origin = 1;
         self.source_name.clear();
+        self.project_view = None;
         self.current_path = None;
         self.pending_op = None;
         self.selection = Selection::Setup;
@@ -1375,6 +1409,25 @@ impl AppController {
     /// The `.ocam` file this project was last saved to / opened from, if any.
     pub fn current_path(&self) -> Option<&Path> {
         self.current_path.as_deref()
+    }
+
+    /// Desktop view last opened or supplied before saving; preserved by headless edits.
+    pub fn project_view(&self) -> Option<&crate::project::ProjectView> {
+        self.project_view.as_ref()
+    }
+
+    pub fn set_project_view(&mut self, view: Option<crate::project::ProjectView>) {
+        self.project_view = view;
+    }
+
+    fn current_project_view(&self) -> Option<crate::project::ProjectView> {
+        self.project_view.clone().map(|mut view| {
+            view.active_setup = self.active_setup_id;
+            view.active_origin = self.active_origin;
+            view.selection = self.selection;
+            view.cad_selection = self.cad_selection.clone();
+            view
+        })
     }
 
     fn project_snapshot(&self) -> ProjectSnapshot {
@@ -1422,6 +1475,7 @@ impl AppController {
             doc.pattern_id_floor = doc.pattern_id_floor.max(pattern_floor);
         });
         let project = Project {
+            view: self.current_project_view(),
             toolpaths: crate::project::StoredToolpaths {
                 cache: self.operation_cache.clone(),
                 fingerprints: self.toolpath_fingerprints.clone(),
@@ -1513,7 +1567,17 @@ impl AppController {
         self.pending_op = None;
         self.current_path = Some(path.to_path_buf());
         self.selection = Selection::Setup;
-        self.reconcile_selection();
+        self.project_view = project.view;
+        if let Some(view) = self.project_view.clone() {
+            let _ = self.activate_setup(view.active_setup);
+            self.select(view.selection);
+            if self.setup().origin_indices().contains(&view.active_origin) {
+                self.active_origin = view.active_origin;
+            }
+            self.cad_selection = view.cad_selection;
+        } else {
+            self.reconcile_selection();
+        }
         self.invalidate();
         self.mark_project_saved();
         Ok(())
@@ -1611,7 +1675,9 @@ impl AppController {
     /// `origin_index` — is never removed). Its operations are reassigned to the base,
     /// and it drops from the active / disabled sets.
     pub fn delete_origin(&mut self, index: u32) {
-        if self.setups().is_empty() { return; }
+        if self.setups().is_empty() {
+            return;
+        }
         let base = self.setup().origin_index;
         if index == base {
             return;
@@ -1679,7 +1745,12 @@ impl AppController {
 
     /// Reassign operation `id` to origin `index` (its group), as one undoable change.
     pub fn set_operation_origin(&mut self, id: u32, index: u32) {
-        if self.setup().patterns.iter().any(|pattern| pattern.members.contains(&id)) {
+        if self
+            .setup()
+            .patterns
+            .iter()
+            .any(|pattern| pattern.members.contains(&id))
+        {
             return;
         }
         self.edit_document(move |doc| {
@@ -1751,7 +1822,8 @@ impl AppController {
     /// Append a fresh default tool (numbered one past the highest existing tool)
     /// and select it, as one undoable change.
     pub fn add_tool(&mut self) {
-        let number = self.setup()
+        let number = self
+            .setup()
             .tools
             .iter()
             .map(|t| t.number)
@@ -1777,7 +1849,9 @@ impl AppController {
     /// tool's number are left as-is — they surface a "references tool N which is
     /// not in the setup" diagnostic on the next run rather than being rewritten.
     pub fn delete_tool(&mut self, index: usize) {
-        if self.setups().is_empty() { return; }
+        if self.setups().is_empty() {
+            return;
+        }
         let count = self.setup().tools.len();
         if index >= count {
             return;
@@ -1798,14 +1872,16 @@ impl AppController {
     /// number is reused; otherwise a copy is added with a fresh project-unique
     /// number. One undoable change when it adds.
     pub fn use_tool(&mut self, tool: Tool) -> u32 {
-        if let Some(existing) = self.setup()
+        if let Some(existing) = self
+            .setup()
             .tools
             .iter()
             .find(|t| same_tool_geometry(t, &tool))
         {
             return existing.number;
         }
-        let number = self.setup()
+        let number = self
+            .setup()
             .tools
             .iter()
             .map(|t| t.number)
@@ -1835,19 +1911,19 @@ impl AppController {
     /// and the saved `.ocam` — to just the tools in use). One undoable change if it
     /// removes anything.
     pub fn prune_unused_tools(&mut self) {
-        if self.setups().is_empty() { return; }
+        if self.setups().is_empty() {
+            return;
+        }
         // Must count EVERY tool an operation references: pruning on the defining tool
         // alone would drop a carve's clearing end mill out of the setup, leaving the
         // operation pointing at a tool that is no longer there.
-        let used: BTreeSet<u32> = self.setup()
+        let used: BTreeSet<u32> = self
+            .setup()
             .operations
             .iter()
             .flat_map(Operation::tools)
             .collect();
-        let has_unused = self.setup()
-            .tools
-            .iter()
-            .any(|t| !used.contains(&t.number));
+        let has_unused = self.setup().tools.iter().any(|t| !used.contains(&t.number));
         if !has_unused {
             return;
         }
@@ -1861,7 +1937,9 @@ impl AppController {
     /// rather than whatever is selected — e.g. changing an operation's tool from the
     /// inspector.
     pub fn edit_operation(&mut self, id: u32, f: impl FnOnce(&mut Operation)) {
-        if self.operation(id).is_none() { return; }
+        if self.operation(id).is_none() {
+            return;
+        }
         let mut edited = false;
         self.edit_document(|doc| {
             let heights = doc.setup().heights;
@@ -1957,11 +2035,21 @@ impl AppController {
         let Some(mut copy) = self.operation(sel).cloned() else {
             return;
         };
-        let insert_after = self.setup().patterns.iter().find(|p| p.members.contains(&sel))
+        let insert_after = self
+            .setup()
+            .patterns
+            .iter()
+            .find(|p| p.members.contains(&sel))
             .and_then(|p| p.members.last())
-            .and_then(|last| self.setup().operations.iter().position(|op| op.id() == *last))
+            .and_then(|last| {
+                self.setup()
+                    .operations
+                    .iter()
+                    .position(|op| op.id() == *last)
+            })
             .or_else(|| self.setup().operations.iter().position(|op| op.id() == sel))
-            .map(|index| index + 1).unwrap_or(self.setup().operations.len());
+            .map(|index| index + 1)
+            .unwrap_or(self.setup().operations.len());
         let new_id = self.next_op_id();
         set_op_id(&mut copy, new_id);
         self.edit_document(move |doc| {
@@ -2010,10 +2098,7 @@ impl AppController {
     /// finally committed comes back in via [`Self::confirm_operation`].
     pub fn seeded_cutting_for(&self, tool: u32) -> CuttingData {
         let p = self.defaults;
-        let td = self.setup()
-            .tools
-            .iter()
-            .find(|t| t.number == tool);
+        let td = self.setup().tools.iter().find(|t| t.number == tool);
         if let Some(preset) = td.and_then(|t| t.preset_for_material(self.setup().material_id)) {
             return CuttingData {
                 rpm: preset.spindle_rpm,
@@ -3476,6 +3561,27 @@ mod tests {
     }
 
     #[test]
+    fn estlcam_export_passes_setup_tool_details_and_operation_speed() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        app.edit_setup(|setup| {
+            let tool = &mut setup.tools[0];
+            tool.description = "Workshop rougher".into();
+            tool.flute_length = 12.0;
+            tool.nominal_rpm = 8000.0;
+            for operation in &mut setup.operations {
+                operation.set_spindle_rpm(6000.0);
+            }
+        });
+        app.set_post_kind(PostKind::Estlcam);
+        app.run(&CancelToken::new());
+        let nc = app.export_nc().unwrap();
+        let change = nc.lines().find(|line| line.contains(" M6 ")).unwrap();
+        assert!(change.contains(" - Workshop rougher - Square End Mill - D6.000 - FL12.000 - CR=0.000 - F2 - RPM 6000)"), "{change}");
+        assert!(!change.contains("RPM 8000"));
+    }
+
+    #[test]
     fn estlcam_output_changes_repost_the_same_toolpath() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
@@ -3488,7 +3594,10 @@ mod tests {
         let first = app.export_nc().unwrap().to_string();
         assert!(first.lines().any(|line| line == "M8"));
         let program = app.outcome().unwrap().program.clone();
-        let mms = cam_post::EstlcamOptions { output_1: false, output_2: true };
+        let mms = cam_post::EstlcamOptions {
+            output_1: false,
+            output_2: true,
+        };
         app.set_estlcam_options(mms);
         assert!(app.exported_nc().is_none());
         assert_eq!(app.outcome().unwrap().program, program);
@@ -3561,48 +3670,70 @@ mod tests {
         let unselected = existing[1];
         let third = 900;
         app.edit_document(|doc| {
-            doc.setup_mut().operations.push(Operation::Drill(cam_model::DrillOp {
-                id: third,
-                tool: 1,
-                points: vec![[25.0, 25.0]],
-                depth: 1.0,
-                start_offset: 0.0,
-                peck: None,
-                dwell: None,
-                spindle_rpm: 1000.0,
-                tool_preset: None,
-                cooling: Default::default(),
-                entry_feeds: Default::default(),
-                work_offset: 1,
-                feed: 100.0,
-            }));
+            doc.setup_mut()
+                .operations
+                .push(Operation::Drill(cam_model::DrillOp {
+                    id: third,
+                    tool: 1,
+                    points: vec![[25.0, 25.0]],
+                    depth: 1.0,
+                    start_offset: 0.0,
+                    peck: None,
+                    dwell: None,
+                    spindle_rpm: 1000.0,
+                    tool_preset: None,
+                    cooling: Default::default(),
+                    entry_feeds: Default::default(),
+                    work_offset: 1,
+                    feed: 100.0,
+                }));
         });
         let first = existing[0];
         let setup_id = app.active_setup_id();
-        let pattern_id = app.create_pattern(
-            setup_id,
-            &[first, third],
-            "Pair".into(),
-            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 12.0, dy: 0.0 },
-            cam_model::PatternOrder::ByInstance,
-        ).unwrap();
+        let pattern_id = app
+            .create_pattern(
+                setup_id,
+                &[first, third],
+                "Pair".into(),
+                cam_model::PatternKind::Rectangular {
+                    nx: 2,
+                    ny: 1,
+                    dx: 12.0,
+                    dy: 0.0,
+                },
+                cam_model::PatternOrder::ByInstance,
+            )
+            .unwrap();
         let setup = app.document().setup();
         assert_eq!(setup.patterns[0].members, vec![first, third]);
         assert_eq!(op_ids(&app), vec![first, third, unselected]);
         setup.validate_patterns().unwrap();
         app.move_operation(unselected, true);
-        assert_eq!(op_ids(&app), vec![first, third, unselected], "plain operations cannot split a neighboring group");
+        assert_eq!(
+            op_ids(&app),
+            vec![first, third, unselected],
+            "plain operations cannot split a neighboring group"
+        );
         app.document().setup().validate_patterns().unwrap();
 
         assert!(app.undo());
         assert!(app.document().setup().patterns.is_empty());
         assert_eq!(op_ids(&app), vec![first, unselected, third]);
         // Undo must not return an allocated identifier to the pool.
-        let next_id = app.create_pattern(
-            setup_id, &[first], "Next".into(),
-            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
-            cam_model::PatternOrder::ByOperation,
-        ).unwrap();
+        let next_id = app
+            .create_pattern(
+                setup_id,
+                &[first],
+                "Next".into(),
+                cam_model::PatternKind::Rectangular {
+                    nx: 2,
+                    ny: 1,
+                    dx: 1.0,
+                    dy: 0.0,
+                },
+                cam_model::PatternOrder::ByOperation,
+            )
+            .unwrap();
         assert!(next_id > pattern_id);
         assert!(app.undo());
         assert!(app.redo());
@@ -3627,13 +3758,20 @@ mod tests {
         app.edit_document(|doc| doc.pattern_id_floor = u64::MAX);
         let before = app.document().clone();
 
-        let error = app.create_pattern(
-            setup_id,
-            &[source],
-            "Exhausted".into(),
-            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 },
-            cam_model::PatternOrder::ByInstance,
-        ).unwrap_err();
+        let error = app
+            .create_pattern(
+                setup_id,
+                &[source],
+                "Exhausted".into(),
+                cam_model::PatternKind::Rectangular {
+                    nx: 2,
+                    ny: 1,
+                    dx: 1.0,
+                    dy: 0.0,
+                },
+                cam_model::PatternOrder::ByInstance,
+            )
+            .unwrap_err();
 
         assert_eq!(error, "Pattern ID range exhausted");
         assert_eq!(app.document(), &before);
@@ -3647,25 +3785,69 @@ mod tests {
         assert!(ids.len() >= 2);
         let setup_id = app.active_setup_id();
         app.edit_document(|doc| {
-            if let Some(op) = doc.setup_mut().operations.iter_mut().find(|op| op.id() == ids[1]) {
+            if let Some(op) = doc
+                .setup_mut()
+                .operations
+                .iter_mut()
+                .find(|op| op.id() == ids[1])
+            {
                 op.set_work_offset(2);
             }
         });
-        let rect = cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 1.0, dy: 0.0 };
-        assert!(app.create_pattern(setup_id, &ids, "Bad datum".into(), rect, cam_model::PatternOrder::ByInstance).is_err());
+        let rect = cam_model::PatternKind::Rectangular {
+            nx: 2,
+            ny: 1,
+            dx: 1.0,
+            dy: 0.0,
+        };
+        assert!(app
+            .create_pattern(
+                setup_id,
+                &ids,
+                "Bad datum".into(),
+                rect,
+                cam_model::PatternOrder::ByInstance
+            )
+            .is_err());
         app.edit_document(|doc| {
-            if let Some(op) = doc.setup_mut().operations.iter_mut().find(|op| op.id() == ids[1]) {
+            if let Some(op) = doc
+                .setup_mut()
+                .operations
+                .iter_mut()
+                .find(|op| op.id() == ids[1])
+            {
                 op.set_work_offset(1);
             }
         });
-        let pattern = app.create_pattern(setup_id, &ids, "Group".into(), rect, cam_model::PatternOrder::ByInstance).unwrap();
+        let pattern = app
+            .create_pattern(
+                setup_id,
+                &ids,
+                "Group".into(),
+                rect,
+                cam_model::PatternOrder::ByInstance,
+            )
+            .unwrap();
         app.edit_pattern(
-            setup_id, pattern, &[ids[0]], "Reduced".into(),
-            cam_model::PatternKind::Rectangular { nx: 2, ny: 1, dx: 2.0, dy: 0.0 },
+            setup_id,
+            pattern,
+            &[ids[0]],
+            "Reduced".into(),
+            cam_model::PatternKind::Rectangular {
+                nx: 2,
+                ny: 1,
+                dx: 2.0,
+                dy: 0.0,
+            },
             cam_model::PatternOrder::ByOperation,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(app.document().setup().patterns[0].members, vec![ids[0]]);
-        assert_eq!(op_ids(&app), ids, "removed members remain immediately after the group");
+        assert_eq!(
+            op_ids(&app),
+            ids,
+            "removed members remain immediately after the group"
+        );
         app.document().setup().validate_patterns().unwrap();
         assert!(app.undo());
         assert_eq!(app.document().setup().patterns[0].members, ids);
@@ -3688,19 +3870,30 @@ mod tests {
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let source_id = app.active_setup_id();
         let source_members = op_ids(&app);
-        let pattern = app.create_pattern(
-            source_id, &source_members, "Duplicated group".into(),
-            cam_model::PatternKind::Circular {
-                center_xy: [3.0, 4.0], count: 3,
-                distribution: cam_model::CircularDistribution::Partial { sweep_degrees: 90.0 },
-                direction: cam_model::PatternDirection::Cw,
-            }, cam_model::PatternOrder::ByOperation,
-        ).unwrap();
+        let pattern = app
+            .create_pattern(
+                source_id,
+                &source_members,
+                "Duplicated group".into(),
+                cam_model::PatternKind::Circular {
+                    center_xy: [3.0, 4.0],
+                    count: 3,
+                    distribution: cam_model::CircularDistribution::Partial {
+                        sweep_degrees: 90.0,
+                    },
+                    direction: cam_model::PatternDirection::Cw,
+                },
+                cam_model::PatternOrder::ByOperation,
+            )
+            .unwrap();
         let datum = app.document().setup().operations[0].work_offset();
         app.set_pattern_suppressed(source_id, pattern, true);
         app.edit_document(|doc| {
             doc.excluded_operations.insert(source_members[0]);
-            doc.disabled_origins.entry(source_id).or_default().insert(datum);
+            doc.disabled_origins
+                .entry(source_id)
+                .or_default()
+                .insert(datum);
         });
         let target_id = app.duplicate_setup(source_id).unwrap();
         let source = app.setups().iter().find(|s| s.id == source_id).unwrap();
@@ -3709,12 +3902,31 @@ mod tests {
         assert_ne!(target.patterns[0].id, pattern);
         assert_ne!(target.patterns[0].members, source_members);
         assert_eq!(target.patterns[0].kind, source.patterns[0].kind);
-        assert!(target.patterns[0].suppressed, "pattern suppression is preserved");
-        assert!(target.patterns[0].members.iter().all(|id| target.operations.iter().any(|op| op.id() == *id)));
-        assert!(app.document().excluded_operations.contains(&target.patterns[0].members[0]), "excluded source state follows remapped IDs");
-        assert!(app.document().disabled_origins.get(&target_id).is_some_and(|indices| indices.contains(&datum)), "disabled datum state is copied to the new setup");
+        assert!(
+            target.patterns[0].suppressed,
+            "pattern suppression is preserved"
+        );
+        assert!(target.patterns[0]
+            .members
+            .iter()
+            .all(|id| target.operations.iter().any(|op| op.id() == *id)));
+        assert!(
+            app.document()
+                .excluded_operations
+                .contains(&target.patterns[0].members[0]),
+            "excluded source state follows remapped IDs"
+        );
+        assert!(
+            app.document()
+                .disabled_origins
+                .get(&target_id)
+                .is_some_and(|indices| indices.contains(&datum)),
+            "disabled datum state is copied to the new setup"
+        );
         assert!(target.validate_patterns().is_ok());
-        assert!(app.transfer_operation_to_setup(source_members[0], target_id, false).is_err());
+        assert!(app
+            .transfer_operation_to_setup(source_members[0], target_id, false)
+            .is_err());
     }
 
     #[test]
@@ -3746,7 +3958,10 @@ mod tests {
         app.new_project();
         assert!(app.setups().is_empty());
         app.add_setup();
-        assert!(matches!(app.document().setup().stock, Stock::RelativeBox { .. }));
+        assert!(matches!(
+            app.document().setup().stock,
+            Stock::RelativeBox { .. }
+        ));
     }
 
     #[test]
@@ -4012,12 +4227,7 @@ mod tests {
         // Area strategies require a closed boundary.
         let mut app = AppController::new(machine());
         app.open_dxf(PART_WITH_STROKE_DXF, "part.dxf").unwrap();
-        for kind in [
-            OpKind::Pocket,
-            OpKind::Face,
-            OpKind::Drill,
-            OpKind::Thread,
-        ] {
+        for kind in [OpKind::Pocket, OpKind::Face, OpKind::Drill, OpKind::Thread] {
             assert!(
                 app.build_op(kind, LoopRef::open(0), &[], 1, None, None)
                     .is_none(),
@@ -4049,7 +4259,12 @@ mod tests {
 
         app.begin_operation(OpKind::Chamfer);
         assert!(app.open_paths_pickable());
-        let Operation::Chamfer(chamfer) = app.build_op(OpKind::Chamfer, LoopRef::open(0), &[], 1, None, None).unwrap() else { unreachable!() };
+        let Operation::Chamfer(chamfer) = app
+            .build_op(OpKind::Chamfer, LoopRef::open(0), &[], 1, None, None)
+            .unwrap()
+        else {
+            unreachable!()
+        };
         assert!(!chamfer.closed);
         assert_eq!(chamfer.chain.points(), app.open_paths()[0].points());
 
@@ -4066,6 +4281,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_WITH_STROKE_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4088,6 +4304,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4512,11 +4729,20 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         assert!(app.run(&CancelToken::new()).collisions.is_empty());
-        app.edit_heights(|h| { h.clearance = -1.; h.retract = -1.; });
+        app.edit_heights(|h| {
+            h.clearance = -1.;
+            h.retract = -1.;
+        });
         let outcome = app.run(&CancelToken::new());
-        assert!(outcome.has_errors(), "Invalid safety planes must prevent generation");
+        assert!(
+            outcome.has_errors(),
+            "Invalid safety planes must prevent generation"
+        );
         assert_ne!(outcome.completion, JobCompletion::Complete);
-        assert!(app.export_nc().is_err(), "Invalid safety planes must block export");
+        assert!(
+            app.export_nc().is_err(),
+            "Invalid safety planes must block export"
+        );
     }
 
     #[test]
@@ -4666,6 +4892,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4780,6 +5007,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4819,6 +5047,7 @@ mod tests {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
         let project = Project {
+            view: None,
             toolpaths: Default::default(),
             schema_version: cam_model::SCHEMA_VERSION,
             document: app.document().clone(),
@@ -4846,7 +5075,10 @@ mod tests {
         );
         // A real import brings in geometry only — no operations are fabricated
         // (unlike the bundled sample); selection falls back to the Setup.
-        assert!(app.setups().is_empty(), "import must not auto-create setups");
+        assert!(
+            app.setups().is_empty(),
+            "import must not auto-create setups"
+        );
         assert_eq!(app.selection(), Selection::Setup);
         assert!(app.undo());
         assert!(app.regions().is_empty());

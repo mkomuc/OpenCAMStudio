@@ -2,7 +2,139 @@
 use super::*;
 use cam_model::{ProfileContour, ProfileOp};
 
+type EntryContours = Result<(Vec<ProfileContour>, Option<cam_model::CuttingHeights>), String>;
+
+#[derive(PartialEq)]
+struct ContourKey {
+    revision: u64,
+    setup: u64,
+    entries: Vec<cam_model::ProfileGeometryEntry>,
+}
+
+#[derive(PartialEq)]
+struct ResolutionKey {
+    revision: u64,
+    setup: u64,
+    operation: u32,
+    depth: f64,
+    entries: Vec<cam_model::ProfileGeometryEntry>,
+}
+
+struct ResolvedProfile {
+    profile: ProfileOp,
+    binding: Option<cam_model::GeometryBinding>,
+}
+
+/// Only the current geometry extraction is retained. Feed, RPM, camera and
+/// holding-tab edits reuse it; source, setup and geometry settings invalidate it.
+#[derive(Default)]
+pub(super) struct ProfileContourCache {
+    key: Option<ContourKey>,
+    contours: Arc<Vec<EntryContours>>,
+    resolution: Option<(ResolutionKey, Result<Arc<ResolvedProfile>, String>)>,
+    verification: Option<(ContourKey, Option<String>)>,
+}
+
 impl App {
+    /// Creation validity, height previews and the geometry preview all need the
+    /// same authoritative extraction. Retain its geometry separately from live
+    /// feeds, speeds and pass settings so typing never extracts it again.
+    pub(super) fn resolve_profile_geometry(
+        &self,
+        profile: &mut ProfileOp,
+    ) -> Result<Option<cam_model::GeometryBinding>, String> {
+        let key = ResolutionKey {
+            revision: self.controller.revision(),
+            setup: self.controller.active_setup_id(),
+            operation: profile.id,
+            depth: profile.depth,
+            entries: profile
+                .selections
+                .clone()
+                .ok_or("Profile entries are unavailable")?,
+        };
+        let mut cache = self.profile_contour_cache.borrow_mut();
+        let resolved =
+            if let Some((_, result)) = cache.resolution.as_ref().filter(|(old, _)| *old == key) {
+                result.clone()
+            } else {
+                let mut resolved = profile.clone();
+                let result = crate::cad_operations::resolve_profile_entries(
+                    self.controller.document(),
+                    &mut resolved,
+                )
+                .map(|binding| {
+                    Arc::new(ResolvedProfile {
+                        profile: resolved,
+                        binding,
+                    })
+                });
+                cache.resolution = Some((key, result.clone()));
+                result
+            }?;
+        // Copy only fields produced by extraction. Every other setting belongs
+        // to the current draft, even when this geometry was resolved earlier.
+        profile.chain = resolved.profile.chain.clone();
+        profile.closed = resolved.profile.closed;
+        profile.side = resolved.profile.side;
+        profile.additional_chains = resolved.profile.additional_chains.clone();
+        profile.selections = resolved.profile.selections.clone();
+        profile.depth = resolved.profile.depth;
+        Ok(resolved.binding.clone())
+    }
+
+    pub(super) fn cached_profile_contours(
+        &self,
+        entries: &[cam_model::ProfileGeometryEntry],
+    ) -> Option<Arc<Vec<EntryContours>>> {
+        let key = self.profile_contour_key(entries);
+        let mut cache = self.profile_contour_cache.borrow_mut();
+        if cache.key.as_ref() == Some(&key) {
+            return Some(cache.contours.clone());
+        }
+        let geometry =
+            crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+        let contours = Arc::new(
+            entries
+                .iter()
+                .map(|entry| cam_geometry3d::profile_entry_contours(&geometry, entry))
+                .collect(),
+        );
+        cache.key = Some(key);
+        cache.contours = Arc::clone(&contours);
+        Some(contours)
+    }
+
+    fn profile_contour_key(&self, entries: &[cam_model::ProfileGeometryEntry]) -> ContourKey {
+        let mut geometry_entries = entries.to_vec();
+        for entry in &mut geometry_entries {
+            // Labels and the last resolved count do not change source geometry.
+            entry.name.clear();
+            entry.contour_count = 0;
+        }
+        ContourKey {
+            revision: self.controller.revision(),
+            setup: self.controller.active_setup_id(),
+            entries: geometry_entries,
+        }
+    }
+
+    pub(super) fn cached_profile_entry_verification(
+        &self,
+        entry: &cam_model::ProfileGeometryEntry,
+    ) -> Option<String> {
+        let key = self.profile_contour_key(std::slice::from_ref(entry));
+        let mut cache = self.profile_contour_cache.borrow_mut();
+        if let Some((_, finding)) = cache.verification.as_ref().filter(|(old, _)| *old == key) {
+            return finding.clone();
+        }
+        let finding = crate::cad_operations::geometry_for_setup(self.controller.document())
+            .ok()
+            .and_then(|geometry| cam_geometry3d::verify_profile_entry(&geometry, entry));
+        cache.verification = Some((key, finding.clone()));
+        finding
+    }
+
     fn profile_silhouette_bottom(&self, fallback: f64) -> f64 {
         let id = if self.creating_operation() {
             0
@@ -11,7 +143,8 @@ impl App {
         } else {
             return fallback;
         };
-        self.resolve_height_editor(id).map_or(fallback, |heights| heights.bottom)
+        self.resolve_height_editor(id)
+            .map_or(fallback, |heights| heights.bottom)
     }
 
     pub(super) fn apply_profile_side_overrides(&self, profile: &mut ProfileOp) {
@@ -41,15 +174,12 @@ impl App {
             return None;
         }
         if self.active_profile_geometry_entries().is_some() {
-            let geometry =
-                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
             let mut all = Vec::new();
             let mut plane = 0.;
             let mut entries = self.preview_profile_entries();
-            for entry in &mut entries {
-                if let Ok((contours, heights)) =
-                    cam_geometry3d::profile_entry_contours(&geometry, entry)
-                {
+            let resolved = self.cached_profile_contours(&entries)?;
+            for (entry, result) in entries.iter_mut().zip(resolved.iter()) {
+                if let Ok((contours, heights)) = result {
                     if all.is_empty() {
                         plane = match &entry.source {
                             _ if entry.kind == cam_model::ProfileGeometryKind::Silhouette => {
@@ -71,7 +201,7 @@ impl App {
                         };
                     }
                     entry.contour_count = contours.len();
-                    all.extend(contours);
+                    all.extend(contours.iter().cloned());
                 }
             }
             profile.selections = Some(entries);
@@ -762,6 +892,129 @@ mod tests {
         app
     }
     #[test]
+    fn contour_cache_reuses_cutting_edits_and_refreshes_geometry_changes() {
+        use cam_model::{ProfileGeometryEntry, ProfileGeometryKind, ProfileGeometrySource};
+        let mut app = drawing_app();
+        let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Chain".into());
+        entry.source = ProfileGeometrySource::Contours(vec![square(Side::Outside)]);
+        let first = app.cached_profile_contours(&[entry.clone()]).unwrap();
+        app.fields.insert(Field::Feed, "3000".into());
+        app.fields.insert(Field::SpindleRpm, "24000".into());
+        entry.name = "Renamed chain".into();
+        entry.contour_count = 1;
+        let reused = app.cached_profile_contours(&[entry.clone()]).unwrap();
+        assert!(Arc::ptr_eq(&first, &reused));
+
+        entry.side_overrides.insert(0, Side::Inside);
+        let inside = app.cached_profile_contours(&[entry.clone()]).unwrap();
+        assert!(!Arc::ptr_eq(&reused, &inside));
+        assert_eq!(inside[0].as_ref().unwrap().0[0].side, Side::Inside);
+
+        if let ProfileGeometrySource::Contours(contours) = &mut entry.source {
+            contours[0].chain = cam_geo::Contour::new(vec![
+                cam_geo::Point::new(100., 0.),
+                cam_geo::Point::new(140., 0.),
+                cam_geo::Point::new(140., 40.),
+            ]);
+        }
+        let moved = app.cached_profile_contours(&[entry.clone()]).unwrap();
+        assert!(!Arc::ptr_eq(&inside, &moved));
+        assert_eq!(moved[0].as_ref().unwrap().0[0].chain.points()[0].x, 100.);
+
+        entry.reversed = true;
+        let reversed = app.cached_profile_contours(&[entry.clone()]).unwrap();
+        assert!(!Arc::ptr_eq(&moved, &reversed));
+        assert_eq!(reversed[0].as_ref().unwrap().0[0].chain.points()[0].y, 40.);
+
+        // A model/setup revision must never retain the previous source extraction.
+        app.controller
+            .edit_setup(|setup| setup.name = "Changed setup".into());
+        let revised = app.cached_profile_contours(&[entry]).unwrap();
+        assert!(!Arc::ptr_eq(&reversed, &revised));
+    }
+
+    #[test]
+    fn creation_resolution_cache_preserves_live_cutting_data_and_matches_fresh_resolution() {
+        use cam_model::{ProfileGeometryEntry, ProfileGeometryKind, ProfileGeometrySource};
+        let mut app = drawing_app();
+        let Operation::Profile(mut profile) = app.controller.operation_template(OpKind::Profile, 0)
+        else {
+            panic!()
+        };
+        let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::Chain, "Chain".into());
+        entry.source = ProfileGeometrySource::Contours(vec![square(Side::Outside)]);
+        profile.selections = Some(vec![entry]);
+        let compare = |app: &App, profile: &cam_model::ProfileOp| {
+            let mut expected = profile.clone();
+            let binding = crate::cad_operations::resolve_profile_entries(
+                app.controller.document(),
+                &mut expected,
+            );
+            let mut actual = profile.clone();
+            assert_eq!(app.resolve_profile_geometry(&mut actual), binding);
+            assert_eq!(actual, expected);
+        };
+        compare(&app, &profile);
+        let initial = app
+            .profile_contour_cache
+            .borrow()
+            .resolution
+            .as_ref()
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+            .clone();
+        profile.feed = 4321.;
+        profile.spindle_rpm = 24000.;
+        profile.stepdown = 0.5;
+        profile.tabs.enabled = true;
+        compare(&app, &profile);
+        let reused = app
+            .profile_contour_cache
+            .borrow()
+            .resolution
+            .as_ref()
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(Arc::ptr_eq(&initial, &reused));
+
+        profile.depth += 1.;
+        compare(&app, &profile);
+        let deeper = app
+            .profile_contour_cache
+            .borrow()
+            .resolution
+            .as_ref()
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(!Arc::ptr_eq(&reused, &deeper));
+        profile.selections.as_mut().unwrap()[0].reversed = true;
+        compare(&app, &profile);
+        profile.selections.as_mut().unwrap()[0]
+            .side_overrides
+            .insert(0, Side::Inside);
+        compare(&app, &profile);
+        app.controller
+            .edit_setup(|s| s.name = "New revision".into());
+        compare(&app, &profile);
+
+        // An invalid source cannot reuse the preceding successful geometry.
+        profile.selections.as_mut().unwrap()[0].source = ProfileGeometrySource::Contours(vec![]);
+        assert!(app.resolve_profile_geometry(&mut profile).is_err());
+        profile.selections.as_mut().unwrap()[0].name = "Invalid renamed chain".into();
+        assert!(app
+            .resolve_profile_geometry(&mut profile)
+            .unwrap_err()
+            .contains("Invalid renamed chain"));
+    }
+    #[test]
     fn each_feature_retains_its_side_during_creation_and_when_other_features_are_removed() {
         let mut app = drawing_app();
         let before = app.controller.document().clone();
@@ -806,7 +1059,8 @@ mod tests {
         }];
         app.controller.add_operation(op);
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .last()
             .unwrap()

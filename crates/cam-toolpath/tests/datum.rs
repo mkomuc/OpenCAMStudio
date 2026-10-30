@@ -23,7 +23,10 @@ fn machine() -> Machine {
         tool_change_seconds: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
-        envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 50.0)),
+        envelope: Envelope::new(
+            Point3::new(0.0, 0.0, -50.0),
+            Point3::new(300.0, 180.0, 50.0),
+        ),
         safe_z: 5.0,
         tool_change_pos: None,
     }
@@ -95,7 +98,8 @@ fn every_shutdown_stops_the_spindle_first_then_coolant_then_lifts() {
         index: 2,
         position: [0.0, 0.0, 0.0],
     }];
-    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } =
+        build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
     let s = program.steps();
 
     // Each shutdown: SpindleOff, Coolant(Off), then the Traverse lift to 42.
@@ -105,7 +109,11 @@ fn every_shutdown_stops_the_spindle_first_then_coolant_then_lifts() {
         .filter(|(_, x)| matches!(x, Step::SpindleOff))
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(starts.len(), 2, "one shutdown per re-fixture, plus the ending:\n{s:#?}");
+    assert_eq!(
+        starts.len(),
+        2,
+        "one shutdown per re-fixture, plus the ending:\n{s:#?}"
+    );
 
     for i in starts {
         assert!(
@@ -133,7 +141,11 @@ fn a_tool_change_height_below_clearance_is_raised_and_reported() {
     ]);
     let clearance = d.setups[0].heights.clearance;
     // Well below the clearance plane.
-    let cam_toolpath::JobResult { program, diagnostics: diags, .. } = build_job(
+    let cam_toolpath::JobResult {
+        program,
+        diagnostics: diags,
+        ..
+    } = build_job(
         &d,
         1000.0,
         SpindleDir::Cw,
@@ -142,7 +154,9 @@ fn a_tool_change_height_below_clearance_is_raised_and_reported() {
         &CancelToken::new(),
     );
     assert!(
-        diags.iter().any(|x| x.message.contains("below the clearance plane")),
+        diags
+            .iter()
+            .any(|x| x.message.contains("below the clearance plane")),
         "the operator must be told their value was overruled: {diags:?}"
     );
     // And nothing labelled a lift may descend.
@@ -169,20 +183,34 @@ fn a_tool_change_height_below_clearance_is_raised_and_reported() {
 
 #[test]
 fn nearly_equal_tool_change_planes_are_clamped_without_a_spurious_warning() {
-    let mut d = doc(vec![profile(0, rect(10., 10., 70., 50.), Side::Outside, 1, 1)]);
+    let mut d = doc(vec![profile(
+        0,
+        rect(10., 10., 70., 50.),
+        Side::Outside,
+        1,
+        1,
+    )]);
     let clearance = 50.0000001;
     d.setups[0].heights.clearance = clearance;
     for height in [clearance, 50., clearance - 2e-6] {
         let result = build_job(&d, 1000., SpindleDir::Cw, None, height, &CancelToken::new());
         assert_eq!(result.completion, cam_toolpath::JobCompletion::Complete);
         assert_eq!(
-            result.diagnostics.iter().any(|d| d.message.contains("below the clearance plane")),
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("below the clearance plane")),
             clearance - height > 1e-6,
         );
-        let traverses: Vec<_> = result.program.steps().iter().filter_map(|step| match step {
-            Step::Rapid { to, tag } if tag.kind == cam_cldata::MoveKind::Traverse => Some(to.z),
-            _ => None,
-        }).collect();
+        let traverses: Vec<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Rapid { to, tag } if tag.kind == cam_cldata::MoveKind::Traverse => Some(to.z),
+                _ => None,
+            })
+            .collect();
         assert!(!traverses.is_empty());
         assert!(traverses.iter().all(|z| *z >= clearance));
     }
@@ -199,7 +227,8 @@ fn a_same_datum_tool_change_is_a_full_planner_owned_transition() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 2, 1),
     ]);
-    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } =
+        build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
     let s = program.steps();
     let tc = s
         .iter()
@@ -209,7 +238,11 @@ fn a_same_datum_tool_change_is_a_full_planner_owned_transition() {
     // Just before the M6: the in-place lift to tool-change height.
     match &s[tc - 1] {
         Step::Rapid { to, tag } => {
-            assert_eq!(tag.kind, MoveKind::Traverse, "the pre-M6 lift is a Traverse");
+            assert_eq!(
+                tag.kind,
+                MoveKind::Traverse,
+                "the pre-M6 lift is a Traverse"
+            );
             assert_eq!(to.z, 42.0, "the lift rises to the tool-change height");
         }
         other => panic!("expected a Traverse lift before the M6, got {other:?}"),
@@ -229,7 +262,10 @@ fn a_same_datum_tool_change_is_a_full_planner_owned_transition() {
         3,
         "a cross then a descent after the M6, then the end-of-program lift:\n{s:#?}"
     );
-    assert_eq!(traverses[0].z, 42.0, "cross to the next op at tool-change height");
+    assert_eq!(
+        traverses[0].z, 42.0,
+        "cross to the next op at tool-change height"
+    );
     assert_eq!(traverses[1].z, 5.0, "then descend to clearance");
     assert_eq!(
         traverses[2].z, 42.0,
@@ -252,7 +288,8 @@ fn same_tool_consecutive_ops_get_no_transition() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 1, 1),
     ]);
-    let cam_toolpath::JobResult { program, .. } = build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
+    let cam_toolpath::JobResult { program, .. } =
+        build_job(&d, 1000.0, SpindleDir::Cw, None, 42.0, &CancelToken::new());
     let traverse_ops: Vec<u32> = program
         .steps()
         .iter()
@@ -305,14 +342,19 @@ fn the_iso_families_state_the_reorientation_as_a_work_offset_change() {
     // comes first — the operator must not be asked to flip the part after the frame
     // has already moved.
     let g = nc(&two_origin_doc(), PostKind::Fanuc);
-    let halt = g.lines().position(|l| l.trim() == "M0").expect("the re-fixture halt");
+    let halt = g
+        .lines()
+        .position(|l| l.trim() == "M0")
+        .expect("the re-fixture halt");
     let select = g
         .lines()
         .position(|l| l.split_whitespace().any(|w| w == "G55"))
         .expect("the second datum");
     assert!(halt < select, "the halt precedes the datum select:\n{g}");
     assert_eq!(
-        g.lines().filter(|l| l.split_whitespace().any(|w| w == "G55")).count(),
+        g.lines()
+            .filter(|l| l.split_whitespace().any(|w| w == "G55"))
+            .count(),
         1,
         "the modal offset is stated once, not per move:\n{g}"
     );
@@ -373,12 +415,12 @@ fn tool(number: u32) -> Tool {
 
 fn doc(ops: Vec<Operation>) -> Document {
     Document::new(Setup {
-            id: 0,
-            frame: Default::default(),
-            material: String::new(),
-            material_id: None,
-            model_instances: Vec::new(),
-            program_name: String::new(),
+        id: 0,
+        frame: Default::default(),
+        material: String::new(),
+        material_id: None,
+        model_instances: Vec::new(),
+        program_name: String::new(),
         name: "datum".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
         stock: Stock::BoundingBox {
@@ -431,7 +473,10 @@ fn a_single_datum_job_emits_no_datum_step() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 1, 1),
     ]);
-    assert!(datums(&d).is_empty(), "no datum steps for a single-datum job");
+    assert!(
+        datums(&d).is_empty(),
+        "no datum steps for a single-datum job"
+    );
 }
 
 #[test]
@@ -473,7 +518,11 @@ fn a_reorientation_emits_an_operator_stop_before_the_new_datum() {
     assert_eq!(stops, 1, "one stop, at the single reorientation");
     let stop_at = s.iter().position(|x| matches!(x, Step::Stop)).unwrap();
     let datum_at = s.iter().position(|x| matches!(x, Step::Datum(2))).unwrap();
-    assert_eq!(stop_at + 1, datum_at, "the stop immediately precedes the new datum");
+    assert_eq!(
+        stop_at + 1,
+        datum_at,
+        "the stop immediately precedes the new datum"
+    );
 }
 
 #[test]
@@ -487,10 +536,16 @@ fn a_reorientation_stops_spindle_and_coolant_before_the_halt_and_restarts_after(
         op.set_cooling(cam_model::Cooling::Mms);
     }
     let s = steps(&d);
-    let stop_at = s.iter().position(|x| matches!(x, Step::Stop)).expect("an M00");
+    let stop_at = s
+        .iter()
+        .position(|x| matches!(x, Step::Stop))
+        .expect("an M00");
     // Nothing live during the flip: M05 then M09, then a lift clear to tool-change
     // height, immediately precede the M00 so the part is free to re-fixture.
-    assert!(matches!(s[stop_at - 3], Step::SpindleOff), "spindle off before the halt");
+    assert!(
+        matches!(s[stop_at - 3], Step::SpindleOff),
+        "spindle off before the halt"
+    );
     assert!(
         matches!(s[stop_at - 2], Step::Coolant(Coolant::Off)),
         "coolant off before the halt"
@@ -502,11 +557,15 @@ fn a_reorientation_stops_spindle_and_coolant_before_the_halt_and_restarts_after(
     // The new group brings both back.
     let datum_at = s.iter().position(|x| matches!(x, Step::Datum(2))).unwrap();
     assert!(
-        s[datum_at..].iter().any(|x| matches!(x, Step::Spindle { .. })),
+        s[datum_at..]
+            .iter()
+            .any(|x| matches!(x, Step::Spindle { .. })),
         "spindle restarts for the new group"
     );
     assert!(
-        s[datum_at..].iter().any(|x| matches!(x, Step::Coolant(Coolant::Mist))),
+        s[datum_at..]
+            .iter()
+            .any(|x| matches!(x, Step::Coolant(Coolant::Mist))),
         "coolant restarts for the new group"
     );
 }
@@ -517,7 +576,10 @@ fn a_single_origin_job_emits_no_stop() {
         profile(0, rect(10.0, 10.0, 70.0, 50.0), Side::Outside, 1, 1),
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 1, 1),
     ]);
-    assert!(!steps(&d).iter().any(|x| matches!(x, Step::Stop)), "no stop without reorientation");
+    assert!(
+        !steps(&d).iter().any(|x| matches!(x, Step::Stop)),
+        "no stop without reorientation"
+    );
 }
 
 #[test]
@@ -529,14 +591,24 @@ fn the_datum_step_precedes_the_tool_change_for_that_operation() {
         profile(1, rect(35.0, 25.0, 45.0, 35.0), Side::Inside, 2, 2),
     ]);
     let s = steps(&d);
-    let datum_at = s.iter().position(|x| matches!(x, Step::Datum(2))).expect("a datum step");
+    let datum_at = s
+        .iter()
+        .position(|x| matches!(x, Step::Datum(2)))
+        .expect("a datum step");
     let tc2_at = s
         .iter()
         .position(|x| matches!(x, Step::ToolChange { tool: 2 }))
         .expect("op1's tool change");
-    assert!(datum_at < tc2_at, "datum select precedes the tool change:\n{s:#?}");
+    assert!(
+        datum_at < tc2_at,
+        "datum select precedes the tool change:\n{s:#?}"
+    );
     // Nothing is emitted between them — they form the section head together.
-    assert_eq!(datum_at + 1, tc2_at, "datum sits immediately before the tool change");
+    assert_eq!(
+        datum_at + 1,
+        tc2_at,
+        "datum sits immediately before the tool change"
+    );
 }
 
 /// Rewrite this file's goldens after an intentional change.
@@ -548,7 +620,11 @@ fn the_datum_step_precedes_the_tool_change_for_that_operation() {
 #[ignore = "regeneration helper"]
 fn regen_goldens() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/");
-    std::fs::write(format!("{dir}multi_datum_okuma.min"), okuma_nc(&two_origin_doc())).unwrap();
+    std::fs::write(
+        format!("{dir}multi_datum_okuma.min"),
+        okuma_nc(&two_origin_doc()),
+    )
+    .unwrap();
     std::fs::write(
         format!("{dir}multi_datum_fanuc.nc"),
         nc(&two_origin_doc(), PostKind::Fanuc),

@@ -181,9 +181,11 @@ fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
         .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&trim))
         .unwrap_err()
         .contains("seam"));
-    assert!(app
-        .preview_cad_operation(OpKind::Profile, &[trim, selected.clone()])
-        .is_err(), "a cylindrical seam cannot become a planar chain by adding another loop");
+    assert!(
+        app.preview_cad_operation(OpKind::Profile, &[trim, selected.clone()])
+            .is_err(),
+        "a cylindrical seam cannot become a planar chain by adding another loop"
+    );
     let preview = app
         .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&selected))
         .unwrap();
@@ -317,11 +319,16 @@ fn step_plate_floor_island_four_holes_profile_generates_and_reopens_without_sour
 #[ignore = "requires OCCT SDK; run explicitly for native qualification"]
 fn adaptive_clearing_creates_runs_posts_and_round_trips() {
     let mut app = new_app();
-    app.import_cad(fixture("pocket-island-holes-mm.step")).unwrap();
+    app.import_cad(fixture("pocket-island-holes-mm.step"))
+        .unwrap();
     select_all_models(&mut app);
     let topology = &app.geometry_state().assets[0].topology;
     assert_eq!(topology.bodies.len(), 1);
-    let body = reference(app.geometry_state(), EntityKind::Body, topology.bodies[0].id);
+    let body = reference(
+        app.geometry_state(),
+        EntityKind::Body,
+        topology.bodies[0].id,
+    );
     let id = app
         .create_cad_operation(OpKind::Adaptive, vec![body.clone()])
         .unwrap();
@@ -336,7 +343,12 @@ fn adaptive_clearing_creates_runs_posts_and_round_trips() {
     assert_eq!(app.geometry_state().bindings[&id].selected, vec![body]);
 
     let run = app.run(&CancelToken::new());
-    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
     let program = run.program.clone();
     assert!(program.steps().iter().any(|step| matches!(
         step,
@@ -368,15 +380,30 @@ fn adaptive_body_subset_can_target_a_nonfirst_setup_instance_and_persist() {
     let second = geometry.instances[1].id;
     let body_id = geometry.instances[1].body_id;
     let body = instance_reference(geometry, second, EntityKind::Body, body_id);
-    let preview = app.preview_cad_operation(OpKind::Adaptive, std::slice::from_ref(&body)).unwrap();
+    let preview = app
+        .preview_cad_operation(OpKind::Adaptive, std::slice::from_ref(&body))
+        .unwrap();
 
-    let id = app.create_cad_operation(OpKind::Adaptive, vec![body.clone()]).unwrap();
-    assert_eq!(app.geometry_state().bindings[&id].selected, vec![body.clone()]);
+    let id = app
+        .create_cad_operation(OpKind::Adaptive, vec![body.clone()])
+        .unwrap();
+    assert_eq!(
+        app.geometry_state().bindings[&id].selected,
+        vec![body.clone()]
+    );
     assert_eq!(app.document().setup().model_instances, setup_instances);
     let run = app.run(&CancelToken::new());
-    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
     let (cut_bottom, _) = cutting_z_range(&run.program);
-    assert!(cut_bottom < preview.heights.top - 1.0, "selected body must produce cuts below stock top");
+    assert!(
+        cut_bottom < preview.heights.top - 1.0,
+        "selected body must produce cuts below stock top"
+    );
     assert!(run.program.steps().iter().any(|step| matches!(
         step,
         cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
@@ -405,26 +432,30 @@ fn adaptive_selection_across_two_component_instances_creates_runs_and_round_trip
         .instances
         .iter()
         .map(|instance| {
-            instance_reference(
-                geometry,
-                instance.id,
-                EntityKind::Body,
-                instance.body_id,
-            )
+            instance_reference(geometry, instance.id, EntityKind::Body, instance.body_id)
         })
         .collect();
     assert_ne!(selected[0].instance_id, selected[1].instance_id);
     let setup_instances = app.document().setup().model_instances.clone();
     assert_eq!(setup_instances.len(), 2);
 
-    let preview = app.preview_cad_operation(OpKind::Adaptive, &selected).unwrap();
+    let preview = app
+        .preview_cad_operation(OpKind::Adaptive, &selected)
+        .unwrap();
     assert!(preview.heights.depth() > 1.0);
-    let id = app.create_cad_operation(OpKind::Adaptive, selected.clone()).unwrap();
+    let id = app
+        .create_cad_operation(OpKind::Adaptive, selected.clone())
+        .unwrap();
     assert_eq!(app.geometry_state().bindings[&id].selected, selected);
     assert_eq!(app.document().setup().model_instances, setup_instances);
 
     let run = app.run(&CancelToken::new());
-    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
     assert!(run.program.steps().iter().any(|step| matches!(
         step,
         cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
@@ -434,7 +465,10 @@ fn adaptive_selection_across_two_component_instances_creates_runs_and_round_trip
     let nc = app.export_nc().unwrap().to_owned();
     assert!(nc.contains("G"));
 
-    let path = std::env::temp_dir().join(format!("adaptive-multi-instance-{}.ocam", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "adaptive-multi-instance-{}.ocam",
+        std::process::id()
+    ));
     app.save_project(&path).unwrap();
     let mut reopened = new_app();
     reopened.open_project(&path).unwrap();
@@ -449,12 +483,18 @@ fn adaptive_selection_across_two_component_instances_creates_runs_and_round_trip
 #[ignore = "requires OCCT SDK; run explicitly for native qualification"]
 fn adaptive_selected_pocket_floor_face_scope_and_reference_survive_project_round_trip() {
     let mut app = new_app();
-    app.import_cad(fixture("pocket-island-holes-mm.step")).unwrap();
+    app.import_cad(fixture("pocket-island-holes-mm.step"))
+        .unwrap();
     select_all_models(&mut app);
     let geometry = app.geometry_state();
     let instance = &geometry.instances[0];
     let asset = geometry.asset(instance.asset_id).unwrap();
-    let body = asset.topology.bodies.iter().find(|body| body.id == instance.body_id).unwrap();
+    let body = asset
+        .topology
+        .bodies
+        .iter()
+        .find(|body| body.id == instance.body_id)
+        .unwrap();
     let body_bounds = body.bounds;
     let face = asset
         .topology
@@ -470,10 +510,17 @@ fn adaptive_selected_pocket_floor_face_scope_and_reference_survive_project_round
         .expect("upward-facing pocket floor below the stock top")
         .id;
     let selected = instance_reference(geometry, instance.id, EntityKind::Face, face);
-    let preview = app.preview_cad_operation(OpKind::Adaptive, std::slice::from_ref(&selected)).unwrap();
+    let preview = app
+        .preview_cad_operation(OpKind::Adaptive, std::slice::from_ref(&selected))
+        .unwrap();
     assert!(preview.heights.bottom.is_finite());
-    let id = app.create_cad_operation(OpKind::Adaptive, vec![selected.clone()]).unwrap();
-    assert_eq!(app.geometry_state().bindings[&id].selected, vec![selected.clone()]);
+    let id = app
+        .create_cad_operation(OpKind::Adaptive, vec![selected.clone()])
+        .unwrap();
+    assert_eq!(
+        app.geometry_state().bindings[&id].selected,
+        vec![selected.clone()]
+    );
     app.edit_operation(id, |operation| {
         if let Operation::Adaptive(adaptive) = operation {
             adaptive.params.optimal_load = 2.9;
@@ -496,15 +543,37 @@ fn adaptive_selected_pocket_floor_face_scope_and_reference_survive_project_round
     )
     .unwrap();
     assert!(!scoped.layers.is_empty());
-    assert!(scoped.layers.iter().all(|layer| layer.body_domains.is_empty()));
-    assert!(scoped.layers.iter().all(|layer| !layer.face_domains.is_empty()));
-    let selected_area: f64 = scoped.layers[0].face_domains.iter().map(cam_geo::Polygon::area).sum();
-    let body_area = (body_bounds[1][0] - body_bounds[0][0]) * (body_bounds[1][1] - body_bounds[0][1]);
-    assert!(selected_area < body_area, "face domain must remain narrower than the body XY bounds");
+    assert!(scoped
+        .layers
+        .iter()
+        .all(|layer| layer.body_domains.is_empty()));
+    assert!(scoped
+        .layers
+        .iter()
+        .all(|layer| !layer.face_domains.is_empty()));
+    let selected_area: f64 = scoped.layers[0]
+        .face_domains
+        .iter()
+        .map(cam_geo::Polygon::area)
+        .sum();
+    let body_area =
+        (body_bounds[1][0] - body_bounds[0][0]) * (body_bounds[1][1] - body_bounds[0][1]);
+    assert!(
+        selected_area < body_area,
+        "face domain must remain narrower than the body XY bounds"
+    );
     let run = app.run(&CancelToken::new());
-    assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+    assert_eq!(
+        run.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        run.diagnostics
+    );
     let (cut_bottom, _) = cutting_z_range(&run.program);
-    assert!(cut_bottom < preview.heights.top - 1.0, "selected pocket floor must produce real cuts below stock top");
+    assert!(
+        cut_bottom < preview.heights.top - 1.0,
+        "selected pocket floor must produce real cuts below stock top"
+    );
     assert!(run.program.steps().iter().any(|step| matches!(
         step,
         cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
@@ -517,11 +586,16 @@ fn adaptive_selected_pocket_floor_face_scope_and_reference_survive_project_round
     let mut reopened = new_app();
     reopened.open_project(&path).unwrap();
     std::fs::remove_file(path).unwrap();
-    assert_eq!(reopened.geometry_state().bindings[&id].selected, vec![selected]);
-    let resolved = reopened.preview_cad_operation(
-        OpKind::Adaptive,
-        &reopened.geometry_state().bindings[&id].selected,
-    ).unwrap();
+    assert_eq!(
+        reopened.geometry_state().bindings[&id].selected,
+        vec![selected]
+    );
+    let resolved = reopened
+        .preview_cad_operation(
+            OpKind::Adaptive,
+            &reopened.geometry_state().bindings[&id].selected,
+        )
+        .unwrap();
     assert_eq!(resolved.heights, preview.heights);
 }
 
@@ -1111,25 +1185,54 @@ fn silhouette_projection_is_independent_of_display_quality_on_curved_step_models
 #[ignore = "requires OCCT SDK; run explicitly for native qualification"]
 fn profile_face_contours_and_silhouette_resolve_real_step_boundaries() {
     let mut app = new_app();
-    app.import_cad(fixture("pocket-island-holes-mm.step")).unwrap();
+    app.import_cad(fixture("pocket-island-holes-mm.step"))
+        .unwrap();
     select_all_models(&mut app);
     let state = app.geometry_state();
     let topology = &state.assets[0].topology;
-    let top = topology.faces.iter().filter(|face| matches!(face.surface,
-        CadSurface::Plane { origin, normal } if origin[2].abs() < 1e-6 && normal[2] > 0.99))
-        .max_by_key(|face| face.loop_ids.len()).unwrap();
+    let top = topology
+        .faces
+        .iter()
+        .filter(|face| {
+            matches!(face.surface,
+        CadSurface::Plane { origin, normal } if origin[2].abs() < 1e-6 && normal[2] > 0.99)
+        })
+        .max_by_key(|face| face.loop_ids.len())
+        .unwrap();
     let face = reference(state, EntityKind::Face, top.id);
     let silhouette = reference(state, EntityKind::Silhouette, state.instances[0].body_id);
     let contours = app.preview_cad_operation(OpKind::Profile, &[face]).unwrap();
-    assert_eq!(contours.profiles.len(), 6, "outside, pocket opening and four bores");
-    assert_eq!(contours.profiles.iter().filter(|p| p.side == Side::Inside).count(), 5);
-    assert!((contours.heights.bottom + 6.).abs() < 1e-6, "stop all contours at the shallowest wall");
+    assert_eq!(
+        contours.profiles.len(),
+        6,
+        "outside, pocket opening and four bores"
+    );
+    assert_eq!(
+        contours
+            .profiles
+            .iter()
+            .filter(|p| p.side == Side::Inside)
+            .count(),
+        5
+    );
+    assert!(
+        (contours.heights.bottom + 6.).abs() < 1e-6,
+        "stop all contours at the shallowest wall"
+    );
     let projected = app
         .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&silhouette))
         .unwrap();
-    assert_eq!(projected.profiles.len(), 5, "outside plus four through holes; blind pocket is filled by its floor");
-    let id = app.create_cad_operation(OpKind::Profile, vec![silhouette]).unwrap();
-    assert!(matches!(app.operation(id), Some(Operation::Profile(p)) if p.additional_chains.len() == 4));
+    assert_eq!(
+        projected.profiles.len(),
+        5,
+        "outside plus four through holes; blind pocket is filled by its floor"
+    );
+    let id = app
+        .create_cad_operation(OpKind::Profile, vec![silhouette])
+        .unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Profile(p)) if p.additional_chains.len() == 4)
+    );
     let result = app.run(&CancelToken::new());
     assert_eq!(
         result.completion,

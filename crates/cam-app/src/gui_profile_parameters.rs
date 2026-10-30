@@ -27,7 +27,8 @@ mod tests {
         app.controller.open_dxf(SAMPLE_DXF, "profile.dxf").unwrap();
         app.controller.new_operation(OpKind::Profile);
         let id = app
-            .controller.inspection_setup()
+            .controller
+            .inspection_setup()
             .operations
             .last()
             .unwrap()
@@ -415,11 +416,15 @@ impl App {
         tab: OperationTab,
         linked: bool,
     ) -> operation_sections::Form<'_> {
-        let mut list = operation_sections::Form::new(self, tab, match tab {
-            OperationTab::Tool => Some("Cutting data"),
-            OperationTab::Passes => Some("Passes"),
-            _ => None,
-        });
+        let mut list = operation_sections::Form::new(
+            self,
+            tab,
+            match tab {
+                OperationTab::Tool => Some("Cutting data"),
+                OperationTab::Passes => Some("Passes"),
+                _ => None,
+            },
+        );
         let number = |n: Number| {
             let field = Field::Profile(n);
             let value = self
@@ -470,9 +475,7 @@ impl App {
                 }
                 list=list.push(row![label_help("Roughing boundary","Setup stock or a saved snapshot of a drawing outline. The boundary must contain the allowanced part. Reselect a snapshot after editing its source.",self.tooltips),pick_list(choices,Some(selected),Message::ProfileStockBoundary).text_size(12).padding([7,9]).style(inspector_picker).width(Length::Fill)].spacing(8).align_y(Alignment::Center));
             }
-            list = list
-                .section("Passes")
-                .push(toggle(Toggle::Even));
+            list = list.section("Passes").push(toggle(Toggle::Even));
             for n in [
                 Number::FloorLeave,
                 Number::FinishDepths,
@@ -496,7 +499,8 @@ impl App {
                 list = list.push(toggle(Toggle::BothWays));
             }
             list = list.optional_section(
-                "Finishing passes", p.passes.finishing,
+                "Finishing passes",
+                p.passes.finishing,
                 Some(|v| Message::ProfilePassToggle(Toggle::Finishing, v)),
             );
             if p.passes.finishing {
@@ -510,9 +514,7 @@ impl App {
                 }
                 list = list.push(toggle(Toggle::FinishOnlyFinal));
             }
-            list = list
-                .section("Passes")
-                .push(number(Number::Tolerance));
+            list = list.section("Passes").push(number(Number::Tolerance));
             list=list.push(profile_picker("Outer corners","Roll around the corner, or extend the offset edges to a sharp point. Very acute sharp joins are bevelled to bound the path.",self.tooltips,p.passes.outer_corner,&cam_model::ProfileCorner::ALL[..],Message::ProfileCorner));
             if (!linked && !p.tabs.enabled) || p.passes.taper_angle != 0. {
                 list = list.push(number(Number::Taper));

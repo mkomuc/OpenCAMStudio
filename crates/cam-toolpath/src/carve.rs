@@ -98,7 +98,9 @@
 //! [`cam_model::CarveOp::clear_tool`]).
 
 use cam_cldata::{MoveKind, Point3, Program, Step, Tag};
-use cam_geo::{offset, vtip_depth_for_half_width, vtip_half_width, vtip_max_depth, JoinStyle, Polygon};
+use cam_geo::{
+    offset, vtip_depth_for_half_width, vtip_half_width, vtip_max_depth, JoinStyle, Polygon,
+};
 use cam_model::{CarveOp, Plunge, Tool, ToolKind};
 
 use crate::{CancelToken, Diagnostic, JobEnv, Strategy, StrategyResult};
@@ -143,7 +145,10 @@ impl Strategy for CarveStrategy {
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if let Err(reason) = op.entry_feeds.validate() {
-            return StrategyResult { diagnostics: vec![Diagnostic::error(reason)], ..Default::default() };
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            };
         }
         let mut diagnostics = Vec::new();
 
@@ -246,8 +251,7 @@ impl Strategy for CarveStrategy {
         } else {
             DEFAULT_SCALLOP_MM
         };
-        let floor_step =
-            (2.0 * vtip_half_width(alpha, tip_radius, scallop)).max(MIN_RING_STEP_MM);
+        let floor_step = (2.0 * vtip_half_width(alpha, tip_radius, scallop)).max(MIN_RING_STEP_MM);
         let widths = ring_widths(w_max, step);
 
         // --- what the shape itself allows, and what the cap left behind ---
@@ -358,7 +362,11 @@ impl Strategy for CarveStrategy {
                 if spacing <= 1e-9 {
                     fail!("operation {}: clearing overlap leaves no stepover", op.id);
                 }
-                let stepdown = if cp.stepdown > 0.0 { cp.stepdown } else { op.depth };
+                let stepdown = if cp.stepdown > 0.0 {
+                    cp.stepdown
+                } else {
+                    op.depth
+                };
                 let feed = if cp.feed > 0.0 { cp.feed } else { op.feed };
                 let plunge_feed = if cp.plunge_feed > 0.0 {
                     cp.plunge_feed
@@ -366,7 +374,12 @@ impl Strategy for CarveStrategy {
                     op.plunge_feed
                 };
                 let levels = crate::profile::depth_levels(op.top, op.top - op.depth, stepdown);
-                if levels.is_empty() { fail!("operation {}: invalid or excessive clearing depths; increase stepdown",op.id); }
+                if levels.is_empty() {
+                    fail!(
+                        "operation {}: invalid or excessive clearing depths; increase stepdown",
+                        op.id
+                    );
+                }
                 // `offset` is a real finishing allowance here: how far the end mill stays
                 // off the carved surface, leaving that skin for the V-bit — which cuts it
                 // better, with the flank of its cone rather than a corner. Nothing is left
@@ -405,9 +418,8 @@ impl Strategy for CarveStrategy {
                     }
                     for area in &at_level {
                         // Region the wall leads must stay inside, as a pocket computes it.
-                        let guards =
-                            offset(std::slice::from_ref(area), -first, JoinStyle::Round)
-                                .unwrap_or_default();
+                        let guards = offset(std::slice::from_ref(area), -first, JoinStyle::Round)
+                            .unwrap_or_default();
                         let job = crate::clearing::ClearJob {
                             lift_height: cp.lift_height,
                             id: op.id,
@@ -427,7 +439,7 @@ impl Strategy for CarveStrategy {
                             start: op.start,
                             end: op.end,
                             guard: &guards,
-                                                    spindle: env.spindle,
+                            spindle: env.spindle,
                         };
                         match crate::clearing::clear(
                             &mut clear_body,
@@ -450,7 +462,10 @@ impl Strategy for CarveStrategy {
                                     ..Default::default()
                                 };
                             }
-                            Err(crate::rings::RingsError::Offset(e) | crate::rings::RingsError::Limit(e)) => {
+                            Err(
+                                crate::rings::RingsError::Offset(e)
+                                | crate::rings::RingsError::Limit(e),
+                            ) => {
                                 fail!("operation {}: clearing offset failed: {e}", op.id)
                             }
                         }
@@ -526,7 +541,11 @@ impl Strategy for CarveStrategy {
             // Inward by the hold-off plus this ring's distance. Positive `offset` leaves
             // material, so it shrinks the carved region — the same sign convention as a
             // profile's finishing allowance.
-            let rings = match offset(std::slice::from_ref(&region), -(op.offset + w), JoinStyle::Round) {
+            let rings = match offset(
+                std::slice::from_ref(&region),
+                -(op.offset + w),
+                JoinStyle::Round,
+            ) {
                 Ok(r) => r,
                 Err(e) => fail!("operation {}: offset failed: {e}", op.id),
             };
@@ -708,8 +727,7 @@ impl Strategy for CarveStrategy {
         program.push(Step::Comment(format!(
             "Carve: {} rings at {step:.3} mm wall / {floor_step:.3} mm floor, to \
              {deepest:.3} mm deep with a {included_angle_deg} deg V-bit, {} lifts",
-            st.rings_cut,
-            st.lifts
+            st.rings_cut, st.lifts
         )));
         program.extend(body);
 
@@ -772,7 +790,17 @@ fn emit_rings(
             if min_perimeter > 0.0 && perimeter(contour) < min_perimeter {
                 continue;
             }
-            emit_loop(body, st, contour.points(), guard_next, z, op, heights, tags, finished);
+            emit_loop(
+                body,
+                st,
+                contour.points(),
+                guard_next,
+                z,
+                op,
+                heights,
+                tags,
+                finished,
+            );
         }
     }
 }
@@ -900,7 +928,14 @@ fn emit_loop(
                     // below: that lands above the surface and the plunge feeds from there,
                     // whereas a ramp starts *at* the material and must be brought to it.
                     crate::emit::descend_to(body, start, top.max(z), heights, op.feed, op.id);
-                    crate::profile::emit_descending_path(body, path, *top, z, op.entry_feeds.ramp(op.feed), tags.plunge);
+                    crate::profile::emit_descending_path(
+                        body,
+                        path,
+                        *top,
+                        z,
+                        op.entry_feeds.ramp(op.feed),
+                        tags.plunge,
+                    );
                 }
                 None => {
                     let from_z = heights.retract.max(op.top);
@@ -931,7 +966,11 @@ fn emit_loop(
         // The cut begins where the ramp ended and runs a full perimeter from there.
         Some((_, on_loop, _)) => {
             let perim = crate::profile::loop_perimeter(&pts);
-            let walked = crate::profile::walk_loop(&pts, *on_loop, perim + crate::profile::exit_overlap(&pts, *on_loop, 0.0, op.end));
+            let walked = crate::profile::walk_loop(
+                &pts,
+                *on_loop,
+                perim + crate::profile::exit_overlap(&pts, *on_loop, 0.0, op.end),
+            );
             crate::emit::cut_polyline(body, &walked, op.feed, tags.cut, z);
             st.at = Some((walked[walked.len() - 1], z));
         }
@@ -1071,7 +1110,8 @@ fn swept_by(steps: &[Step], radius: f64) -> Vec<Polygon> {
     let mut flush = |run: &mut Vec<cam_geo::Point>| {
         if run.len() >= 2 {
             let path = cam_geo::Polyline::new(std::mem::take(run));
-            if let Ok(mut polys) = cam_geo::stroke_path(&path, radius, cam_geo::CapStyle::Round, JoinStyle::Round)
+            if let Ok(mut polys) =
+                cam_geo::stroke_path(&path, radius, cam_geo::CapStyle::Round, JoinStyle::Round)
             {
                 out.append(&mut polys);
             }
@@ -1333,8 +1373,14 @@ mod tests {
     }
 
     /// Bits spanning the useful range, for the geometric safety properties.
-    const VBITS_FOR_SAFETY: &[(f64, f64)] =
-        &[(90.0, 0.0), (90.0, 0.2), (60.0, 0.3), (30.0, 0.05), (120.0, 0.4), (150.0, 0.1)];
+    const VBITS_FOR_SAFETY: &[(f64, f64)] = &[
+        (90.0, 0.0),
+        (90.0, 0.2),
+        (60.0, 0.3),
+        (30.0, 0.05),
+        (120.0, 0.4),
+        (150.0, 0.1),
+    ];
 
     fn vbit(included_angle_deg: f64, tip_radius: f64) -> Tool {
         Tool {
@@ -1480,7 +1526,10 @@ mod tests {
         );
         let e = errors(&r);
         assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("chamfer mill") && e[0].contains("non-cutting"), "{e:?}");
+        assert!(
+            e[0].contains("chamfer mill") && e[0].contains("non-cutting"),
+            "{e:?}"
+        );
         assert!(r.program.steps().is_empty(), "no path may be emitted");
     }
 
@@ -1544,7 +1593,7 @@ mod tests {
         assert!(errors(&r).is_empty(), "{:?}", errors(&r));
         for (x, y, z) in cuts(&r) {
             let d = -z; // depth below top 0.0
-            // distance from the nearest wall of the [0,20]² square
+                        // distance from the nearest wall of the [0,20]² square
             let inset = x.min(y).min(20.0 - x).min(20.0 - y);
             // Until the cap bites; past it the floor is flat at the cap.
             let want = inset.min(1.5);
@@ -1568,7 +1617,10 @@ mod tests {
         let naive = -0.1 / a.tan();
         let ball = -(rt - (rt * rt - 0.1 * 0.1_f64).sqrt());
         assert!((first - ball).abs() < 1e-9, "first={first} ball={ball}");
-        assert!(first > naive, "the ball must be shallower than the naive cone");
+        assert!(
+            first > naive,
+            "the ball must be shallower than the naive cone"
+        );
     }
 
     #[test]
@@ -1640,7 +1692,10 @@ mod tests {
         for (x, y, z) in cuts(&r) {
             let inset = x.min(y).min(20.0 - x).min(20.0 - y);
             let want = (inset - 1.0).min(1.0);
-            assert!((want + z).abs() < OFFSET_TOL, "({x:.4},{y:.4},{z:.4}) wants {want:.4}");
+            assert!(
+                (want + z).abs() < OFFSET_TOL,
+                "({x:.4},{y:.4},{z:.4}) wants {want:.4}"
+            );
         }
     }
 
@@ -1806,11 +1861,23 @@ mod tests {
         .unwrap();
         let region = [l];
         // Along the inside of the L: safe.
-        assert!(link_is_safe(&region, Point::new(0.0, 0.0), Point::new(10.0, 0.0)));
+        assert!(link_is_safe(
+            &region,
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0)
+        ));
         // Across the notch: not.
-        assert!(!link_is_safe(&region, Point::new(10.0, 4.0), Point::new(4.0, 10.0)));
+        assert!(!link_is_safe(
+            &region,
+            Point::new(10.0, 4.0),
+            Point::new(4.0, 10.0)
+        ));
         // An empty region can never be traversed.
-        assert!(!link_is_safe(&[], Point::new(0.0, 0.0), Point::new(1.0, 1.0)));
+        assert!(!link_is_safe(
+            &[],
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 1.0)
+        ));
     }
 
     // --- flat lands and the shape's own full depth ---
@@ -1888,7 +1955,10 @@ mod tests {
         let w = warnings(&r);
         assert_eq!(w.len(), 1, "{w:?}");
         assert!(w[0].contains("ridged"), "{w:?}");
-        assert!(!r.program.steps().is_empty(), "the carve must still be emitted");
+        assert!(
+            !r.program.steps().is_empty(),
+            "the carve must still be emitted"
+        );
     }
 
     #[test]
@@ -1964,7 +2034,10 @@ mod tests {
                 _ => continue,
             };
             saw = true;
-            assert!((z + 1.0).abs() < 1e-9, "clearing at z={z}, not the 1 mm cap");
+            assert!(
+                (z + 1.0).abs() < 1e-9,
+                "clearing at z={z}, not the 1 mm cap"
+            );
             // Inside the flat land (inset 1 mm) by at least the tool radius (2 mm).
             let inset = x.min(y).min(20.0 - x).min(20.0 - y);
             assert!(
@@ -2116,7 +2189,10 @@ mod tests {
         o.clear = Some(clearing(9));
         let e = errors(&run(o, vbit(90.0, 0.0)));
         assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("clearing tool 9 is not in the setup"), "{e:?}");
+        assert!(
+            e[0].contains("clearing tool 9 is not in the setup"),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -2127,7 +2203,9 @@ mod tests {
         let result = run(o, vbit(90.0, 0.0));
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
         assert!(!result.program.is_empty());
-        assert!(warnings(&result).iter().any(|message| message.contains("both")));
+        assert!(warnings(&result)
+            .iter()
+            .any(|message| message.contains("both")));
     }
 
     #[test]
@@ -2151,7 +2229,9 @@ mod tests {
         let result = run_with(o, &[vbit(90.0, 0.0), ball]);
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
         assert!(!result.program.is_empty());
-        assert!(warnings(&result).iter().any(|message| message.contains("not flat-bottomed") && message.contains("scallops")));
+        assert!(warnings(&result)
+            .iter()
+            .any(|message| message.contains("not flat-bottomed") && message.contains("scallops")));
     }
 
     #[test]
@@ -2166,7 +2246,9 @@ mod tests {
         let result = run_with(o, &[vbit(90.0, 0.0), cham]);
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
         assert!(!result.program.is_empty());
-        assert!(warnings(&result).iter().any(|message| message.contains("non-cutting tip")));
+        assert!(warnings(&result)
+            .iter()
+            .any(|message| message.contains("non-cutting tip")));
     }
 
     #[test]
@@ -2250,7 +2332,10 @@ mod tests {
         o.ring_step = 0.25;
         let r = run(o, vbit(90.0, 0.0));
         let (vertical, travelled) = descents(r.program.steps());
-        assert!(vertical > 0, "the default entry stopped being a straight drop");
+        assert!(
+            vertical > 0,
+            "the default entry stopped being a straight drop"
+        );
         assert_eq!(travelled, 0, "the default entry travelled while descending");
     }
 
@@ -2266,7 +2351,10 @@ mod tests {
         let r = run(o, vbit(90.0, 0.0));
         assert!(errors(&r).is_empty(), "{:?}", errors(&r));
         let (vertical, travelled) = descents(r.program.steps());
-        assert_eq!(vertical, 0, "a ramped carve dropped vertically {vertical} times");
+        assert_eq!(
+            vertical, 0,
+            "a ramped carve dropped vertically {vertical} times"
+        );
         assert!(travelled > 0, "no ramp was emitted at all");
     }
 
@@ -2353,7 +2441,10 @@ mod tests {
             "the clearing pass's own straight entry was overridden by the carve's ramp"
         );
         assert_eq!(carve_vertical, 0, "the V-bit still dropped straight in");
-        assert!(carve_travelled > 0, "the V-bit's ramp never reached the emitter");
+        assert!(
+            carve_travelled > 0,
+            "the V-bit's ramp never reached the emitter"
+        );
     }
 
     #[test]
@@ -2465,7 +2556,9 @@ mod tests {
         let result = run_with(o, &[vbit(90.0, 0.0), short]);
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
         assert!(!result.program.is_empty());
-        assert!(warnings(&result).iter().any(|message| message.contains("cutting edge")));
+        assert!(warnings(&result)
+            .iter()
+            .any(|message| message.contains("cutting edge")));
     }
 
     #[test]
@@ -2540,7 +2633,11 @@ mod tests {
         o.ring_step = 0.25;
         let r = run(o, vbit(90.0, 0.0));
         assert!(warnings(&r).is_empty(), "{:?}", warnings(&r));
-        assert!(infos(&r)[0].contains("no flat areas remain"), "{:?}", infos(&r));
+        assert!(
+            infos(&r)[0].contains("no flat areas remain"),
+            "{:?}",
+            infos(&r)
+        );
     }
 
     #[test]
@@ -2601,7 +2698,6 @@ mod tests {
         assert!(carve_shape(&open, &t).is_none(), "not a region");
     }
 
-
     #[test]
     fn nothing_stands_in_the_corners_the_clearing_tool_cannot_reach() {
         // 20 mm square, 1 mm cap, 90 deg sharp V-bit (f(x) == x), dia 4 end mill (r=2).
@@ -2614,7 +2710,10 @@ mod tests {
         let r = run_with(o, &[vbit(90.0, 0.0), endmill(2, 4.0)]);
         assert!(errors(&r).is_empty(), "{:?}", errors(&r));
         let steps = r.program.steps();
-        let change = steps.iter().position(|s| matches!(s, Step::ToolChange { .. })).unwrap();
+        let change = steps
+            .iter()
+            .position(|s| matches!(s, Step::ToolChange { .. }))
+            .unwrap();
 
         let collect = |range: &[Step], floor_only: bool| {
             let mut segs: Vec<((f64, f64), (f64, f64))> = Vec::new();
@@ -2625,11 +2724,19 @@ mod tests {
                     Step::Linear { to, tag, .. } => {
                         let at_floor = !floor_only || (to.z + 1.0).abs() < 1e-9;
                         if tag.kind == MoveKind::Cutting && at_floor {
-                            if let Some(q) = last { segs.push((q, (to.x, to.y))); }
+                            if let Some(q) = last {
+                                segs.push((q, (to.x, to.y)));
+                            }
                         }
                         last = Some((to.x, to.y));
                     }
-                    Step::Arc { end, center, dir, tag, .. } => {
+                    Step::Arc {
+                        end,
+                        center,
+                        dir,
+                        tag,
+                        ..
+                    } => {
                         let at_floor = !floor_only || (end.z + 1.0).abs() < 1e-9;
                         if tag.kind == MoveKind::Cutting && at_floor {
                             // Densify: a chord across a 90 deg arc misses it by r(1-cos45),
@@ -2641,8 +2748,12 @@ mod tests {
                                 let a1 = (end.y - c.1).atan2(end.x - c.0);
                                 let ccw = matches!(dir, cam_cldata::ArcDir::Ccw);
                                 let mut sweep = a1 - a0;
-                                if ccw && sweep <= 0.0 { sweep += std::f64::consts::TAU; }
-                                if !ccw && sweep >= 0.0 { sweep -= std::f64::consts::TAU; }
+                                if ccw && sweep <= 0.0 {
+                                    sweep += std::f64::consts::TAU;
+                                }
+                                if !ccw && sweep >= 0.0 {
+                                    sweep -= std::f64::consts::TAU;
+                                }
                                 let n = 64;
                                 let mut prev = q;
                                 for k in 1..=n {
@@ -2666,11 +2777,15 @@ mod tests {
         let dist_seg = |p: (f64, f64), a: (f64, f64), b: (f64, f64)| {
             let (dx, dy) = (b.0 - a.0, b.1 - a.1);
             let l2 = dx * dx + dy * dy;
-            let t = if l2 <= 0.0 { 0.0 } else { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(0.0, 1.0) };
+            let t = if l2 <= 0.0 {
+                0.0
+            } else {
+                (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(0.0, 1.0)
+            };
             let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
             ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
         };
-        let (lo, hi) = (1.0_f64, 19.0_f64);   // the flat land
+        let (lo, hi) = (1.0_f64, 19.0_f64); // the flat land
         let step = 0.02_f64;
         let mut worst = 0.0_f64;
         let mut worst_at = (0.0, 0.0);
@@ -2678,13 +2793,24 @@ mod tests {
         for i in 0..=n {
             for j in 0..=n {
                 let p = (lo + i as f64 * step, lo + j as f64 * step);
-                let dm = mill.iter().map(|(a, b)| dist_seg(p, *a, *b)).fold(f64::MAX, f64::min);
-                if dm <= 2.0 + 1e-9 { continue; }             // the end mill floored it
-                // Otherwise only the V-bit's cone has been here: material stands from
-                // the floor up to f(distance to the nearest V-bit floor pass).
-                let dv = vbit_floor.iter().map(|(a, b)| dist_seg(p, *a, *b)).fold(f64::MAX, f64::min);
-                let h = dv.min(1.0);                           // 90 deg sharp: f(x) == x
-                if h > worst { worst = h; worst_at = p; }
+                let dm = mill
+                    .iter()
+                    .map(|(a, b)| dist_seg(p, *a, *b))
+                    .fold(f64::MAX, f64::min);
+                if dm <= 2.0 + 1e-9 {
+                    continue;
+                } // the end mill floored it
+                  // Otherwise only the V-bit's cone has been here: material stands from
+                  // the floor up to f(distance to the nearest V-bit floor pass).
+                let dv = vbit_floor
+                    .iter()
+                    .map(|(a, b)| dist_seg(p, *a, *b))
+                    .fold(f64::MAX, f64::min);
+                let h = dv.min(1.0); // 90 deg sharp: f(x) == x
+                if h > worst {
+                    worst = h;
+                    worst_at = p;
+                }
             }
         }
         // A round cutter cannot enter a sharp corner: it leaves a lens of stock at each
@@ -2717,16 +2843,15 @@ mod tests {
         let inside = cuts(&r)
             .into_iter()
             .filter(|&(x, y, z)| {
-                (z + 1.0).abs() < 1e-9
-                    && x > 2.0
-                    && x < 18.0
-                    && y > 2.0
-                    && y < 18.0
+                (z + 1.0).abs() < 1e-9 && x > 2.0 && x < 18.0 && y > 2.0 && y < 18.0
             })
             .count();
         assert!(inside > 0, "the flat land was never entered");
         // And the deepest cut is still the cap, not deeper.
-        let deepest = cuts(&r).into_iter().map(|(_, _, z)| z).fold(0.0_f64, f64::min);
+        let deepest = cuts(&r)
+            .into_iter()
+            .map(|(_, _, z)| z)
+            .fold(0.0_f64, f64::min);
         assert!((deepest + 1.0).abs() < 1e-9, "deepest={deepest}");
     }
 
@@ -2800,7 +2925,10 @@ mod tests {
         assert!(c.contains("0.100 mm floor"), "{c}");
         // Halve the ridge, halve the spacing — and the wall step is untouched.
         let c = comment_of(0.025, 0.5, 0.0);
-        assert!(c.contains("0.500 mm wall") && c.contains("0.050 mm floor"), "{c}");
+        assert!(
+            c.contains("0.500 mm wall") && c.contains("0.050 mm floor"),
+            "{c}"
+        );
     }
 
     #[test]
@@ -3117,7 +3245,10 @@ mod tests {
             .iter()
             .filter(|s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract))
             .count();
-        assert_eq!(lifts, 1, "a single-region carve should stay down throughout");
+        assert_eq!(
+            lifts, 1,
+            "a single-region carve should stay down throughout"
+        );
     }
 
     #[test]
@@ -3178,7 +3309,11 @@ mod tests {
         let r = run(o, vbit(60.0, 0.1));
         assert!(errors(&r).is_empty(), "{:?}", errors(&r));
         let loops = floor_loops_of(&r, -1.0);
-        assert!(loops.len() > 20, "expected many floor loops, got {}", loops.len());
+        assert!(
+            loops.len() > 20,
+            "expected many floor loops, got {}",
+            loops.len()
+        );
         let total: f64 = loops
             .windows(2)
             .map(|w| (w[1].0 .0 - w[0].0 .0).hypot(w[1].0 .1 - w[0].0 .1))
@@ -3199,8 +3334,14 @@ mod tests {
     fn ring_widths_are_monotonic_and_end_on_w_max() {
         for &(w_max, step) in &[(1.0, 0.3), (2.0, 0.7), (0.5, 0.5), (1.2, 0.4), (0.1, 5.0)] {
             let ws = ring_widths(w_max, step);
-            assert!((ws.last().unwrap() - w_max).abs() < 1e-12, "w={w_max} s={step}");
-            assert!(ws.windows(2).all(|p| p[1] > p[0]), "w={w_max} s={step} {ws:?}");
+            assert!(
+                (ws.last().unwrap() - w_max).abs() < 1e-12,
+                "w={w_max} s={step}"
+            );
+            assert!(
+                ws.windows(2).all(|p| p[1] > p[0]),
+                "w={w_max} s={step} {ws:?}"
+            );
             assert!(ws.iter().all(|&x| x > 0.0 && x <= w_max + 1e-12));
         }
     }

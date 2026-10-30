@@ -163,7 +163,10 @@ impl Raster {
 
     #[inline]
     fn centre(&self, i: usize, j: usize) -> Point {
-        Point::new(self.ox + (i as f64 + 0.5) * self.px, self.oy + (j as f64 + 0.5) * self.px)
+        Point::new(
+            self.ox + (i as f64 + 0.5) * self.px,
+            self.oy + (j as f64 + 0.5) * self.px,
+        )
     }
 
     /// Whether the cell at `p` is currently uncut material (in the target, not yet
@@ -365,7 +368,10 @@ mod tests {
         let mut ras = Raster::new(&square(-20.0, 60.0), 3.0, 2.0).unwrap();
         ras.stamp(Point::new(-10.0, 20.0), Point::new(50.0, 20.0));
         let e = ras.engagement(Point::new(0.0, 22.0), Point::new(40.0, 22.0));
-        assert!((1.7..2.3).contains(&e), "a 2 mm peel should read a_e ≈ 2, got {e}");
+        assert!(
+            (1.7..2.3).contains(&e),
+            "a 2 mm peel should read a_e ≈ 2, got {e}"
+        );
     }
 
     #[test]
@@ -378,11 +384,19 @@ mod tests {
             ras.stamp(Point::new(2.0, y), Point::new(18.0, y));
             y += 2.0;
         }
-        assert!(ras.uncut_area() < 8.0, "covered, uncut {}", ras.uncut_area());
+        assert!(
+            ras.uncut_area() < 8.0,
+            "covered, uncut {}",
+            ras.uncut_area()
+        );
         assert!(ras.gouge_area() < 1.0, "no gouge, got {}", ras.gouge_area());
 
         let mut g = Raster::new(&square(0.0, 20.0), 2.0, 2.0).unwrap();
         g.stamp(Point::new(10.0, 10.0), Point::new(30.0, 10.0));
-        assert!(g.gouge_area() > 1.0, "a cut past the edge gouges, got {}", g.gouge_area());
+        assert!(
+            g.gouge_area() > 1.0,
+            "a cut past the edge gouges, got {}",
+            g.gouge_area()
+        );
     }
 }

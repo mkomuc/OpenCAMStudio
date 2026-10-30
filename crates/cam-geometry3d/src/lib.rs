@@ -213,7 +213,10 @@ pub fn resolve_binding(
     if heights.top < base.top - T {
         return Err("top override skips material above the geometry-certified entry plane".into());
     }
-    if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
+    if matches!(
+        binding.recipe,
+        ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing
+    ) {
         return Ok(ResolvedInput {
             chamfers: Vec::new(),
             profiles: Vec::new(),
@@ -221,7 +224,11 @@ pub fn resolve_binding(
             holes,
             heights,
             fingerprint: state.binding_fingerprint(binding),
-            diagnostics: vec![if binding.recipe == ExtractionRecipe::ParallelFinishing { "3D Parallel follows selected CAD surfaces and protects all setup bodies".into() } else { "3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into() }],
+            diagnostics: vec![if binding.recipe == ExtractionRecipe::ParallelFinishing {
+                "3D Parallel follows selected CAD surfaces and protects all setup bodies".into()
+            } else {
+                "3D Adaptive uses selected machining domains and complete setup-model obstacle shadows".into()
+            }],
         });
     }
     let view = View::new(state, &binding.selected)?;
@@ -1087,7 +1094,10 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
-    if matches!(binding.recipe, ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing) {
+    if matches!(
+        binding.recipe,
+        ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing
+    ) {
         return Ok((
             Vec::new(),
             Vec::new(),
@@ -1501,7 +1511,8 @@ fn derive_holes(
                                 if matches!(adjacent.surface, CadSurface::Cylinder { .. }) {
                                     continue;
                                 }
-                                if internal && (c[2] - hi).abs() < T
+                                if internal
+                                    && (c[2] - hi).abs() < T
                                     && matches!(adjacent.surface, CadSurface::Torus { .. })
                                 {
                                     bore_entry::certify(view, adjacent, face, edge)?;
@@ -2531,14 +2542,23 @@ mod tests {
         assert!(refs
             .iter()
             .all(|r| r.kind == EntityKind::Face && r.body_id == 1));
-        let mut binding = resolve_selection(&state, &refs, ExtractionRecipe::ProfileContours, 0.).unwrap();
-        assert_eq!(binding.heights, CuttingHeights { top: 0., bottom: -3. });
+        let mut binding =
+            resolve_selection(&state, &refs, ExtractionRecipe::ProfileContours, 0.).unwrap();
+        assert_eq!(
+            binding.heights,
+            CuttingHeights {
+                top: 0.,
+                bottom: -3.
+            }
+        );
         let resolved = resolve_binding(&state, &binding).unwrap();
         assert_eq!(resolved.profiles.len(), 3);
         assert_eq!(resolved.heights, binding.heights);
         binding.overrides.bottom = Some(-5.);
-        assert!(resolve_binding(&state, &binding).is_err(),
-            "the deeper exterior wall must not allow cutting below the pocket floor");
+        assert!(
+            resolve_binding(&state, &binding).is_err(),
+            "the deeper exterior wall must not allow cutting below the pocket floor"
+        );
     }
 
     #[test]

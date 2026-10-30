@@ -369,9 +369,16 @@ impl Strategy for ParallelStrategy {
             }
         };
         let mut linking = PassLinker {
-            grid: &grid, selected: &selected, radius: r, error, axial, clearance,
-            bottom: self.geometry.heights.bottom, top: self.geometry.heights.top,
-            previous: None, passes: 0,
+            grid: &grid,
+            selected: &selected,
+            radius: r,
+            error,
+            axial,
+            clearance,
+            bottom: self.geometry.heights.bottom,
+            top: self.geometry.heights.top,
+            previous: None,
+            passes: 0,
         };
         for row in 0..=rows {
             if cancel.is_cancelled() {
@@ -525,9 +532,21 @@ impl PassLinker<'_, '_> {
             // can machine the intervening scallop instead of demanding air.
             let margin = self.error + op.params.tolerance + self.axial;
             let mut path = Vec::new();
-            if refine(self.grid, from, to, self.radius, self.error, margin,
-                op.params.tolerance, self.bottom, 0, &mut path, cancel)
-                && path.iter().all(|q| q[2] <= self.top + margin && q[2] < self.clearance)
+            if refine(
+                self.grid,
+                from,
+                to,
+                self.radius,
+                self.error,
+                margin,
+                op.params.tolerance,
+                self.bottom,
+                0,
+                &mut path,
+                cancel,
+            ) && path
+                .iter()
+                .all(|q| q[2] <= self.top + margin && q[2] < self.clearance)
             {
                 return Some(path);
             }
@@ -584,7 +603,14 @@ impl PassLinker<'_, '_> {
                     out.program.push(Step::Linear {
                         to: Point3::new(q[0], q[1], q[2]),
                         feed: op.params.feed,
-                        tag: Tag::new(op.id, if at_depth { MoveKind::Cutting } else { MoveKind::Link }),
+                        tag: Tag::new(
+                            op.id,
+                            if at_depth {
+                                MoveKind::Cutting
+                            } else {
+                                MoveKind::Link
+                            },
+                        ),
                     });
                 }
                 self.previous = None;
@@ -952,15 +978,30 @@ mod tests {
             let zero = run(operation, surface());
             assert!(!zero.has_errors(), "{:?}", zero.diagnostics);
             assert!(zero.program.validate().is_ok());
-            assert_eq!(local_links(&zero), 0, "zero-lift transitions continue cutting the surface");
-            let cuts = |result: &StrategyResult| result.program.steps().iter().filter_map(|s| match s {
-                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
-                _ => None,
-            }).collect::<Vec<_>>();
+            assert_eq!(
+                local_links(&zero),
+                0,
+                "zero-lift transitions continue cutting the surface"
+            );
+            let cuts = |result: &StrategyResult| {
+                result
+                    .program
+                    .steps()
+                    .iter()
+                    .filter_map(|s| match s {
+                        Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
             let zero_cuts = cuts(&zero);
             let mut next = 0;
             for point in cuts(&baseline) {
-                next += zero_cuts[next..].iter().position(|p| *p == point).expect("original finishing cuts must be preserved") + 1;
+                next += zero_cuts[next..]
+                    .iter()
+                    .position(|p| *p == point)
+                    .expect("original finishing cuts must be preserved")
+                    + 1;
             }
             let mut transitions = 0;
             for pair in zero.program.steps().windows(2) {
@@ -969,7 +1010,9 @@ mod tests {
                         let (s, c) = angle.to_radians().sin_cos();
                         if (-s * (to.x - from.x) + c * (to.y - from.y)).abs() > 1e-8 {
                             assert_eq!(*feed, 500.);
-                            if angle == 0. { assert_eq!(from.z, to.z); }
+                            if angle == 0. {
+                                assert_eq!(from.z, to.z);
+                            }
                             transitions += 1;
                         }
                     }
@@ -1024,16 +1067,28 @@ mod tests {
         let result = run(operation, geometry.clone());
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
         assert!(result.program.validate().is_ok());
-        assert_eq!(result.program.steps().iter().filter(|s| matches!(s, Step::Rapid { .. })).count(), 2);
-        assert!(result.program.steps().iter().any(|s| matches!(s,
+        assert_eq!(
+            result
+                .program
+                .steps()
+                .iter()
+                .filter(|s| matches!(s, Step::Rapid { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            result.program.steps().iter().any(|s| matches!(s,
             Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting
                 && to.x == 9. && (2.5..3.5).contains(&to.y) && to.z > 0.4)),
-            "the connector must follow the crest instead of crossing it at endpoint Z");
+            "the connector must follow the crest instead of crossing it at endpoint Z"
+        );
         // Independently check the emitted cutting points against the actual
         // drop-ball contact, including intermediate points along the turn.
         for step in result.program.steps() {
             if let Step::Linear { to, tag, .. } = step {
-                if tag.kind != MoveKind::Cutting { continue; }
+                if tag.kind != MoveKind::Cutting {
+                    continue;
+                }
                 for triangle in &geometry.triangles {
                     if let Some(required) = drop_ball([to.x, to.y, to.z], triangle, 1.) {
                         assert!(to.z >= required);
@@ -1045,11 +1100,21 @@ mod tests {
         program.push(Step::ToolChange { tool: 1 });
         program.extend(result.program);
         let verified = cam_sim::simulate(
-            &program, [-1., -1., -2.], [11., 11., 0.8],
-            &cam_sim::SimOptions { resolution: 0.2, tool_radius: 1. },
-            &[cam_sim::SimTool { number: 1,
-                profile: cam_sim::ToolProfile { radius: 1., shape: cam_sim::ProfileShape::Ball },
-                noncutting_tip_radius: None }],
+            &program,
+            [-1., -1., -2.],
+            [11., 11., 0.8],
+            &cam_sim::SimOptions {
+                resolution: 0.2,
+                tool_radius: 1.,
+            },
+            &[cam_sim::SimTool {
+                number: 1,
+                profile: cam_sim::ToolProfile {
+                    radius: 1.,
+                    shape: cam_sim::ProfileShape::Ball,
+                },
+                noncutting_tip_radius: None,
+            }],
         );
         assert!(verified.is_clean(), "{:?}", verified.collisions);
         assert!(verified.removed_volume > 0.);
@@ -1223,9 +1288,17 @@ mod tests {
         assert!(result.program.steps().iter().any(|s| matches!(s,
             Step::Rapid { to, tag } if tag.kind == MoveKind::Retract
                 && to.x == 9. && to.y == 1. && to.z == 10.)));
-        assert_eq!(result.program.steps().iter().filter(|s| matches!(s,
-            Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract)).count(), 2,
-            "only the real selection gap and the final exit need a retract");
+        assert_eq!(
+            result
+                .program
+                .steps()
+                .iter()
+                .filter(|s| matches!(s,
+            Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract))
+                .count(),
+            2,
+            "only the real selection gap and the final exit need a retract"
+        );
     }
 
     #[test]
