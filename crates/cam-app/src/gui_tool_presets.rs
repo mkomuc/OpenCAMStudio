@@ -95,9 +95,38 @@ pub(super) struct LibraryToolDraft {
     fields: BTreeMap<Field, String>,
     preset: Option<u64>,
     preset_values: BTreeMap<PresetField, String>,
+    preset_buffers: BTreeMap<u64, BTreeMap<PresetField, String>>,
 }
 
 impl App {
+    pub(super) fn begin_preset_edit(&mut self) {
+        if self.preset_editor_snapshot.is_none() {
+            self.edited_preset_input = None;
+            if let Some(tool) = &self.tool_edit {
+                self.preset_editor_snapshot = Some(LibraryToolDraft {
+                    tool: tool.clone(),
+                    fields: self.fields.clone(),
+                    preset: self.library_preset,
+                    preset_values: self.preset_values.clone(),
+                    preset_buffers: self.preset_buffers.clone(),
+                });
+            }
+        }
+        self.show_preset_editor = self.library_preset.is_some();
+    }
+
+    pub(super) fn cancel_preset_edit(&mut self) {
+        if let Some(snapshot) = self.preset_editor_snapshot.take() {
+            self.tool_edit = Some(snapshot.tool);
+            self.fields = snapshot.fields;
+            self.library_preset = snapshot.preset;
+            self.preset_values = snapshot.preset_values;
+            self.preset_buffers = snapshot.preset_buffers;
+        }
+        self.show_preset_editor = false;
+        self.edited_preset_input = None;
+    }
+
     pub(super) fn select_library_tool(&mut self, index: usize) {
         if index == self.lib_sel || index >= self.library.tools.len() {
             return;
@@ -111,6 +140,7 @@ impl App {
                         fields: self.fields.clone(),
                         preset: self.library_preset,
                         preset_values: self.preset_values.clone(),
+                        preset_buffers: self.preset_buffers.clone(),
                     },
                 );
             }
@@ -122,6 +152,7 @@ impl App {
             self.fields = draft.fields;
             self.library_preset = draft.preset;
             self.preset_values = draft.preset_values;
+            self.preset_buffers = draft.preset_buffers;
         }
     }
 
@@ -175,8 +206,23 @@ impl App {
             .find(|p| p.id == id)
     }
     pub(super) fn select_library_preset(&mut self, id: Option<u64>) {
+        self.edited_preset_input = None;
+        if let Some(current) = self.library_preset {
+            if self
+                .tool_edit
+                .as_ref()
+                .is_some_and(|tool| tool.presets.iter().any(|p| p.id == current))
+            {
+                self.preset_buffers
+                    .insert(current, self.preset_values.clone());
+            }
+        }
         self.library_preset = id;
         self.preset_values.clear();
+        if let Some(values) = id.and_then(|id| self.preset_buffers.remove(&id)) {
+            self.preset_values = values;
+            return;
+        }
         if let Some(p) = self
             .tool_edit
             .as_ref()
@@ -212,7 +258,7 @@ impl App {
         }
         self.refresh_preset_cutting_fields(None);
     }
-    pub(super) fn add_library_preset(&mut self) {
+    pub(super) fn add_library_preset(&mut self, duplicate: bool) {
         if self.preset_edit_invalid() {
             self.status = "Correct the current preset before adding another.".into();
             return;
@@ -222,11 +268,14 @@ impl App {
             return;
         };
         let id = tool.next_preset_id();
-        let source = tool
-            .presets
-            .iter()
-            .find(|p| Some(p.id) == self.library_preset)
-            .cloned();
+        let source = if duplicate {
+            tool.presets
+                .iter()
+                .find(|p| Some(p.id) == self.library_preset)
+                .cloned()
+        } else {
+            None
+        };
         let preset = ToolPreset {
             id,
             name: format!("Preset {id}"),
@@ -257,11 +306,15 @@ impl App {
     pub(super) fn delete_library_preset(&mut self) {
         if let Some(tool) = &mut self.tool_edit {
             tool.presets.retain(|p| Some(p.id) != self.library_preset);
+            if let Some(id) = self.library_preset {
+                self.preset_buffers.remove(&id);
+            }
             let next = tool.presets.first().map(|p| p.id);
             self.select_library_preset(next);
         }
     }
     pub(super) fn edit_preset_value(&mut self, field: PresetField, value: String) {
+        self.edited_preset_input = Some(field);
         let tool = self.tool_edit.clone();
         let fallback_rpm = self.controller.defaults().spindle_rpm;
         let mut linked = None;
@@ -360,6 +413,10 @@ impl App {
                 .preset_values
                 .iter()
                 .any(|(field, value)| !field.valid(value))
+            || self
+                .preset_buffers
+                .values()
+                .any(|values| values.iter().any(|(field, value)| !field.valid(value)))
     }
     pub(super) fn library_preset_editor(&self) -> Element<'_, Message> {
         let Some(tool) = &self.tool_edit else {
@@ -377,8 +434,17 @@ impl App {
             .iter()
             .find(|c| c.id == self.library_preset)
             .cloned();
-        let mut list = column![
-            inspector_section("Cutting presets"),
+        fn control_row<'a>(
+            label: &'static str,
+            control: Element<'a, Message>,
+        ) -> Element<'a, Message> {
+            row![text(label).size(12).width(245), control]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .into()
+        }
+        let mut list = column![control_row(
+            "Preset",
             pick_list(choices, selected, |c| Message::LibraryPresetSelected(
                 c.id.unwrap()
             ))
@@ -386,15 +452,10 @@ impl App {
             .text_size(12)
             .padding([7, 9])
             .style(inspector_picker)
-            .width(Length::Fill),
-            row![
-                inspector_button("Add / duplicate").on_press(Message::AddPreset),
-                inspector_button("Delete")
-                    .on_press_maybe(self.library_preset.map(|_| Message::DeletePreset))
-            ]
-            .spacing(6),
-        ]
-        .spacing(8);
+            .width(Length::Fill)
+            .into()
+        ),]
+        .spacing(6);
         if let Some(preset) = tool
             .presets
             .iter()
@@ -413,41 +474,34 @@ impl App {
                 .iter()
                 .find(|m| m.id == preset.material_id)
                 .cloned();
-            list = list.push(
-                inspector_input("Preset name", &preset.name).on_input(Message::PresetNameChanged),
-            );
-            list = list.push(
-                text(format!(
-                    "Material ID: {}",
-                    preset
-                        .material_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_else(|| "Any material".into())
-                ))
-                .size(12),
-            );
-            list = list.push(
+            list = list.push(control_row(
+                "Name",
+                inspector_input("", &preset.name)
+                    .on_input(Message::PresetNameChanged)
+                    .into(),
+            ));
+            list = list.push(control_row(
+                "Material",
                 pick_list(materials, selected, Message::PresetMaterialChanged)
                     .text_size(12)
                     .padding([7, 9])
                     .style(inspector_picker)
-                    .width(Length::Fill),
-            );
-            list = list.push(
-                column![
-                    text("Cooling").size(12),
-                    pick_list(
-                        &cam_model::Cooling::ALL[..],
-                        Some(preset.cooling),
-                        Message::PresetCoolingChanged
-                    )
-                    .text_size(12)
-                    .padding([7, 9])
-                    .style(inspector_picker)
                     .width(Length::Fill)
-                ]
-                .spacing(4),
-            );
+                    .into(),
+            ));
+            list = list.push(control_row(
+                "Cooling",
+                pick_list(
+                    &cam_model::Cooling::ALL[..],
+                    Some(preset.cooling),
+                    Message::PresetCoolingChanged,
+                )
+                .text_size(12)
+                .padding([7, 9])
+                .style(inspector_picker)
+                .width(Length::Fill)
+                .into(),
+            ));
             for field in PresetField::ALL {
                 let unavailable =
                     matches!(field, PresetField::CuttingSpeed | PresetField::FeedPerTooth)
@@ -457,20 +511,23 @@ impl App {
                     .get(&field)
                     .map(String::as_str)
                     .unwrap_or("");
+                let shown = self
+                    .settings
+                    .format_numeric_input(value, self.edited_preset_input == Some(field));
                 let input = inspector_input(
                     if unavailable {
                         "Cutter data unavailable"
                     } else {
                         ""
                     },
-                    value,
+                    &shown,
                 );
                 let input = if unavailable {
                     input
                 } else {
                     input.on_input(move |v| Message::PresetValueChanged(field, v))
                 };
-                list = list.push(column![text(field.label()).size(12), input].spacing(4));
+                list = list.push(control_row(field.label(), input.into()));
                 if !unavailable && !field.valid(value) {
                     list = list.push(text("Enter a valid value").size(11).color(palette::ERROR));
                 }
@@ -478,7 +535,6 @@ impl App {
             if preset.name.trim().is_empty() {
                 list = list.push(text("Enter a preset name").size(11).color(palette::ERROR));
             }
-            list = list.push(text("Apply tool changes to save presets. The first preset for a material is its automatic default.").size(11).color(INSPECTOR_MUTED));
         }
         list.into()
     }
@@ -487,13 +543,30 @@ impl App {
         let Some(tool) = &self.tool_edit else {
             return column![].into();
         };
+        let fmt_num = |value| self.settings.format_number(value);
         let selected = self.library_preset;
+        let action = |icon, label, message| {
+            render_command(&cmd_help(icon, label, message, label), true, true)
+        };
         let toolbar = row![
             text("Cutting parameters").size(14),
             Space::new().width(Length::Fill),
-            inspector_button("Add preset").on_press(Message::AddPreset),
-            inspector_button("Edit").on_press_maybe(selected.map(|_| Message::EditPreset)),
-            inspector_button("Remove").on_press_maybe(selected.map(|_| Message::DeletePreset)),
+            action(Icon::New, "Add preset", Some(Message::AddPreset)),
+            action(
+                Icon::Edit,
+                "Edit preset",
+                selected.map(|_| Message::EditPreset)
+            ),
+            action(
+                Icon::Duplicate,
+                "Duplicate preset",
+                selected.map(|_| Message::DuplicatePreset)
+            ),
+            action(
+                Icon::Delete,
+                "Remove preset",
+                selected.map(|_| Message::DeletePreset)
+            ),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -611,7 +684,12 @@ impl App {
                     background: active.then_some(Background::Color(palette::SELECT_BG)),
                     ..Default::default()
                 });
-            rows = rows.push(mouse_area(item).on_press(Message::LibraryPresetSelected(preset.id)));
+            rows = rows.push(
+                mouse_area(item)
+                    .on_press(Message::LibraryPresetSelected(preset.id))
+                    .on_double_click(Message::EditLibraryPreset(preset.id))
+                    .interaction(iced::mouse::Interaction::Pointer),
+            );
         }
         if tool.presets.is_empty() {
             rows = rows.push(text("No cutting presets for this cutter. Add a preset to define material-specific parameters.").size(12));
@@ -655,20 +733,30 @@ impl App {
             return None;
         };
         let can_close = self.show_materials || !self.preset_edit_invalid();
-        let card = container(
-            column![
-                text(title).size(18),
-                scrollable(content).height(Length::Shrink),
-                text(self.status.clone()).size(11).color(INSPECTOR_MUTED),
+        let mut body = column![
+            text(title).size(18),
+            scrollable(content).height(Length::Fill),
+        ]
+        .spacing(12);
+        if self.show_materials {
+            body = body.push(text(self.status.clone()).size(11).color(INSPECTOR_MUTED));
+        }
+        let card = container(body.push(row![
+            Space::new().width(Length::Fill),
+            if self.show_materials {
+                row![inspector_button("Done").on_press(close)]
+            } else {
                 row![
-                    Space::new().width(Length::Fill),
-                    inspector_button("Done").on_press_maybe(can_close.then_some(close))
-                ],
-            ]
-            .spacing(12),
-        )
+                    inspector_button("Cancel").on_press(Message::CancelPresetEditor),
+                    inspector_button("OK").on_press_maybe(can_close.then_some(close))
+                ]
+                .spacing(8)
+            }
+        ]))
         .width(600)
-        .max_height((self.window.height - 60.).max(200.))
+        .height(
+            (self.window.height - 60.).clamp(200., if self.show_materials { 820. } else { 700. }),
+        )
         .padding(16)
         .style(|theme: &iced::Theme| container::Style {
             background: Some(Background::Color(
@@ -1493,7 +1581,141 @@ mod tests {
     }
 
     #[test]
-    fn preset_modal_keeps_invalid_edits_open_and_escape_preserves_tool_draft() {
+    fn display_rounding_keeps_tool_and_preset_values_exact() {
+        let mut app = app();
+        app.switch_workspace(Workspace::Tools);
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ToolDiameter, "6.123456".into()),
+        );
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "123.456789".into()),
+        );
+        let before = app.tool_edit.clone();
+        let fields = app.fields.clone();
+        let preset_values = app.preset_values.clone();
+        app.settings.number_decimals = 2;
+        app.begin_preset_edit();
+        let _ = app.library_editor();
+        let _ = app.library_preset_editor();
+        let _ = app.cutting_presets_table();
+        assert_eq!(app.tool_edit, before);
+        assert_eq!(app.fields, fields);
+        assert_eq!(app.preset_values, preset_values);
+        assert_eq!(
+            app.settings
+                .format_number(app.tool_edit.as_ref().unwrap().diameter),
+            "6.12"
+        );
+        assert_eq!(
+            app.settings
+                .format_number(app.tool_edit.as_ref().unwrap().presets[0].feed),
+            "123.46"
+        );
+        app.settings.number_decimals = 4;
+        assert_eq!(
+            app.settings
+                .format_number(app.tool_edit.as_ref().unwrap().diameter),
+            "6.1235"
+        );
+    }
+
+    #[test]
+    fn double_click_edits_the_clicked_preset() {
+        let mut app = app();
+        app.switch_workspace(Workspace::Tools);
+        send(&mut app, Message::EditLibraryPreset(2));
+        assert_eq!(app.library_preset, Some(2));
+        assert!(app.show_preset_editor);
+        assert_eq!(app.preset_values[&PresetField::Feed], "200");
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "350".into()),
+        );
+        send(&mut app, Message::ClosePresetEditor);
+        assert_eq!(app.tool_edit.as_ref().unwrap().presets[1].feed, 350.);
+        assert_eq!(app.tool_edit.as_ref().unwrap().presets[0].feed, 500.);
+    }
+
+    #[test]
+    fn duplicate_copies_selected_preset_while_add_uses_tool_defaults() {
+        let mut app = app();
+        app.switch_workspace(Workspace::Tools);
+        send(&mut app, Message::LibraryPresetSelected(2));
+        let source = app.tool_edit.as_ref().unwrap().presets[1].clone();
+        send(&mut app, Message::DuplicatePreset);
+        let copy = app.tool_edit.as_ref().unwrap().presets.last().unwrap();
+        assert_ne!(copy.id, source.id);
+        assert_ne!(copy.name, source.name);
+        let mut expected = source;
+        expected.id = copy.id;
+        expected.name = copy.name.clone();
+        assert_eq!(copy, &expected);
+        assert!(app.show_preset_editor);
+        send(&mut app, Message::ClosePresetEditor);
+        send(&mut app, Message::AddPreset);
+        let added = app.tool_edit.as_ref().unwrap().presets.last().unwrap();
+        assert_eq!(added.material_id, None);
+        assert_eq!(added.stepdown, None);
+        assert_eq!(
+            added.spindle_rpm,
+            app.tool_edit.as_ref().unwrap().nominal_rpm
+        );
+    }
+
+    #[test]
+    fn switching_presets_retains_invalid_input_without_blocking_navigation() {
+        let mut app = app();
+        app.switch_workspace(Workspace::Tools);
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "invalid".into()),
+        );
+        send(&mut app, Message::LibraryPresetSelected(2));
+        assert_eq!(app.library_preset, Some(2));
+        assert_eq!(app.preset_values[&PresetField::Feed], "200");
+        assert!(app.preset_edit_invalid());
+        send(&mut app, Message::LibraryPresetSelected(1));
+        assert_eq!(app.preset_values[&PresetField::Feed], "invalid");
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "600".into()),
+        );
+        assert!(!app.preset_edit_invalid());
+    }
+
+    #[test]
+    fn preset_dialog_cancel_restores_prior_draft_and_ok_keeps_edits() {
+        let mut app = app();
+        app.switch_workspace(Workspace::Tools);
+        send(&mut app, Message::PresetNameChanged("Prior draft".into()));
+        let prior = app.tool_edit.clone();
+        send(&mut app, Message::EditPreset);
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "750".into()),
+        );
+        send(&mut app, Message::CancelPresetEditor);
+        assert_eq!(app.tool_edit, prior);
+        assert!(!app.show_preset_editor);
+        send(&mut app, Message::AddPreset);
+        assert_eq!(app.tool_edit.as_ref().unwrap().presets.len(), 3);
+        send(&mut app, Message::CancelPresetEditor);
+        assert_eq!(app.tool_edit, prior);
+        send(&mut app, Message::EditPreset);
+        send(
+            &mut app,
+            Message::PresetValueChanged(PresetField::Feed, "750".into()),
+        );
+        send(&mut app, Message::ClosePresetEditor);
+        assert!(!app.show_preset_editor);
+        assert_eq!(app.tool_edit.as_ref().unwrap().presets[0].feed, 750.);
+        assert_eq!(app.library.tools[0].presets[0].feed, 500.);
+    }
+
+    #[test]
+    fn preset_modal_validates_ok_and_escape_cancels_dialog_edits() {
         let mut app = app();
         app.switch_workspace(Workspace::Tools);
         app.lib_sel = 0;
@@ -1513,8 +1735,13 @@ mod tests {
         );
         send(&mut app, Message::CadEscape);
         assert!(!app.show_preset_editor);
-        assert_eq!(app.tool_edit.as_ref().unwrap().presets[0].feed, 750.);
+        assert_eq!(app.tool_edit.as_ref().unwrap(), &saved);
         assert_eq!(app.library.tools[0], saved);
+        assert!(!app.preset_edit_invalid());
+        send(
+            &mut app,
+            Message::PresetNameChanged("Pending tool edit".into()),
+        );
         send(&mut app, Message::OpenMaterials);
         assert!(app.show_materials);
         send(&mut app, Message::CadEscape);

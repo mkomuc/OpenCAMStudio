@@ -1,6 +1,14 @@
 //! Transactional setup/tool/operation inspector view.
 use super::*;
 use iced::widget::column;
+
+const ESTLCAM_OUTPUT_CHOICES: &[&str] = &[
+    "None",
+    "Output 1 (M8 / M9)",
+    "Output 2 (M10 / M11)",
+    "Both outputs",
+];
+
 impl App {
     pub(super) fn inspector(&self) -> Element<'_, Message> {
         if self.pattern_draft.is_some() {
@@ -120,22 +128,32 @@ impl App {
                 let options = self
                     .machine_estlcam_edit
                     .unwrap_or(self.controller.estlcam_options());
-                list = list
-                    .push(text("Coolant / MMS outputs").size(12))
-                    .push(checkbox(options.output_1)
-                        .label("Output 1 (M8 / M9)")
-                        .on_toggle(|on| Message::EstlcamOutputChanged(1, on)))
-                    .push(checkbox(options.output_2)
-                        .label("Output 2 (M10 / M11)")
-                        .on_toggle(|on| Message::EstlcamOutputChanged(2, on)))
-                    .push(text("Selected outputs follow coolant on/off and switch off at program end. Enable the output wired to your MMS system.").size(11).color(palette::GROUP_LABEL))
-                    .push(text("Set Estlcam to mm and mm/min. Export each workpiece origin separately.").size(11).color(palette::GROUP_LABEL));
+                let selected_output = match (options.output_1, options.output_2) {
+                    (false, false) => "None",
+                    (true, false) => "Output 1 (M8 / M9)",
+                    (false, true) => "Output 2 (M10 / M11)",
+                    (true, true) => "Both outputs",
+                };
+                list = list.push(text("Coolant / MMS outputs").size(12)).push(
+                    row![
+                        text("Cooling output").size(12).width(Length::Fill),
+                        pick_list(ESTLCAM_OUTPUT_CHOICES, Some(selected_output), |choice| {
+                            Message::EstlcamOutputSelectionChanged(match choice {
+                                "Output 1 (M8 / M9)" => 1,
+                                "Output 2 (M10 / M11)" => 2,
+                                "Both outputs" => 3,
+                                _ => 0,
+                            })
+                        })
+                        .text_size(12)
+                        .padding([7, 9])
+                        .style(inspector_picker)
+                        .width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
             }
-            list = list.push(
-                text("Dry-run / air-cut generated code on your control before cutting.")
-                    .size(11)
-                    .color(palette::GROUP_LABEL),
-            );
         }
 
         let ordered = self.inspector_fields();

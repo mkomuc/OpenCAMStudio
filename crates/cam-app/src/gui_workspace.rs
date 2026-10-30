@@ -203,7 +203,8 @@ impl App {
             self.planar_selection = view.planar_selection;
             self.show_stock = view.show_stock;
             self.show_origin = view.show_origin;
-            self.show_project_browser = view.show_project_browser;
+            // Pane visibility is a user preference, including for older projects
+            // that still carry a browser-visibility snapshot.
         }
     }
 
@@ -289,6 +290,7 @@ impl App {
         }
         self.reload_tool_edit();
         self.status = format!("{} workspace.", workspace.label());
+        self.remember();
     }
     pub(super) fn workspace_main(&self) -> Element<'_, Message> {
         if self.workspace == Workspace::Tools {
@@ -944,9 +946,15 @@ impl App {
                 text(tool.kind.to_string()).size(12).width(140),
                 text(tool.manufacturer.clone()).size(12).width(140),
                 text(tool.product_id.clone()).size(12).width(120),
-                text(fmt_num(tool.diameter)).size(12).width(62),
-                text(fmt_num(tool.length)).size(12).width(80),
-                text(fmt_num(tool.flute_len())).size(12).width(112)
+                text(self.settings.format_number(tool.diameter))
+                    .size(12)
+                    .width(62),
+                text(self.settings.format_number(tool.length))
+                    .size(12)
+                    .width(80),
+                text(self.settings.format_number(tool.flute_len()))
+                    .size(12)
+                    .width(112)
             ]
             .spacing(4);
             let item = container(cells)

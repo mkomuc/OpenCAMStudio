@@ -2186,9 +2186,13 @@ struct App {
     tool_drafts: BTreeMap<usize, tool_presets::LibraryToolDraft>,
     library_preset: Option<u64>,
     preset_values: BTreeMap<PresetField, String>,
+    edited_preset_input: Option<PresetField>,
+    edited_tool_input: Option<Field>,
+    preset_buffers: BTreeMap<u64, BTreeMap<PresetField, String>>,
     new_material_name: String,
     show_materials: bool,
     show_preset_editor: bool,
+    preset_editor_snapshot: Option<tool_presets::LibraryToolDraft>,
     /// Which internal tab the Tool Library pane shows (Serial / Family).
     library_view: LibraryView,
     /// The operation whose right-click context menu is open, and where to anchor it
@@ -2673,7 +2677,7 @@ enum Message {
     MachineNameChanged(String),
     /// Choose the post/controller dialect for export.
     PostKindChanged(PostKind),
-    EstlcamOutputChanged(u8, bool),
+    EstlcamOutputSelectionChanged(u8),
     /// Commit the inspector fields (one undo step) and recompute the toolpath.
     Apply,
     Undo,
@@ -2854,6 +2858,7 @@ enum Message {
     /// A continuous control has settled (slider released) — write preferences now
     /// rather than on every intermediate value.
     SettingsSettled,
+    SetNumberDecimals(u8),
     /// Make this machine the active one — and adopt its control with it.
     ActiveMachineChanged(String),
     /// Add a machine to the library: a copy of the active one, ready to edit.
@@ -2908,9 +2913,12 @@ enum Message {
     /// Create a new default tool and select it.
     NewTool,
     LibraryPresetSelected(u64),
+    EditLibraryPreset(u64),
     AddPreset,
+    DuplicatePreset,
     EditPreset,
     ClosePresetEditor,
+    CancelPresetEditor,
     OpenMaterials,
     Noop,
     CloseMaterials,
@@ -3548,9 +3556,13 @@ impl App {
             tool_drafts: BTreeMap::new(),
             library_preset: None,
             preset_values: BTreeMap::new(),
+            edited_preset_input: None,
+            edited_tool_input: None,
+            preset_buffers: BTreeMap::new(),
             new_material_name: String::new(),
             show_materials: false,
             show_preset_editor: false,
+            preset_editor_snapshot: None,
             library_view: LibraryView::Ordered,
             open_op_menu: None,
             pending_toolpath_export: None,
@@ -3629,6 +3641,7 @@ impl App {
         app.controller
             .set_simulation_accuracy(app.settings.simulation.accuracy);
         app.controller.select(Selection::Setup);
+        app.restore_pane_preferences();
         app.refresh_fields();
         app.sync_inspector_visibility();
         // Seed the fixed layout against the assumed window size; the first real
@@ -3790,6 +3803,8 @@ impl App {
         {
             let close = if self.show_materials {
                 Message::CloseMaterials
+            } else if matches!(message, Message::CadEscape) {
+                Message::CancelPresetEditor
             } else {
                 Message::ClosePresetEditor
             };
@@ -5417,6 +5432,9 @@ impl App {
                 }
             }
             Message::FieldChanged(field, value) => {
+                if self.library_mode() {
+                    self.edited_tool_input = Some(field);
+                }
                 if matches!(field, Field::MajorDia | Field::Pitch) {
                     self.thread_parameters.mode = thread_parameters::ThreadMatchMode::Manual;
                 }
@@ -5475,15 +5493,16 @@ impl App {
                 // *this machine's* control — and an edit waits for Apply.
                 self.machine_post_edit = Some(kind);
             }
-            Message::EstlcamOutputChanged(output, enabled) => {
+            Message::EstlcamOutputSelectionChanged(selection) => {
                 let mut options = self
                     .machine_estlcam_edit
                     .unwrap_or(self.controller.estlcam_options());
-                match output {
-                    1 => options.output_1 = enabled,
-                    2 => options.output_2 = enabled,
-                    _ => return iced::Task::none(),
-                }
+                (options.output_1, options.output_2) = match selection {
+                    1 => (true, false),
+                    2 => (false, true),
+                    3 => (true, true),
+                    _ => (false, false),
+                };
                 self.machine_estlcam_edit = Some(options);
             }
             Message::Apply => {
@@ -6920,6 +6939,12 @@ impl App {
                 // decision. `SettingsSettled` fires on release.
                 self.gizmo_size = v.clamp(GIZMO_SIZE_MIN, GIZMO_SIZE_MAX)
             }
+            Message::SetNumberDecimals(digits) => {
+                self.settings.number_decimals = digits.min(8);
+                self.edited_preset_input = None;
+                self.edited_tool_input = None;
+                self.remember();
+            }
             Message::SettingsSettled => {
                 if self
                     .controller
@@ -7027,6 +7052,8 @@ impl App {
                 // resets *everything* — pane sizes and minimums included — and applies
                 // at once rather than behind a confirm they might not be able to reach.
                 self.settings = crate::Settings::default();
+                self.edited_preset_input = None;
+                self.edited_tool_input = None;
                 let s = &self.settings;
                 self.show_stock = s.view.show_stock;
                 self.show_gizmo = s.view.show_gizmo;
@@ -7039,6 +7066,7 @@ impl App {
                 self.project_px = s.panes.project_px;
                 self.inspector_px = s.panes.inspector_px;
                 self.output_px = s.panes.output_px;
+                self.restore_pane_preferences();
                 self.apply_fixed_layout();
                 if self
                     .controller
@@ -7430,23 +7458,26 @@ impl App {
                 // buffers -- a newly revealed field would otherwise render blank.
                 self.refresh_operation_fields();
             }
-            Message::LibraryPresetSelected(id) => {
-                if !self.preset_edit_invalid() {
-                    self.select_library_preset(Some(id));
-                } else {
-                    self.status = "Correct the current preset before selecting another.".into();
-                }
+            Message::LibraryPresetSelected(id) => self.select_library_preset(Some(id)),
+            Message::EditLibraryPreset(id) => {
+                self.select_library_preset(Some(id));
+                self.begin_preset_edit();
             }
-            Message::AddPreset => {
-                self.add_library_preset();
+            Message::AddPreset | Message::DuplicatePreset => {
+                let duplicate = matches!(message, Message::DuplicatePreset);
+                self.begin_preset_edit();
+                self.add_library_preset(duplicate);
                 self.show_preset_editor = self.library_preset.is_some();
             }
-            Message::EditPreset => self.show_preset_editor = self.library_preset.is_some(),
+            Message::EditPreset => self.begin_preset_edit(),
             Message::ClosePresetEditor => {
                 if !self.preset_edit_invalid() {
                     self.show_preset_editor = false;
+                    self.edited_preset_input = None;
+                    self.preset_editor_snapshot = None;
                 }
             }
+            Message::CancelPresetEditor => self.cancel_preset_edit(),
             Message::Noop => {}
             Message::OpenMaterials => self.show_materials = true,
             Message::CloseMaterials => self.show_materials = false,
@@ -7680,8 +7711,14 @@ impl App {
                 unreachable!()
             }
             Message::OutputAction(_) | Message::OutputCopy | Message::OutputClear => unreachable!(),
-            Message::SetPaneVisible(Pane::Inspector, show) => self.inspector_enabled = show,
-            Message::SetPaneVisible(pane, show) => self.set_pane_visible(pane, show),
+            Message::SetPaneVisible(pane, show) => {
+                if pane == Pane::Inspector {
+                    self.inspector_enabled = show;
+                } else {
+                    self.set_pane_visible(pane, show);
+                }
+                self.remember();
+            }
         }
         iced::Task::none()
     }
@@ -7807,6 +7844,27 @@ impl App {
         let show = self.inspector_enabled && editing;
         if show != self.pane_handle(Pane::Inspector).is_some() {
             self.set_pane_visible(Pane::Inspector, show);
+        }
+    }
+
+    /// Restore user choices independently of the inspector's temporary visibility.
+    fn restore_pane_preferences(&mut self) {
+        self.show_project_browser = self.settings.panes.show_project_browser;
+        self.inspector_enabled = self.settings.panes.inspector_enabled;
+        self.set_pane_visible(Pane::Output, self.settings.panes.show_output);
+        let workspace = if self.settings.panes.show_library {
+            Workspace::Tools
+        } else {
+            Workspace::Machining
+        };
+        if self.workspace != workspace {
+            self.workspace = workspace;
+            self.active_tab = if workspace == Workspace::Tools {
+                RibbonTab::Tools
+            } else {
+                self.machining_tab
+            };
+            self.reload_tool_edit();
         }
     }
 
@@ -7940,6 +7998,10 @@ impl App {
                 extra: Default::default(),
             },
             crate::PanePrefs {
+                show_project_browser: self.show_project_browser,
+                show_library: self.workspace == Workspace::Tools,
+                inspector_enabled: self.inspector_enabled,
+                show_output: self.pane_handle(Pane::Output).is_some(),
                 project_px: self.project_px,
                 inspector_px: self.inspector_px,
                 output_px: self.output_px,
@@ -8015,6 +8077,7 @@ impl App {
     /// Reload the inspector edit buffers from the model for the current
     /// selection.
     fn refresh_fields(&mut self) {
+        self.edited_tool_input = None;
         if self.creating_operation() {
             self.focused_height = None;
             self.fields.clear();
@@ -8059,6 +8122,9 @@ impl App {
     /// tab switch, post-Apply), but *not* on an in-place field/picker edit.
     fn reload_tool_edit(&mut self) {
         self.show_preset_editor = false;
+        self.preset_editor_snapshot = None;
+        self.library_preset = None;
+        self.preset_buffers.clear();
         self.tool_edit = if self.library_mode() {
             self.library.tools.get(self.lib_sel).cloned()
         } else {
@@ -9545,8 +9611,34 @@ impl App {
                      you change them."
                         .to_string()
                 ),
-                scrollable(column![snapping, stock, simulation, panes].spacing(12))
-                    .height(Length::Shrink),
+                scrollable(
+                    column![
+                        column![
+                            heading("Number display"),
+                            row![
+                                text("Decimal places").size(12).width(150),
+                                pick_list(
+                                    (0u8..=8).collect::<Vec<_>>(),
+                                    Some(self.settings.number_decimals),
+                                    Message::SetNumberDecimals,
+                                )
+                                .text_size(12)
+                                .padding([7, 9])
+                                .style(inspector_picker)
+                                .width(100),
+                            ]
+                            .spacing(10)
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(6),
+                        snapping,
+                        stock,
+                        simulation,
+                        panes
+                    ]
+                    .spacing(12)
+                )
+                .height(Length::Shrink),
                 row![
                     // Left, away from Close: it is destructive, and the two should not
                     // be adjacent when one of them is the escape from an unusable layout.
@@ -10677,9 +10769,16 @@ impl App {
         // the viewport preview (the committed list/pane updates on Apply).
         let name = self
             .preview_tool()
-            .map(|t| format!("T{} — ⌀{} {}", t.number, fmt_num(t.diameter), t.kind))
+            .map(|t| {
+                format!(
+                    "T{} — ⌀{} {}",
+                    t.number,
+                    self.settings.format_number(t.diameter),
+                    t.kind
+                )
+            })
             .unwrap_or_else(|| "Tool Library".to_string());
-        let mut list = column![inspector_heading(name)].spacing(10).padding(14);
+        let mut list = column![inspector_heading(name)].spacing(6).padding(14);
 
         if let Some(t) = self.preview_tool() {
             // Keep the label flexible so long tool types fit a narrow inspector.
@@ -10729,18 +10828,28 @@ impl App {
                 ),
             ] {
                 list = list.push(
-                    column![
-                        text(label).size(12),
-                        inspector_input(label, value)
+                    row![
+                        text(label).size(12).width(Length::Fill),
+                        inspector_input("", value)
                             .on_input(move |value| Message::ToolDetailChanged(field, value))
+                            .width(177)
                     ]
-                    .spacing(4),
+                    .spacing(8)
+                    .align_y(Alignment::Center),
                 );
             }
         }
 
         for field in self.inspector_fields() {
-            let value = self.fields.get(&field).cloned().unwrap_or_default();
+            let raw = self
+                .fields
+                .get(&field)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let value = self.settings.format_numeric_input(
+                raw,
+                self.edited_tool_input == Some(field) || field == Field::Flutes,
+            );
             list = list.push(field_row_labeled(
                 field,
                 self.field_label(field),
@@ -10752,8 +10861,8 @@ impl App {
         }
         if let Some(tool) = &self.tool_edit {
             list = list.push(
-                column![
-                    text("Cooling").size(12),
+                row![
+                    text("Cooling").size(12).width(Length::Fill),
                     pick_list(
                         &cam_model::Cooling::ALL[..],
                         Some(tool.cooling),
@@ -10762,9 +10871,10 @@ impl App {
                     .text_size(12)
                     .padding([7, 9])
                     .style(inspector_picker)
-                    .width(Length::Fill)
+                    .width(177)
                 ]
-                .spacing(4),
+                .spacing(8)
+                .align_y(Alignment::Center),
             );
         }
         if let Some(t) = self.preview_tool() {
@@ -15274,6 +15384,47 @@ mod multi_setup_draft_tests {
 #[cfg(test)]
 mod settings_agree_with_constants {
     use super::*;
+
+    #[test]
+    fn pane_choices_restore_without_treating_an_idle_inspector_as_disabled() {
+        let (mut app, _) = App::new();
+        app.settings.panes = crate::PanePrefs {
+            show_project_browser: false,
+            show_library: true,
+            inspector_enabled: false,
+            show_output: false,
+            ..Default::default()
+        };
+        app.restore_pane_preferences();
+        app.sync_inspector_visibility();
+        assert!(!app.show_project_browser);
+        assert_eq!(app.workspace, Workspace::Tools);
+        assert_eq!(app.active_tab, RibbonTab::Tools);
+        assert!(app.pane_handle(Pane::Output).is_none());
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+
+        // A project saved with its browser open must respect the user's pane choice.
+        let mut view = app.capture_project_view();
+        view.show_project_browser = true;
+        app.controller.set_project_view(Some(view));
+        app.restore_project_view();
+        assert!(!app.show_project_browser);
+
+        app.settings.panes = crate::PanePrefs::default();
+        app.restore_pane_preferences();
+        app.sync_inspector_visibility();
+        assert!(app.show_project_browser);
+        assert_eq!(app.workspace, Workspace::Machining);
+        assert!(app.pane_handle(Pane::Output).is_some());
+        assert!(app.inspector_enabled);
+        assert!(app.pane_handle(Pane::Inspector).is_none());
+
+        app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
+        app.controller.select(Selection::Setup);
+        app.begin_setup_draft();
+        app.sync_inspector_visibility();
+        assert!(app.pane_handle(Pane::Inspector).is_some());
+    }
 
     #[test]
     fn the_gizmo_slider_range_is_the_preferences_range() {
