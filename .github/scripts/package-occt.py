@@ -1,5 +1,6 @@
 """Stage and verify relocatable OCCT runtimes for the desktop release packages."""
 import argparse
+import filecmp
 import hashlib
 import os
 from pathlib import Path
@@ -114,7 +115,9 @@ def wix_fragment(stage_dir, output):
     root = ET.Element(f'{{{namespace}}}Wix')
     fragment = node(root, 'Fragment')
     directory = node(fragment, 'DirectoryRef', Id='Bin')
-    feature = node(fragment, 'FeatureRef', Id='Binaries')
+    # The product must reference this group to pull the fragment into the MSI.
+    # A FeatureRef here points back to the product without making it link us in.
+    group = node(fragment, 'ComponentGroup', Id='OcctRuntime')
     directories = {Path('.'): directory}
     for file in sorted(stage_dir.rglob('*')):
         relative = file.relative_to(stage_dir)
@@ -127,8 +130,27 @@ def wix_fragment(stage_dir, output):
                              Id=f'OcctComponent{identifier}', Guid='*', Win64='yes')
             node(component, 'File', Id=f'OcctFile{identifier}', Source=str(file.resolve()),
                  Name=file.name, KeyPath='yes')
-            node(feature, 'ComponentRef', Id=f'OcctComponent{identifier}')
+            node(group, 'ComponentRef', Id=f'OcctComponent{identifier}')
     ET.ElementTree(root).write(output, encoding='utf-8', xml_declaration=True)
+
+
+def verify_payload(expected, destination):
+    """Require every staged payload file to survive installation unchanged."""
+    if not expected.is_dir():
+        raise FileNotFoundError(expected)
+    missing = []
+    changed = []
+    for source in sorted(expected.rglob('*')):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(expected)
+        installed = destination / relative
+        if not installed.is_file():
+            missing.append(relative.as_posix())
+        elif not filecmp.cmp(source, installed, shallow=False):
+            changed.append(relative.as_posix())
+    if missing or changed:
+        raise RuntimeError(f'Installed payload differs from staging: missing={missing}, changed={changed}')
 
 
 def verify(destination, smoke, system):
@@ -195,6 +217,8 @@ def main():
     parser.add_argument('operation', choices=('stage', 'verify', 'wix', 'source'))
     parser.add_argument('destination', type=Path)
     parser.add_argument('--smoke', type=Path)
+    parser.add_argument('--expected-files', type=Path,
+                        help='Compare installed files against the staged payload before runtime checks')
     args = parser.parse_args()
     destination = args.destination.resolve()
     if args.operation == 'stage':
@@ -202,6 +226,8 @@ def main():
     elif args.operation == 'verify':
         if args.smoke is None:
             parser.error('verify requires --smoke')
+        if args.expected_files is not None:
+            verify_payload(args.expected_files.resolve(), destination)
         verify(destination, args.smoke.resolve(), platform.system())
     elif args.operation == 'wix':
         wix_fragment(destination, Path('target/occt-runtime.wxs'))

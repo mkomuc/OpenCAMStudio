@@ -166,6 +166,7 @@
 
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='StartMenuShortcut'/>
+            <ComponentGroupRef Id='OcctRuntime'/>
 
             <!-- cargo-wix's template offers a sub-feature that appends the install
                  directory to the SYSTEM PATH. That is right for a command-line tool

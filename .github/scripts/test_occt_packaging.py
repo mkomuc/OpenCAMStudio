@@ -65,10 +65,35 @@ class PackagingTests(unittest.TestCase):
         references = xml.findall('.//w:ComponentRef', ns)
         self.assertEqual({c.attrib['Id'] for c in components}, {r.attrib['Id'] for r in references})
         self.assertEqual(len(components), len(expected))
+        # The product must pull the generated fragment into the link. Merely
+        # compiling a FeatureRef fragment silently omits all its payload files.
+        group = xml.find('.//w:ComponentGroup', ns)
+        self.assertIsNotNone(group)
+        product = ET.parse(SCRIPTS.parent.parent / 'crates/cam-app/wix/main.wxs')
+        group_refs = product.findall('.//w:Feature[@Id="Binaries"]/w:ComponentGroupRef', ns)
+        self.assertIn(group.attrib['Id'], {ref.attrib['Id'] for ref in group_refs})
+        self.assertEqual({ref.attrib['Id'] for ref in group.findall('w:ComponentRef', ns)},
+                         {component.attrib['Id'] for component in components})
         # Component IDs remain stable across rebuilds of the same installed paths.
         previous = fragment.read_bytes()
         package.wix_fragment(destination, fragment)
         self.assertEqual(previous, fragment.read_bytes())
+
+    def test_installed_payload_detects_missing_and_changed_runtime_files(self):
+        staged = self.root / 'staged'
+        installed = self.root / 'installed'
+        (staged / 'licenses').mkdir(parents=True)
+        (staged / 'TKernel.dll').write_bytes(b'OCCT')
+        (staged / 'opencamstudio-mcp.exe').write_bytes(b'MCP')
+        (staged / 'licenses/notice.txt').write_text('license')
+        shutil.copytree(staged, installed)
+        package.verify_payload(staged, installed)
+        (installed / 'TKernel.dll').unlink()
+        (installed / 'opencamstudio-mcp.exe').write_bytes(b'bad')
+        with self.assertRaisesRegex(RuntimeError, r"missing=\['TKernel.dll'\].*changed=\['opencamstudio-mcp.exe'\]"):
+            package.verify_payload(staged, installed)
+        with self.assertRaises(FileNotFoundError):
+            package.verify_payload(self.root / 'absent staging directory', installed)
 
     def test_missing_runtime_fails(self):
         with self.assertRaisesRegex(RuntimeError, 'No runtime files'):
