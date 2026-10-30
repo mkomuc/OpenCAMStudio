@@ -375,7 +375,7 @@ impl Icon {
                  (asks for confirmation — it rewrites every tool number)."
             }
             Icon::ImportLibrary => {
-                "Import a tool library from a .ocam file, replacing the working library."
+                "Import a .ocam library or select tools from a Fusion .tools database."
             }
             Icon::ExportLibrary => "Export the working tool library to a .ocam file to share.",
             Icon::Duplicate => "Duplicate the selected operation.",
@@ -965,7 +965,9 @@ fn tool_kind_fields(kind: ToolKind) -> Vec<Field> {
         ToolKind::Drill { .. } => vec![Field::PointAngle],
         ToolKind::ThreadMill { .. } => vec![Field::ToolThreadPitch],
         ToolKind::VBit { .. } => vec![Field::PointAngle, Field::TipRadius],
-        ToolKind::EndMill | ToolKind::BallMill | ToolKind::FaceMill => Vec::new(),
+        ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::BallMill | ToolKind::FaceMill => {
+            Vec::new()
+        }
     }
 }
 
@@ -1090,7 +1092,7 @@ fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
                 *tip_radius = v.max(0.0);
             }
         }
-        ToolKind::EndMill | ToolKind::BallMill | ToolKind::FaceMill => {}
+        ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::BallMill | ToolKind::FaceMill => {}
     }
 }
 
@@ -2178,6 +2180,7 @@ struct App {
     library: ToolLibrary,
     /// The library tool selected for editing in the Tools-tab library editor.
     lib_sel: usize,
+    fusion_import: Option<Vec<crate::fusion_tools::ImportEntry>>,
     /// A live **working copy** of the selected library tool while editing in the Tools
     /// tab. Field edits apply here first (so the viewport previews them instantly without
     /// an Apply); the committed library entry is only overwritten on Apply. `None` outside
@@ -2706,6 +2709,10 @@ enum Message {
     ImportLibrary,
     /// The chosen library file to import (`None` = cancelled).
     LibraryToImport(Option<PathBuf>),
+    FusionImportToggle(usize, bool),
+    FusionImportSelectAll(bool),
+    FusionImportConfirm,
+    FusionImportCancel,
     /// Prompt for and import a `.dxf`/`.dwg` file.
     ImportCad,
     PollCadImport,
@@ -3552,6 +3559,7 @@ impl App {
             machine_post_edit: None,
             machine_estlcam_edit: None,
             lib_sel: 0,
+            fusion_import: None,
             tool_edit: None,
             tool_drafts: BTreeMap::new(),
             library_preset: None,
@@ -5615,11 +5623,24 @@ impl App {
             }
             Message::ImportLibrary => {
                 return iced::Task::perform(
-                    pick_open("OpenCAMStudio tool library", &["ocam"]),
+                    pick_open("Tool library (.ocam or Fusion .tools)", &["ocam", "tools"]),
                     Message::LibraryToImport,
                 );
             }
             Message::LibraryToImport(Some(path)) => {
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tools"))
+                {
+                    match crate::fusion_tools::read(&path) {
+                        Ok(entries) if entries.is_empty() => {
+                            self.status = "The tool database is empty.".into()
+                        }
+                        Ok(entries) => self.fusion_import = Some(entries),
+                        Err(e) => self.status = format!("Tool database import failed: {e}"),
+                    }
+                    return iced::Task::none();
+                }
                 self.status = match std::fs::read_to_string(&path) {
                     Ok(text) => match OcamFile::from_json(&text) {
                         Ok(OcamFile::Library(lib)) => {
@@ -5637,6 +5658,42 @@ impl App {
                     },
                     Err(e) => format!("Library import failed: {e}"),
                 };
+            }
+            Message::FusionImportToggle(index, selected) => {
+                if let Some(entry) = self
+                    .fusion_import
+                    .as_mut()
+                    .and_then(|items| items.get_mut(index))
+                {
+                    if entry.tool.is_some() {
+                        entry.selected = selected;
+                    }
+                }
+            }
+            Message::FusionImportSelectAll(selected) => {
+                if let Some(entries) = &mut self.fusion_import {
+                    for entry in entries {
+                        entry.selected = selected && entry.tool.is_some();
+                    }
+                }
+            }
+            Message::FusionImportCancel => self.fusion_import = None,
+            Message::FusionImportConfirm => {
+                if let Some(entries) = self.fusion_import.take() {
+                    let first = self.library.tools.len();
+                    for entry in entries.into_iter().filter(|entry| entry.selected) {
+                        if let Some(tool) = entry.tool {
+                            self.library.append_imported_tool(tool);
+                        }
+                    }
+                    let count = self.library.tools.len() - first;
+                    if count > 0 {
+                        self.library.save();
+                        self.lib_sel = first;
+                        self.reload_tool_edit();
+                    }
+                    self.status = format!("Imported {count} tool(s) into the library.");
+                }
             }
             Message::ImportCad => {
                 return iced::Task::perform(
@@ -7099,11 +7156,12 @@ impl App {
                 // Route to whichever tool the inspector is editing: the library
                 // entry (Tools tab) or the selected setup tool. Switching kind
                 // resets its parameters to the new kind's defaults.
-                // Straight flute only applies to a Square End Mill; changing to any other
+                // Straight flutes apply to flat end mills; changing to any other
                 // kind falls back to a down-cut.
                 let fix_dir = |t: &mut cam_model::Tool| {
                     t.kind = kind;
-                    if !matches!(kind, ToolKind::EndMill) && t.cutting_direction == CutDir::Straight
+                    if !matches!(kind, ToolKind::EndMill | ToolKind::RoughingMill)
+                        && t.cutting_direction == CutDir::Straight
                     {
                         t.cutting_direction = CutDir::Down;
                     }
@@ -7366,7 +7424,12 @@ impl App {
                             .tools
                             .iter()
                             .find(|t| {
-                                matches!(t.kind, ToolKind::EndMill | ToolKind::BullNose { .. })
+                                matches!(
+                                    t.kind,
+                                    ToolKind::EndMill
+                                        | ToolKind::RoughingMill
+                                        | ToolKind::BullNose { .. }
+                                )
                             })
                             .cloned()
                     })
@@ -8313,7 +8376,7 @@ impl App {
         use ToolKind::*;
         match (self.inspected_tool_kind(), field) {
             // Cutting/flute diameter — the meaning turns on the kind.
-            (Some(EndMill | BallMill | BullNose { .. }), Field::ToolDiameter) => {
+            (Some(EndMill | RoughingMill | BallMill | BullNose { .. }), Field::ToolDiameter) => {
                 "Diameter across the flutes — the end mill's cutting diameter."
             }
             (Some(Drill { .. }), Field::ToolDiameter) => {
@@ -8697,7 +8760,7 @@ impl App {
         let tool_fields = |kind: Option<ToolKind>| {
             let mut fields = match kind {
                 // Square & Ball Nose end mills share the exact end-mill field set.
-                Some(ToolKind::EndMill | ToolKind::BallMill) => vec![
+                Some(ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::BallMill) => vec![
                     Field::ToolDiameter, // "Flute ⌀"
                     Field::FluteLength,
                     Field::ShankDiameter,
@@ -9408,6 +9471,9 @@ impl App {
                 .on_press(Message::CloseLicense);
             layers = layers.push(catcher).push(card);
         }
+        if let Some(dialog) = self.fusion_import_overlay() {
+            layers = layers.push(dialog);
+        }
         if let Some(dialog) = self.tool_management_overlay() {
             layers = layers.push(dialog);
         }
@@ -9423,6 +9489,84 @@ impl App {
             layers = layers.push(dialog);
         }
         layers.into()
+    }
+
+    fn fusion_import_overlay(&self) -> Option<Element<'_, Message>> {
+        let entries = self.fusion_import.as_ref()?;
+        let selected = entries.iter().filter(|entry| entry.selected).count();
+        let mut list = column![].spacing(8);
+        for (index, entry) in entries.iter().enumerate() {
+            let mut item = column![].spacing(3);
+            let label = if let Some(tool) = &entry.tool {
+                format!(
+                    "{}  —  {} · ⌀{:.2} mm",
+                    entry.label, tool.kind, tool.diameter
+                )
+            } else {
+                entry.label.clone()
+            };
+            let check = checkbox(entry.selected)
+                .label(label)
+                .size(16)
+                .text_size(13)
+                .on_toggle_maybe(
+                    entry
+                        .tool
+                        .as_ref()
+                        .map(|_| move |value| Message::FusionImportToggle(index, value)),
+                );
+            item = item.push(check);
+            if !entry.detail.is_empty() {
+                item = item.push(text(&entry.detail).size(11).color(INSPECTOR_MUTED));
+            }
+            list = list.push(item);
+        }
+        let body = column![
+            text("Import Fusion tools").size(18),
+            text("Choose tools to add to your library. Existing tools are kept; imported tools receive free numbers.").size(12),
+            text("Check direction and cutting data after import. Fusion coolant and preset step settings are not imported.").size(11).color(INSPECTOR_MUTED),
+            row![inspector_button("Select all").on_press(Message::FusionImportSelectAll(true)),
+                 inspector_button("Select none").on_press(Message::FusionImportSelectAll(false))].spacing(8),
+            scrollable(list).height(Length::Fill),
+            row![text(format!("{selected} selected")).size(12), Space::new().width(Length::Fill),
+                 inspector_button("Cancel").on_press(Message::FusionImportCancel),
+                 inspector_button("Import").on_press_maybe((selected > 0).then_some(Message::FusionImportConfirm))].spacing(8)
+        ].spacing(12);
+        let card = container(body)
+            .width(650)
+            .height((self.window.height - 60.).clamp(200., 700.))
+            .padding(16)
+            .style(|theme: &iced::Theme| container::Style {
+                background: Some(Background::Color(
+                    theme.extended_palette().background.weak.color,
+                )),
+                border: Border {
+                    color: palette::SEPARATOR,
+                    width: 1.,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            });
+        let backdrop = mouse_area(
+            container(Space::new().width(Length::Fill).height(Length::Fill)).style(|_| {
+                container::Style {
+                    background: Some(Background::Color(Color::from_rgba(0., 0., 0., 0.45))),
+                    ..Default::default()
+                }
+            }),
+        )
+        .on_press(Message::Noop);
+        Some(
+            iced::widget::stack![
+                backdrop,
+                container(iced::widget::opaque(card))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center)
+            ]
+            .into(),
+        )
     }
 
     /// The preferences panel. `None` unless open.
@@ -10804,6 +10948,14 @@ impl App {
             );
         }
 
+        if self
+            .preview_tool()
+            .is_some_and(|tool| matches!(tool.kind, ToolKind::RoughingMill))
+        {
+            list = list.push(text("Roughing serrations are not modeled; simulation uses the nominal flat-end envelope.")
+                .size(11).color(INSPECTOR_MUTED));
+        }
+
         if let Some(tool) = &self.tool_edit {
             for (label, field, value) in [
                 (
@@ -10881,13 +11033,16 @@ impl App {
             // Read from the working copy so the pickers (cutting direction, Type, thread
             // form) track live edits, matching the fields and viewport.
             // Cutting direction (a picker, not a numeric field) applies to the end-mill
-            // family only; "Straight flute" is offered only for a Square End Mill.
+            // family only; "Straight flute" is offered for flat end mills.
             let is_end_mill = matches!(
                 t.kind,
-                ToolKind::EndMill | ToolKind::BallMill | ToolKind::BullNose { .. }
+                ToolKind::EndMill
+                    | ToolKind::RoughingMill
+                    | ToolKind::BallMill
+                    | ToolKind::BullNose { .. }
             );
             if is_end_mill {
-                let dir_opts = if matches!(t.kind, ToolKind::EndMill) {
+                let dir_opts = if matches!(t.kind, ToolKind::EndMill | ToolKind::RoughingMill) {
                     vec![CutDir::Down, CutDir::Up, CutDir::Straight]
                 } else {
                     vec![CutDir::Down, CutDir::Up]
@@ -10897,7 +11052,7 @@ impl App {
                         help_wrap(
                             text("Cutting direction").width(Length::Fill).size(13),
                             "Down-cut vs up-cut (helix direction); a physical property of the \
-                             tool, like the flute count. Square end mills also allow a straight \
+                             tool, like the flute count. Flat end mills also allow a straight \
                              (axial) flute.",
                             self.tooltips,
                         ),
@@ -12126,13 +12281,13 @@ fn flute_count(flutes: u32) -> String {
     format!("{flutes} flute{}", if flutes == 1 { "" } else { "s" })
 }
 
-/// The end-mill family — square, ball-nose and rounded-edge (bull-nose) end mills —
+/// The end-mill family — square, roughing, ball-nose and rounded-edge (bull-nose) end mills —
 /// which share a field set and dimensions, so switching between them preserves the
 /// tool's measurements (a Type change *across* families resets to defaults instead).
 fn end_mill_family(kind: ToolKind) -> bool {
     matches!(
         kind,
-        ToolKind::EndMill | ToolKind::BallMill | ToolKind::BullNose { .. }
+        ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::BallMill | ToolKind::BullNose { .. }
     )
 }
 
@@ -12153,7 +12308,7 @@ fn library_extra(t: &cam_model::Tool) -> Option<String> {
         CutDir::Straight => "S",
     };
     match t.kind {
-        ToolKind::EndMill | ToolKind::BallMill => Some(format!(
+        ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::BallMill => Some(format!(
             "{}, {}",
             flute_count(t.flutes),
             dir(t.cutting_direction)
@@ -12200,13 +12355,14 @@ fn library_extra(t: &cam_model::Tool) -> Option<String> {
 fn kind_order(kind: ToolKind) -> u8 {
     match kind {
         ToolKind::EndMill => 0,
-        ToolKind::BallMill => 1,
-        ToolKind::BullNose { .. } => 2,
-        ToolKind::FaceMill => 3,
-        ToolKind::ChamferMill { .. } => 4,
-        ToolKind::VBit { .. } => 5,
-        ToolKind::Drill { .. } => 6,
-        ToolKind::ThreadMill { .. } => 7,
+        ToolKind::RoughingMill => 1,
+        ToolKind::BallMill => 2,
+        ToolKind::BullNose { .. } => 3,
+        ToolKind::FaceMill => 4,
+        ToolKind::ChamferMill { .. } => 5,
+        ToolKind::VBit { .. } => 6,
+        ToolKind::Drill { .. } => 7,
+        ToolKind::ThreadMill { .. } => 8,
     }
 }
 

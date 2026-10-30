@@ -3221,7 +3221,7 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
 pub(crate) fn sim_profile(tool: &Tool) -> ToolProfile {
     let radius = tool.radius();
     let shape = match tool.kind {
-        ToolKind::EndMill | ToolKind::FaceMill => ProfileShape::Flat,
+        ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::FaceMill => ProfileShape::Flat,
         ToolKind::BallMill => ProfileShape::Ball,
         ToolKind::BullNose { corner_radius } => ProfileShape::BullNose {
             corner_radius: corner_radius.clamp(0.0, radius),

@@ -263,6 +263,7 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         27 => Ok(()),
         30 => Ok(()), // Additive stock from the preceding setup.
         31 => Ok(()), // Additive pattern options default to legacy placements.
+        32 => Ok(()), // Roughing end mills add a tool kind; existing tools are unchanged.
         29 => Ok(()), // Additive Parallel finishing operations and surface bindings.
         28 => Ok(()), // Additive Bore operations and cylindrical geometry bindings.
         _ => Err(MigrationError::MissingStep { from }),

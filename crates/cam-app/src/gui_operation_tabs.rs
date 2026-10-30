@@ -1010,7 +1010,12 @@ impl App {
                                 .iter()
                                 .enumerate()
                                 .filter(|(_, t)| {
-                                    matches!(t.kind, ToolKind::EndMill | ToolKind::BullNose { .. })
+                                    matches!(
+                                        t.kind,
+                                        ToolKind::EndMill
+                                            | ToolKind::RoughingMill
+                                            | ToolKind::BullNose { .. }
+                                    )
                                 })
                                 .map(|(index, t)| ToolChoice {
                                     index,

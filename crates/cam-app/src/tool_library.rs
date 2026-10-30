@@ -69,8 +69,8 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
 /// Its own counter, like the settings file's — `cam_model::SCHEMA_VERSION` describes
 /// the *document*, and a library is not a document. v1 is the shape every library
 /// ever written already has, which is why an unversioned file reads as v1 rather
-/// than being refused. v2 adds managed materials and named cutter presets.
-pub const LIBRARY_VERSION: u32 = 2;
+/// than being refused. v2 adds managed materials and named cutter presets; v3 adds roughing end mills.
+pub const LIBRARY_VERSION: u32 = 3;
 
 /// A library file with no `library_version` predates the field. Every such file is
 /// the v1 shape — the field was added *because* the format needed a version, not
@@ -92,7 +92,7 @@ impl crate::config::ConfigFile for ToolLibrary {
     }
 
     fn migrate(&mut self, _from: u32) {
-        // v2 adds preset/material registries with serde defaults.
+        // v2 adds preset/material registries; v3 adds a new tool kind.
         self.library_version = LIBRARY_VERSION;
     }
 
@@ -470,13 +470,16 @@ impl ToolLibrary {
                 .tools
                 .iter()
                 .filter(|t| matches!(t.kind, ToolKind::EndMill | ToolKind::FaceMill))
-                .max_by(|a, b| a.diameter.total_cmp(&b.diameter)),
-            OpKind::Profile | OpKind::Pocket | OpKind::Adaptive => {
-                middle(|k| matches!(k, ToolKind::EndMill))
-            }
+                .max_by(|a, b| a.diameter.total_cmp(&b.diameter))
+                .or_else(|| middle(|k| matches!(k, ToolKind::RoughingMill))),
+            OpKind::Profile | OpKind::Pocket => middle(|k| matches!(k, ToolKind::EndMill))
+                .or_else(|| middle(|k| matches!(k, ToolKind::RoughingMill))),
+            OpKind::Adaptive => middle(|k| matches!(k, ToolKind::RoughingMill))
+                .or_else(|| middle(|k| matches!(k, ToolKind::EndMill))),
             OpKind::Parallel => middle(|k| matches!(k, ToolKind::BallMill)),
             OpKind::Drill => middle(|k| matches!(k, ToolKind::Drill { .. })),
-            OpKind::Bore => middle(|k| matches!(k, ToolKind::EndMill)),
+            OpKind::Bore => middle(|k| matches!(k, ToolKind::EndMill))
+                .or_else(|| middle(|k| matches!(k, ToolKind::RoughingMill))),
             OpKind::Thread => middle(|k| matches!(k, ToolKind::ThreadMill { .. })),
             OpKind::Chamfer => middle(|k| matches!(k, ToolKind::ChamferMill { .. })),
             // Prefer a V-bit for engraving and carving, chosen by angle.
@@ -513,6 +516,12 @@ impl ToolLibrary {
         (1..)
             .find(|n| !used.contains(n))
             .expect("u32 space is never exhausted")
+    }
+
+    /// Append an imported tool with a free shop number, preserving its catalog data.
+    pub fn append_imported_tool(&mut self, mut tool: Tool) {
+        tool.number = self.next_number();
+        self.tools.push(tool);
     }
 
     /// Set the number of the tool at `index` to `new`, **swapping** with whatever tool
@@ -566,6 +575,7 @@ impl ToolLibrary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolKindPick {
     EndMill,
+    RoughingMill,
     BallMill,
     BullNose,
     ChamferMill,
@@ -576,8 +586,9 @@ pub enum ToolKindPick {
 }
 
 impl ToolKindPick {
-    pub const ALL: [ToolKindPick; 8] = [
+    pub const ALL: [ToolKindPick; 9] = [
         ToolKindPick::EndMill,
+        ToolKindPick::RoughingMill,
         ToolKindPick::BallMill,
         ToolKindPick::BullNose,
         ToolKindPick::ChamferMill,
@@ -590,6 +601,7 @@ impl ToolKindPick {
     pub fn of(kind: ToolKind) -> Self {
         match kind {
             ToolKind::EndMill => ToolKindPick::EndMill,
+            ToolKind::RoughingMill => ToolKindPick::RoughingMill,
             ToolKind::BallMill => ToolKindPick::BallMill,
             ToolKind::BullNose { .. } => ToolKindPick::BullNose,
             ToolKind::ChamferMill { .. } => ToolKindPick::ChamferMill,
@@ -604,6 +616,7 @@ impl ToolKindPick {
     pub fn to_kind(self) -> ToolKind {
         match self {
             ToolKindPick::EndMill => ToolKind::EndMill,
+            ToolKindPick::RoughingMill => ToolKind::RoughingMill,
             ToolKindPick::BallMill => ToolKind::BallMill,
             ToolKindPick::BullNose => ToolKind::BullNose { corner_radius: 1.0 },
             // A chamfer mill is always ground with a flat tip; 0 would make it a
@@ -660,6 +673,61 @@ impl std::fmt::Display for ToolKindPick {
 mod library_file_tests {
     use super::*;
     use crate::config::tests::Scratch;
+
+    #[test]
+    fn roughing_tool_round_trips_and_is_available_to_clearing() {
+        let mut library = ToolLibrary::default();
+        let index = library.add_of_kind(ToolKind::RoughingMill);
+        let exported = crate::OcamFile::Library(library.clone()).to_json().unwrap();
+        let crate::OcamFile::Library(reopened) = crate::OcamFile::from_json(&exported).unwrap()
+        else {
+            panic!("expected library");
+        };
+        assert_eq!(reopened.tools[index].kind, ToolKind::RoughingMill);
+        assert!(families_for(OpKind::Adaptive).contains(&ToolKindPick::RoughingMill));
+        assert_eq!(
+            reopened.default_tool_for(OpKind::Adaptive).unwrap().kind,
+            ToolKind::RoughingMill
+        );
+        let mut mixed = reopened.clone();
+        mixed.add_of_kind(ToolKind::EndMill);
+        assert_eq!(
+            mixed.default_tool_for(OpKind::Adaptive).unwrap().kind,
+            ToolKind::RoughingMill
+        );
+        assert_eq!(
+            mixed.default_tool_for(OpKind::Pocket).unwrap().kind,
+            ToolKind::EndMill
+        );
+        assert!(matches!(
+            crate::controller::sim_profile(&reopened.tools[index]).shape,
+            cam_sim::ProfileShape::Flat
+        ));
+        let app = crate::AppController::new(crate::default_machine());
+        let mut project = crate::Project {
+            view: None,
+            toolpaths: Default::default(),
+            schema_version: cam_model::SCHEMA_VERSION,
+            document: cam_model::Document::new(app.inspection_setup().clone()),
+            regions: Vec::new(),
+            open_paths: Vec::new(),
+            defaults: Default::default(),
+            source_name: String::new(),
+            machine: None,
+            post: None,
+        };
+        project.document.setup_mut().tools = vec![reopened.tools[index].clone()];
+        let json = crate::OcamFile::Project(project).to_json().unwrap();
+        let crate::OcamFile::Project(project) = crate::OcamFile::from_json(&json).unwrap() else {
+            panic!("expected project");
+        };
+        assert!(project
+            .document
+            .setup()
+            .tools
+            .iter()
+            .any(|tool| tool.kind == ToolKind::RoughingMill));
+    }
 
     /// **The hazard this fix exists for.** The old `load()` fell back to the starter
     /// set *and immediately saved it*, so a library that failed to parse was replaced

@@ -54,6 +54,29 @@ A material used by a library preset or stock in the current project must be
 unlinked before it can be deleted. Saved projects remain self-contained when a
 material is unavailable in the local library.
 
+## Roughing end mills
+
+Choose **Roughing End Mill** as the cutter type for a flat-bottomed rougher.
+It has its own library identity and can be selected for milling and clearing.
+Toolpaths and simulation use its nominal flat-ended cylindrical envelope; the
+serrated cutting edges and the resulting surface finish are not modeled. Enter
+cutting parameters appropriate for the actual cutter and material.
+
+## Import Fusion tool databases
+
+In **Tools → Import**, choose a Fusion `.tools` archive. Select individual tools
+in the preview, then click **Import**. The selected tools are added to the current
+library and receive free tool numbers; existing tools are retained. The preview
+explains why an entry cannot be imported and notes any skipped presets. Flat,
+ball-nose and bull-nose end mills are supported. Catalog information, dimensions,
+flute count and valid named feed presets are imported; inch dimensions and feeds
+are converted to millimeters. Presets are imported without a material link.
+
+Cut direction is inferred from recognizable wording in the description; otherwise
+it defaults to down-cut. Check the imported tool geometry, direction and cutting
+data before use. Fusion coolant and preset step settings are not imported.
+Importing an OpenCAMStudio `.ocam` library continues to replace the working library.
+
 ## Cooling
 
 Tool defaults and cutting presets include **None** and **MMS**. Choosing a cutter
