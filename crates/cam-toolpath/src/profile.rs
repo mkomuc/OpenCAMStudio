@@ -992,7 +992,7 @@ fn control_air_point(point: Point, normal: (f64, f64), comp: Option<(CutterComp,
 /// loop bounds the protected side of the cut. For an outside profile, represent
 /// the unbounded exterior as a large rectangle with that loop removed; its outer
 /// edge is placed far enough away that it cannot constrain a valid entry.
-fn profile_plunge_guard(pts: &[Point], air_sign: f64, plunge: Plunge) -> Option<Vec<Polygon>> {
+fn profile_plunge_guard(pts: &[Point], air_sign: f64, plunge: Plunge, entry: Point) -> Option<Vec<Polygon>> {
     let Plunge::Helix { radius, .. } = plunge else {
         return Some(Vec::new());
     };
@@ -1014,6 +1014,10 @@ fn profile_plunge_guard(pts: &[Point], air_sign: f64, plunge: Plunge) -> Option<
         hi[0] = hi[0].max(p.x);
         hi[1] = hi[1].max(p.y);
     }
+    lo[0] = lo[0].min(entry.x);
+    lo[1] = lo[1].min(entry.y);
+    hi[0] = hi[0].max(entry.x);
+    hi[1] = hi[1].max(entry.y);
     let margin = radius * 3.0 + 1.0;
     let outer = Contour::new(vec![
         Point::new(lo[0] - margin, lo[1] - margin),
@@ -1067,12 +1071,6 @@ fn emit_loop_rich(
     } else {
         Vec::new()
     };
-    // A profile helix must stay on the same side of the cutter-centre contour as
-    // the lead. Inside profiles use the hole; outside profiles use a bounded
-    // approximation of the contour's exterior, with the contour itself as a hole.
-    // If that region cannot be built, choose a straight plunge rather than risk
-    // swinging the helix through the part.
-    let plunge_guard = profile_plunge_guard(pts, air_sign, op.plunge);
     let link = Tag::new(op.id, MoveKind::Link);
     let lead = Tag::new(op.id, MoveKind::LeadIn);
     let retract = Tag::new(op.id, MoveKind::Retract);
@@ -1102,6 +1100,9 @@ fn emit_loop_rich(
         out,
         comp,
     );
+    // Bound the exterior around both the contour and lead entry so the artificial
+    // outer edge cannot reject a helix that is safely outside the part.
+    let plunge_guard = profile_plunge_guard(pts, air_sign, op.plunge, entry);
     let exit = control_air_point(
         crate::leads::lead_end_point(exit_on, tan_out, out_exit, lead_out),
         out_exit,

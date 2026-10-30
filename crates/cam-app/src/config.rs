@@ -82,6 +82,13 @@ pub(crate) enum ConfigLoad {
 
 /// Read `T` from its place in the config directory.
 pub(crate) fn load<T: ConfigFile>() -> (T, ConfigLoad) {
+    #[cfg(test)]
+    {
+        // Unit tests must neither depend on nor overwrite the user's configuration.
+        let _ = T::FILE_NAME;
+        (T::seed(), ConfigLoad::Fresh)
+    }
+    #[cfg(not(test))]
     match crate::paths::config_file(T::FILE_NAME) {
         Some(p) => load_from(&p),
         // Nowhere to persist on this machine: defaults, and nothing to write.
@@ -140,6 +147,9 @@ fn backup_path(path: &Path) -> PathBuf {
 /// simply means changes do not survive the run, which is not worth interrupting anyone
 /// over.
 pub(crate) fn save<T: ConfigFile>(value: &T) {
+    #[cfg(test)]
+    let _ = value;
+    #[cfg(not(test))]
     if let Some(path) = crate::paths::config_file(T::FILE_NAME) {
         let _ = save_to(value, &path);
     }
