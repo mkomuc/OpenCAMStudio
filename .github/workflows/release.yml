@@ -64,7 +64,7 @@ jobs:
           cargo test --locked --release -p cam-kernel --features occt
           # Tigerente.step is a local, untracked fixture; the authored corpus ships in git.
           cargo test --locked --release -p cam-app --features occt --test native_step --test native_iges \
-            -- --include-ignored --skip tigerente \
+            -- --include-ignored --skip tigerente --skip supplied_cold_end_spline_bore_is_recognized \
             --skip silhouette_projection_is_independent_of_display_quality_on_curved_step_models
           cargo build --locked --release -p cam-kernel --features occt --example occt_smoke
       # `--features gui` is the whole point: cam-app's `default = []`, so without it
@@ -167,7 +167,7 @@ jobs:
           cargo test --locked --release -p cam-kernel --features occt --target aarch64-apple-darwin
           # Tigerente.step is a local, untracked fixture; the authored corpus ships in git.
           cargo test --locked --release -p cam-app --features occt --test native_step --test native_iges \
-            --target aarch64-apple-darwin -- --include-ignored --skip tigerente \
+            --target aarch64-apple-darwin -- --include-ignored --skip tigerente --skip supplied_cold_end_spline_bore_is_recognized \
             --skip silhouette_projection_is_independent_of_display_quality_on_curved_step_models
           cargo build --locked --release -p cam-kernel --features occt --example occt_smoke --target aarch64-apple-darwin
       - name: Build the desktop app
@@ -265,13 +265,15 @@ jobs:
         run: .github/scripts/version.sh
       - uses: ./.github/actions/setup-occt
       - name: Test native STEP/IGES imports
-        shell: bash
+        shell: pwsh
         run: |
           cargo test --locked --release -p cam-kernel --features occt
-          # Tigerente.step is a local, untracked fixture; the authored corpus ships in git.
-          cargo test --locked --release -p cam-app --features occt --test native_step --test native_iges \
-            -- --include-ignored --skip tigerente \
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # These fixtures are local and untracked; the authored corpus ships in git.
+          cargo test --locked --release -p cam-app --features occt --test native_step --test native_iges `
+            -- --include-ignored --skip tigerente --skip supplied_cold_end_spline_bore_is_recognized `
             --skip silhouette_projection_is_independent_of_display_quality_on_curved_step_models
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release -p cam-kernel --features occt --example occt_smoke
       - name: Build the desktop app
         run: cargo build --locked --release -p cam-app --features gui,occt --bin opencamstudio --bin opencamstudio-mcp

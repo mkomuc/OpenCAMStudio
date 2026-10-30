@@ -67,8 +67,14 @@ fn iges_aliases_machine_and_reopen_without_source() {
         };
         let instance_id = instance.id;
         app.edit_setup(|setup| setup.model_instances = vec![instance_id]);
-        app.create_cad_operation(OpKind::Profile, vec![selected])
+        let id = app
+            .create_cad_operation(OpKind::Profile, vec![selected])
             .unwrap();
+        // The selected loop lies at stock top; cut down to the stock bottom.
+        app.edit_setup(|setup| {
+            setup.height_settings.get_mut(&id).unwrap().planes[4] =
+                cam_model::HeightDefinition::new(cam_model::HeightReference::StockBottom, 0.);
+        });
         let outcome = app.run(&CancelToken::new());
         assert_eq!(
             outcome.completion,
