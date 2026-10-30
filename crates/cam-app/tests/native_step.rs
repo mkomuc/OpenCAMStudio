@@ -146,12 +146,21 @@ fn step_source_tolerances_preserve_validity_and_geometry_selection() {
         topology.bodies[0].valid_solid,
         "source tolerances must not be clamped to the import fallback precision"
     );
-    let face = reference(state, EntityKind::Face, topology.faces[0].id);
+    let vertical = topology
+        .faces
+        .iter()
+        .find(|face| {
+            matches!(face.surface,
+                CadSurface::LinearExtrusion { axis, .. } if axis[2].abs() > 0.99
+            )
+        })
+        .expect("vertical boundary face");
+    let face = reference(state, EntityKind::Face, vertical.id);
     app.toggle_cad_selection(face.clone(), false).unwrap();
     assert_eq!(app.cad_selection(), &[face]);
-    // Validity does not imply support for machining arbitrary spline surfaces.
+    // Validity does not make this vertical boundary machinable as an XY pocket.
     let error = app.cad_operation_eligibility(OpKind::Pocket).unwrap_err();
-    assert!(error.contains("planar face"), "{error}");
+    assert!(error.contains("not coplanar in setup XY"), "{error}");
 }
 #[test]
 #[ignore = "requires OCCT SDK; run explicitly for native qualification"]
@@ -165,7 +174,7 @@ fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
     assert!(topology.bodies[0].valid_solid);
     assert!(topology.faces.iter().any(|f| matches!(
         f.surface,
-        CadSurface::Unsupported { .. } | CadSurface::Torus { .. }
+        CadSurface::Unsupported { .. } | CadSurface::Torus { .. } | CadSurface::Sphere { .. }
     )));
     let floor = topology.faces.iter().find(|f| matches!(f.surface,
         CadSurface::Plane { origin, normal } if (origin[2] + 2.0).abs() < 1e-6 && normal[2] > 0.99
@@ -177,10 +186,10 @@ fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
         .find(|f| matches!(f.surface, CadSurface::Cylinder { inward: true, .. }))
         .unwrap();
     let trim = reference(state, EntityKind::Loop, cylinder.loop_ids[0]);
-    assert!(app
+    let error = app
         .preview_cad_operation(OpKind::Profile, std::slice::from_ref(&trim))
-        .unwrap_err()
-        .contains("seam"));
+        .unwrap_err();
+    assert!(error.contains("not coplanar in setup XY"), "{error}");
     assert!(
         app.preview_cad_operation(OpKind::Profile, &[trim, selected.clone()])
             .is_err(),
@@ -203,7 +212,7 @@ fn blind_bore_inside_profile_ignores_unrelated_blends_and_round_trips() {
     assert_eq!(app.geometry_state().bindings[&id].selected, vec![selected]);
     assert_eq!(
         app.geometry_state().bindings[&id].recipe,
-        ExtractionRecipe::ProfileLoop { side: Side::Inside }
+        ExtractionRecipe::ProfileContours
     );
     let run = app.run(&CancelToken::new());
     assert_eq!(
@@ -294,8 +303,14 @@ fn step_plate_floor_island_four_holes_profile_generates_and_reopens_without_sour
     });
     app.create_cad_operation_with_tool(OpKind::Drill, holes, drill)
         .unwrap();
-    app.create_cad_operation_with_tool(OpKind::Profile, vec![profile_ref], 1)
+    let profile = app
+        .create_cad_operation_with_tool(OpKind::Profile, vec![profile_ref], 1)
         .unwrap();
+    // The selected outer loop is at stock top; profile through the stock.
+    app.edit_setup(|setup| {
+        setup.height_settings.get_mut(&profile).unwrap().planes[4] =
+            HeightDefinition::new(HeightReference::StockBottom, 0.);
+    });
     let result = app.run(&CancelToken::new());
     assert_eq!(
         result.completion,
@@ -371,6 +386,16 @@ fn adaptive_clearing_creates_runs_posts_and_round_trips() {
 #[ignore = "requires OCCT SDK; run explicitly for native qualification"]
 fn adaptive_body_subset_can_target_a_nonfirst_setup_instance_and_persist() {
     let mut app = new_app();
+    // Solid boxes have no pockets: provide surrounding stock to rough away.
+    app.edit_stock(|stock| {
+        if let Stock::BoundingBox {
+            x_offset, y_offset, ..
+        } = stock
+        {
+            *x_offset = 5.;
+            *y_offset = 5.;
+        }
+    });
     app.import_cad(fixture("repeated-boxes.step")).unwrap();
     select_all_models(&mut app);
     let geometry = app.geometry_state();
@@ -392,6 +417,15 @@ fn adaptive_body_subset_can_target_a_nonfirst_setup_instance_and_persist() {
         vec![body.clone()]
     );
     assert_eq!(app.document().setup().model_instances, setup_instances);
+    app.edit_operation(id, |operation| {
+        if let Operation::Adaptive(adaptive) = operation {
+            adaptive.params.containment = AdaptiveContainment::Outside;
+            adaptive.params.additional_offset = 5.;
+            adaptive.params.optimal_load = 2.9;
+            adaptive.params.stepdown = 10.;
+            adaptive.params.fine_stepdown = 10.;
+        }
+    });
     let run = app.run(&CancelToken::new());
     assert_eq!(
         run.completion,
@@ -424,6 +458,16 @@ fn adaptive_body_subset_can_target_a_nonfirst_setup_instance_and_persist() {
 #[ignore = "requires OCCT SDK; run explicitly for native qualification"]
 fn adaptive_selection_across_two_component_instances_creates_runs_and_round_trips() {
     let mut app = new_app();
+    // Solid boxes have no pockets: provide surrounding stock to rough away.
+    app.edit_stock(|stock| {
+        if let Stock::BoundingBox {
+            x_offset, y_offset, ..
+        } = stock
+        {
+            *x_offset = 5.;
+            *y_offset = 5.;
+        }
+    });
     app.import_cad(fixture("repeated-boxes.step")).unwrap();
     select_all_models(&mut app);
     let geometry = app.geometry_state();
@@ -446,6 +490,15 @@ fn adaptive_selection_across_two_component_instances_creates_runs_and_round_trip
     let id = app
         .create_cad_operation(OpKind::Adaptive, selected.clone())
         .unwrap();
+    app.edit_operation(id, |operation| {
+        if let Operation::Adaptive(adaptive) = operation {
+            adaptive.params.containment = AdaptiveContainment::Outside;
+            adaptive.params.additional_offset = 5.;
+            adaptive.params.optimal_load = 2.9;
+            adaptive.params.stepdown = 10.;
+            adaptive.params.fine_stepdown = 10.;
+        }
+    });
     assert_eq!(app.geometry_state().bindings[&id].selected, selected);
     assert_eq!(app.document().setup().model_instances, setup_instances);
 
