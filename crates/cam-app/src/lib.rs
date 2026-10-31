@@ -9,6 +9,9 @@
 //!   needs a windowing/graphics stack, so it is compiled and run on the desktop,
 //!   not in headless tests.
 
+#[cfg(all(test, feature = "gui"))]
+mod test_fixture;
+
 mod config;
 mod controller;
 mod geometry_verification;

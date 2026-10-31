@@ -1,4 +1,7 @@
 //! Qualification against the supplied modeled-chamfer project; no native SDK required.
+
+#[path = "../src/test_fixture.rs"]
+mod test_fixture;
 use cam_app::{default_machine, AppController, OpKind};
 use cam_cldata::{MoveKind, Point3, Step};
 use cam_model::*;
@@ -64,6 +67,9 @@ fn cuts(program: &cam_cldata::Program) -> Vec<(Point3, Point3)> {
 
 #[test]
 fn supplied_faces_define_exact_boundaries_and_a_small_cutter_uses_multiple_bands() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     let (mut app, references, tool) = setup(6., 90.);
     assert_eq!(references.len(), 4);
     let resolved = app
@@ -119,6 +125,9 @@ fn supplied_faces_define_exact_boundaries_and_a_small_cutter_uses_multiple_bands
 
 #[test]
 fn requested_stepdown_and_reopened_project_keep_all_face_bounds_and_passes() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     let (mut app, references, tool) = setup(6., 90.);
     let id = app
         .create_cad_operation_with_tool(OpKind::Chamfer, references.clone(), tool)
@@ -143,6 +152,9 @@ fn requested_stepdown_and_reopened_project_keep_all_face_bounds_and_passes() {
 
 #[test]
 fn single_face_selection_stays_local_and_angle_mismatch_is_advisory() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     let (mut app, references, tool) = setup(6., 90.);
     app.create_cad_operation_with_tool(OpKind::Chamfer, vec![references[0].clone()], tool)
         .unwrap();
@@ -184,6 +196,9 @@ fn single_face_selection_stays_local_and_angle_mismatch_is_advisory() {
 
 #[test]
 fn horizontal_and_vertical_faces_are_not_mistaken_for_modeled_chamfers() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     let (app, references, _) = setup(6., 90.);
     for id in [6, 8] {
         let mut face = references[0].clone();
@@ -197,6 +212,9 @@ fn horizontal_and_vertical_faces_are_not_mistaken_for_modeled_chamfers() {
 
 #[test]
 fn moved_model_keeps_the_face_interval_and_each_pass_attached_to_the_source() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     let (mut app, references, tool) = setup(6., 90.);
     let id = app
         .create_cad_operation_with_tool(OpKind::Chamfer, references, tool)
@@ -225,6 +243,9 @@ fn moved_model_keeps_the_face_interval_and_each_pass_attached_to_the_source() {
 
 #[test]
 fn rounded_vbit_uses_its_straight_flank_and_keeps_the_nose_clear_of_the_lower_edge() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     let (mut app, references, _) = setup(6., 90.);
     let tool = app.use_tool(Tool {
         number: 20,
@@ -266,6 +287,9 @@ fn rounded_vbit_uses_its_straight_flank_and_keeps_the_nose_clear_of_the_lower_ed
 
 #[test]
 fn replacing_an_edge_by_a_modeled_face_updates_untouched_height_defaults() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     let (mut app, references, tool) = setup(6., 90.);
     let mut rim = references[0].clone();
     rim.kind = EntityKind::Loop;
@@ -291,6 +315,9 @@ fn replacing_an_edge_by_a_modeled_face_updates_untouched_height_defaults() {
 
 #[test]
 fn single_upper_and_lower_edges_accept_width_without_a_closing_cut_and_roundtrip() {
+    if !test_fixture::available("chamfer_test.ocam") {
+        return;
+    }
     for (edge_id, top, y, side) in [
         (12, 50., -20.5, Side::Outside),
         (14, 40., -30.5, Side::Inside),

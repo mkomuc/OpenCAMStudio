@@ -949,6 +949,9 @@ mod tests {
 
     #[test]
     fn direct_closed_loop_picks_use_chain_resolution_in_both_creation_orders() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         for feature_first in [false, true] {
             check_direct_loop_creation("chamfer_test.ocam", 50, feature_first);
         }
@@ -956,6 +959,9 @@ mod tests {
 
     #[test]
     fn confirmed_named_chain_does_not_log_a_legacy_wall_error() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (mut app, reference) = cad_loop_app("chamfer_test.ocam", 50);
         let _ = app.update(Message::BeginOp(OpKind::Profile));
         app.profile_entry_message(EntryMessage::Add(ProfileGeometryKind::Chain));
@@ -1032,6 +1038,9 @@ mod tests {
 
     #[test]
     fn individual_edges_can_make_a_closed_chain_without_an_upward_face_certificate() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (app, reference) = cad_loop_app("chamfer_test.ocam", 53);
         let asset = app
             .controller

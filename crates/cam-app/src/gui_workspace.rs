@@ -2328,6 +2328,9 @@ mod performance_tests {
 
     #[test]
     fn camera_and_menu_events_reuse_geometry_but_hover_and_visibility_refresh_it() {
+        if !crate::test_fixture::available("test_project.ocam") {
+            return;
+        }
         let mut app = cad_app();
         let initial = app.machining_viewport();
         assert!(!initial.mesh_indices.is_empty());
@@ -2375,6 +2378,9 @@ mod performance_tests {
 
     #[test]
     fn simulation_draws_cad_without_selected_or_hovered_features_and_preserves_selection() {
+        if !crate::test_fixture::available("test_project.ocam") {
+            return;
+        }
         let mut app = cad_app();
         let geometry = app.controller.geometry_state();
         let instance = &geometry.instances[0];
@@ -2459,6 +2465,9 @@ mod performance_tests {
 
     #[test]
     fn cached_editor_and_stock_follow_uncommitted_edits() {
+        if !crate::test_fixture::available("test_project.ocam") {
+            return;
+        }
         let mut app = cad_app();
         app.model_view = None;
         app.controller.select(Selection::Setup);

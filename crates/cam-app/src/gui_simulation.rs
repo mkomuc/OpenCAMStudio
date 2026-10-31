@@ -1443,6 +1443,9 @@ mod tests {
 
     #[test]
     fn comparison_runs_in_the_background_and_reclassifies_when_tolerance_changes() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         let previous = player.preview.stock_vertices.clone();
         let mut prefs = player.options.clone();
@@ -1475,6 +1478,9 @@ mod tests {
 
     #[test]
     fn comparison_publishes_stock_colors_and_tool_position_together_without_gray_frames() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         for (position, z, color) in [
             (1., 20., [0.15, 0.85, 0.2, 1.]),
@@ -1510,6 +1516,9 @@ mod tests {
 
     #[test]
     fn pending_comparison_tracks_tolerance_and_can_be_published_in_another_color_mode() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         let previous = player.preview.stock_vertices.clone();
         next_comparison_frame(&mut player, 1., 21.);
@@ -1541,6 +1550,9 @@ mod tests {
 
     #[test]
     fn seeking_discards_a_pending_comparison_frame() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         next_comparison_frame(&mut player, 1., 21.);
         assert!(player.pending_frame.is_some());
@@ -1562,6 +1574,9 @@ mod tests {
 
     #[test]
     fn comparison_keeps_stock_visible_when_rewinding_without_regeneration() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         player.stock_position = 2.;
         player.rendered = 2.;

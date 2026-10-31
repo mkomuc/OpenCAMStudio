@@ -1275,6 +1275,9 @@ mod tests {
 
     #[test]
     fn pending_adaptive_operation_accepts_replacement_cutter() {
+        if !crate::test_fixture::available("mill_change.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller

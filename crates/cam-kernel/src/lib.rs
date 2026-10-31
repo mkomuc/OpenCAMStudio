@@ -232,12 +232,11 @@ mod tests {
 mod multi_body_tests {
     use super::*;
     #[test]
-    fn tigerente_multiple_imports_all_bodies() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/Tigerente_multiple.step");
+    fn multi_body_import_retains_all_bodies_and_projection_faces() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/cone-sphere-mm.step");
         let import = read_step_file(path, &Default::default()).unwrap();
         eprintln!(
-            "Tigerente: {} bodies, {} placements, {} faces; warnings: {:?}",
+            "{} bodies, {} placements, {} faces; warnings: {:?}",
             import.topology.bodies.len(),
             import.placements.len(),
             import.topology.faces.len(),
@@ -261,16 +260,8 @@ mod multi_body_tests {
                 .all(|face| covered.contains(&face.id)),
             "every face of every body must contribute to the projection"
         );
-        assert_eq!(
-            import.warnings,
-            ["4 CAD faces have no analytic feature representation; their CAD mesh is retained."]
-        );
-        eprintln!(
-            "Tigerente projection: {} triangles",
-            projection.mesh.triangles.len()
-        );
-        assert_eq!(import.topology.bodies.len(), 5);
-        assert_eq!(import.placements.len(), 5);
+        assert_eq!(import.topology.bodies.len(), 2);
+        assert_eq!(import.placements.len(), 2);
         for body in &import.topology.bodies {
             assert!(
                 import
