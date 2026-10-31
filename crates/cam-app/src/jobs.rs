@@ -74,6 +74,10 @@ pub(crate) struct JobInputs {
     pub preview_resolution: Option<f64>,
     /// Generate editable source paths without simulating stock removal.
     pub toolpath_preview: bool,
+    /// Sample actual removal along an existing program, without meshing/export changes.
+    pub removal_analysis: bool,
+    /// Detailed cut-face provenance, only needed for force-colored stock playback.
+    pub stock_force_surfaces: bool,
 }
 impl JobInputs {
     pub fn execute(
@@ -98,6 +102,24 @@ impl JobInputs {
             return RunOutcome {
                 completion: JobCompletion::Cancelled,
                 ..Default::default()
+            };
+        }
+        if self.removal_analysis {
+            return match self.analyze_stock_removal(cancel, cache, progress) {
+                Ok(samples) => RunOutcome {
+                    completion: JobCompletion::Complete,
+                    removal_samples: Arc::new(samples),
+                    ..Default::default()
+                },
+                Err(error) => RunOutcome {
+                    completion: if cancel.is_cancelled() {
+                        JobCompletion::Cancelled
+                    } else {
+                        JobCompletion::Failed
+                    },
+                    diagnostics: vec![error],
+                    ..Default::default()
+                },
             };
         }
         let mut job = if let Some(program) = &self.preview_program {
@@ -250,6 +272,8 @@ impl JobInputs {
             stock_vertices: stock.vertices,
             stock_machined: stock.machined,
             stock_operations: stock.operations,
+            stock_cut_sources: stock.cut_sources,
+            removal_samples: Arc::default(),
             stock_indices: stock.indices,
             collisions: stock.collisions,
         }

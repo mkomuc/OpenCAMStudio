@@ -4,7 +4,8 @@ The **Tools** page shows the cutter library above a **Cutting parameters** table
 for the selected cutter. Preset rows show the linked material name and stable ID.
 The inspector edits cutter geometry, description, manufacturer, product ID, and
 product link. The **Materials** button in the Tools ribbon opens the shared material
-manager in a modal. Materials currently contain only a stable ID and a name.
+manager in a modal. Materials contain a stable ID, a name, and optional effective
+specific cutting force **kc (N/mm²)** for [operation load estimates](cutting-forces.md).
 Rename a material without changing its ID; presets and stock use the ID to match.
 Materials are saved with the cross-project tool library and included in library
 imports and exports.
@@ -51,8 +52,9 @@ Changing stock material does not rewrite existing operations. Older files withou
 presets or managed material IDs retain their existing cutting data and material name.
 
 A material used by a library preset or stock in the current project must be
-unlinked before it can be deleted. Saved projects remain self-contained when a
-material is unavailable in the local library.
+unlinked before it can be deleted. Saved projects remain self-contained for
+toolpath generation when a material is unavailable in the local library.
+Cutting-force analysis requires that material's coefficient in the shared library.
 
 ## Roughing end mills
 

@@ -107,6 +107,9 @@ impl App {
             }
             if shop && !read_only {
                 self.reload_tool_edit();
+                if let Some(player) = &mut self.simulation {
+                    player.sync_force_material(&self.library);
+                }
             }
             if self.controller.revision() != revision
                 || self.controller.active_setup_id() != active
@@ -295,6 +298,7 @@ desktop_catalog! {
         if action=="open" {
             c.controller.poll_run();
             let mut player=SimulationPlayer::new_for_operation(&c.controller,a.optional("operation")?)?;
+            player.sync_force_material(&c.library);
             player.configure(&c.settings.simulation,c.settings.view.stock_color); c.simulation=Some(player);
         } else if action=="close" {c.simulation=None; c.pending_simulation=None;}
         else {

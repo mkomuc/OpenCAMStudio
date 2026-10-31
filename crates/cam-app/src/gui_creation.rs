@@ -65,6 +65,7 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.cutting_force_inputs.remove(&(self.controller.inspection_setup().id, None));
         self.thread_parameters = thread_parameters::ThreadParameters::for_creation(kind);
         self.geometry_editor = None;
         self.creation_geometry_height_defaults = None;

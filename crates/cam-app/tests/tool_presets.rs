@@ -145,10 +145,12 @@ fn overrides_and_all_available_presets_survive_project_and_library_round_trips()
             Material {
                 id: 7,
                 name: "Aluminum".into(),
+                specific_cutting_force: Some(700.),
             },
             Material {
                 id: 8,
                 name: "Steel".into(),
+                specific_cutting_force: None,
             },
         ],
         ..Default::default()

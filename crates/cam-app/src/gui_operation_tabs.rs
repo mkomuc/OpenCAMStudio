@@ -1110,6 +1110,9 @@ impl App {
                 }
             }
         }
+        if tab == OperationTab::Tool {
+            list = list.section("Cutting forces").push(self.cutting_force_panel(op));
+        }
         let footer = inspector_footer(
             row![
                 inspector_button("Cancel").on_press(if creating {

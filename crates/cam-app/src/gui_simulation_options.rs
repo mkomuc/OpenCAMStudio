@@ -24,6 +24,7 @@ pub(in crate::gui) enum SimulationOption {
     Cutting(bool),
     Points(bool),
     Mode(SimulationToolpathMode),
+    PathColoring(SimulationToolpathColoring),
     Stock(bool),
     Coloring(SimulationStockColoring),
     Material(SimulationMaterial),
@@ -46,6 +47,7 @@ impl SimulationOption {
             Self::Cutting(v) => prefs.show_cutting = v,
             Self::Points(v) => prefs.show_points = v,
             Self::Mode(v) => prefs.toolpath_mode = v,
+            Self::PathColoring(v) => prefs.toolpath_coloring = v,
             Self::Stock(v) => prefs.show_stock = v,
             Self::Coloring(v) => prefs.stock_coloring = v,
             Self::Material(v) => prefs.material = v,
@@ -58,13 +60,13 @@ impl SimulationOption {
     }
 }
 
-fn motion_tag(step: &Step) -> Option<Tag> {
+pub(super) fn motion_tag(step: &Step) -> Option<Tag> {
     match step {
         Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(*tag),
         _ => None,
     }
 }
-fn endpoint(step: &Step) -> Option<Point3> {
+pub(super) fn endpoint(step: &Step) -> Option<Point3> {
     match step {
         Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
         Step::Arc { end, .. } => Some(*end),
@@ -72,7 +74,7 @@ fn endpoint(step: &Step) -> Option<Point3> {
     }
 }
 impl TimedStep {
-    fn at(&self, fraction: f64) -> Step {
+    pub(super) fn at(&self, fraction: f64) -> Step {
         let mut step = self.step.clone();
         if let Some(a) = self.from {
             match &mut step {
@@ -119,8 +121,11 @@ impl TimedStep {
 
 impl SimulationPlayer {
     pub(in crate::gui) fn configure(&mut self, prefs: &SimulationPrefs, custom: [f32; 3]) {
-        let rebuild = prefs.accuracy != self.inputs.simulation_accuracy
-            || (prefs.regenerate_on_rewind && !self.options.regenerate_on_rewind);
+        let accuracy_changed = prefs.accuracy != self.inputs.simulation_accuracy;
+        let rebuild = accuracy_changed
+            || (prefs.regenerate_on_rewind && !self.options.regenerate_on_rewind)
+            || ((prefs.stock_coloring == SimulationStockColoring::CuttingForce)
+                != (self.options.stock_coloring == SimulationStockColoring::CuttingForce));
         let comparison_changed = prefs.comparison_tolerance != self.options.comparison_tolerance
             || prefs.stock_coloring != self.options.stock_coloring;
         if prefs.stop_on_collision != self.options.stop_on_collision {
@@ -148,6 +153,7 @@ impl SimulationPlayer {
                 self.prepare_frame(frame);
             }
         }
+        self.configure_force_analysis(accuracy_changed);
         self.refresh_display();
     }
 
@@ -209,7 +215,7 @@ impl SimulationPlayer {
             run.steps.clear();
         };
         let mut previous_end = None;
-        for step in &self.timeline.steps {
+        for (step_index, step) in self.timeline.steps.iter().enumerate() {
             let Some(tag) = motion_tag(&step.step) else {
                 continue;
             };
@@ -223,6 +229,15 @@ impl SimulationPlayer {
             let hi = end.min(step.end);
             if !visible || hi <= lo || step.from.is_none() {
                 flush(&mut run, &mut scene);
+                previous_end = None;
+                continue;
+            }
+            if prefs.toolpath_coloring == SimulationToolpathColoring::CuttingForce
+                && matches!(step.step, Step::Linear { .. } | Step::Arc { .. })
+                && !matches!(tag.kind, MoveKind::Link | MoveKind::Retract | MoveKind::Traverse)
+            {
+                flush(&mut run, &mut scene);
+                self.add_force_motion(&mut scene, step_index, step, lo, hi, tag);
                 previous_end = None;
                 continue;
             }
@@ -337,6 +352,11 @@ impl SimulationPlayer {
             let owner = self.preview.stock_operations.get(index).copied().flatten();
             vertex.color = match self.options.stock_coloring {
                 SimulationStockColoring::Material => material,
+                SimulationStockColoring::CuttingForce => {
+                    if self.preview.stock_machined.get(index).copied().unwrap_or(false) {
+                        super::forces::stock_surface_color(self.force_trace.as_ref(), self.preview.stock_cut_sources.get(index).copied().flatten())
+                    } else { material }
+                }
                 SimulationStockColoring::Operation => owner.map_or(material, identity_color),
                 SimulationStockColoring::Tool => owner
                     .and_then(|id| tools.get(&id))
@@ -378,6 +398,7 @@ impl SimulationPlayer {
                     text(format!("Tool: {}", tool.map_or("—".into(), |v| v.to_string()))).size(12),
                 ].spacing(10);
                 if let Some(p) = point { info = info.push(text(format!("X {:.3} mm\nY {:.3} mm\nZ {:.3} mm", p.x, p.y, p.z)).size(12)); }
+                if self.forces_enabled() { info = info.push(self.force_information()); }
                 if let Some(c) = &self.collision { info = info.push(text(c.message.clone()).size(12).color(Color::from_rgb(1., 0.3, 0.2))); }
                 info.into()
             }
@@ -386,6 +407,7 @@ impl SimulationPlayer {
                     self.timeline.duration, self.rendered,
                     self.timeline.steps.iter().filter(|s| motion_tag(&s.step).is_some()).count(),
                     self.preview.stock_indices.len()/3, self.inputs.preview_resolution.unwrap_or(0.))).size(12),
+                self.force_statistics(),
             ].spacing(10).into(),
         };
         column![
@@ -473,7 +495,16 @@ impl SimulationPlayer {
                         SimulationToolpathMode::ALL,
                         p.toolpath_mode,
                         SimulationOption::Mode,
+                    ))
+                    .push(picker(
+                        "Color by", SimulationToolpathColoring::ALL, p.toolpath_coloring,
+                        SimulationOption::PathColoring,
                     ));
+                if p.toolpath_coloring == SimulationToolpathColoring::CuttingForce
+                    && p.stock_coloring != SimulationStockColoring::CuttingForce
+                {
+                    list = list.push(self.force_legend());
+                }
             }
         }
         list = list
@@ -510,6 +541,11 @@ impl SimulationPlayer {
                         p.transparent_stock,
                         SimulationOption::TransparentStock,
                     ));
+                if p.stock_coloring == SimulationStockColoring::CuttingForce {
+                    list = list
+                        .push(text("Cut faces retain the force of the move that exposed them. Original stock keeps its material appearance.").size(11))
+                        .push(self.force_legend());
+                }
                 if p.stock_coloring == SimulationStockColoring::Comparison {
                     list = list
                         .push(text(format!("Tolerance  {:.3} mm", p.comparison_tolerance)).size(12))

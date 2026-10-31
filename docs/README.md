@@ -12,6 +12,7 @@ For installation and a feature overview, start with the [project README](../READ
 - [Lift height and stay-down moves](lift-height.md): raised local links for Pocket, 3D Adaptive Clearing and 3D Parallel.
 - [Operation patterns](operation-patterns.md): rectangular and circular repetition.
 - [Tool presets and materials](tool-presets.md): reusable cutting data and cooling.
+- [Cutting forces](cutting-forces.md): per-operation force, cutting power and torque estimates.
 - [Thread presets](thread-presets.md): standard sizes and prepared-bore matching.
 - [Processing time](processing-time.md): estimates and their assumptions.
 - [Simulation](simulation.md): playback, display modes, stock coloring and collision behavior.

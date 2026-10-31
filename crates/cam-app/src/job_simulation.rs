@@ -15,9 +15,44 @@ pub(super) struct StockSimulation {
     pub indices: Vec<u32>,
     pub machined: Vec<bool>,
     pub operations: Vec<Option<u32>>,
+    pub cut_sources: Vec<Option<cam_sim::SurfaceLocation>>,
     pub collisions: Vec<Collision>,
 }
 impl JobInputs {
+    pub(super) fn analyze_stock_removal(
+        &self,
+        cancel: &CancelToken,
+        cache: &mut OperationCache,
+        progress: &Progress,
+    ) -> Result<Vec<cam_sim::RemovalSample>, Diagnostic> {
+        if let Some(error) = &self.frame_error {
+            return Err(Diagnostic::error(error.clone()));
+        }
+        let program = self.preview_program.as_ref()
+            .ok_or_else(|| Diagnostic::error("Force analysis requires a simulation program."))?;
+        let resolution = self.preview_resolution.unwrap_or_else(|| self.stock_resolution(program));
+        let initial = if self.document.setup().stock == cam_model::Stock::PreviousSetup {
+            if self.document.setups.first().is_some_and(|s| s.id == self.document.setup().id) {
+                return Err(Diagnostic::error("The first setup cannot inherit previous stock."));
+            }
+            Some(self.previous_stock(resolution, cancel, cache, progress)?)
+        } else { None };
+        let tools: Vec<_> = self.document.setup().tools.iter().map(|tool| {
+            let outline = tool.profile();
+            SimTool {
+                number: tool.number, profile: sim_profile(tool),
+                noncutting_tip_radius: outline.segs.first()
+                    .filter(|s| !s.cutting && s.end.y.abs() < 1e-9).map(|s| s.end.x),
+            }
+        }).collect();
+        cam_sim::analyze_removal_controlled(
+            program, self.min, self.max,
+            &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
+            &tools, initial.as_ref(), &|| cancel.is_cancelled(),
+            |done, total| progress.set(JobPhase::Verification, done, total, None),
+        ).map_err(Diagnostic::error)
+    }
+
     pub(crate) fn stock_resolution(&self, program: &Program) -> f64 {
         let span = (self.max[0] - self.min[0]).max(self.max[1] - self.min[1]);
         let setup = self.document.setup();
@@ -102,6 +137,7 @@ impl JobInputs {
         } else {
             None
         };
+        simulation.current.set_surface_sources(self.stock_force_surfaces);
         let Some(sim) = self.simulate_field(
             program,
             resolution,
@@ -130,6 +166,7 @@ impl JobInputs {
             indices: surface.indices,
             machined: surface.machined,
             operations: surface.operations,
+            cut_sources: surface.cut_sources.unwrap_or_default(),
             collisions: sim.collisions,
         })
     }
@@ -544,6 +581,30 @@ mod tests {
         settings.stock = Stock::PreviousSetup;
         app.apply_setup_settings(settings).unwrap();
         id
+    }
+
+    #[test]
+    fn force_analysis_uses_inherited_stock_and_does_not_replace_verification_meshes() {
+        use cam_cldata::{MoveKind, Point3, ProgramBuilder};
+        let mut app = drilled_blank();
+        inherited_setup(&mut app);
+        let before = app.document().clone();
+        let mut inputs = app.job_inputs();
+        inputs.removal_analysis = true;
+        inputs.preview_resolution = Some(0.1);
+        inputs.preview_program = Some(ProgramBuilder::new().tool_change(1).feed(100.)
+            .rapid(Point3::new(5., 5., 3.), MoveKind::Link)
+            .linear(Point3::new(5., 5., -2.), MoveKind::Plunge).build());
+        let run = inputs.execute(&CancelToken::new(), &mut OperationCache::default(), &Progress::default(), &mut StockSimulationCache::default());
+        assert_eq!(run.completion, JobCompletion::Complete, "{:?}", run.diagnostics);
+        assert!(!run.removal_samples.is_empty());
+        assert!(run.removal_samples.iter().all(|s| s.removed_volume_mm3 == 0.));
+        assert!(run.stock_vertices.is_empty());
+        assert_eq!(app.document(), &before);
+        Arc::make_mut(&mut inputs.document).setup_mut().stock = Stock::FixedBox { size: [10., 10., 5.], model_position: [0., 0., 1.] };
+        let fresh = inputs.execute(&CancelToken::new(), &mut OperationCache::default(), &Progress::default(), &mut StockSimulationCache::default());
+        assert_eq!(fresh.completion, JobCompletion::Complete);
+        assert!(fresh.removal_samples.iter().any(|s| s.removed_volume_mm3 > 0.));
     }
 
     #[test]

@@ -279,6 +279,7 @@ impl App {
     }
 
     pub(super) fn reset_model_browser(&mut self) {
+        self.cutting_force_inputs.clear();
         self.model_view = Some(TreeNode::Models);
         self.browser_view = TreeNode::Models;
         self.models_collapsed = true;
@@ -430,6 +431,9 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
+        }
+        if let Some(legend) = self.simulation.as_ref().and_then(|player| player.force_viewport_legend(viewport_browser_width, self.show_gizmo.then_some(self.gizmo_size))) {
+            overlays = overlays.push(legend);
         }
         layers = layers.push(overlays.width(Length::Fill).height(Length::Fill));
         if self.show_project_browser {

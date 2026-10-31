@@ -22,10 +22,26 @@ impl std::fmt::Display for Cooling {
 }
 
 /// A shared stock material. Physical properties can be added without changing IDs.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Material {
     pub id: u64,
     pub name: String,
+    /// Effective specific cutting force kc, N/mm², for the intended cutting conditions.
+    /// Unset on legacy materials; never substitute an invented material coefficient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specific_cutting_force: Option<f64>,
+}
+
+impl Material {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id == 0 || self.name.trim().is_empty() {
+            return Err("A material needs a nonzero ID and a name.".into());
+        }
+        if self.specific_cutting_force.is_some_and(|v| !v.is_finite() || v <= 0.) {
+            return Err("Specific cutting force must be finite and positive, or unset (N/mm²).".into());
+        }
+        Ok(())
+    }
 }
 
 /// Optional entry/exit feed rates in mm/min. Unset values retain the strategy's

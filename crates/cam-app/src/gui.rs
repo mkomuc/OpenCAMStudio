@@ -92,6 +92,8 @@ use operation_geometry::GeometryMessage;
 mod creation;
 #[path = "gui_cutting_data.rs"]
 mod cutting_data;
+#[path = "gui_cutting_forces.rs"]
+mod cutting_forces;
 #[cfg(test)]
 #[path = "gui_performance.rs"]
 mod performance;
@@ -2193,6 +2195,9 @@ struct App {
     edited_tool_input: Option<Field>,
     preset_buffers: BTreeMap<u64, BTreeMap<PresetField, String>>,
     new_material_name: String,
+    material_force_inputs: BTreeMap<u64, String>,
+    /// Session-only what-if engagement; None identifies an unsaved creation draft.
+    cutting_force_inputs: BTreeMap<(u64, Option<u32>), [String; 3]>,
     show_materials: bool,
     show_preset_editor: bool,
     preset_editor_snapshot: Option<tool_presets::LibraryToolDraft>,
@@ -2952,6 +2957,9 @@ enum Message {
     NewMaterialNameChanged(String),
     AddMaterial,
     MaterialRenamed(u64, String),
+    MaterialCuttingForceChanged(u64, String),
+    CuttingForceCustomToggled(u32, bool),
+    CuttingForceInputChanged(u32, usize, String),
     DeleteMaterial(u64),
     /// Delete the selected tool.
     DeleteTool,
@@ -3593,6 +3601,8 @@ impl App {
             edited_tool_input: None,
             preset_buffers: BTreeMap::new(),
             new_material_name: String::new(),
+            material_force_inputs: BTreeMap::new(),
+            cutting_force_inputs: BTreeMap::new(),
             show_materials: false,
             show_preset_editor: false,
             preset_editor_snapshot: None,
@@ -4177,6 +4187,7 @@ impl App {
             }
             Message::SimulationTick => {
                 if let Some(player) = &mut self.simulation {
+                    player.sync_force_material(&self.library);
                     player.tick();
                 }
             }
@@ -5689,6 +5700,9 @@ impl App {
                         Ok(OcamFile::Library(lib)) => {
                             let n = lib.tools.len();
                             self.library = lib;
+                            if let Some(player) = &mut self.simulation {
+                                player.sync_force_material(&self.library);
+                            }
                             self.library.save(); // becomes the working (config-dir) library
                             self.lib_sel = 0;
                             self.reload_tool_edit();
@@ -5818,6 +5832,7 @@ impl App {
                             .flatten();
                         match SimulationPlayer::new_for_operation(&self.controller, operation) {
                             Ok(mut player) => {
+                                player.sync_force_material(&self.library);
                                 player.configure(
                                     &self.settings.simulation,
                                     self.settings.view.stock_color,
@@ -6565,6 +6580,7 @@ impl App {
                 }
             }
             Message::CancelOp => {
+                self.cutting_force_inputs.remove(&(self.controller.inspection_setup().id, None));
                 self.geometry_editor = None;
                 self.cad_pending_kind = None;
                 self.cad_filter_explicit = false;
@@ -6595,6 +6611,10 @@ impl App {
                     });
                     match result {
                         Ok(id) => {
+                            let setup_id = self.controller.inspection_setup().id;
+                            if let Some(inputs) = self.cutting_force_inputs.remove(&(setup_id, None)) {
+                                self.cutting_force_inputs.insert((setup_id, Some(id)), inputs);
+                            }
                             // The creation draft was used to stage the allowance, but
                             // the committed setup is now the source of truth for the
                             // selected operation. Keeping it would mask the value just
@@ -7587,7 +7607,11 @@ impl App {
             Message::CancelPresetEditor => self.cancel_preset_edit(),
             Message::Noop => {}
             Message::OpenMaterials => self.show_materials = true,
-            Message::CloseMaterials => self.show_materials = false,
+            Message::CloseMaterials => {
+                // Valid entries are saved immediately; abandon incomplete input on close.
+                self.material_force_inputs.clear();
+                self.show_materials = false;
+            }
             Message::ToolDetailChanged(field, value) => {
                 if let Some(tool) = &mut self.tool_edit {
                     match field {
@@ -7639,6 +7663,16 @@ impl App {
             Message::NewMaterialNameChanged(name) => self.new_material_name = name,
             Message::AddMaterial => self.add_managed_material(),
             Message::MaterialRenamed(id, name) => self.rename_managed_material(id, name),
+            Message::MaterialCuttingForceChanged(id, value) => self.edit_material_cutting_force(id, value),
+            Message::CuttingForceCustomToggled(id, enabled) => self.toggle_custom_cutting_force(id, enabled),
+            Message::CuttingForceInputChanged(id, index, value) => {
+                let key = self.cutting_force_key(id);
+                if let Some(inputs) = self.cutting_force_inputs.get_mut(&key) {
+                    if let Some(input) = inputs.get_mut(index) {
+                        *input = value;
+                    }
+                }
+            }
             Message::DeleteMaterial(id) => self.delete_managed_material(id),
             Message::NewTool => {
                 // Add a tool to the library and select it for editing. Its **type**

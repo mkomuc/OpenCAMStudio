@@ -176,6 +176,7 @@ pub struct SimulationPrefs {
     pub show_cutting: bool,
     pub show_points: bool,
     pub toolpath_mode: SimulationToolpathMode,
+    pub toolpath_coloring: SimulationToolpathColoring,
     pub show_stock: bool,
     pub stock_coloring: SimulationStockColoring,
     pub material: SimulationMaterial,
@@ -203,6 +204,7 @@ impl Default for SimulationPrefs {
             show_cutting: true,
             show_points: false,
             toolpath_mode: SimulationToolpathMode::Trailing,
+            toolpath_coloring: SimulationToolpathColoring::MoveType,
             show_stock: true,
             stock_coloring: SimulationStockColoring::Operation,
             material: SimulationMaterial::Metallic,
@@ -237,8 +239,12 @@ simulation_choices!(SimulationToolpathMode {
     All => "All toolpaths", Trailing => "Trailing", Leading => "Leading",
     Operation => "Current operation", Tail => "Tail",
 });
+simulation_choices!(SimulationToolpathColoring {
+    MoveType => "Move type", CuttingForce => "Cutting force (actual removal)",
+});
 simulation_choices!(SimulationStockColoring {
     Material => "Material", Operation => "Operation", Tool => "Tool", Comparison => "Comparison",
+    CuttingForce => "Cutting force",
 });
 simulation_choices!(SimulationMaterial {
     Metallic => "Metallic", Aluminum => "Aluminum", Steel => "Steel",
@@ -807,9 +813,11 @@ mod tests {
             old.simulation.toolpath_mode,
             SimulationToolpathMode::Trailing
         );
+        assert_eq!(old.simulation.toolpath_coloring, SimulationToolpathColoring::MoveType);
         let mut settings = old;
         settings.simulation.tool_display = SimulationToolDisplay::Holder;
         settings.simulation.toolpath_mode = SimulationToolpathMode::Leading;
+        settings.simulation.toolpath_coloring = SimulationToolpathColoring::CuttingForce;
         settings.simulation.stock_coloring = SimulationStockColoring::Tool;
         settings.simulation.material = SimulationMaterial::Brass;
         settings.simulation.transparent_tool = true;

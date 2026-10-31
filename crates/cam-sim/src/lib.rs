@@ -13,9 +13,9 @@ mod collision;
 mod heightfield;
 mod simulation;
 mod sweep;
-pub use simulation::{simulate_controlled, SimulationCache};
+pub use simulation::{analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache};
 
-pub use heightfield::{Heightfield, SurfaceDiff, SurfaceMesh};
+pub use heightfield::{Heightfield, SurfaceDiff, SurfaceLocation, SurfaceMesh};
 
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use cam_geo::{Arc, Point};

@@ -69,8 +69,9 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
 /// Its own counter, like the settings file's — `cam_model::SCHEMA_VERSION` describes
 /// the *document*, and a library is not a document. v1 is the shape every library
 /// ever written already has, which is why an unversioned file reads as v1 rather
-/// than being refused. v2 adds managed materials and named cutter presets; v3 adds roughing end mills.
-pub const LIBRARY_VERSION: u32 = 3;
+/// than being refused. v2 adds managed materials and named cutter presets; v3 adds
+/// roughing end mills; v4 adds optional effective specific cutting force on materials.
+pub const LIBRARY_VERSION: u32 = 4;
 
 /// A library file with no `library_version` predates the field. Every such file is
 /// the v1 shape — the field was added *because* the format needed a version, not
@@ -92,7 +93,8 @@ impl crate::config::ConfigFile for ToolLibrary {
     }
 
     fn migrate(&mut self, _from: u32) {
-        // v2 adds preset/material registries; v3 adds a new tool kind.
+        // v2 adds preset/material registries; v3 adds a new tool kind;
+        // v4's optional material coefficient defaults to unset.
         self.library_version = LIBRARY_VERSION;
     }
 
@@ -164,6 +166,7 @@ impl ToolLibrary {
     pub fn validate(&self) -> Result<(), String> {
         let mut ids = std::collections::BTreeSet::new();
         for material in &self.materials {
+            material.validate()?;
             if material.id == 0 || material.name.trim().is_empty() || !ids.insert(material.id) {
                 return Err("Material IDs must be nonzero and unique, with nonempty names".into());
             }
@@ -1369,6 +1372,7 @@ mod preset_file_tests {
         library.materials.push(cam_model::Material {
             id: 17,
             name: "Aluminum".into(),
+            specific_cutting_force: None,
         });
         library.tools[0].presets.push(cam_model::ToolPreset {
             id: 1,

@@ -85,6 +85,8 @@ impl Heightfield {
                             upper: z,
                             lower_op,
                             upper_op: hit.operation,
+                            lower_source: u32::MAX,
+                            upper_source: u32::MAX,
                         });
                     }
                 } else {

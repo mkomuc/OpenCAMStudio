@@ -801,6 +801,10 @@ impl App {
         .spacing(8);
         for material in &self.library.materials {
             let id = material.id;
+            let kc = self.material_force_inputs.get(&id).cloned().unwrap_or_else(|| {
+                material.specific_cutting_force.map(|v| v.to_string()).unwrap_or_default()
+            });
+            let invalid = super::cutting_forces::parse_material_kc(&kc).is_err();
             list = list.push(
                 column![
                     text(format!("ID {id}")).size(10).color(INSPECTOR_MUTED),
@@ -810,6 +814,16 @@ impl App {
                         inspector_button("Delete").on_press(Message::DeleteMaterial(id))
                     ]
                     .spacing(6),
+                    column![
+                        text("Specific cutting force kc (N/mm²)").size(11),
+                        inspector_input("Unset", &kc)
+                            .on_input(move |v| Message::MaterialCuttingForceChanged(id, v)),
+                    ].spacing(3),
+                    text(if invalid {
+                        "Enter a finite positive kc, or leave blank. Invalid input is not saved."
+                    } else {
+                        "Effective kc for your cutting conditions. Blank disables force estimates."
+                    }).size(11).color(if invalid { palette::ERROR } else { INSPECTOR_MUTED }),
                 ]
                 .spacing(3),
             );
@@ -849,6 +863,7 @@ impl App {
         self.library.materials.push(Material {
             id: self.library.material_id_floor,
             name: name.into(),
+            specific_cutting_force: None,
         });
         self.new_material_name.clear();
         self.library.save();
@@ -867,6 +882,9 @@ impl App {
             material.name = name;
         }
         self.library.save();
+        if let Some(player) = &mut self.simulation {
+            player.sync_force_material(&self.library);
+        }
     }
     pub(super) fn delete_managed_material(&mut self, id: u64) {
         let in_use = self
@@ -891,6 +909,7 @@ impl App {
             return;
         }
         self.library.materials.retain(|m| m.id != id);
+        self.material_force_inputs.remove(&id);
         self.library.save();
     }
     pub(super) fn operation_preset_tool(&self) -> Option<&cam_model::Tool> {
@@ -1809,7 +1828,8 @@ mod tests {
             app.library.materials[0],
             Material {
                 id,
-                name: "Hardwood".into()
+                name: "Hardwood".into(),
+                specific_cutting_force: None,
             }
         );
         app.library.tools[0].presets[0].material_id = Some(id);

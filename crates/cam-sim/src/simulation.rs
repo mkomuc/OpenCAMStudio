@@ -2,6 +2,9 @@
 //! (possibly interpolated) playback step runs on a disposable copy. Rewind and
 //! edited prefixes restore an earlier checkpoint, never future removed stock.
 use super::*;
+#[path = "removal.rs"]
+mod removal;
+pub use removal::{analyze_removal_controlled, RemovalSample};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Config {
@@ -10,6 +13,7 @@ struct Config {
     options: SimOptions,
     tools: Vec<SimTool>,
     initial_key: Option<String>,
+    surface_sources: bool,
 }
 #[derive(Clone)]
 struct State {
@@ -21,13 +25,15 @@ struct State {
 }
 impl State {
     fn new(config: &Config) -> Self {
-        Self {
-            field: Heightfield::new(
+        let mut field = Heightfield::new(
                 [config.min[0], config.min[1]],
                 [config.max[0], config.max[1]],
                 config.options.resolution,
                 config.max[2],
-            ),
+            );
+        field.set_surface_tracking(config.surface_sources);
+        Self {
+            field,
             tool: ToolProfile::flat(config.options.tool_radius),
             noncutting_tip_radius: None,
             cur: None,
@@ -218,6 +224,7 @@ impl State {
             }
         }
         if !rapid && !reposition {
+            self.field.set_cut_source(index, range);
             self.field
                 .cut_segment_profile_controlled(a, b, &self.tool, Some(tag.op_id), cancelled);
         }
@@ -233,8 +240,13 @@ pub struct SimulationCache {
     steps: Vec<Step>,
     state: Option<State>,
     checkpoints: Vec<(usize, State)>,
+    surface_sources: bool,
 }
 impl SimulationCache {
+    /// Surface attribution is opt-in; changing it invalidates prefix checkpoints.
+    pub fn set_surface_sources(&mut self, enabled: bool) {
+        self.surface_sources = enabled;
+    }
     /// The same result and collision checks as a fresh simulation. Cancelled work
     /// cannot become a checkpoint or a published result.
     #[allow(clippy::too_many_arguments)] // Matches the stateless public API plus the cache receiver.
@@ -299,10 +311,12 @@ impl SimulationCache {
             options: *options,
             tools: tools.to_vec(),
             initial_key: initial.map(|(key, _)| key.to_owned()),
+            surface_sources: self.surface_sources,
         };
         if self.config.as_ref() != Some(&config) {
             *self = Self {
                 config: Some(config.clone()),
+                surface_sources: self.surface_sources,
                 ..Self::default()
             };
         }
@@ -325,6 +339,7 @@ impl SimulationCache {
                     let mut state = State::new(&config);
                     if let Some((_, field)) = initial {
                         state.field = field.clone();
+                        state.field.set_surface_tracking(config.surface_sources);
                     }
                     (state, 0)
                 },
@@ -402,6 +417,7 @@ pub fn simulate_controlled(
         options: *options,
         tools: tools.to_vec(),
         initial_key: None,
+        surface_sources: false,
     };
     let mut state = State::new(&config);
     let mut progress = progress;
