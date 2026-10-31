@@ -2204,7 +2204,10 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
-                passes: Default::default(),
+                passes: cam_model::ProfilePasses {
+                    same_lead_out: true,
+                    ..Default::default()
+                },
                 selections: None,
                 closed,
                 additional_chains: islands
@@ -2242,8 +2245,8 @@ impl AppController {
                 plunge_feed,
                 start,
                 end: None,
-                lead_in: Lead::None,
-                lead_out: Lead::None,
+                lead_in: Lead::Arc { radius: 0.6 },
+                lead_out: Lead::Arc { radius: 0.6 },
                 lead_overlap: 0.0,
                 plunge: Plunge::Straight,
             }),
@@ -2747,7 +2750,10 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
-                    passes: Default::default(),
+                    passes: cam_model::ProfilePasses {
+                        same_lead_out: true,
+                        ..Default::default()
+                    },
                     selections: None,
                     closed: true,
                     additional_chains: Vec::new(),
@@ -2771,8 +2777,8 @@ impl AppController {
                     plunge_feed: p.plunge_feed,
                     end: None,
                     start: None,
-                    lead_in: Lead::None,
-                    lead_out: Lead::None,
+                    lead_in: Lead::Arc { radius: 0.6 },
+                    lead_out: Lead::Arc { radius: 0.6 },
                     lead_overlap: 0.0,
                     plunge: Plunge::Straight,
                 })

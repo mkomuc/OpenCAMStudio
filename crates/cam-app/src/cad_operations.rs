@@ -511,7 +511,10 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
-            passes: Default::default(),
+            passes: cam_model::ProfilePasses {
+                same_lead_out: true,
+                ..Default::default()
+            },
             selections: match &binding.recipe {
                 ExtractionRecipe::ProfileEntries { entries } => Some(entries.clone()),
                 _ => None,
@@ -548,8 +551,8 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
             end: None,
             start: None,
-            lead_in: Lead::None,
-            lead_out: Lead::None,
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
             lead_overlap: 0.0,
             plunge: Plunge::Straight,
             clearing: Clearing::default(),

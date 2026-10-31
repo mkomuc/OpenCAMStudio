@@ -2125,7 +2125,10 @@ mod tests {
         let floor = fixture.face(vec![square(0., 30., 0., 20., 15.)], [0., 0., 1.]);
         fixture.walls(0., 30., 0., 20., 15., 20.);
         fixture.face(
-            vec![square(-2., 32., -2., 22., 20.), square(0., 30., 0., 20., 20.)],
+            vec![
+                square(-2., 32., -2., 22., 20.),
+                square(0., 30., 0., 20., 20.),
+            ],
             [0., 0., 1.],
         );
         let state = fixture.state();

@@ -322,7 +322,7 @@ impl ProfileOp {
             && (p.finish_count == 0
                 || p.finish_count > 1000
                 || p.spring_passes > 1000
-                || (p.finish_count > 1 && p.finish_stepover <= 0.))
+                || p.finish_stepover <= 0.)
         {
             return Err(
                 "Finish count must be 1..1000, repeats 0..1000, and radial spacing positive".into(),

@@ -26,11 +26,11 @@ struct State {
 impl State {
     fn new(config: &Config) -> Self {
         let mut field = Heightfield::new(
-                [config.min[0], config.min[1]],
-                [config.max[0], config.max[1]],
-                config.options.resolution,
-                config.max[2],
-            );
+            [config.min[0], config.min[1]],
+            [config.max[0], config.max[1]],
+            config.options.resolution,
+            config.max[2],
+        );
         field.set_surface_tracking(config.surface_sources);
         Self {
             field,

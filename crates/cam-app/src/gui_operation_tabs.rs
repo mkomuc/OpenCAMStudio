@@ -1111,7 +1111,9 @@ impl App {
             }
         }
         if tab == OperationTab::Tool {
-            list = list.section("Cutting forces").push(self.cutting_force_panel(op));
+            list = list
+                .section("Cutting forces")
+                .push(self.cutting_force_panel(op));
         }
         let footer = inspector_footer(
             row![

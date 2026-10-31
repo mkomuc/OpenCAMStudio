@@ -13,7 +13,9 @@ mod collision;
 mod heightfield;
 mod simulation;
 mod sweep;
-pub use simulation::{analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache};
+pub use simulation::{
+    analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache,
+};
 
 pub use heightfield::{Heightfield, SurfaceDiff, SurfaceLocation, SurfaceMesh};
 

@@ -813,7 +813,10 @@ mod tests {
             old.simulation.toolpath_mode,
             SimulationToolpathMode::Trailing
         );
-        assert_eq!(old.simulation.toolpath_coloring, SimulationToolpathColoring::MoveType);
+        assert_eq!(
+            old.simulation.toolpath_coloring,
+            SimulationToolpathColoring::MoveType
+        );
         let mut settings = old;
         settings.simulation.tool_display = SimulationToolDisplay::Holder;
         settings.simulation.toolpath_mode = SimulationToolpathMode::Leading;

@@ -40,7 +40,8 @@ impl Sweep {
         let source = self.source?;
         let t = if self.len2 < 1e-12 && (self.b[2] - self.a[2]).abs() > 1e-12 {
             ((f64::from(point[2]) - self.a[2]) / (self.b[2] - self.a[2])).clamp(0., 1.)
-        } else if self.len2 > 1e-12 && self.tool.shape == ProfileShape::Flat
+        } else if self.len2 > 1e-12
+            && self.tool.shape == ProfileShape::Flat
             && (self.b[2] - self.a[2]).abs() < 1e-12
         {
             // A flat floor is exposed when the leading cutter edge first
@@ -49,7 +50,8 @@ impl Sweep {
             let dy = f64::from(point[1]) - self.a[1];
             let along = (dx * self.dx + dy * self.dy) / self.len2;
             let perpendicular2 = ((dx * self.dy - dy * self.dx).powi(2) / self.len2).max(0.);
-            (along - ((self.tool.radius.powi(2) - perpendicular2).max(0.) / self.len2).sqrt()).clamp(0., 1.)
+            (along - ((self.tool.radius.powi(2) - perpendicular2).max(0.) / self.len2).sqrt())
+                .clamp(0., 1.)
         } else {
             self.projection(f64::from(point[0]), f64::from(point[1])).0
         };

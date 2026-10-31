@@ -73,6 +73,21 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
 /// roughing end mills; v4 adds optional effective specific cutting force on materials.
 pub const LIBRARY_VERSION: u32 = 4;
 
+/// Approximate effective coefficients, not raw kc1 reference values. See
+/// docs/cutting-forces.md for the assumptions and source data.
+const STARTER_MATERIALS: &[(&str, f64)] = &[
+    ("Pine", 53.),
+    ("Oak", 80.),
+    ("Beech", 65.),
+    ("MDF", 65.),
+    ("Birch plywood", 170.),
+    ("Aluminium 6061-T6", 1700.),
+    ("Aluminium 6082-T6", 1700.),
+    ("Aluminium 5083", 1500.),
+    ("Steel C15 / 1.0401", 3500.),
+    ("Steel S355 / 1.0050", 4350.),
+];
+
 /// A library file with no `library_version` predates the field. Every such file is
 /// the v1 shape — the field was added *because* the format needed a version, not
 /// because the format changed — so reading it as v1 is the truth, not a guess.
@@ -163,6 +178,38 @@ impl Default for ToolLibrary {
 }
 
 impl ToolLibrary {
+    /// Add missing starter materials without changing existing names, IDs or values.
+    pub fn add_starter_materials(&mut self) -> usize {
+        let mut added = 0;
+        for &(name, kc) in STARTER_MATERIALS {
+            if self
+                .materials
+                .iter()
+                .any(|m| m.name.trim().eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            let highest = self
+                .materials
+                .iter()
+                .map(|m| m.id)
+                .max()
+                .unwrap_or(0)
+                .max(self.material_id_floor);
+            let Some(id) = highest.checked_add(1) else {
+                break;
+            };
+            self.material_id_floor = id;
+            self.materials.push(cam_model::Material {
+                id,
+                name: name.into(),
+                specific_cutting_force: Some(kc),
+            });
+            added += 1;
+        }
+        added
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let mut ids = std::collections::BTreeSet::new();
         for material in &self.materials {
@@ -359,12 +406,14 @@ impl ToolLibrary {
             kind: ToolKind::ThreadMill { pitch: None },
             ..Default::default()
         });
-        Self {
+        let mut library = Self {
             library_version: LIBRARY_VERSION,
             materials: Vec::new(),
             material_id_floor: 0,
             tools,
-        }
+        };
+        library.add_starter_materials();
+        library
     }
 
     /// Load the library from the config directory.
@@ -1364,6 +1413,35 @@ mod tests {
 mod preset_file_tests {
     use super::*;
     use crate::config::tests::Scratch;
+
+    #[test]
+    fn starter_materials_preserve_existing_values_and_stable_ids() {
+        let mut library = ToolLibrary::default();
+        library.materials.push(cam_model::Material {
+            id: 17,
+            name: "pine".into(),
+            specific_cutting_force: Some(123.),
+        });
+        library.material_id_floor = 25;
+        assert_eq!(library.add_starter_materials(), 9);
+        assert_eq!(library.materials[0].specific_cutting_force, Some(123.));
+        assert_eq!(library.materials[1].id, 26);
+        assert_eq!(library.material_id_floor, 34);
+        assert_eq!(library.add_starter_materials(), 0);
+        library.validate().unwrap();
+        let scratch = Scratch::new("starter-materials");
+        let path = scratch.file("tools.json");
+        library.save_to(&path).unwrap();
+        assert_eq!(ToolLibrary::load_from(&path).0, library);
+
+        let seeded = ToolLibrary::defaults();
+        assert_eq!(seeded.materials.len(), 10);
+        assert!(seeded
+            .materials
+            .iter()
+            .all(|m| m.specific_cutting_force.is_some()));
+        seeded.validate().unwrap();
+    }
 
     #[test]
     fn malformed_presets_are_rejected_without_overwriting_the_library() {

@@ -792,54 +792,130 @@ impl App {
     }
 
     pub(super) fn managed_material_editor(&self) -> Element<'_, Message> {
+        let selected = self
+            .selected_material
+            .filter(|id| self.library.materials.iter().any(|m| m.id == *id));
+        let action = |icon, label, message| {
+            render_command(&cmd_help(icon, label, message, label), true, true)
+        };
+        let toolbar = row![
+            text("Materials").size(14),
+            Space::new().width(Length::Fill),
+            action(Icon::New, "New", Some(Message::NewMaterial)),
+            action(Icon::Edit, "Edit", selected.map(|_| Message::EditMaterial)),
+            action(
+                Icon::Delete,
+                "Delete",
+                selected.map(Message::DeleteMaterial)
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
         let mut list = column![
-            inspector_section("Materials"),
+            toolbar,
             text("Shared across projects. IDs stay fixed when names change.")
                 .size(11)
-                .color(INSPECTOR_MUTED)
+                .color(INSPECTOR_MUTED),
+            inspector_button("Add starter materials").on_press(Message::AddStarterMaterials),
+            text("Starter kc values are approximate; adjust them for your material and cut.")
+                .size(11)
+                .color(INSPECTOR_MUTED),
+            container(
+                row![
+                    text("ID").size(12).width(70),
+                    text("Material").size(12).width(Length::Fill),
+                    text("kc (N/mm²)").size(12).width(140),
+                ]
+                .spacing(4)
+            )
+            .padding(7),
         ]
         .spacing(8);
         for material in &self.library.materials {
             let id = material.id;
-            let kc = self.material_force_inputs.get(&id).cloned().unwrap_or_else(|| {
-                material.specific_cutting_force.map(|v| v.to_string()).unwrap_or_default()
+            let active = selected == Some(id);
+            let item = container(
+                row![
+                    text(id.to_string()).size(12).width(70),
+                    text(&material.name).size(12).width(Length::Fill),
+                    text(
+                        material
+                            .specific_cutting_force
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "Unset".into())
+                    )
+                    .size(12)
+                    .width(140),
+                ]
+                .spacing(4),
+            )
+            .padding(7)
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: active.then_some(Background::Color(palette::SELECT_BG)),
+                ..Default::default()
             });
+            list = list.push(
+                mouse_area(item)
+                    .on_press(Message::SelectMaterial(id))
+                    .on_double_click(Message::EditMaterialRow(id))
+                    .interaction(iced::mouse::Interaction::Pointer),
+            );
+        }
+        if self.creating_material {
+            list = list.push(
+                row![
+                    inspector_input("New material", &self.new_material_name)
+                        .on_input(Message::NewMaterialNameChanged),
+                    inspector_button("Add").on_press_maybe(
+                        (!self.new_material_name.trim().is_empty()).then_some(Message::AddMaterial)
+                    ),
+                ]
+                .spacing(6),
+            );
+        }
+        if let Some(material) = self
+            .editing_material
+            .and_then(|id| self.library.materials.iter().find(|m| m.id == id))
+        {
+            let id = material.id;
+            let kc = self
+                .material_force_inputs
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    material
+                        .specific_cutting_force
+                        .map(|v| v.to_string())
+                        .unwrap_or_default()
+                });
             let invalid = super::cutting_forces::parse_material_kc(&kc).is_err();
             list = list.push(
                 column![
-                    text(format!("ID {id}")).size(10).color(INSPECTOR_MUTED),
-                    row![
-                        inspector_input("Material name", &material.name)
-                            .on_input(move |v| Message::MaterialRenamed(id, v)),
-                        inspector_button("Delete").on_press(Message::DeleteMaterial(id))
-                    ]
-                    .spacing(6),
-                    column![
-                        text("Specific cutting force kc (N/mm²)").size(11),
-                        inspector_input("Unset", &kc)
-                            .on_input(move |v| Message::MaterialCuttingForceChanged(id, v)),
-                    ].spacing(3),
+                    text("Edit material").size(14),
+                    inspector_input("Material name", &material.name)
+                        .on_input(move |v| Message::MaterialRenamed(id, v)),
+                    text("Specific cutting force kc (N/mm²)").size(11),
+                    inspector_input("Unset", &kc)
+                        .on_input(move |v| Message::MaterialCuttingForceChanged(id, v)),
                     text(if invalid {
                         "Enter a finite positive kc, or leave blank. Invalid input is not saved."
                     } else {
                         "Effective kc for your cutting conditions. Blank disables force estimates."
-                    }).size(11).color(if invalid { palette::ERROR } else { INSPECTOR_MUTED }),
+                    })
+                    .size(11)
+                    .color(if invalid {
+                        palette::ERROR
+                    } else {
+                        INSPECTOR_MUTED
+                    }),
                 ]
-                .spacing(3),
+                .spacing(6),
             );
         }
-        list.push(
-            row![
-                inspector_input("New material", &self.new_material_name)
-                    .on_input(Message::NewMaterialNameChanged),
-                inspector_button("Add").on_press_maybe(
-                    (!self.new_material_name.trim().is_empty()).then_some(Message::AddMaterial)
-                )
-            ]
-            .spacing(6),
-        )
-        .into()
+        list.into()
     }
+
     pub(super) fn add_managed_material(&mut self) {
         let name = self.new_material_name.trim();
         if name.is_empty()
@@ -866,6 +942,8 @@ impl App {
             specific_cutting_force: None,
         });
         self.new_material_name.clear();
+        self.selected_material = Some(self.library.material_id_floor);
+        self.creating_material = false;
         self.library.save();
     }
     pub(super) fn rename_managed_material(&mut self, id: u64, name: String) {
@@ -910,6 +988,12 @@ impl App {
         }
         self.library.materials.retain(|m| m.id != id);
         self.material_force_inputs.remove(&id);
+        if self.selected_material == Some(id) {
+            self.selected_material = None;
+        }
+        if self.editing_material == Some(id) {
+            self.editing_material = None;
+        }
         self.library.save();
     }
     pub(super) fn operation_preset_tool(&self) -> Option<&cam_model::Tool> {
@@ -1100,6 +1184,21 @@ mod tests {
     }
     fn near(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn starter_material_button_adds_missing_materials_to_existing_library() {
+        let mut app = app();
+        app.new_material_name = "Pine".into();
+        app.add_managed_material();
+        let existing = app.library.materials[0].clone();
+        send(&mut app, Message::AddStarterMaterials);
+        assert_eq!(app.library.materials.len(), 10);
+        assert_eq!(app.library.materials[0], existing);
+        assert!(app.status.contains("9 starter"));
+        send(&mut app, Message::AddStarterMaterials);
+        assert_eq!(app.library.materials.len(), 10);
+        let _editor = app.managed_material_editor();
     }
 
     #[test]

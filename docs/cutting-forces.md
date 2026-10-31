@@ -3,6 +3,60 @@
 The operation inspector estimates nominal engagement. For loads based on the
 remaining stock, use [force mode in simulation](#force-mode-from-simulated-removal).
 
+## Starter materials
+
+New tool libraries include the editable starting values below. In an existing
+library, open **Tools → Materials → Add starter materials**. This adds missing
+names only; existing materials, IDs and coefficients are not changed. The
+button can also restore a deleted starter material on request.
+
+| Material | Approximate effective kc (N/mm²) |
+| --- | ---: |
+| Pine | 53 |
+| Oak | 80 |
+| Beech | 65 |
+| MDF | 65 |
+| Birch plywood | 170 |
+| Aluminium 6061-T6 | 1700 |
+| Aluminium 6082-T6 | 1700 |
+| Aluminium 5083 | 1500 |
+| Steel C15 / 1.0401 | 3500 |
+| Steel S355 / 1.0050 | 4350 |
+
+These are **rough starting estimates**, not material properties or guaranteed
+loads. The model does not automatically adjust them for chip thickness, grain,
+tool geometry or wear. Edit kc for the actual cutting conditions. In particular,
+solid wood and plywood vary with direction and composition; the solid-wood
+values are especially uncertain. They are not machine-limit or workholding
+recommendations.
+
+The estimates are derived as follows (rounded to avoid implying precision):
+
+* Pine and oak use a [wood-sawing reference](https://pmc.ncbi.nlm.nih.gov/articles/PMC8741902/)
+  of 53 N/mm² for dry pine at 0.15 mm chip thickness, with the paper's 1.5 oak
+  multiplier. This is a proxy for routing, not a measurement of a router cut.
+  Beech is a coarse 65 N/mm² proxy, guided by the relative loads in a
+  [milling comparison](https://df.tuzvo.sk/sites/default/files/06-02-21_0_0_0.pdf),
+  not a directly measured beech coefficient.
+* MDF uses the [measured milling fit](https://pmc.ncbi.nlm.nih.gov/articles/PMC6315737/)
+  `kc = 31.44 + 3.36 / h`, evaluated at an illustrative chip thickness
+  `h = 0.1 mm`. Birch plywood uses the [measured wood model](https://www.mdpi.com/2504-4494/10/9/339)
+  `kc = 53 / sqrt(h)` at the same chip thickness. Tool and board differences
+  can make the actual effective value substantially different.
+* For the two heat-treatable aluminium alloys, use [ISCAR's](https://www.iscar.com/Catalogs/Publication/english_1/ALUMINUM_MACHINING/ALUMINUM_MACHINING.pdf)
+  wrought-alloy reference `kc1 = 800`, `mc = 0.25`; for non-heat-treatable
+  5083 use the group reference `kc1 = 700`, `mc = 0.25`. Apply the
+  [Kienzle relation](https://www.iscar.rs/Catalogs/Publication/english_1/Cutting_tools_user_guide/Cutting_tools_user_guide.pdf)
+  `kc = kc1 × h^(-mc)` at illustrative `h = 0.05 mm`, with no additional rake
+  correction. These are group-level approximations, not alloy-specific tests.
+* For steel, apply that relation at `h = 0.05 mm` to the
+  [Kistler reference table](https://kistler.cdn.celum.cloud/SAPCommerce_Download_original/012-021e.pdf):
+  C15 `kc1 = 1820`, `mc = 0.22`; S355 `kc1 = 1990`, `mc = 0.26`.
+  The table's stated steel rake angle is 6°. Do not treat these converted values
+  as measured loads for a particular end mill.
+
+## Using cutting forces
+
 1. Open **Tools → Materials** and enter the material's **Specific cutting force kc
    (N/mm²)**. Use an effective coefficient appropriate to the material, chip
    thickness and cutter geometry. Blank means unknown; no default is assumed.

@@ -234,7 +234,10 @@ impl SimulationPlayer {
             }
             if prefs.toolpath_coloring == SimulationToolpathColoring::CuttingForce
                 && matches!(step.step, Step::Linear { .. } | Step::Arc { .. })
-                && !matches!(tag.kind, MoveKind::Link | MoveKind::Retract | MoveKind::Traverse)
+                && !matches!(
+                    tag.kind,
+                    MoveKind::Link | MoveKind::Retract | MoveKind::Traverse
+                )
             {
                 flush(&mut run, &mut scene);
                 self.add_force_motion(&mut scene, step_index, step, lo, hi, tag);
@@ -353,9 +356,20 @@ impl SimulationPlayer {
             vertex.color = match self.options.stock_coloring {
                 SimulationStockColoring::Material => material,
                 SimulationStockColoring::CuttingForce => {
-                    if self.preview.stock_machined.get(index).copied().unwrap_or(false) {
-                        super::forces::stock_surface_color(self.force_trace.as_ref(), self.preview.stock_cut_sources.get(index).copied().flatten())
-                    } else { material }
+                    if self
+                        .preview
+                        .stock_machined
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        super::forces::stock_surface_color(
+                            self.force_trace.as_ref(),
+                            self.preview.stock_cut_sources.get(index).copied().flatten(),
+                        )
+                    } else {
+                        material
+                    }
                 }
                 SimulationStockColoring::Operation => owner.map_or(material, identity_color),
                 SimulationStockColoring::Tool => owner
@@ -432,6 +446,33 @@ impl SimulationPlayer {
 
     fn display_menu(&self) -> Element<'_, Message> {
         let p = &self.options;
+        let force_help = |stock: bool| {
+            let mut help = if stock {
+                "Cutting force colors each cut face by the load when it was exposed; original stock keeps its material appearance."
+            } else {
+                "Cutting force colors feed moves by simulated material removal; rapid moves retain their normal colors."
+            }.to_string();
+            help.push_str(" Blue indicates low or no load, red the highest sampled load, and gray unavailable data. The force is an equivalent mean at the nominal tool diameter. Accuracy follows the stock grid.");
+            if let Some(hint) = self.force_material_hint() {
+                help.push_str("\n\n");
+                help.push_str(hint);
+            }
+            if self.forces_enabled() {
+                if let Some(error) = &self.force_error {
+                    help.push_str("\n\n");
+                    help.push_str(error);
+                } else if self.force_jobs.pending() {
+                    help.push_str("\n\nCalculating removal…");
+                } else if self.force_has_collision() {
+                    help.push_str(
+                        "\n\nA collision was detected; loads from contact onward are unavailable.",
+                    );
+                }
+            }
+            container(text(help).size(12).width(280))
+                .padding(10)
+                .style(popup_surface)
+        };
         let section = |i: usize, label: &str| {
             inspector_button(format!(
                 "{} {label}",
@@ -496,15 +537,16 @@ impl SimulationPlayer {
                         p.toolpath_mode,
                         SimulationOption::Mode,
                     ))
-                    .push(picker(
-                        "Color by", SimulationToolpathColoring::ALL, p.toolpath_coloring,
-                        SimulationOption::PathColoring,
+                    .push(delayed_tooltip(
+                        picker(
+                            "Color by",
+                            SimulationToolpathColoring::ALL,
+                            p.toolpath_coloring,
+                            SimulationOption::PathColoring,
+                        ),
+                        force_help(false),
+                        tooltip::Position::Left,
                     ));
-                if p.toolpath_coloring == SimulationToolpathColoring::CuttingForce
-                    && p.stock_coloring != SimulationStockColoring::CuttingForce
-                {
-                    list = list.push(self.force_legend());
-                }
             }
         }
         list = list
@@ -514,11 +556,15 @@ impl SimulationPlayer {
             list = list.push(check("Show stock", p.show_stock, SimulationOption::Stock));
             if p.show_stock {
                 list = list
-                    .push(picker(
-                        "Coloring",
-                        SimulationStockColoring::ALL,
-                        p.stock_coloring,
-                        SimulationOption::Coloring,
+                    .push(delayed_tooltip(
+                        picker(
+                            "Coloring",
+                            SimulationStockColoring::ALL,
+                            p.stock_coloring,
+                            SimulationOption::Coloring,
+                        ),
+                        force_help(true),
+                        tooltip::Position::Left,
                     ))
                     .push(picker(
                         "Material",
@@ -541,11 +587,6 @@ impl SimulationPlayer {
                         p.transparent_stock,
                         SimulationOption::TransparentStock,
                     ));
-                if p.stock_coloring == SimulationStockColoring::CuttingForce {
-                    list = list
-                        .push(text("Cut faces retain the force of the move that exposed them. Original stock keeps its material appearance.").size(11))
-                        .push(self.force_legend());
-                }
                 if p.stock_coloring == SimulationStockColoring::Comparison {
                     list = list
                         .push(text(format!("Tolerance  {:.3} mm", p.comparison_tolerance)).size(12))

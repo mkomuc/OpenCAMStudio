@@ -12,6 +12,8 @@ struct Dependencies {
     adaptive_domain_revision: u32,
     #[serde(default)]
     profile_lead_revision: u32,
+    #[serde(default)]
+    profile_finish_revision: u32,
     operation: Operation,
     heights: Heights,
     tools: Vec<Tool>,
@@ -99,6 +101,8 @@ impl OperationCache {
         let key = Dependencies {
             // Recompute persisted profiles generated before automatic lead placement.
             profile_lead_revision: u32::from(matches!(op, Operation::Profile(_))),
+            // Recompute persisted profiles created before the roughing allowance fix.
+            profile_finish_revision: 2 * u32::from(matches!(op, Operation::Profile(_))),
             adaptive_domain_revision: if matches!(op, Operation::Parallel(_)) {
                 crate::ParallelStrategy::DOMAIN_REVISION
             } else if matches!(op, Operation::Adaptive(_)) {

@@ -3,8 +3,8 @@
 use super::*;
 use crate::jobs::{JobInputs, JobService};
 use crate::settings::{
-    SimulationPrefs, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathMode,
-    SimulationToolpathColoring,
+    SimulationPrefs, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathColoring,
+    SimulationToolpathMode,
 };
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use iced::widget::column;
@@ -315,7 +315,8 @@ impl SimulationPlayer {
         }
         let mut inputs = self.inputs.clone();
         inputs.preview_program = Some(self.timeline.prefix(self.position));
-        inputs.stock_force_surfaces = self.options.stock_coloring == SimulationStockColoring::CuttingForce;
+        inputs.stock_force_surfaces =
+            self.options.stock_coloring == SimulationStockColoring::CuttingForce;
         self.requested = self.position;
         self.jobs.start(
             self.source.revision,
@@ -479,7 +480,9 @@ impl SimulationPlayer {
             if let Some(step) = self.timeline.steps.get(index).filter(|s| s.end > s.start) {
                 let scale = ((self.requested - step.start) / (step.end - step.start)).clamp(0., 1.);
                 for source in outcome.stock_cut_sources.iter_mut().flatten() {
-                    if source.step_index == index { source.fraction *= scale; }
+                    if source.step_index == index {
+                        source.fraction *= scale;
+                    }
                 }
             }
         }
@@ -529,7 +532,10 @@ impl SimulationPlayer {
         self.refresh_display();
     }
     pub fn needs_tick(&self) -> bool {
-        self.playing || self.jobs.needs_poll() || self.force_jobs.needs_poll() || self.comparison.pending()
+        self.playing
+            || self.jobs.needs_poll()
+            || self.force_jobs.needs_poll()
+            || self.comparison.pending()
     }
     /// Follow the rendered frame, including its active tool, when seeking in
     /// either direction. The tool and stock must describe the same instant.

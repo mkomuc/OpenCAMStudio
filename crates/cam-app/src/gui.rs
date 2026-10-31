@@ -2195,6 +2195,9 @@ struct App {
     edited_tool_input: Option<Field>,
     preset_buffers: BTreeMap<u64, BTreeMap<PresetField, String>>,
     new_material_name: String,
+    selected_material: Option<u64>,
+    editing_material: Option<u64>,
+    creating_material: bool,
     material_force_inputs: BTreeMap<u64, String>,
     /// Session-only what-if engagement; None identifies an unsaved creation draft.
     cutting_force_inputs: BTreeMap<(u64, Option<u32>), [String; 3]>,
@@ -2954,8 +2957,13 @@ enum Message {
     PresetValueChanged(PresetField, String),
     OperationPresetPicked(PresetChoice),
     SetupMaterialPicked(MaterialChoice),
+    SelectMaterial(u64),
+    NewMaterial,
+    EditMaterial,
+    EditMaterialRow(u64),
     NewMaterialNameChanged(String),
     AddMaterial,
+    AddStarterMaterials,
     MaterialRenamed(u64, String),
     MaterialCuttingForceChanged(u64, String),
     CuttingForceCustomToggled(u32, bool),
@@ -3601,6 +3609,9 @@ impl App {
             edited_tool_input: None,
             preset_buffers: BTreeMap::new(),
             new_material_name: String::new(),
+            selected_material: None,
+            editing_material: None,
+            creating_material: false,
             material_force_inputs: BTreeMap::new(),
             cutting_force_inputs: BTreeMap::new(),
             show_materials: false,
@@ -6580,7 +6591,8 @@ impl App {
                 }
             }
             Message::CancelOp => {
-                self.cutting_force_inputs.remove(&(self.controller.inspection_setup().id, None));
+                self.cutting_force_inputs
+                    .remove(&(self.controller.inspection_setup().id, None));
                 self.geometry_editor = None;
                 self.cad_pending_kind = None;
                 self.cad_filter_explicit = false;
@@ -6612,8 +6624,11 @@ impl App {
                     match result {
                         Ok(id) => {
                             let setup_id = self.controller.inspection_setup().id;
-                            if let Some(inputs) = self.cutting_force_inputs.remove(&(setup_id, None)) {
-                                self.cutting_force_inputs.insert((setup_id, Some(id)), inputs);
+                            if let Some(inputs) =
+                                self.cutting_force_inputs.remove(&(setup_id, None))
+                            {
+                                self.cutting_force_inputs
+                                    .insert((setup_id, Some(id)), inputs);
                             }
                             // The creation draft was used to stage the allowance, but
                             // the committed setup is now the source of truth for the
@@ -7610,6 +7625,8 @@ impl App {
             Message::CloseMaterials => {
                 // Valid entries are saved immediately; abandon incomplete input on close.
                 self.material_force_inputs.clear();
+                self.editing_material = None;
+                self.creating_material = false;
                 self.show_materials = false;
             }
             Message::ToolDetailChanged(field, value) => {
@@ -7660,11 +7677,41 @@ impl App {
                     };
                 }
             }
+            Message::SelectMaterial(id) => {
+                self.selected_material = Some(id);
+                self.editing_material = None;
+                self.creating_material = false;
+            }
+            Message::NewMaterial => {
+                self.creating_material = true;
+                self.editing_material = None;
+                self.new_material_name.clear();
+            }
+            Message::EditMaterialRow(id) => {
+                self.selected_material = Some(id);
+                self.editing_material = Some(id);
+                self.creating_material = false;
+            }
+            Message::EditMaterial => {
+                self.editing_material = self.selected_material;
+                self.creating_material = false;
+            }
             Message::NewMaterialNameChanged(name) => self.new_material_name = name,
             Message::AddMaterial => self.add_managed_material(),
+            Message::AddStarterMaterials => {
+                let count = self.library.add_starter_materials();
+                if count > 0 {
+                    self.library.save();
+                }
+                self.status = format!("Added {count} starter material(s).");
+            }
             Message::MaterialRenamed(id, name) => self.rename_managed_material(id, name),
-            Message::MaterialCuttingForceChanged(id, value) => self.edit_material_cutting_force(id, value),
-            Message::CuttingForceCustomToggled(id, enabled) => self.toggle_custom_cutting_force(id, enabled),
+            Message::MaterialCuttingForceChanged(id, value) => {
+                self.edit_material_cutting_force(id, value)
+            }
+            Message::CuttingForceCustomToggled(id, enabled) => {
+                self.toggle_custom_cutting_force(id, enabled)
+            }
             Message::CuttingForceInputChanged(id, index, value) => {
                 let key = self.cutting_force_key(id);
                 if let Some(inputs) = self.cutting_force_inputs.get_mut(&key) {

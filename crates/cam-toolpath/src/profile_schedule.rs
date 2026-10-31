@@ -119,6 +119,10 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
     } else {
         0
     };
+    // Without radial clearing, the first contour cut must still leave the
+    // finishing allowance instead of going straight to the final wall.
+    let contour_rough = usize::from(p.finishing && op.stepover == 0.);
+    let stages = contour_rough + count + repeats;
     let mut contours: Vec<_> = op.contours().enumerate().collect();
     if !p.preserve_order {
         let mut from = op.start.unwrap_or([0., 0.]);
@@ -149,7 +153,7 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
     let estimated = levels
         .len()
         .max(rough_levels.len())
-        .saturating_mul(count + repeats)
+        .saturating_mul(stages)
         .saturating_mul(contours.len());
     if estimated > cam_model::MAX_PROFILE_LEVELS {
         return StrategyResult {
@@ -163,23 +167,24 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
     // Without Rough final, intermediate cuts use the regular maximum stepdown.
     let mut jobs = Vec::with_capacity(estimated);
     for (order_index, _) in contours.iter().enumerate() {
-        for radial in 0..count + repeats {
-            let depths = if !p.rough_final && radial + 1 < count {
+        for radial in 0..stages {
+            let is_rough = radial < contour_rough;
+            let depths = if !p.rough_final && radial + 1 < contour_rough + count {
                 &rough_levels
             } else {
                 &levels
             };
             for (level, &z) in depths.iter().enumerate() {
                 let final_depth = level + 1 == depths.len();
-                if p.finish_only_final && !final_depth && (op.stepover > 0. || radial > 0) {
+                if p.finishing && p.finish_only_final && !final_depth && !is_rough {
                     continue;
                 }
-                let previous = if level == 0 || p.finish_only_final {
+                let previous = if level == 0 || (p.finish_only_final && !is_rough) {
                     top
                 } else {
                     depths[level - 1]
                 };
-                jobs.push((order_index, z, radial, previous, final_depth, level));
+                jobs.push((order_index, z, radial, previous, level));
             }
         }
     }
@@ -194,7 +199,7 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
         }
     });
     let mut result = StrategyResult::default();
-    // Rough first at the outermost finishing offset; explicit finishing follows.
+    // Leave one spacing of stock for each finishing cut; the last reaches the wall.
     if op.stepover > 0. {
         let mut previous = top;
         for &z in if p.rough_final {
@@ -211,7 +216,9 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
             let mut rough = op.clone();
             rough.depth = -z;
             rough.stepdown = previous - z;
-            rough.offset += (count.saturating_sub(1)) as f64 * p.finish_stepover;
+            if p.finishing {
+                rough.offset += count as f64 * p.finish_stepover;
+            }
             rough.passes = ProfilePasses {
                 stock_boundary: p.stock_boundary.clone(),
                 ..Default::default()
@@ -232,7 +239,7 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
             return result;
         }
     }
-    for (contour, z, radial, previous, final_depth, level) in jobs {
+    for (contour, z, radial, previous, level) in jobs {
         if cancel.is_cancelled() {
             return StrategyResult {
                 cancelled: true,
@@ -251,12 +258,19 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
         if p.both_ways && !pass.closed && level % 2 == 1 {
             pass.clearing.climb = !pass.clearing.climb;
         }
-        pass.offset += (count - 1 - radial.min(count - 1)) as f64 * p.finish_stepover
-            + (z + op.depth) * p.taper_angle.to_radians().tan();
+        let is_rough = radial < contour_rough;
+        let finish_index = radial.saturating_sub(contour_rough);
+        let spacings = if is_rough {
+            count
+        } else {
+            count - 1 - finish_index.min(count - 1)
+        };
+        pass.offset +=
+            spacings as f64 * p.finish_stepover + (z + op.depth) * p.taper_angle.to_radians().tan();
         pass.depth = -z;
         pass.stepdown = previous - z;
         pass.stepover = 0.;
-        if p.finishing && p.finish_feed > 0. && (!p.finish_only_final || final_depth) {
+        if p.finishing && !is_rough && p.finish_feed > 0. {
             pass.feed = p.finish_feed;
         }
         // Keep only emission parameters; scheduling owns depth/offset stages.

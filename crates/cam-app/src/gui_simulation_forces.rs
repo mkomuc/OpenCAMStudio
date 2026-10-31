@@ -153,6 +153,25 @@ pub(super) fn stock_surface_color(
 }
 
 impl SimulationPlayer {
+    pub(super) fn force_has_collision(&self) -> bool {
+        self.force_trace
+            .as_ref()
+            .is_some_and(|trace| trace.has_collision)
+    }
+
+    pub(super) fn force_material_hint(&self) -> Option<&'static str> {
+        match &self.force_material {
+            None if self.inputs.document.setup().material_id.is_none() => Some(
+                "Cutting force needs a stock material. Select one in Setup → Stock and set its kc in Tools → Materials.",
+            ),
+            None => Some("The setup's stock material is unavailable in the material library. Select a managed material in Setup → Stock."),
+            Some(material) if material.specific_cutting_force.is_none() => Some(
+                "Set the stock material's specific cutting force kc in Tools → Materials to calculate cutting force.",
+            ),
+            Some(_) => None,
+        }
+    }
+
     pub(super) fn forces_enabled(&self) -> bool {
         self.options.toolpath_coloring == SimulationToolpathColoring::CuttingForce
             || self.options.stock_coloring == SimulationStockColoring::CuttingForce
@@ -178,6 +197,7 @@ impl SimulationPlayer {
         Some(
             canvas::Canvas::new(legend::ForceLegend {
                 maximum,
+                power_w: self.current_cutting_load().map(|load| load.cutting_power_w),
                 reserved_left,
                 gizmo_size,
             })
@@ -328,30 +348,7 @@ impl SimulationPlayer {
     }
 
     pub(super) fn force_legend(&self) -> Element<'_, Message> {
-        let mut panel = column![text("Force from simulated material removal").size(12)].spacing(6);
-        if let Some(material) = &self.force_material {
-            panel = panel.push(
-                text(format!(
-                    "Material: {} · kc {} N/mm²",
-                    material.name,
-                    material
-                        .specific_cutting_force
-                        .map_or("unset".into(), |v| v.to_string())
-                ))
-                .size(11),
-            );
-        }
-        if self
-            .force_material
-            .as_ref()
-            .and_then(|m| m.specific_cutting_force)
-            .is_none()
-        {
-            panel = panel.push(
-                text("Choose a managed stock material and set its kc in Tools → Materials.")
-                    .size(11),
-            );
-        }
+        let mut panel = column![].spacing(6);
         if self.force_jobs.pending() {
             let progress = self
                 .force_jobs
@@ -389,30 +386,36 @@ impl SimulationPlayer {
                 );
             }
         }
-        panel.push(text("Blue: air/low load · red: highest sampled load · gray: unavailable. Rapids retain move colors. Equivalent mean force at the nominal tool diameter; not peak tooth force. Accuracy follows the stock grid.").size(11).color(INSPECTOR_MUTED)).into()
+        panel.into()
     }
 
-    pub(super) fn force_information(&self) -> Element<'_, Message> {
-        let Some(trace) = &self.force_trace else {
-            return self.force_legend();
-        };
-        let current = self
+    /// Load at the displayed stock frame, shared by the inspector and viewport legend.
+    fn current_cutting_load(&self) -> Option<CuttingLoad> {
+        let trace = self.force_trace.as_ref()?;
+        let (index, step) = self
             .timeline
             .steps
             .iter()
             .enumerate()
-            .find(|(_, s)| s.start <= self.rendered && s.end > self.rendered);
-        let load = current.and_then(|(index, step)| {
-            let fraction = (self.rendered - step.start) / (step.end - step.start);
-            trace.ranges[index]
-                .clone()
-                .find(|&i| {
-                    trace.samples[i].start_fraction <= fraction
-                        && trace.samples[i].end_fraction > fraction
-                })
-                .and_then(|i| trace.loads[i])
-        });
-        match load {
+            .find(|(_, step)| step.start <= self.rendered && step.end > self.rendered)?;
+        let fraction = (self.rendered - step.start) / (step.end - step.start);
+        trace.ranges[index]
+            .clone()
+            .find(|&i| {
+                trace.samples[i].start_fraction <= fraction
+                    && trace.samples[i].end_fraction > fraction
+            })
+            .and_then(|i| trace.loads[i])
+    }
+
+    pub(super) fn force_information(&self) -> Element<'_, Message> {
+        if let Some(hint) = self.force_material_hint() {
+            return text(hint).size(11).into();
+        }
+        if self.force_trace.is_none() {
+            return self.force_legend();
+        }
+        match self.current_cutting_load() {
             Some(load) => text(format!("Equivalent tangential force: {:.3} N\nNet cutting power: {:.3} W\nSpindle torque: {:.3} N·m\nRemoval rate: {:.3} cm³/min",
                 load.tangential_force_n, load.cutting_power_w, load.spindle_torque_nm, load.removal_rate_mm3_min / 1000.)).size(12).into(),
             None => text("Force unavailable at this frame (non-cutting motion, missing data, drilling or collision).").size(11).into(),
@@ -420,6 +423,9 @@ impl SimulationPlayer {
     }
 
     pub(super) fn force_statistics(&self) -> Element<'_, Message> {
+        if let Some(hint) = self.force_material_hint() {
+            return text(hint).size(11).into();
+        }
         if !self.forces_enabled() {
             return text("Enable Toolpath → Color by → Cutting force to analyze actual removal.")
                 .size(11)
@@ -540,6 +546,82 @@ mod tests {
     }
 
     #[test]
+    fn material_hint_distinguishes_missing_selection_library_entry_and_coefficient() {
+        let mut player = player();
+        assert!(player.force_material_hint().is_none());
+        player.sync_force_material(&library(None));
+        assert!(player
+            .force_material_hint()
+            .unwrap()
+            .contains("specific cutting force kc"));
+        player.sync_force_material(&ToolLibrary::default());
+        assert!(player
+            .force_material_hint()
+            .unwrap()
+            .contains("unavailable"));
+        Arc::make_mut(&mut player.inputs.document)
+            .setup_mut()
+            .material_id = None;
+        assert!(player.force_material_hint().unwrap().contains("Select one"));
+    }
+
+    #[test]
+    fn generated_profile_requires_managed_material_and_produces_force_when_configured() {
+        let mut controller = AppController::new(crate::default_machine());
+        controller.open_dxf(SAMPLE_DXF, "synthetic.dxf").unwrap();
+        controller.edit_setup(|setup| {
+            setup.tools = vec![cam_model::Tool {
+                number: 1,
+                diameter: 4.,
+                length: 30.,
+                ..Default::default()
+            }];
+            setup.operations.clear();
+            setup.material_id = None;
+            setup.stock = cam_model::Stock::BoundingBox {
+                x_offset: 4.,
+                y_offset: 4.,
+                top: 0.,
+                thickness: 4.,
+            };
+        });
+        controller.new_operation(OpKind::Profile);
+        let id = controller.selected_operation().unwrap().id();
+        let outcome = controller.run(&cam_toolpath::CancelToken::new());
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            outcome.diagnostics
+        );
+        let program = outcome.program.clone();
+        let mut player = player();
+        player.inputs = controller.job_inputs();
+        player.inputs.preview_resolution = Some(0.25);
+        player.timeline = Timeline::new(&program, 2000.).unwrap();
+        player.force_material = None;
+        assert!(player.force_material_hint().unwrap().contains("Select one"));
+        enable(&mut player);
+        let trace = player.force_trace.as_ref().unwrap();
+        assert!(trace.operations[&id].unknown > 0);
+        assert!(trace.loads.iter().all(Option::is_none));
+
+        // Selecting the managed stock material enables the same removal trace;
+        // changing its coefficient does not require resimulating the stock.
+        Arc::make_mut(&mut player.inputs.document)
+            .setup_mut()
+            .material_id = Some(7);
+        let samples = trace.samples.clone();
+        player.sync_force_material(&library(Some(1500.)));
+        assert!(player.force_material_hint().is_none());
+        let trace = player.force_trace.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&samples, &trace.samples));
+        assert!(trace.operations[&id].volume > 0.);
+        assert!(trace.operations[&id].seconds > 0.);
+        assert!(trace.max_force > 0.);
+    }
+
+    #[test]
     fn analysis_colors_actual_removal_and_repeat_passes_without_changing_playback_stock() {
         let mut player = player();
         let document = player.inputs.document.clone();
@@ -597,6 +679,42 @@ mod tests {
         let _info = player.force_information();
         let _stats = player.force_statistics();
         let _legend = player.force_legend();
+    }
+
+    #[test]
+    fn current_power_tracks_rendered_sample_and_unavailable_frames() {
+        let mut player = player();
+        assert!(player.current_cutting_load().is_none());
+        enable(&mut player);
+        let trace = player.force_trace.as_ref().unwrap();
+        let frames: Vec<_> = trace
+            .samples
+            .iter()
+            .zip(&trace.loads)
+            .filter_map(|(sample, load)| {
+                let load = (*load)?;
+                let step = &player.timeline.steps[sample.step_index];
+                let fraction = (sample.start_fraction + sample.end_fraction) / 2.;
+                Some((
+                    step.start + fraction * (step.end - step.start),
+                    load.cutting_power_w,
+                ))
+            })
+            .collect();
+        let cutting = *frames.iter().find(|(_, power)| *power > 0.).unwrap();
+        let air = *frames.iter().find(|(_, power)| *power == 0.).unwrap();
+        for (time, power) in [cutting, air, cutting] {
+            player.rendered = time;
+            assert_eq!(
+                player.current_cutting_load().unwrap().cutting_power_w,
+                power
+            );
+        }
+        player.rendered = player.timeline.duration;
+        assert!(player.current_cutting_load().is_none());
+        player.rendered = cutting.0;
+        player.sync_force_material(&library(None));
+        assert!(player.current_cutting_load().is_none());
     }
 
     #[test]

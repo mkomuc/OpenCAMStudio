@@ -151,7 +151,7 @@ impl Number {
     pub(super) fn help(self) -> &'static str {
         match self {
         Self::FinishCount => "Number of radial finishing cuts, including the final wall. Each earlier cut is one finish spacing farther from the wall.",
-        Self::FinishStep => "Radial spacing between finishing cuts. This is separate from the roughing stepover.",
+        Self::FinishStep => "Radial spacing between finishing cuts and between roughing and the first finishing cut. This is separate from the roughing stepover.",
         Self::FinishFeed => "Feed for the finishing stage. Zero inherits the cutting feed.",
         Self::SpringPasses => "Additional repeats of the final wall path to remove material left by tool deflection.",
         Self::FloorLeave => "Signed axial allowance above the selected bottom. Positive leaves material; negative cuts below the nominal bottom. Linked CAD requires a nonnegative value.",

@@ -205,7 +205,16 @@ fn edits_patterns_setup_transfers_and_shop_data_use_real_application_history() {
             json!({"id":material,"name":"Aluminium 6082"}),
         )
         .unwrap();
-    assert_eq!(session.library.materials[0].name, "Aluminium 6082");
+    assert_eq!(
+        session
+            .library
+            .materials
+            .iter()
+            .find(|m| Some(m.id) == material.as_u64())
+            .unwrap()
+            .name,
+        "Aluminium 6082"
+    );
     let tools_before = session.library.tools.len();
     session
         .call("duplicate_library_tool", json!({"index":0}))

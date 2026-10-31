@@ -992,7 +992,12 @@ fn control_air_point(point: Point, normal: (f64, f64), comp: Option<(CutterComp,
 /// loop bounds the protected side of the cut. For an outside profile, represent
 /// the unbounded exterior as a large rectangle with that loop removed; its outer
 /// edge is placed far enough away that it cannot constrain a valid entry.
-fn profile_plunge_guard(pts: &[Point], air_sign: f64, plunge: Plunge, entry: Point) -> Option<Vec<Polygon>> {
+fn profile_plunge_guard(
+    pts: &[Point],
+    air_sign: f64,
+    plunge: Plunge,
+    entry: Point,
+) -> Option<Vec<Polygon>> {
     let Plunge::Helix { radius, .. } = plunge else {
         return Some(Vec::new());
     };

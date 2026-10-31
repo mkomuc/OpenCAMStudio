@@ -432,7 +432,12 @@ impl App {
                     .height(Length::Fill),
             );
         }
-        if let Some(legend) = self.simulation.as_ref().and_then(|player| player.force_viewport_legend(viewport_browser_width, self.show_gizmo.then_some(self.gizmo_size))) {
+        if let Some(legend) = self.simulation.as_ref().and_then(|player| {
+            player.force_viewport_legend(
+                viewport_browser_width,
+                self.show_gizmo.then_some(self.gizmo_size),
+            )
+        }) {
             overlays = overlays.push(legend);
         }
         layers = layers.push(overlays.width(Length::Fill).height(Length::Fill));

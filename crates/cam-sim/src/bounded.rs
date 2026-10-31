@@ -84,7 +84,9 @@ impl Heightfield {
             let cut = self.cuts.len() as u32;
             self.cuts.push(sweep);
             cut
-        } else { u32::MAX };
+        } else {
+            u32::MAX
+        };
         let (y0, y1) = self.index_range(
             a[1].min(b[1]) - tool.radius,
             a[1].max(b[1]) + tool.radius,
@@ -250,13 +252,19 @@ impl Heightfield {
     fn air_cut(&self, x: usize, y: usize, z: f32) -> u32 {
         if let Some(spans) = self.bounded.get(&(y * self.nx + x)) {
             if let Some(span) = spans.iter().find(|s| s.lower <= z && s.upper >= z) {
-                return if span.lower_source != u32::MAX { span.lower_source } else { span.upper_source };
+                return if span.lower_source != u32::MAX {
+                    span.lower_source
+                } else {
+                    span.upper_source
+                };
             }
         }
         let mut cut = self.winners[y * self.nx + x];
         let mut previous = self.previous_layers[y * self.nx + x];
         while let Some(layer) = self.layers.get(previous as usize) {
-            if z <= layer.height { break; }
+            if z <= layer.height {
+                break;
+            }
             cut = layer.cut;
             previous = layer.previous;
         }

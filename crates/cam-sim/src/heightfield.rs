@@ -155,7 +155,9 @@ impl Heightfield {
     }
 
     pub(crate) fn set_cut_source(&mut self, step_index: usize, range: (f64, f64)) {
-        self.cut_source = self.surface_tracking.then_some(CutSource { step_index, range });
+        self.cut_source = self
+            .surface_tracking
+            .then_some(CutSource { step_index, range });
     }
 
     pub(crate) fn storage_bytes(&self) -> usize {
@@ -252,9 +254,14 @@ impl Heightfield {
                     if bottom < self.z[index] {
                         let previous_op = self.operation_at(ix, iy);
                         let previous_cut = self.winners[index];
-                        let different_source = self.surface_tracking && self.cuts.get(previous_cut as usize)
-                            .is_some_and(|previous| previous.source != sweep.source);
-                        if self.z[index] < self.top && (previous_op != operation || different_source) {
+                        let different_source = self.surface_tracking
+                            && self
+                                .cuts
+                                .get(previous_cut as usize)
+                                .is_some_and(|previous| previous.source != sweep.source);
+                        if self.z[index] < self.top
+                            && (previous_op != operation || different_source)
+                        {
                             let layer = self.layers.len() as u32;
                             self.layers.push(CutLayer {
                                 height: self.z[index],
@@ -264,7 +271,11 @@ impl Heightfield {
                             });
                             self.previous_layers[index] = layer;
                         }
-                        self.track_removed_interval(index, f64::from(bottom), f64::from(self.z[index]));
+                        self.track_removed_interval(
+                            index,
+                            f64::from(bottom),
+                            f64::from(self.z[index]),
+                        );
                         self.z[index] = bottom;
                         self.winners[index] = id;
                     }
@@ -411,13 +422,22 @@ impl Heightfield {
     /// Account only for material that still exists in this column, including
     /// sparse voids left by thread teeth. Called before changing the column.
     pub(super) fn track_removed_interval(&mut self, index: usize, lower: f64, upper: f64) {
-        let Some((floor, _)) = self.removal_tracking else { return };
+        let Some((floor, _)) = self.removal_tracking else {
+            return;
+        };
         let lower = lower.max(floor);
         let upper = upper.min(f64::from(self.z[index]));
-        if upper <= lower { return; }
-        let void = self.bounded.get(&index).map_or(0., |spans| spans.iter().map(|span| {
-            (upper.min(f64::from(span.upper)) - lower.max(f64::from(span.lower))).max(0.)
-        }).sum::<f64>());
+        if upper <= lower {
+            return;
+        }
+        let void = self.bounded.get(&index).map_or(0., |spans| {
+            spans
+                .iter()
+                .map(|span| {
+                    (upper.min(f64::from(span.upper)) - lower.max(f64::from(span.lower))).max(0.)
+                })
+                .sum::<f64>()
+        });
         let x = index % self.nx;
         let y = index / self.nx;
         let dx = (self.max[0] - self.origin[0] - x as f64 * self.res).clamp(0., self.res);

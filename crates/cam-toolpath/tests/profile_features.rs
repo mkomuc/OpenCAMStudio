@@ -117,7 +117,12 @@ fn automatic_inside_entry_preserves_the_requested_lead_shape() {
                 if tag.kind == MoveKind::LeadIn)
             })
             .collect();
-        assert_eq!(entries.len(), 2, "{lead:?}: {:?}", r.program.steps());
+        assert_eq!(
+            entries.len(),
+            if finishing { 4 } else { 2 },
+            "{lead:?}: {:?}",
+            r.program.steps()
+        );
         for entry in entries {
             assert_eq!(
                 matches!(entry, Step::Arc { .. }),
@@ -131,7 +136,7 @@ fn automatic_inside_entry_preserves_the_requested_lead_shape() {
                 .filter(|step| matches!(step,
             Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.kind == MoveKind::LeadOut))
                 .count(),
-            2
+            if finishing { 4 } else { 2 }
         );
         assert!(!r.diagnostics.iter().any(|d| d.message.contains("omitted")));
     }
@@ -165,30 +170,37 @@ fn leads_that_cannot_fit_warn_once_and_preserve_selected_positions() {
 }
 
 #[test]
-fn saved_profiles_without_the_lead_placement_revision_are_recomputed() {
-    let op = Operation::Profile(profile());
-    let env = JobEnv {
-        heights: Heights::new(8., 3., 0.),
-        tools: &[],
-        stock: None,
-        spindle: SpindleDir::Cw,
-    };
-    let token = CancelToken::new();
-    let mut cache = cam_toolpath::OperationCache::default();
-    cache.compute(&op, &env, &token, StrategyResult::default);
-    let mut saved = serde_json::to_value(cache).unwrap();
-    saved["entries"][0]["key"]
-        .as_object_mut()
-        .unwrap()
-        .remove("profile_lead_revision");
-    let mut cache: cam_toolpath::OperationCache = serde_json::from_value(saved).unwrap();
-    cache.compute(&op, &env, &token, StrategyResult::default);
-    assert_eq!(cache.stats.computed, 1);
-    assert_eq!(cache.stats.reused, 0);
-    cache.compute(&op, &env, &token, || {
-        panic!("current profile must be reused")
-    });
-    assert_eq!(cache.stats.reused, 1);
+fn saved_profiles_with_outdated_finish_revisions_are_recomputed() {
+    for revision in [None, Some(1)] {
+        let op = Operation::Profile(profile());
+        let env = JobEnv {
+            heights: Heights::new(8., 3., 0.),
+            tools: &[],
+            stock: None,
+            spindle: SpindleDir::Cw,
+        };
+        let token = CancelToken::new();
+        let mut cache = cam_toolpath::OperationCache::default();
+        cache.compute(&op, &env, &token, StrategyResult::default);
+        let mut saved = serde_json::to_value(cache).unwrap();
+        let key = saved["entries"][0]["key"].as_object_mut().unwrap();
+        if let Some(revision) = revision {
+            key.insert(
+                "profile_finish_revision".into(),
+                serde_json::json!(revision),
+            );
+        } else {
+            key.remove("profile_finish_revision");
+        }
+        let mut cache: cam_toolpath::OperationCache = serde_json::from_value(saved).unwrap();
+        cache.compute(&op, &env, &token, StrategyResult::default);
+        assert_eq!(cache.stats.computed, 1);
+        assert_eq!(cache.stats.reused, 0);
+        cache.compute(&op, &env, &token, || {
+            panic!("current profile must be reused")
+        });
+        assert_eq!(cache.stats.reused, 1);
+    }
 }
 
 #[test]
@@ -235,7 +247,7 @@ fn finishing_and_spring_passes_have_distinct_offsets_and_feed() {
     op.passes.finish_feed = 125.;
     let r = run(op);
     assert!(!r.has_errors(), "{:?}", r.diagnostics);
-    assert_eq!(plunges(&r).len(), 10);
+    assert_eq!(plunges(&r).len(), 12);
     assert!(r
         .program
         .steps()
@@ -246,14 +258,103 @@ fn finishing_and_spring_passes_have_distinct_offsets_and_feed() {
                 Some(*feed),
             _ => None,
         })
-        .all(|f| f == 125.));
+        .all(|f| f == 125. || f == 300.));
     let starts: Vec<_> = plunges(&r)
         .into_iter()
         .filter(|p| p.z == -4.)
         .map(|p| p.y)
         .collect();
-    for (actual, expected) in starts.iter().zip([-4., -3.5, -3., -3., -3.]) {
+    for (actual, expected) in starts.iter().zip([-4.5, -4., -3.5, -3., -3., -3.]) {
         assert!((actual - expected).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn roughing_leaves_a_spacing_for_every_finish_pass() {
+    for (count, stepover) in [1, 3]
+        .into_iter()
+        .flat_map(|count| [0., 0.5, 2.].map(move |stepover| (count, stepover)))
+    {
+        let mut op = profile();
+        op.stepover = stepover;
+        op.offset = 0.2;
+        op.passes.finishing = true;
+        op.passes.finish_count = count;
+        op.passes.finish_stepover = 0.5;
+        op.passes.finish_feed = 125.;
+        let r = run(op);
+        assert!(!r.has_errors(), "{:?}", r.diagnostics);
+
+        let rough: Vec<_> = r
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, feed, tag, .. }
+                    if tag.kind == MoveKind::Cutting && *feed == 300. =>
+                {
+                    Some(*to)
+                }
+                Step::Arc { end, feed, tag, .. }
+                    if tag.kind == MoveKind::Cutting && *feed == 300. =>
+                {
+                    Some(*end)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!rough.is_empty());
+        for point in rough {
+            let dx = (-point.x).max(0.).max(point.x - 20.);
+            let dy = (-point.y).max(0.).max(point.y - 20.);
+            assert!(
+                dx.hypot(dy) >= 3.2 + count as f64 * 0.5 - 0.02,
+                "roughing too close: {point:?}"
+            );
+        }
+        let starts: Vec<_> = plunges(&r)
+            .into_iter()
+            .rev()
+            .take((count * 2) as usize)
+            .collect();
+        assert!(
+            starts.iter().any(|point| (point.y + 3.2).abs() < 1e-6),
+            "final wall missing: {starts:?}"
+        );
+    }
+}
+
+#[test]
+fn a_single_finish_pass_without_radial_clearing_leaves_then_cuts_the_allowance() {
+    for final_only in [false, true] {
+        let mut op = profile();
+        op.chain = Contour::new(vec![
+            Point::new(-50., 30.),
+            Point::new(50., 30.),
+            Point::new(50., -30.),
+            Point::new(-50., -30.),
+        ]);
+        op.start = Some([0., -30.]);
+        op.passes.finishing = true;
+        op.passes.finish_stepover = 0.5;
+        op.passes.finish_only_final = final_only;
+        op.passes.finish_feed = 125.;
+        let result = run(op);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let starts: Vec<_> = plunges(&result).into_iter().map(|p| (p.y, p.z)).collect();
+        let expected = if final_only {
+            vec![(-33.5, -2.), (-33.5, -4.), (-33., -4.)]
+        } else {
+            vec![(-33.5, -2.), (-33., -2.), (-33.5, -4.), (-33., -4.)]
+        };
+        assert_eq!(starts, expected);
+        for step in result.program.steps() {
+            if let Step::Linear { to, feed, tag } = step {
+                if tag.kind == MoveKind::Cutting && to.x.abs() < 50. && to.y < -30. {
+                    assert_eq!(*feed, if to.y < -33.25 { 300. } else { 125. });
+                }
+            }
+        }
     }
 }
 
@@ -267,7 +368,7 @@ fn finish_only_final_keeps_rough_depths_and_limits_finish_stages() {
     op.passes.finish_feed = 120.;
     let r = run(op);
     assert!(!r.has_errors(), "{:?}", r.diagnostics);
-    assert_eq!(plunges(&r).len(), 5);
+    assert_eq!(plunges(&r).len(), 6);
     assert!(r.program.steps().iter().any(|s|matches!(s,Step::Linear{to,feed,tag,..} if to.z == -2. && *feed==300. && tag.kind==MoveKind::Cutting)));
 }
 
@@ -577,14 +678,14 @@ fn rough_final_selects_bottom_increments_independently_for_intermediate_radial_c
     assert!(!all.has_errors(), "{:?}", all.diagnostics);
     assert_eq!(
         plunges(&all).iter().map(|p| p.z).collect::<Vec<_>>(),
-        vec![-2., -3., -3.5, -4., -2., -3., -3.5, -4.]
+        vec![-2., -3., -3.5, -4., -2., -3., -3.5, -4., -2., -3., -3.5, -4.]
     );
     op.passes.rough_final = false;
     let final_only = run(op);
     assert!(!final_only.has_errors(), "{:?}", final_only.diagnostics);
     assert_eq!(
         plunges(&final_only).iter().map(|p| p.z).collect::<Vec<_>>(),
-        vec![-2., -4., -2., -3., -3.5, -4.]
+        vec![-2., -4., -2., -4., -2., -3., -3.5, -4.]
     );
 }
 

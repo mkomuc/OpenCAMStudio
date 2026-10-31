@@ -27,7 +27,9 @@ impl SurfaceMesh {
                 self.normals.extend(ids.map(|i| n[i]));
                 self.machined.extend([cut; 3]);
                 self.operations.extend([op.filter(|_| cut); 3]);
-                if let Some(sources) = &mut self.cut_sources { sources.extend([None; 3]); }
+                if let Some(sources) = &mut self.cut_sources {
+                    sources.extend([None; 3]);
+                }
                 self.indices.extend([base, base + 1, base + 2]);
             }
         }
@@ -38,32 +40,46 @@ impl SurfaceMesh {
         self.normals.extend(n);
         self.machined.extend([cut; 4]);
         self.operations.extend([op.filter(|_| cut); 4]);
-        if let Some(sources) = &mut self.cut_sources { sources.extend([None; 4]); }
+        if let Some(sources) = &mut self.cut_sources {
+            sources.extend([None; 4]);
+        }
         self.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 }
 impl SurfaceMesh {
     pub(super) fn stamp_source(&mut self, first: usize, field: &Heightfield, cut: u32) {
-        let Some(sources) = &mut self.cut_sources else { return };
-        let Some(sweep) = field.cuts.get(cut as usize) else { return };
+        let Some(sources) = &mut self.cut_sources else {
+            return;
+        };
+        let Some(sweep) = field.cuts.get(cut as usize) else {
+            return;
+        };
         for (index, point) in self.positions.iter().enumerate().skip(first) {
-            if self.machined[index] { sources[index] = sweep.surface_location(*point); }
+            if self.machined[index] {
+                sources[index] = sweep.surface_location(*point);
+            }
         }
     }
 }
 impl Heightfield {
     fn top_cut(&self, x: usize, y: usize, wall_step: f32) -> u32 {
         let cut = self.winners[y * self.nx + x];
-        if cut != u32::MAX || self.operation_at(x, y).is_some() { return cut; }
+        if cut != u32::MAX || self.operation_at(x, y).is_some() {
+            return cut;
+        }
         let z = self.z[y * self.nx + x];
-        (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+        (-1..=1)
+            .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
             .filter_map(|(dx, dy)| {
                 let (nx, ny) = (x as isize + dx, y as isize + dy);
                 let height = self.height(nx, ny)?;
                 let cut = self.winners[ny as usize * self.nx + nx as usize];
-                (height < self.top && (z - height).abs() <= wall_step && cut != u32::MAX).then_some((height, cut))
-            }).min_by(|a, b| a.0.total_cmp(&b.0)).map_or(u32::MAX, |(_, cut)| cut)
+                (height < self.top && (z - height).abs() <= wall_step && cut != u32::MAX)
+                    .then_some((height, cut))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(u32::MAX, |(_, cut)| cut)
     }
     /// Smoothing can lower an uncut cell's displayed edge beside a shallow cut.
     /// Give that fringe the neighbouring cut's owner, just as its height/normal
@@ -507,16 +523,34 @@ mod tests {
         field.set_surface_tracking(true);
         let tool = ToolProfile::flat(2.);
         field.set_cut_source(3, (0., 1.));
-        field.cut_segment_profile_controlled([-4., 5., -2.], [24., 5., -2.], &tool, Some(7), &|| false);
+        field.cut_segment_profile_controlled(
+            [-4., 5., -2.],
+            [24., 5., -2.],
+            &tool,
+            Some(7),
+            &|| false,
+        );
         field.set_cut_source(4, (0., 1.));
-        field.cut_segment_profile_controlled([24., 5., -2.], [-4., 5., -2.], &tool, Some(7), &|| false);
+        field.cut_segment_profile_controlled(
+            [24., 5., -2.],
+            [-4., 5., -2.],
+            &tool,
+            Some(7),
+            &|| false,
+        );
         let mesh = field.to_solid_mesh(-5.);
         let sources = mesh.cut_sources.as_ref().unwrap();
         assert_eq!(sources.len(), mesh.positions.len());
-        assert!(sources.iter().flatten().all(|source| source.step_index == 3));
+        assert!(sources
+            .iter()
+            .flatten()
+            .all(|source| source.step_index == 3));
         assert!(sources.iter().flatten().any(|source| source.fraction > 0.6));
         assert!(sources.iter().flatten().any(|source| source.fraction < 0.3));
-        assert!(sources.iter().zip(&mesh.machined).all(|(source, cut)| *cut || source.is_none()));
+        assert!(sources
+            .iter()
+            .zip(&mesh.machined)
+            .all(|(source, cut)| *cut || source.is_none()));
         // Leading-edge contact at x=10, y=5 occurs at axis x=8.
         let cut = &field.cuts[0];
         assert!((cut.surface_location([10., 5., -2.]).unwrap().fraction - 12. / 28.).abs() < 1e-10);
@@ -528,7 +562,13 @@ mod tests {
         field.set_surface_tracking(true);
         for (depth, step) in [(-2., 10), (-4., 20)] {
             field.set_cut_source(step, (0., 1.));
-            field.cut_segment_profile_controlled([4., 5., depth], [16., 5., depth], &ToolProfile::flat(2.), Some(7), &|| false);
+            field.cut_segment_profile_controlled(
+                [4., 5., depth],
+                [16., 5., depth],
+                &ToolProfile::flat(2.),
+                Some(7),
+                &|| false,
+            );
         }
         let mesh = field.to_solid_mesh(-6.);
         let sources = mesh.cut_sources.as_ref().unwrap();
@@ -536,10 +576,16 @@ mod tests {
         for triangle in mesh.indices.as_chunks::<3>().0 {
             let first = triangle[0] as usize;
             if mesh.machined[first] && mesh.normals[first][2].abs() < 0.1 {
-                let z = triangle.iter().map(|&i| mesh.positions[i as usize][2]).sum::<f32>() / 3.;
+                let z = triangle
+                    .iter()
+                    .map(|&i| mesh.positions[i as usize][2])
+                    .sum::<f32>()
+                    / 3.;
                 let (band, step) = if z > -2. { (0, 10) } else { (1, 20) };
                 bands[band] += 1;
-                assert!(triangle.iter().all(|&i| sources[i as usize].unwrap().step_index == step));
+                assert!(triangle
+                    .iter()
+                    .all(|&i| sources[i as usize].unwrap().step_index == step));
             }
         }
         assert!(bands.iter().all(|&n| n > 0));
@@ -549,10 +595,24 @@ mod tests {
     fn thread_flanks_keep_the_cut_that_exposed_them() {
         let mut field = Heightfield::new([0., 0.], [10., 10.], 0.25, 0.);
         field.set_surface_tracking(true);
-        let tool = ToolProfile { radius: 2., shape: crate::ProfileShape::Thread { root_radius: 1., tooth_height: 1., pitch: 2., tooth_count: 2 } };
+        let tool = ToolProfile {
+            radius: 2.,
+            shape: crate::ProfileShape::Thread {
+                root_radius: 1.,
+                tooth_height: 1.,
+                pitch: 2.,
+                tooth_count: 2,
+            },
+        };
         for step in [10, 20] {
             field.set_cut_source(step, (0., 1.));
-            field.cut_segment_profile_controlled([3., 5., -4.], [7., 5., -4.], &tool, Some(7), &|| false);
+            field.cut_segment_profile_controlled(
+                [3., 5., -4.],
+                [7., 5., -4.],
+                &tool,
+                Some(7),
+                &|| false,
+            );
         }
         let mesh = field.to_solid_mesh(-5.);
         let sources = mesh.cut_sources.as_ref().unwrap();
@@ -563,23 +623,53 @@ mod tests {
     #[test]
     fn surface_tracking_cache_resets_on_rewind_and_mode_changes() {
         use cam_cldata::{MoveKind, Point3, ProgramBuilder};
-        let program = ProgramBuilder::new().feed(600.)
+        let program = ProgramBuilder::new()
+            .feed(600.)
             .rapid(Point3::new(-4., 5., 5.), MoveKind::Link)
             .linear(Point3::new(-4., 5., -2.), MoveKind::Plunge)
             .linear(Point3::new(24., 5., -2.), MoveKind::Cutting)
             .linear(Point3::new(24., 5., -4.), MoveKind::Plunge)
-            .linear(Point3::new(-4., 5., -4.), MoveKind::Cutting).build();
+            .linear(Point3::new(-4., 5., -4.), MoveKind::Cutting)
+            .build();
         let mut cache = crate::SimulationCache::default();
         cache.set_surface_sources(true);
-        let options = crate::SimOptions { resolution: 0.5, tool_radius: 2. };
+        let options = crate::SimOptions {
+            resolution: 0.5,
+            tool_radius: 2.,
+        };
         let run = |cache: &mut crate::SimulationCache, program: &cam_cldata::Program| {
-            cache.simulate_controlled(program, [0., 0., -5.], [20., 10., 0.], &options, &[], &|| false, |_, _| {}).unwrap().field.to_solid_mesh(-5.)
+            cache
+                .simulate_controlled(
+                    program,
+                    [0., 0., -5.],
+                    [20., 10., 0.],
+                    &options,
+                    &[],
+                    &|| false,
+                    |_, _| {},
+                )
+                .unwrap()
+                .field
+                .to_solid_mesh(-5.)
         };
         let full = run(&mut cache, &program);
-        assert!(full.cut_sources.unwrap().iter().flatten().any(|s| s.step_index == 4));
-        let prefix = cam_cldata::Program { steps: program.steps()[..3].to_vec() };
+        assert!(full
+            .cut_sources
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|s| s.step_index == 4));
+        let prefix = cam_cldata::Program {
+            steps: program.steps()[..3].to_vec(),
+        };
         let rewound = run(&mut cache, &prefix);
-        assert!(rewound.cut_sources.as_ref().unwrap().iter().flatten().all(|s| s.step_index < 3));
+        assert!(rewound
+            .cut_sources
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|s| s.step_index < 3));
         let mut fresh = crate::SimulationCache::default();
         fresh.set_surface_sources(true);
         assert_eq!(rewound, run(&mut fresh, &prefix));
