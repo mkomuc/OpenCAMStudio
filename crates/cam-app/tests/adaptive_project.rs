@@ -1,9 +1,15 @@
+#[path = "../src/test_fixture.rs"]
+mod test_fixture;
+
 use cam_app::{default_machine, AppController};
 use cam_cldata::{MoveKind, Step};
 use cam_toolpath::{CancelToken, JobCompletion};
 
 #[test]
 fn test2_face_selection_avoids_excessive_adaptive_retracts() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     let mut app = AppController::new(default_machine());
     // test2 uses the same CAD asset as the tracked fixture. Recreate its
     // adaptive operation without depending on its large local toolpath cache.
@@ -62,6 +68,9 @@ fn test2_face_selection_avoids_excessive_adaptive_retracts() {
 
 #[test]
 fn adaptive_tolerance_drives_simplification_and_survives_project_reopening() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     let mut app = AppController::new(default_machine());
     app.open_project(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -117,6 +126,9 @@ fn adaptive_tolerance_drives_simplification_and_survives_project_reopening() {
 
 #[test]
 fn supplied_3d_project_stays_down_at_002_simplification() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     let mut app = AppController::new(default_machine());
     app.open_project(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

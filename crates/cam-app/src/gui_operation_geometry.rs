@@ -868,6 +868,9 @@ mod tests {
 
     #[test]
     fn adaptive_geometry_modes_preserve_mixed_body_and_face_selection() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller
@@ -915,6 +918,9 @@ mod tests {
 
     #[test]
     fn geometry_tab_auto_selects_supported_adaptive_feature_and_resets_for_idle_view() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller
@@ -1028,6 +1034,9 @@ mod tests {
 
     #[test]
     fn profile_geometry_auto_pick_edits_a_named_entry_without_legacy_geometry_mode() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller
@@ -1219,6 +1228,9 @@ mod tests {
 
     #[test]
     fn single_chamfer_edge_keeps_editable_width_and_open_preview() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller
@@ -1269,6 +1281,9 @@ mod tests {
 
     #[test]
     fn supplied_modeled_faces_use_face_icons_both_height_boundaries_and_a_stepdown() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller
@@ -1337,6 +1352,9 @@ mod tests {
 
     #[test]
     fn replacing_a_rim_with_modeled_faces_updates_default_heights_in_the_editor() {
+        if !crate::test_fixture::available("chamfer_test.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller

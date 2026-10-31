@@ -7,6 +7,7 @@ pub(super) struct Sweep {
     pub b: [f64; 3],
     pub tool: ToolProfile,
     pub operation: Option<u32>,
+    pub source: Option<crate::heightfield::CutSource>,
     dx: f64,
     dy: f64,
     len2: f64,
@@ -20,6 +21,7 @@ impl Sweep {
             b,
             tool,
             operation: None,
+            source: None,
             dx,
             dy,
             len2: dx * dx + dy * dy,
@@ -33,6 +35,28 @@ impl Sweep {
         };
         let d2 = (x - self.a[0] - t * self.dx).powi(2) + (y - self.a[1] - t * self.dy).powi(2);
         (t, d2)
+    }
+    pub fn surface_location(&self, point: [f32; 3]) -> Option<crate::SurfaceLocation> {
+        let source = self.source?;
+        let t = if self.len2 < 1e-12 && (self.b[2] - self.a[2]).abs() > 1e-12 {
+            ((f64::from(point[2]) - self.a[2]) / (self.b[2] - self.a[2])).clamp(0., 1.)
+        } else if self.len2 > 1e-12 && self.tool.shape == ProfileShape::Flat
+            && (self.b[2] - self.a[2]).abs() < 1e-12
+        {
+            // A flat floor is exposed when the leading cutter edge first
+            // reaches it, not when the axis later passes over cleared stock.
+            let dx = f64::from(point[0]) - self.a[0];
+            let dy = f64::from(point[1]) - self.a[1];
+            let along = (dx * self.dx + dy * self.dy) / self.len2;
+            let perpendicular2 = ((dx * self.dy - dy * self.dx).powi(2) / self.len2).max(0.);
+            (along - ((self.tool.radius.powi(2) - perpendicular2).max(0.) / self.len2).sqrt()).clamp(0., 1.)
+        } else {
+            self.projection(f64::from(point[0]), f64::from(point[1])).0
+        };
+        Some(crate::SurfaceLocation {
+            step_index: source.step_index,
+            fraction: source.range.0 + t * (source.range.1 - source.range.0),
+        })
     }
     pub fn bottom(&self, t: f64, d2: f64) -> f64 {
         let z = if self.len2 < 1e-12 {

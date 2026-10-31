@@ -27,6 +27,7 @@ impl SurfaceMesh {
                 self.normals.extend(ids.map(|i| n[i]));
                 self.machined.extend([cut; 3]);
                 self.operations.extend([op.filter(|_| cut); 3]);
+                if let Some(sources) = &mut self.cut_sources { sources.extend([None; 3]); }
                 self.indices.extend([base, base + 1, base + 2]);
             }
         }
@@ -37,11 +38,33 @@ impl SurfaceMesh {
         self.normals.extend(n);
         self.machined.extend([cut; 4]);
         self.operations.extend([op.filter(|_| cut); 4]);
+        if let Some(sources) = &mut self.cut_sources { sources.extend([None; 4]); }
         self.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 }
+impl SurfaceMesh {
+    pub(super) fn stamp_source(&mut self, first: usize, field: &Heightfield, cut: u32) {
+        let Some(sources) = &mut self.cut_sources else { return };
+        let Some(sweep) = field.cuts.get(cut as usize) else { return };
+        for (index, point) in self.positions.iter().enumerate().skip(first) {
+            if self.machined[index] { sources[index] = sweep.surface_location(*point); }
+        }
+    }
+}
 impl Heightfield {
+    fn top_cut(&self, x: usize, y: usize, wall_step: f32) -> u32 {
+        let cut = self.winners[y * self.nx + x];
+        if cut != u32::MAX || self.operation_at(x, y).is_some() { return cut; }
+        let z = self.z[y * self.nx + x];
+        (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+            .filter_map(|(dx, dy)| {
+                let (nx, ny) = (x as isize + dx, y as isize + dy);
+                let height = self.height(nx, ny)?;
+                let cut = self.winners[ny as usize * self.nx + nx as usize];
+                (height < self.top && (z - height).abs() <= wall_step && cut != u32::MAX).then_some((height, cut))
+            }).min_by(|a, b| a.0.total_cmp(&b.0)).map_or(u32::MAX, |(_, cut)| cut)
+    }
     /// Smoothing can lower an uncut cell's displayed edge beside a shallow cut.
     /// Give that fringe the neighbouring cut's owner, just as its height/normal
     /// come from the compatible neighbouring surface.
@@ -282,6 +305,7 @@ impl Heightfield {
                 let z = self.z[y * self.nx + x];
                 flat[y * self.nx + x] = u8::from(
                     !self.detailed_column(x, y)
+                        && !(self.surface_tracking && z < self.top)
                         && z > f + 1e-4
                         && (-1..=1).all(|dy| {
                             (-1..=1).all(|dx| {
@@ -292,7 +316,10 @@ impl Heightfield {
                 );
             }
         }
-        let mut mesh = SurfaceMesh::default();
+        let mut mesh = SurfaceMesh {
+            cut_sources: self.surface_tracking.then(Vec::new),
+            ..Default::default()
+        };
         let up = [[0., 0., 1.]; 4];
         let down = [[0., 0., -1.]; 4];
         // Greedy rectangles leave a one-cell collar around changing heights.
@@ -387,6 +414,7 @@ impl Heightfield {
                 let p: [[f32; 3]; 4] =
                     std::array::from_fn(|i| [c[i].xy[0], c[i].xy[1], h[i].0.max(f)]);
                 if !interior {
+                    let first = mesh.positions.len();
                     mesh.top_quad(
                         p,
                         h.map(|v| v.1),
@@ -394,6 +422,7 @@ impl Heightfield {
                         self.top,
                         self.top_operation(x, y, wall_step),
                     );
+                    mesh.stamp_source(first, self, self.top_cut(x, y, wall_step));
                     mesh.quad(
                         [p[0], p[3], p[2], p[1]].map(|v| [v[0], v[1], f]),
                         down,
@@ -425,20 +454,24 @@ impl Heightfield {
                     };
                     let top = [p[a], p[b]];
                     let mut bottom = [[p[a][0], p[a][1], lower(a)], [p[b][0], p[b][1], lower(b)]];
-                    let mut wall = |upper: [[f32; 3]; 2], lower: [[f32; 3]; 2], op| {
+                    let mut wall = |upper: [[f32; 3]; 2], lower: [[f32; 3]; 2], op, cut| {
                         if (0..2).any(|i| upper[i][2] - lower[i][2] > 1e-5) {
+                            let first = mesh.positions.len();
                             mesh.quad(
                                 [upper[0], upper[1], lower[1], lower[0]],
                                 [n(a), n(b), n(b), n(a)],
                                 nb.is_some(),
                                 op,
                             );
+                            mesh.stamp_source(first, self, cut);
                         }
                     };
                     let mut op = None;
+                    let mut cut = u32::MAX;
                     if nb.is_some() {
                         let (nx, ny) = ((x as isize + dx) as usize, (y as isize + dy) as usize);
                         op = self.operation_at(nx, ny);
+                        cut = self.winners[ny * self.nx + nx];
                         let mut previous = self.previous_layers[ny * self.nx + nx];
                         while let Some(layer) = self.layers.get(previous as usize) {
                             let split = std::array::from_fn(|i| {
@@ -448,13 +481,14 @@ impl Heightfield {
                                     layer.height.max(bottom[i][2]).min(top[i][2]),
                                 ]
                             });
-                            wall(split, bottom, op);
+                            wall(split, bottom, op, cut);
                             bottom = split;
                             op = layer.operation;
+                            cut = layer.cut;
                             previous = layer.previous;
                         }
                     }
-                    wall(top, bottom, op);
+                    wall(top, bottom, op, cut);
                 }
             }
         }
@@ -466,6 +500,94 @@ impl Heightfield {
 mod tests {
     use super::*;
     use crate::ToolProfile;
+
+    #[test]
+    fn force_surfaces_retain_the_removing_move_after_an_air_pass() {
+        let mut field = Heightfield::new([0., 0.], [20., 10.], 0.5, 0.);
+        field.set_surface_tracking(true);
+        let tool = ToolProfile::flat(2.);
+        field.set_cut_source(3, (0., 1.));
+        field.cut_segment_profile_controlled([-4., 5., -2.], [24., 5., -2.], &tool, Some(7), &|| false);
+        field.set_cut_source(4, (0., 1.));
+        field.cut_segment_profile_controlled([24., 5., -2.], [-4., 5., -2.], &tool, Some(7), &|| false);
+        let mesh = field.to_solid_mesh(-5.);
+        let sources = mesh.cut_sources.as_ref().unwrap();
+        assert_eq!(sources.len(), mesh.positions.len());
+        assert!(sources.iter().flatten().all(|source| source.step_index == 3));
+        assert!(sources.iter().flatten().any(|source| source.fraction > 0.6));
+        assert!(sources.iter().flatten().any(|source| source.fraction < 0.3));
+        assert!(sources.iter().zip(&mesh.machined).all(|(source, cut)| *cut || source.is_none()));
+        // Leading-edge contact at x=10, y=5 occurs at axis x=8.
+        let cut = &field.cuts[0];
+        assert!((cut.surface_location([10., 5., -2.]).unwrap().fraction - 12. / 28.).abs() < 1e-10);
+    }
+
+    #[test]
+    fn same_operation_wall_bands_keep_their_separate_cutting_moves() {
+        let mut field = Heightfield::new([0., 0.], [20., 10.], 0.5, 0.);
+        field.set_surface_tracking(true);
+        for (depth, step) in [(-2., 10), (-4., 20)] {
+            field.set_cut_source(step, (0., 1.));
+            field.cut_segment_profile_controlled([4., 5., depth], [16., 5., depth], &ToolProfile::flat(2.), Some(7), &|| false);
+        }
+        let mesh = field.to_solid_mesh(-6.);
+        let sources = mesh.cut_sources.as_ref().unwrap();
+        let mut bands = [0; 2];
+        for triangle in mesh.indices.as_chunks::<3>().0 {
+            let first = triangle[0] as usize;
+            if mesh.machined[first] && mesh.normals[first][2].abs() < 0.1 {
+                let z = triangle.iter().map(|&i| mesh.positions[i as usize][2]).sum::<f32>() / 3.;
+                let (band, step) = if z > -2. { (0, 10) } else { (1, 20) };
+                bands[band] += 1;
+                assert!(triangle.iter().all(|&i| sources[i as usize].unwrap().step_index == step));
+            }
+        }
+        assert!(bands.iter().all(|&n| n > 0));
+    }
+
+    #[test]
+    fn thread_flanks_keep_the_cut_that_exposed_them() {
+        let mut field = Heightfield::new([0., 0.], [10., 10.], 0.25, 0.);
+        field.set_surface_tracking(true);
+        let tool = ToolProfile { radius: 2., shape: crate::ProfileShape::Thread { root_radius: 1., tooth_height: 1., pitch: 2., tooth_count: 2 } };
+        for step in [10, 20] {
+            field.set_cut_source(step, (0., 1.));
+            field.cut_segment_profile_controlled([3., 5., -4.], [7., 5., -4.], &tool, Some(7), &|| false);
+        }
+        let mesh = field.to_solid_mesh(-5.);
+        let sources = mesh.cut_sources.as_ref().unwrap();
+        assert!(sources.iter().flatten().count() > 0);
+        assert!(sources.iter().flatten().all(|s| s.step_index == 10));
+    }
+
+    #[test]
+    fn surface_tracking_cache_resets_on_rewind_and_mode_changes() {
+        use cam_cldata::{MoveKind, Point3, ProgramBuilder};
+        let program = ProgramBuilder::new().feed(600.)
+            .rapid(Point3::new(-4., 5., 5.), MoveKind::Link)
+            .linear(Point3::new(-4., 5., -2.), MoveKind::Plunge)
+            .linear(Point3::new(24., 5., -2.), MoveKind::Cutting)
+            .linear(Point3::new(24., 5., -4.), MoveKind::Plunge)
+            .linear(Point3::new(-4., 5., -4.), MoveKind::Cutting).build();
+        let mut cache = crate::SimulationCache::default();
+        cache.set_surface_sources(true);
+        let options = crate::SimOptions { resolution: 0.5, tool_radius: 2. };
+        let run = |cache: &mut crate::SimulationCache, program: &cam_cldata::Program| {
+            cache.simulate_controlled(program, [0., 0., -5.], [20., 10., 0.], &options, &[], &|| false, |_, _| {}).unwrap().field.to_solid_mesh(-5.)
+        };
+        let full = run(&mut cache, &program);
+        assert!(full.cut_sources.unwrap().iter().flatten().any(|s| s.step_index == 4));
+        let prefix = cam_cldata::Program { steps: program.steps()[..3].to_vec() };
+        let rewound = run(&mut cache, &prefix);
+        assert!(rewound.cut_sources.as_ref().unwrap().iter().flatten().all(|s| s.step_index < 3));
+        let mut fresh = crate::SimulationCache::default();
+        fresh.set_surface_sources(true);
+        assert_eq!(rewound, run(&mut fresh, &prefix));
+        cache.set_surface_sources(false);
+        assert!(run(&mut cache, &prefix).cut_sources.is_none());
+        cache.set_surface_sources(true);
+        assert_eq!(rewound, run(&mut cache, &prefix));
+    }
 
     #[test]
     fn coplanar_surfaces_do_not_merge_across_operation_boundaries() {

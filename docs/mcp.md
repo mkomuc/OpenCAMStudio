@@ -79,7 +79,7 @@ angles are degrees, and playback/processing times are seconds.
 | Patterns | `create_pattern`, `edit_pattern`, `dissolve_pattern`, `delete_pattern`, `set_pattern_suppressed` |
 | Embedded tools | `add_tool`, `use_tool`, `update_tool`, `delete_tool`, `prune_unused_tools`, `reconcile_tools` |
 | Shop tools and presets | `get_tool_library`, `update_tool_library`, `import_tool_library`, `export_tool_library`, `add_library_tool`, `duplicate_library_tool`, `update_library_tool`, `delete_library_tool`, `set_library_tool_number`, `renumber_tool_library`, `embed_library_tool`, `promote_project_tool` |
-| Materials | `add_material`, `rename_material`, `delete_material`; setup material and tool presets are editable through `update_setup` and `update_library_tool` |
+| Materials and cutting forces | `add_material`, `rename_material`, `set_material_cutting_force`, `delete_material`, `get_cutting_forces`; setup material and tool presets are editable through `update_setup` and `update_library_tool`. See [cutting-force assumptions](cutting-forces.md). |
 | Machines and posts | `set_machine`, `update_machine`, `set_post_kind`, `set_estlcam_options`, `get_machine_library`, `add_machine`, `update_library_machine`, `delete_machine`, `activate_machine` |
 | Toolpaths and verification | `start_run`, `start_toolpath_run`, `start_pattern_toolpath_run`, `get_run_status`, `cancel_run`, `get_program`, `get_stock_mesh`, `get_cache_stats`, `get_processing_time`, `set_simulation_accuracy`, `export_nc` |
 | Preferences | `get_preferences`, `update_preferences`, `restore_preferences`, `save_shop` |

@@ -92,13 +92,42 @@ shop_catalog! {
         if name.trim().is_empty() || c.library.materials.iter().any(|m|m.name.eq_ignore_ascii_case(name.trim())) {return Err("enter a unique material name".into());}
         let id=c.library.material_id_floor.max(c.library.materials.iter().map(|m|m.id).max().unwrap_or(0))
             .checked_add(1).ok_or("material ID range exhausted")?;
-        c.library.material_id_floor=id; c.library.materials.push(cam_model::Material{id,name}); serialized(id)
+        c.library.material_id_floor=id; c.library.materials.push(cam_model::Material{id,name,specific_cutting_force:None}); serialized(id)
     }
     rename_material [false] "Rename a shop material by stable ID." {"id":id(),"name":text()} |c,a| {
         let id:u64=a.get("id")?; let name:String=a.get("name")?;
         if name.trim().is_empty() || c.library.materials.iter().any(|m|m.id!=id && m.name.eq_ignore_ascii_case(name.trim())) {return Err("enter a unique material name".into());}
         let material=c.library.materials.iter_mut().find(|m|m.id==id).ok_or("material not found")?;
         material.name=name; serialized(material)
+    }
+    set_material_cutting_force [false] "Set effective specific cutting force kc in N/mm²; omit specific_cutting_force to clear it. Save with save_shop or export_tool_library." {"id":id(),"specific_cutting_force":optional(number())} |c,a| {
+        let id:u64=a.get("id")?;
+        let material=c.library.materials.iter().find(|m|m.id==id).ok_or("material not found")?;
+        let mut candidate=material.clone(); candidate.specific_cutting_force=a.optional("specific_cutting_force")?;
+        candidate.validate()?;
+        let material=c.library.materials.iter_mut().find(|m|m.id==id).unwrap();
+        *material=candidate; serialized(material)
+    }
+    get_cutting_forces [true] "Estimate nominal steady milling force, net power and torque for an active-setup operation using its stock material kc. Optional engagement supplies axial_depth_mm, radial_width_mm and cutting_diameter_mm. No run is required; excludes transient peaks and drilling thrust." {"operation":id(),"engagement":optional(object("CuttingEngagement in mm"))} |c,a| {
+        let id:u32=a.get("operation")?;
+        let setup=c.controller.inspection_setup();
+        let op=c.controller.operation(id).ok_or("operation not found in active setup")?;
+        if matches!(op,cam_model::Operation::Drill(_)) {return Err("Drilling thrust requires a drill-specific model; milling force is unavailable.".into());}
+        let material=setup.material_id.and_then(|id|c.library.materials.iter().find(|m|m.id==id)).ok_or("choose a managed stock material available in the shop library")?;
+        let kc=material.specific_cutting_force.ok_or("set the stock material's specific cutting force kc first")?;
+        let tool=setup.tools.iter().find(|t|t.number==op.tool()).ok_or("operation tool not found")?;
+        let (engagement,basis)=if let Some(engagement)=a.optional::<cam_model::CuttingEngagement>("engagement")? {
+            (engagement,"Custom assumed engagement; verify the effective diameter and contact section for this cut.")
+        } else {
+            let legacy=cam_model::OperationHeightSettings::legacy(c.controller.document(),op);
+            let heights=setup.height_settings.get(&id).unwrap_or(&legacy).resolve(c.controller.document(),op)?;
+            op.nominal_cutting_engagement(tool,heights.top-heights.bottom)?
+        };
+        let rpm=if op.spindle_rpm()==0. {c.controller.defaults().spindle_rpm} else {op.spindle_rpm()};
+        engagement.validate_for_tool(tool)?;
+        let estimate=engagement.estimate(kc,op.cutting_feed_mm_min(),rpm)?;
+        Ok(json!({"operation":id,"material":material,"estimate":estimate,"basis":basis,
+            "limitations":"Nominal steady cut only; excludes transient peaks, radial/axial forces, deflection and machine losses. Remaining-stock contact is not simulated."}))
     }
     delete_material [false] "Delete an unused shop material. Unlink stock and presets before deleting a material in use." {"id":id()} |c,a| {
         let id:u64=a.get("id")?;

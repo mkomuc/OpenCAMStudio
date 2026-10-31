@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cam_geo::{Contour, Point, Polygon, Polyline};
 use cam_import::{read_dxf_str, ImportError, ImportOptions};
@@ -144,6 +145,9 @@ pub struct RunOutcome {
     pub stock_machined: Vec<bool>,
     /// Operation that exposed each stock vertex, used for selection highlighting.
     pub stock_operations: Vec<Option<u32>>,
+    pub stock_cut_sources: Vec<Option<cam_sim::SurfaceLocation>>,
+    /// Populated only by the separate, read-only removal/force analysis lane.
+    pub removal_samples: Arc<Vec<cam_sim::RemovalSample>>,
     /// Triangle indices into `stock_vertices`.
     pub stock_indices: Vec<u32>,
     /// Collisions the material-removal simulation found (e.g. a rapid plowing
@@ -3221,7 +3225,7 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
 pub(crate) fn sim_profile(tool: &Tool) -> ToolProfile {
     let radius = tool.radius();
     let shape = match tool.kind {
-        ToolKind::EndMill | ToolKind::FaceMill => ProfileShape::Flat,
+        ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::FaceMill => ProfileShape::Flat,
         ToolKind::BallMill => ProfileShape::Ball,
         ToolKind::BullNose { corner_radius } => ProfileShape::BullNose {
             corner_radius: corner_radius.clamp(0.0, radius),

@@ -15,7 +15,9 @@ The **Display** tab has four collapsible sections:
   **Trailing** shows completed motion; **Leading** shows remaining motion;
   **Current operation** shows the complete active operation; **Tail** shows the
   last 20 mm traveled. Partial linear moves, arcs, helices, and drilling pecks
-  follow the rendered tool position.
+  follow the rendered tool position. **Color by → Cutting force (actual removal)**
+  calculates loads from the evolving stock and colors cutting moves on a fixed
+  blue-to-red force scale. Gray means unavailable. See [cutting-force simulation](cutting-forces.md#force-mode-from-simulated-removal).
 - **Stock**: show or hide material, choose coloring and material appearance,
   adjust simulation accuracy, or enable transparency. Higher accuracy resolves
   finer cuts and costs more time and memory. Changes rebuild the playback stock
@@ -28,6 +30,15 @@ The **Display** tab has four collapsible sections:
 - **Display**: show or hide the imported model or drawing.
 
 Stock coloring supports **Material**, **Operation**, **Tool**, and **Comparison**.
+The same **Coloring** menu also offers **Cutting force**. It colors newly exposed
+cut faces using the local force of the move that created each surface. Floors and
+wall bands retain those colors through later air passes; untouched stock retains
+its material appearance. Unknown loads, including inherited surfaces without
+load data, are gray. Stock and toolpath force coloring can be selected independently.
+A transparent gradient legend in **newtons (N)** appears at the top right of
+the 3D viewport, to the left of the orientation cube, whenever force-colored
+stock or toolpaths are visible. It uses the same fixed, whole-program scale as
+the surfaces and toolpath.
 Operation and tool colors identify which operation or tool exposed a surface;
 original stock faces keep the selected material appearance. Comparison uses the
 closed CAD solids assigned to the active setup: blue indicates excess material,
@@ -51,5 +62,7 @@ bore faces cannot hide the grooves. Hide stock to view the solid CAD model.
 
 The **Info** tab shows the rendered tool, operation, coordinates and collision
 message. **Statistics** shows duration, rendered time, motion count, stock triangle
-count and grid spacing. Playback uses a separate simulation lane and does not
+count and grid spacing. In force coloring mode, **Info** adds the current force,
+power, torque and removal rate; **Statistics** adds mean/max sampled force and
+removed volume per operation. Playback uses a separate simulation lane and does not
 replace the verified result used for G-code export.

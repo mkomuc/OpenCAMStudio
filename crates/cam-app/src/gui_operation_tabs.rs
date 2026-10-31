@@ -1010,7 +1010,12 @@ impl App {
                                 .iter()
                                 .enumerate()
                                 .filter(|(_, t)| {
-                                    matches!(t.kind, ToolKind::EndMill | ToolKind::BullNose { .. })
+                                    matches!(
+                                        t.kind,
+                                        ToolKind::EndMill
+                                            | ToolKind::RoughingMill
+                                            | ToolKind::BullNose { .. }
+                                    )
                                 })
                                 .map(|(index, t)| ToolChoice {
                                     index,
@@ -1104,6 +1109,9 @@ impl App {
                     ));
                 }
             }
+        }
+        if tab == OperationTab::Tool {
+            list = list.section("Cutting forces").push(self.cutting_force_panel(op));
         }
         let footer = inspector_footer(
             row![
@@ -1267,6 +1275,9 @@ mod tests {
 
     #[test]
     fn pending_adaptive_operation_accepts_replacement_cutter() {
+        if !crate::test_fixture::available("mill_change.ocam") {
+            return;
+        }
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller

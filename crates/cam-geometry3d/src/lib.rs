@@ -2120,16 +2120,18 @@ mod tests {
     }
 
     #[test]
-    fn supplied_project_rectangular_floor_resolves_as_inside_profile() {
-        let project: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../testfiles/3d_toolpath_calculation.ocam"
-        ))
-        .unwrap();
-        let state: GeometryState =
-            serde_json::from_value(project["document"]["geometry"].clone()).unwrap();
+    fn rectangular_floor_resolves_as_inside_profile() {
+        let mut fixture = Fixture::new();
+        let floor = fixture.face(vec![square(0., 30., 0., 20., 15.)], [0., 0., 1.]);
+        fixture.walls(0., 30., 0., 20., 15., 20.);
+        fixture.face(
+            vec![square(-2., 32., -2., 22., 20.), square(0., 30., 0., 20., 20.)],
+            [0., 0., 1.],
+        );
+        let state = fixture.state();
         let mut entry =
             ProfileGeometryEntry::new(ProfileGeometryKind::FaceContours, "Face Contours 1".into());
-        entry.source = ProfileGeometrySource::Cad(vec![reference(9, EntityKind::Face)]);
+        entry.source = ProfileGeometrySource::Cad(vec![reference(floor, EntityKind::Face)]);
         let (contours, heights) = profile_entry_contours(&state, &entry).unwrap();
         assert_eq!(
             heights,

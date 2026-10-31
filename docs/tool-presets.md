@@ -4,7 +4,8 @@ The **Tools** page shows the cutter library above a **Cutting parameters** table
 for the selected cutter. Preset rows show the linked material name and stable ID.
 The inspector edits cutter geometry, description, manufacturer, product ID, and
 product link. The **Materials** button in the Tools ribbon opens the shared material
-manager in a modal. Materials currently contain only a stable ID and a name.
+manager in a modal. Materials contain a stable ID, a name, and optional effective
+specific cutting force **kc (N/mm²)** for [operation load estimates](cutting-forces.md).
 Rename a material without changing its ID; presets and stock use the ID to match.
 Materials are saved with the cross-project tool library and included in library
 imports and exports.
@@ -51,8 +52,32 @@ Changing stock material does not rewrite existing operations. Older files withou
 presets or managed material IDs retain their existing cutting data and material name.
 
 A material used by a library preset or stock in the current project must be
-unlinked before it can be deleted. Saved projects remain self-contained when a
-material is unavailable in the local library.
+unlinked before it can be deleted. Saved projects remain self-contained for
+toolpath generation when a material is unavailable in the local library.
+Cutting-force analysis requires that material's coefficient in the shared library.
+
+## Roughing end mills
+
+Choose **Roughing End Mill** as the cutter type for a flat-bottomed rougher.
+It has its own library identity and can be selected for milling and clearing.
+Toolpaths and simulation use its nominal flat-ended cylindrical envelope; the
+serrated cutting edges and the resulting surface finish are not modeled. Enter
+cutting parameters appropriate for the actual cutter and material.
+
+## Import Fusion tool databases
+
+In **Tools → Import**, choose a Fusion `.tools` archive. Select individual tools
+in the preview, then click **Import**. The selected tools are added to the current
+library and receive free tool numbers; existing tools are retained. The preview
+explains why an entry cannot be imported and notes any skipped presets. Flat,
+ball-nose and bull-nose end mills are supported. Catalog information, dimensions,
+flute count and valid named feed presets are imported; inch dimensions and feeds
+are converted to millimeters. Presets are imported without a material link.
+
+Cut direction is inferred from recognizable wording in the description; otherwise
+it defaults to down-cut. Check the imported tool geometry, direction and cutting
+data before use. Fusion coolant and preset step settings are not imported.
+Importing an OpenCAMStudio `.ocam` library continues to replace the working library.
 
 ## Cooling
 

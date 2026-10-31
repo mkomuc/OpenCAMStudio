@@ -4,6 +4,7 @@ use super::*;
 use crate::jobs::{JobInputs, JobService};
 use crate::settings::{
     SimulationPrefs, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathMode,
+    SimulationToolpathColoring,
 };
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use iced::widget::column;
@@ -11,6 +12,8 @@ use std::time::Instant;
 #[path = "gui_simulation_options.rs"]
 mod options;
 pub(super) use options::{SimulationOption, SimulationTab};
+#[path = "gui_simulation_forces.rs"]
+mod forces;
 
 struct TimedStep {
     step: Step,
@@ -196,6 +199,10 @@ pub(super) struct SimulationPlayer {
     inputs: JobInputs,
     timeline: Timeline,
     jobs: JobService,
+    force_jobs: JobService,
+    force_trace: Option<forces::ForceTrace>,
+    force_error: Option<String>,
+    force_material: Option<cam_model::Material>,
     pub preview: crate::RunOutcome,
     pub position: f64,
     requested: f64,
@@ -270,6 +277,10 @@ impl SimulationPlayer {
             inputs,
             timeline,
             jobs: JobService::default(),
+            force_jobs: JobService::default(),
+            force_trace: None,
+            force_error: None,
+            force_material: None,
             preview,
             position,
             requested: position,
@@ -304,6 +315,7 @@ impl SimulationPlayer {
         }
         let mut inputs = self.inputs.clone();
         inputs.preview_program = Some(self.timeline.prefix(self.position));
+        inputs.stock_force_surfaces = self.options.stock_coloring == SimulationStockColoring::CuttingForce;
         self.requested = self.position;
         self.jobs.start(
             self.source.revision,
@@ -397,6 +409,7 @@ impl SimulationPlayer {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
+        self.poll_forces();
         if let Some(result) = self.jobs.poll(self.source.revision) {
             if result.outcome.completion == JobCompletion::Complete {
                 self.accept_frame(result.outcome);
@@ -460,6 +473,16 @@ impl SimulationPlayer {
             }
         }
         let mut outcome = outcome;
+        // The last prefix motion ends at the requested frame. Convert its local
+        // fractions back to the full-program force trace before publishing.
+        if let Some(index) = outcome.program.steps.len().checked_sub(1) {
+            if let Some(step) = self.timeline.steps.get(index).filter(|s| s.end > s.start) {
+                let scale = ((self.requested - step.start) / (step.end - step.start)).clamp(0., 1.);
+                for source in outcome.stock_cut_sources.iter_mut().flatten() {
+                    if source.step_index == index { source.fraction *= scale; }
+                }
+            }
+        }
         if !self.options.stop_on_collision {
             self.collision = contact.map(|(_, collision)| collision.clone());
         }
@@ -469,6 +492,7 @@ impl SimulationPlayer {
                 outcome.stock_indices = self.preview.stock_indices.clone();
                 outcome.stock_machined = self.preview.stock_machined.clone();
                 outcome.stock_operations = self.preview.stock_operations.clone();
+                outcome.stock_cut_sources = self.preview.stock_cut_sources.clone();
                 self.stock_position
             } else {
                 self.requested
@@ -505,7 +529,7 @@ impl SimulationPlayer {
         self.refresh_display();
     }
     pub fn needs_tick(&self) -> bool {
-        self.playing || self.jobs.needs_poll() || self.comparison.pending()
+        self.playing || self.jobs.needs_poll() || self.force_jobs.needs_poll() || self.comparison.pending()
     }
     /// Follow the rendered frame, including its active tool, when seeking in
     /// either direction. The tool and stock must describe the same instant.
@@ -787,7 +811,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-    fn collision_player() -> SimulationPlayer {
+    pub(super) fn collision_player() -> SimulationPlayer {
         let mut controller = AppController::new(crate::default_machine());
         controller.edit_setup(|setup| {
             setup.tools = vec![cam_model::Tool {
@@ -837,6 +861,10 @@ mod tests {
             inputs,
             timeline: Timeline::new(&program, 2000.).unwrap(),
             jobs: JobService::default(),
+            force_jobs: JobService::default(),
+            force_trace: None,
+            force_error: None,
+            force_material: None,
             preview: Default::default(),
             position: 0.,
             requested: 0.,
@@ -1154,6 +1182,10 @@ mod tests {
             inputs: controller.job_inputs(),
             timeline,
             jobs: JobService::default(),
+            force_jobs: JobService::default(),
+            force_trace: None,
+            force_error: None,
+            force_material: None,
             preview: Default::default(),
             position: 0.,
             requested: 0.,
@@ -1411,6 +1443,9 @@ mod tests {
 
     #[test]
     fn comparison_runs_in_the_background_and_reclassifies_when_tolerance_changes() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         let previous = player.preview.stock_vertices.clone();
         let mut prefs = player.options.clone();
@@ -1443,6 +1478,9 @@ mod tests {
 
     #[test]
     fn comparison_publishes_stock_colors_and_tool_position_together_without_gray_frames() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         for (position, z, color) in [
             (1., 20., [0.15, 0.85, 0.2, 1.]),
@@ -1478,6 +1516,9 @@ mod tests {
 
     #[test]
     fn pending_comparison_tracks_tolerance_and_can_be_published_in_another_color_mode() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         let previous = player.preview.stock_vertices.clone();
         next_comparison_frame(&mut player, 1., 21.);
@@ -1509,6 +1550,9 @@ mod tests {
 
     #[test]
     fn seeking_discards_a_pending_comparison_frame() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         next_comparison_frame(&mut player, 1., 21.);
         assert!(player.pending_frame.is_some());
@@ -1530,6 +1574,9 @@ mod tests {
 
     #[test]
     fn comparison_keeps_stock_visible_when_rewinding_without_regeneration() {
+        if !crate::test_fixture::available("thread.ocam") {
+            return;
+        }
         let mut player = comparison_player();
         player.stock_position = 2.;
         player.rendered = 2.;

@@ -53,7 +53,21 @@ pub struct SurfaceMesh {
     pub machined: Vec<bool>,
     /// Operation that exposed each surface vertex; original faces have no owner.
     pub operations: Vec<Option<u32>>,
+    /// Removing motion and local fraction for each vertex, when requested.
+    pub cut_sources: Option<Vec<Option<SurfaceLocation>>>,
     pub indices: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceLocation {
+    pub step_index: usize,
+    pub fraction: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CutSource {
+    pub step_index: usize,
+    pub range: (f64, f64),
 }
 
 /// Unit normal of triangle `a→b→c` from its winding (CCW ⇒ toward the viewer).
@@ -77,6 +91,7 @@ struct CutLayer {
     height: f32,
     operation: Option<u32>,
     previous: u32,
+    cut: u32,
 }
 
 /// A grid of remaining-stock heights.
@@ -97,6 +112,11 @@ pub struct Heightfield {
     layers: Vec<CutLayer>,
     /// Sparse bounded removals for side-cutting teeth, keyed by XY sample.
     bounded: BTreeMap<usize, Vec<RemovedSpan>>,
+    /// Optional incremental volume accounting for a force-analysis traversal.
+    /// The floor clips through cuts to the physical blank; inherited voids are excluded.
+    removal_tracking: Option<(f64, f64)>,
+    surface_tracking: bool,
+    cut_source: Option<CutSource>,
 }
 
 impl Heightfield {
@@ -119,11 +139,23 @@ impl Heightfield {
             previous_layers: vec![u32::MAX; nx * ny],
             layers: Vec::new(),
             bounded: BTreeMap::new(),
+            removal_tracking: None,
+            surface_tracking: false,
+            cut_source: None,
         }
     }
 
     pub(crate) fn top(&self) -> f32 {
         self.top
+    }
+
+    pub(crate) fn set_surface_tracking(&mut self, enabled: bool) {
+        self.surface_tracking = enabled;
+        self.cut_source = None;
+    }
+
+    pub(crate) fn set_cut_source(&mut self, step_index: usize, range: (f64, f64)) {
+        self.cut_source = self.surface_tracking.then_some(CutSource { step_index, range });
     }
 
     pub(crate) fn storage_bytes(&self) -> usize {
@@ -197,6 +229,7 @@ impl Heightfield {
         }
         let mut sweep = Sweep::new(a, b, *tool);
         sweep.operation = operation;
+        sweep.source = self.cut_source;
         let id = self.cuts.len() as u32;
         self.cuts.push(sweep);
         let (iy0, iy1) = self.index_range(a[1].min(b[1]) - radius, a[1].max(b[1]) + radius, 1);
@@ -218,15 +251,20 @@ impl Heightfield {
                     let index = iy * self.nx + ix;
                     if bottom < self.z[index] {
                         let previous_op = self.operation_at(ix, iy);
-                        if self.z[index] < self.top && previous_op != operation {
+                        let previous_cut = self.winners[index];
+                        let different_source = self.surface_tracking && self.cuts.get(previous_cut as usize)
+                            .is_some_and(|previous| previous.source != sweep.source);
+                        if self.z[index] < self.top && (previous_op != operation || different_source) {
                             let layer = self.layers.len() as u32;
                             self.layers.push(CutLayer {
                                 height: self.z[index],
                                 operation: previous_op,
                                 previous: self.previous_layers[index],
+                                cut: previous_cut,
                             });
                             self.previous_layers[index] = layer;
                         }
+                        self.track_removed_interval(index, f64::from(bottom), f64::from(self.z[index]));
                         self.z[index] = bottom;
                         self.winners[index] = id;
                     }
@@ -362,6 +400,31 @@ impl Heightfield {
                 .sum::<f64>()
     }
 
+    pub(crate) fn start_removal_tracking(&mut self, floor: f64) {
+        self.removal_tracking = Some((floor, 0.));
+    }
+
+    pub(crate) fn tracked_removed_volume(&self) -> f64 {
+        self.removal_tracking.map_or(0., |(_, volume)| volume)
+    }
+
+    /// Account only for material that still exists in this column, including
+    /// sparse voids left by thread teeth. Called before changing the column.
+    pub(super) fn track_removed_interval(&mut self, index: usize, lower: f64, upper: f64) {
+        let Some((floor, _)) = self.removal_tracking else { return };
+        let lower = lower.max(floor);
+        let upper = upper.min(f64::from(self.z[index]));
+        if upper <= lower { return; }
+        let void = self.bounded.get(&index).map_or(0., |spans| spans.iter().map(|span| {
+            (upper.min(f64::from(span.upper)) - lower.max(f64::from(span.lower))).max(0.)
+        }).sum::<f64>());
+        let x = index % self.nx;
+        let y = index / self.nx;
+        let dx = (self.max[0] - self.origin[0] - x as f64 * self.res).clamp(0., self.res);
+        let dy = (self.max[1] - self.origin[1] - y as f64 * self.res).clamp(0., self.res);
+        self.removal_tracking.as_mut().unwrap().1 += (upper - lower - void).max(0.) * dx * dy;
+    }
+
     /// Lower every cell whose centre lies in the XY rectangle `[min, max]` to
     /// `z`, never raising — a primitive for building a target surface (e.g. a
     /// pocket floor) or pre-shaping stock.
@@ -459,6 +522,7 @@ impl Heightfield {
         SurfaceMesh {
             positions,
             normals,
+            cut_sources: None,
             machined: self.z.iter().map(|&z| z < self.top).collect(),
             operations: (0..self.ny)
                 .flat_map(|y| (0..self.nx).map(move |x| self.operation_at(x, y)))

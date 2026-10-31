@@ -64,6 +64,8 @@ impl AppController {
             preview_program: None,
             preview_resolution: None,
             toolpath_preview: false,
+            removal_analysis: false,
+            stock_force_surfaces: false,
             simulation_accuracy: self.simulation_accuracy,
         }
     }

@@ -408,6 +408,17 @@ fn a_ramped_clearing_entry_never_drops_vertically_and_re_machines_its_ramp() {
 // --- goldens ---
 
 #[test]
+fn roughing_end_mill_generates_pocket_using_nominal_envelope() {
+    let finishing = pocket_doc();
+    let mut roughing = pocket_doc();
+    roughing.setup_mut().tools[0].kind = ToolKind::RoughingMill;
+    let (program, nc) = post(&roughing, "roughing-cutter");
+    let (_, expected) = post(&finishing, "roughing-cutter");
+    assert_eq!(nc, expected);
+    assert_no_rapid_onto_uncut_stock(&program, RETRACT);
+}
+
+#[test]
 fn pocket_nc_golden_is_stable() {
     let (_, nc) = post(&pocket_doc(), "pocket");
     assert_eq!(

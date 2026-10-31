@@ -9,6 +9,8 @@ pub(super) struct RemovedSpan {
     pub upper: f32,
     pub lower_op: Option<u32>,
     pub upper_op: Option<u32>,
+    pub lower_source: u32,
+    pub upper_source: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -20,6 +22,8 @@ struct MaterialSpan {
     lower_cut: bool,
     upper_cut: bool,
     upper_thread: bool,
+    lower_source: u32,
+    upper_source: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -28,6 +32,7 @@ struct Boundary {
     thread: bool,
     lower_void: bool,
     operation: Option<u32>,
+    cut: u32,
 }
 
 impl MaterialSpan {
@@ -38,12 +43,14 @@ impl MaterialSpan {
                 thread: self.lower_cut,
                 lower_void: false,
                 operation: self.lower_op,
+                cut: self.lower_source,
             },
             Boundary {
                 z: self.upper,
                 thread: self.upper_thread,
                 lower_void: true,
                 operation: self.upper_op,
+                cut: self.upper_source,
             },
         ]
     }
@@ -71,7 +78,13 @@ impl Heightfield {
         if width <= 1e-9 || tooth_height <= 0. {
             return;
         }
-        let sweep = Sweep::new(a, b, *tool);
+        let mut sweep = Sweep::new(a, b, *tool);
+        sweep.source = self.cut_source;
+        let cut = if self.surface_tracking {
+            let cut = self.cuts.len() as u32;
+            self.cuts.push(sweep);
+            cut
+        } else { u32::MAX };
         let (y0, y1) = self.index_range(
             a[1].min(b[1]) - tool.radius,
             a[1].max(b[1]) + tool.radius,
@@ -103,12 +116,15 @@ impl Heightfield {
                     if upper - lower <= 1e-6 {
                         continue;
                     }
+                    self.track_removed_interval(index, f64::from(lower), f64::from(upper));
                     let spans = self.bounded.entry(index).or_default();
                     spans.push(RemovedSpan {
                         lower,
                         upper,
                         lower_op: operation,
                         upper_op: operation,
+                        lower_source: cut,
+                        upper_source: cut,
                     });
                     spans.sort_by(|a, b| a.lower.total_cmp(&b.lower));
                     let mut count = 0;
@@ -119,6 +135,7 @@ impl Heightfield {
                             if span.upper > previous.upper {
                                 previous.upper = span.upper;
                                 previous.upper_op = span.upper_op;
+                                previous.upper_source = span.upper_source;
                             }
                         } else {
                             spans[count] = span;
@@ -170,6 +187,7 @@ impl Heightfield {
         let mut lower = floor;
         let mut lower_op = None;
         let mut lower_cut = false;
+        let mut lower_source = u32::MAX;
         if let Some(spans) = self.bounded.get(&index) {
             for span in spans {
                 if span.upper <= floor || span.lower >= top {
@@ -185,11 +203,14 @@ impl Heightfield {
                         lower_cut,
                         upper_cut: true,
                         upper_thread: true,
+                        lower_source,
+                        upper_source: span.lower_source,
                     });
                 }
                 lower = lower.max(span.upper);
                 lower_op = span.upper_op;
                 lower_cut = true;
+                lower_source = span.upper_source;
             }
         }
         if top > lower {
@@ -201,6 +222,8 @@ impl Heightfield {
                 lower_cut,
                 upper_cut: top < self.top,
                 upper_thread: false,
+                lower_source,
+                upper_source: self.winners[index],
             });
         }
         result
@@ -222,6 +245,22 @@ impl Heightfield {
             previous = layer.previous;
         }
         op
+    }
+
+    fn air_cut(&self, x: usize, y: usize, z: f32) -> u32 {
+        if let Some(spans) = self.bounded.get(&(y * self.nx + x)) {
+            if let Some(span) = spans.iter().find(|s| s.lower <= z && s.upper >= z) {
+                return if span.lower_source != u32::MAX { span.lower_source } else { span.upper_source };
+            }
+        }
+        let mut cut = self.winners[y * self.nx + x];
+        let mut previous = self.previous_layers[y * self.nx + x];
+        while let Some(layer) = self.layers.get(previous as usize) {
+            if z <= layer.height { break; }
+            cut = layer.cut;
+            previous = layer.previous;
+        }
+        cut
     }
 
     /// Average matching tooth boundaries at a shared grid corner. Separate Z
@@ -328,7 +367,9 @@ impl Heightfield {
                 if side == 0 {
                     p = [p[0], p[3], p[2], p[1]];
                 }
+                let first = mesh.positions.len();
                 mesh.quad(p, [normal; 4], cut, bound.operation);
+                mesh.stamp_source(first, self, bound.cut);
             }
         }
         for (dx, dy, ids) in [
@@ -375,6 +416,8 @@ impl Heightfield {
                 let lower = pair[0];
                 let upper: [f32; 2] = std::array::from_fn(|i| pair[1][i].max(lower[i]));
                 let op = neighbour.and_then(|(nx, ny)| self.air_operation(nx, ny, z));
+                let cut = neighbour.map_or(u32::MAX, |(nx, ny)| self.air_cut(nx, ny, z));
+                let first = mesh.positions.len();
                 mesh.quad(
                     [
                         [edge[0][0], edge[0][1], upper[0]],
@@ -386,6 +429,7 @@ impl Heightfield {
                     neighbour.is_some(),
                     op,
                 );
+                mesh.stamp_source(first, self, cut);
             }
         }
     }

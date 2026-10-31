@@ -93,7 +93,8 @@ use crate::{BoreOp, Tool};
 /// v30: 3D Parallel finishing and CAD surface bindings.
 /// v31: remaining stock inherited from the immediately preceding setup.
 /// v32: operation pattern spacing, directions and execution options.
-pub const SCHEMA_VERSION: u32 = 32;
+/// v33: a distinct roughing end mill tool type.
+pub const SCHEMA_VERSION: u32 = 33;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

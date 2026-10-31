@@ -2208,3 +2208,40 @@ fn pocket_boundary_rejects_open_disconnected_and_nonplanar_edge_chains() {
         assert_eq!(app.document(), &before);
     }
 }
+
+#[test]
+fn parallel_creation_uses_setup_cad_and_survives_reopening() {
+    let mut app = controller();
+    let selected = vec![install_pocket(&mut app)];
+    let tool = app.use_tool(cam_model::Tool {
+        number: 901,
+        diameter: 4.,
+        length: 40.,
+        kind: ToolKind::BallMill,
+        ..Default::default()
+    });
+    let id = app
+        .create_cad_operation_with_tool(OpKind::Parallel, selected, tool)
+        .unwrap();
+    app.edit_operation(id, |op| {
+        let Operation::Parallel(p) = op else { panic!() };
+        p.params.angle = 37.;
+        p.params.stepover = 0.7;
+        p.params.stay_down = true;
+        p.params.lift_height = 2.;
+        p.params.both_ways = false;
+    });
+    assert_eq!(
+        app.geometry_state().bindings[&id].recipe,
+        cam_model::ExtractionRecipe::ParallelFinishing
+    );
+    let path = std::env::temp_dir().join(format!("parallel-roundtrip-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = AppController::new(default_machine());
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        matches!(reopened.operation(id),Some(Operation::Parallel(p))if p.params.angle==37. && p.params.stepover==0.7 && p.params.lift_height==2. && p.params.stay_down && !p.params.both_ways)
+    );
+    assert_eq!(app.document(), reopened.document());
+}

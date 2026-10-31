@@ -10,6 +10,8 @@
 //! by `scripts/check_architecture.py`.
 
 mod cutting_data;
+mod cutting_forces;
+pub use cutting_forces::{CuttingEngagement, CuttingForceEstimate, CuttingLoad};
 mod pocket;
 pub use pocket::PocketFinishing;
 mod parallel;
@@ -227,6 +229,8 @@ impl Machine {
 pub enum ToolKind {
     /// Flat-bottomed square end mill.
     EndMill,
+    /// Flat-bottomed roughing end mill; its serrations are approximated by the nominal cutting envelope.
+    RoughingMill,
     /// Ball-nosed end mill (corner radius = tool radius).
     BallMill,
     /// Bull-nose (corner-radius) end mill: flat bottom with a rounded corner of
@@ -273,6 +277,7 @@ impl std::fmt::Display for ToolKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             ToolKind::EndMill => "Square End Mill",
+            ToolKind::RoughingMill => "Roughing End Mill",
             ToolKind::BallMill => "Ball Nose End Mill",
             ToolKind::BullNose { .. } => "Rounded-Edge End Mill",
             ToolKind::ChamferMill { .. } => "Chamfer mill",
@@ -541,9 +546,10 @@ impl Tool {
         // makes a stale `shank_diameter` incapable of producing an arrow.
         let mut shank_radius = self.shank_dia() * 0.5;
         let bottom = match self.kind {
-            ToolKind::EndMill | ToolKind::FaceMill | ToolKind::ThreadMill { .. } => {
-                BottomShape::Flat
-            }
+            ToolKind::EndMill
+            | ToolKind::RoughingMill
+            | ToolKind::FaceMill
+            | ToolKind::ThreadMill { .. } => BottomShape::Flat,
             ToolKind::BallMill => BottomShape::Ball,
             ToolKind::BullNose { corner_radius } => BottomShape::BullNose { corner_radius },
             ToolKind::ChamferMill {
@@ -653,6 +659,7 @@ mod tests {
     fn tool_kind_variants_round_trip() {
         for kind in [
             ToolKind::EndMill,
+            ToolKind::RoughingMill,
             ToolKind::BallMill,
             ToolKind::BullNose { corner_radius: 1.5 },
             ToolKind::ChamferMill {
@@ -765,6 +772,8 @@ mod tests {
         assert!(em.segs[0].cutting);
         assert_eq!(em.max_radius(), 4.0);
         assert_eq!(em.height(), 40.0);
+        // Roughing serrations use the same nominal envelope as a flat end mill.
+        assert_eq!(mk(ToolKind::RoughingMill).profile(), em);
         // Ball: first segment is a cutting arc.
         let ball = mk(ToolKind::BallMill).profile();
         assert!(matches!(ball.segs[0].shape, SegShape::Arc { .. }));

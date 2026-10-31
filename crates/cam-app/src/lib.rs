@@ -9,6 +9,9 @@
 //!   needs a windowing/graphics stack, so it is compiled and run on the desktop,
 //!   not in headless tests.
 
+#[cfg(all(test, feature = "gui"))]
+mod test_fixture;
+
 mod config;
 mod controller;
 mod geometry_verification;
@@ -30,6 +33,8 @@ mod stock_comparison;
 // Not GUI-gated: the library type and the `.ocam` file union are plain serializable
 // data + config-dir I/O (only their *use* is GUI). Phase 3 (`TOOLING_PLAN.md`) lets
 // the ungated `project` module reference `ToolLibrary` for the `OcamFile` union.
+#[cfg(any(feature = "gui", test))]
+mod fusion_tools;
 mod tool_library;
 
 pub use cad_operations::CadImportPreview;

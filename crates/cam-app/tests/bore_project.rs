@@ -1,4 +1,7 @@
 //! Regression coverage for the supplied CAD project, including its rounded bore entrance.
+
+#[path = "../src/test_fixture.rs"]
+mod test_fixture;
 use cam_app::{default_machine, AppController, OpKind};
 use cam_cldata::{MoveKind, Step};
 use cam_model::{CadSurface, EntityKind, EntityRef, Operation};
@@ -70,6 +73,9 @@ fn prepare_thread_bore(app: &mut AppController) {
 
 #[test]
 fn supplied_thread_project_detects_the_noncutting_tip_hitting_the_leftover_core() {
+    if !test_fixture::available("thread.ocam") {
+        return;
+    }
     let mut app = AppController::new(default_machine());
     app.open_project(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testfiles/thread.ocam"),
@@ -100,6 +106,9 @@ fn supplied_thread_project_detects_the_noncutting_tip_hitting_the_leftover_core(
 
 #[test]
 fn supplied_project_bore_with_rounded_entrance_generates_and_posts() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     let (mut app, face) = project();
     let original = app.document().clone();
     app.set_operation_excluded(original.setup().operations[0].id(), true);
@@ -131,6 +140,9 @@ fn supplied_project_bore_with_rounded_entrance_generates_and_posts() {
 
 #[test]
 fn intentional_cutter_shape_mismatch_warns_but_simulates_and_exports() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     use cam_model::{Tool, ToolKind};
     for kind in [
         ToolKind::VBit {
@@ -189,6 +201,9 @@ fn intentional_cutter_shape_mismatch_warns_but_simulates_and_exports() {
 /// The same cylinder/torus with a deliberately prepared bore supports threading.
 #[test]
 fn rounded_bore_threads_regenerate_reopen_and_export_with_a_thread_mill() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     use cam_model::{Tool, ToolKind};
     let (mut app, face) = project();
     let old_id = app.document().setup().operations[0].id();
@@ -293,6 +308,9 @@ fn rounded_bore_threads_regenerate_reopen_and_export_with_a_thread_mill() {
 
 #[test]
 fn supplied_part_has_compatible_selections_and_tools_for_every_operation() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     use cam_model::{Tool, ToolKind};
     let (_, cylinder) = project();
     let reference = |kind, id| EntityRef {
@@ -400,6 +418,9 @@ fn supplied_part_has_compatible_selections_and_tools_for_every_operation() {
 
 #[test]
 fn rounded_bore_access_is_analytic_and_rejects_caps_incomplete_rims_and_obstructions() {
+    if !test_fixture::available("3d_toolpath_calculation.ocam") {
+        return;
+    }
     use cam_model::{CadCurve, CadFace, CadMesh, ExtractionRecipe};
     let (app, reference) = project();
     let original = app.geometry_state().clone();

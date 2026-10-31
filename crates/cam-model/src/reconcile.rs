@@ -36,6 +36,7 @@ fn qa(deg: f64) -> i64 {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum ToolKindId {
     EndMill,
+    RoughingMill,
     BallMill,
     FaceMill,
     BullNose {
@@ -61,6 +62,7 @@ enum ToolKindId {
 fn kind_id(k: &ToolKind) -> ToolKindId {
     match *k {
         ToolKind::EndMill => ToolKindId::EndMill,
+        ToolKind::RoughingMill => ToolKindId::RoughingMill,
         ToolKind::BallMill => ToolKindId::BallMill,
         ToolKind::FaceMill => ToolKindId::FaceMill,
         ToolKind::BullNose { corner_radius } => ToolKindId::BullNose {
@@ -288,6 +290,12 @@ mod tests {
             a.identity(),
             t(1, 12.0, ToolKind::BallMill).identity(),
             "kind"
+        );
+
+        assert_ne!(
+            a.identity(),
+            t(1, 12.0, ToolKind::RoughingMill).identity(),
+            "a rougher must not be reconciled with a finishing end mill"
         );
 
         // Cutting direction is a physical property, so it distinguishes tools too.

@@ -380,6 +380,9 @@ mod tests {
 
     #[test]
     fn automatic_prepared_bore_preset_sets_size_without_committing() {
+        if !crate::test_fixture::available("3d_toolpath_calculation.ocam") {
+            return;
+        }
         let mut app = cad_thread();
         let before = app.controller.document().clone();
         app.fields.insert(Field::Feed, "321.75".into());
@@ -397,6 +400,9 @@ mod tests {
 
     #[test]
     fn manual_edits_stop_auto_matching_and_the_two_tabs_share_values() {
+        if !crate::test_fixture::available("3d_toolpath_calculation.ocam") {
+            return;
+        }
         let mut app = cad_thread();
         app.sync_thread_standard();
         let _ = app.update(Message::FieldChanged(Field::Pitch, "1.75".into()));
@@ -416,6 +422,9 @@ mod tests {
 
     #[test]
     fn explicit_imperial_preset_preserves_hand_feeds_and_exact_tpi_conversion() {
+        if !crate::test_fixture::available("3d_toolpath_calculation.ocam") {
+            return;
+        }
         let mut app = cad_thread();
         let before = app.controller.document().clone();
         let _ = app.update(Message::ThreadHandChanged(Hand::Left));
@@ -451,6 +460,9 @@ mod tests {
 
     #[test]
     fn geometry_subdialog_does_not_apply_a_preset_before_confirmation() {
+        if !crate::test_fixture::available("3d_toolpath_calculation.ocam") {
+            return;
+        }
         let mut app = cad_thread();
         let _ = app.update(Message::OperationGeometry(
             operation_geometry::GeometryMessage::Edit,
@@ -469,6 +481,9 @@ mod tests {
 
     #[test]
     fn committed_preset_survives_save_reopen_and_undo() {
+        if !crate::test_fixture::available("3d_toolpath_calculation.ocam") {
+            return;
+        }
         let mut app = cad_thread();
         let reference = app.controller.cad_selection()[0].clone();
         app.cad_pending_kind = None;

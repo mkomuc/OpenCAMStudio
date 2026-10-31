@@ -17,6 +17,76 @@ impl Workspace {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ToolColumnDrag {
+    Resize {
+        column: usize,
+        start_x: f32,
+        width: f32,
+    },
+    Reorder {
+        column: usize,
+        start: iced::Point,
+        target: Option<(usize, bool)>,
+    },
+}
+
+pub(super) fn reorder_tool_column(
+    order: &mut [usize; 8],
+    column: usize,
+    target: usize,
+    after: bool,
+) {
+    if column == target {
+        return;
+    }
+    let Some(from) = order.iter().position(|&item| item == column) else {
+        return;
+    };
+    let Some(to) = order.iter().position(|&item| item == target) else {
+        return;
+    };
+    let insertion = to + usize::from(after);
+    let insertion = if from < insertion {
+        insertion - 1
+    } else {
+        insertion
+    };
+    if from < insertion {
+        order[from..=insertion].rotate_left(1);
+    } else if from > insertion {
+        order[insertion..=from].rotate_right(1);
+    }
+}
+
+const TOOL_TABLE_LABELS: [&str; 8] = [
+    "Tool",
+    "Description",
+    "Cutter",
+    "Manufacturer",
+    "Product ID",
+    "Ø mm",
+    "Length mm",
+    "Flute length mm",
+];
+
+fn tool_table_matches(
+    values: &[String; 8],
+    search: &str,
+    filters: &[Option<BTreeSet<String>>; 8],
+) -> bool {
+    let search = search.trim().to_lowercase();
+    (search.is_empty()
+        || values
+            .iter()
+            .any(|value| value.to_lowercase().contains(&search)))
+        && values.iter().zip(filters).all(|(value, filter)| {
+            filter
+                .as_ref()
+                .is_none_or(|selected| selected.contains(value))
+        })
+}
+
 pub(super) fn stock_world_bounds(controller: &AppController) -> Option<([f32; 3], [f32; 3])> {
     let (min, max) = controller.stock_box();
     if min[0] >= max[0] || min[1] >= max[1] {
@@ -209,6 +279,7 @@ impl App {
     }
 
     pub(super) fn reset_model_browser(&mut self) {
+        self.cutting_force_inputs.clear();
         self.model_view = Some(TreeNode::Models);
         self.browser_view = TreeNode::Models;
         self.models_collapsed = true;
@@ -360,6 +431,9 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
+        }
+        if let Some(legend) = self.simulation.as_ref().and_then(|player| player.force_viewport_legend(viewport_browser_width, self.show_gizmo.then_some(self.gizmo_size))) {
+            overlays = overlays.push(legend);
         }
         layers = layers.push(overlays.width(Length::Fill).height(Length::Fill));
         if self.show_project_browser {
@@ -885,6 +959,148 @@ impl App {
         })
         .into()
     }
+    fn tool_table_row_values(&self, tool: &cam_model::Tool) -> [String; 8] {
+        [
+            format!("T{}", tool.number),
+            tool.description.clone(),
+            tool.kind.to_string(),
+            tool.manufacturer.clone(),
+            tool.product_id.clone(),
+            self.settings.format_number(tool.diameter),
+            self.settings.format_number(tool.length),
+            self.settings.format_number(tool.flute_len()),
+        ]
+    }
+
+    pub(super) fn tool_table_values(&self, column: usize) -> BTreeSet<String> {
+        self.library
+            .tools
+            .iter()
+            .enumerate()
+            .map(|(index, committed)| {
+                let tool = if index == self.lib_sel {
+                    self.tool_edit.as_ref().unwrap_or(committed)
+                } else {
+                    self.tool_drafts
+                        .get(&index)
+                        .map(|draft| &draft.tool)
+                        .unwrap_or(committed)
+                };
+                self.tool_table_row_values(tool)[column].clone()
+            })
+            .collect()
+    }
+
+    pub(super) fn tool_table_menu_overlay(&self) -> Option<Element<'_, Message>> {
+        let (index, visibility) = self.tool_table_menu?;
+        let title = TOOL_TABLE_LABELS.get(index).copied().unwrap_or("Columns");
+        let mut content = column![text(title).size(14)].spacing(6);
+        if visibility {
+            if index < 8 {
+                content = content.push(
+                    inspector_button("Hide this column")
+                        .on_press(Message::SetToolTableColumn(index, false)),
+                );
+            }
+            for (column, label) in TOOL_TABLE_LABELS.iter().enumerate() {
+                content = content.push(
+                    checkbox(self.tool_table_columns[column])
+                        .size(15)
+                        .text_size(12)
+                        .spacing(8)
+                        .label(*label)
+                        .on_toggle(move |checked| Message::SetToolTableColumn(column, checked)),
+                );
+            }
+            content = content.push(inspector_button("Done").on_press(Message::CloseToolTableMenu));
+        } else {
+            let search = self.tool_table_menu_search.trim().to_lowercase();
+            let values: Vec<_> = self
+                .tool_table_values(index)
+                .into_iter()
+                .filter(|value| value.to_lowercase().contains(&search))
+                .collect();
+            let all_selected = values
+                .iter()
+                .all(|value| self.tool_table_filter_draft.contains(value));
+            let mut choices = column![checkbox(all_selected)
+                .size(15)
+                .text_size(12)
+                .spacing(8)
+                .label("Select all")
+                .on_toggle(Message::ToolTableFilterAll)]
+            .spacing(4);
+            for value in values {
+                let checked = self.tool_table_filter_draft.contains(&value);
+                let label = if value.is_empty() {
+                    "(Blanks)".to_string()
+                } else {
+                    value.clone()
+                };
+                choices = choices.push(
+                    checkbox(checked)
+                        .size(15)
+                        .text_size(12)
+                        .spacing(8)
+                        .label(label)
+                        .on_toggle(move |checked| {
+                            Message::ToolTableFilterValue(value.clone(), checked)
+                        }),
+                );
+            }
+            content = content
+                .push(
+                    inspector_button("Clear filter").on_press(Message::ClearToolTableColumnFilter),
+                )
+                .push(
+                    inspector_input("Search values", &self.tool_table_menu_search)
+                        .on_input(Message::ToolTableMenuSearch),
+                )
+                .push(scrollable(choices).height(180))
+                .push(
+                    row![
+                        inspector_button("OK")
+                            .style(inspector_primary)
+                            .on_press(Message::ApplyToolTableFilter),
+                        inspector_button("Cancel").on_press(Message::CloseToolTableMenu)
+                    ]
+                    .spacing(8),
+                );
+        }
+        let popup = container(content)
+            .width(230)
+            .padding(10)
+            .style(|_| container::Style {
+                background: Some(Background::Color(palette::RIBBON_BG)),
+                border: Border {
+                    color: palette::BORDER_DARK,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..Default::default()
+            });
+        Some(
+            container(popup)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding {
+                    top: self
+                        .tool_table_menu_pos
+                        .y
+                        .min((self.window.height - 390.0).max(0.0)),
+                    left: self
+                        .tool_table_menu_pos
+                        .x
+                        .min((self.window.width - 230.0).max(0.0)),
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
+        )
+    }
+
     pub(super) fn tools_table(&self) -> Element<'_, Message> {
         let mode = |view, label| {
             let active = self.library_view == view;
@@ -892,27 +1108,70 @@ impl App {
                 .on_press(Message::SetLibraryView(view))
                 .style(move |_, status| snap_toggle_style(active, status))
         };
-        let mut list = column![
-            row![
-                text("Tool library").size(14),
-                mode(LibraryView::Ordered, "By number"),
-                mode(LibraryView::Grouped, "By family")
-            ]
-            .spacing(12),
-            container(
-                row![
-                    text("Tool").size(12).width(54),
-                    text("Description").size(12).width(220),
-                    text("Cutter").size(12).width(140),
-                    text("Manufacturer").size(12).width(140),
-                    text("Product ID").size(12).width(120),
-                    text("Ø mm").size(12).width(62),
-                    text("Length mm").size(12).width(80),
-                    text("Flute length mm").size(12).width(112)
+        let widths = self.tool_table_widths;
+        let controls = row![
+            text("Tool library").size(14),
+            mode(LibraryView::Ordered, "By number"),
+            mode(LibraryView::Grouped, "By family"),
+            inspector_input("Search tools", &self.tool_table_search)
+                .on_input(Message::ToolTableSearch)
+                .width(180),
+            inspector_button("Clear filters").on_press(Message::ClearToolTableFilters),
+            inspector_button("Columns").on_press(Message::OpenToolTableMenu(8, true)),
+        ]
+        .spacing(12);
+        let mut headers = row![].spacing(4);
+        for &index in &self.tool_table_order {
+            if self.tool_table_columns[index] {
+                let indicator = if self.tool_table_filters[index].is_some() {
+                    "▼•"
+                } else {
+                    "▼"
+                };
+                let target = matches!(self.tool_table_drag, Some(ToolColumnDrag::Reorder { target: Some((target, _)), .. }) if target == index);
+                let label = mouse_area(
+                    container(text(TOOL_TABLE_LABELS[index]).size(12))
+                        .width(Length::Fill)
+                        .clip(true),
+                )
+                .interaction(iced::mouse::Interaction::Grab)
+                .on_press(Message::ToolColumnReorderStart(index));
+                let handle = mouse_area(
+                    container(text("│").size(12).color(palette::GROUP_LABEL))
+                        .width(8)
+                        .center_x(8),
+                )
+                .interaction(iced::mouse::Interaction::ResizingColumn)
+                .on_press(Message::ToolColumnResizeStart(index));
+                let header = row![
+                    label,
+                    button(text(indicator).size(10))
+                        .padding([2, 4])
+                        .style(move |_, status| command_toggle_style(
+                            self.tool_table_filters[index].is_some(),
+                            status
+                        ))
+                        .on_press(Message::OpenToolTableMenu(index, false)),
+                    handle
                 ]
-                .spacing(4)
-            )
-            .padding(Padding::from([0.0, 7.0]))
+                .align_y(Alignment::Center)
+                .width(widths[index]);
+                headers = headers.push(
+                    mouse_area(container(header).style(move |_| container::Style {
+                        background: target.then_some(Background::Color(palette::SELECT_BG)),
+                        ..Default::default()
+                    }))
+                    .on_move(move |point| {
+                        Message::ToolColumnHover(index, point.x >= widths[index] / 2.0)
+                    })
+                    .on_exit(Message::ToolColumnLeave(index))
+                    .on_right_press(Message::OpenToolTableMenu(index, true)),
+                );
+            }
+        }
+        let mut list = column![
+            controls,
+            container(headers).padding(Padding::from([0.0, 7.0]))
         ]
         .spacing(6)
         .padding(16);
@@ -934,29 +1193,26 @@ impl App {
                 draft.map(|draft| &draft.tool).unwrap_or(committed)
             };
             let pending = draft.is_some() || (selected && self.inspector_dirty());
-            let cells = row![
-                text(format!(
-                    "T{}{}",
-                    tool.number,
-                    if pending { " *" } else { "" }
-                ))
-                .size(12)
-                .width(54),
-                text(tool.description.clone()).size(12).width(220),
-                text(tool.kind.to_string()).size(12).width(140),
-                text(tool.manufacturer.clone()).size(12).width(140),
-                text(tool.product_id.clone()).size(12).width(120),
-                text(self.settings.format_number(tool.diameter))
-                    .size(12)
-                    .width(62),
-                text(self.settings.format_number(tool.length))
-                    .size(12)
-                    .width(80),
-                text(self.settings.format_number(tool.flute_len()))
-                    .size(12)
-                    .width(112)
-            ]
-            .spacing(4);
+            let values = self.tool_table_row_values(tool);
+            if !tool_table_matches(&values, &self.tool_table_search, &self.tool_table_filters) {
+                continue;
+            }
+            let mut cells = row![].spacing(4);
+            for &column in &self.tool_table_order {
+                let value = &values[column];
+                if self.tool_table_columns[column] {
+                    let display = if column == 0 && pending {
+                        format!("{value} *")
+                    } else {
+                        value.clone()
+                    };
+                    cells = cells.push(
+                        container(text(display).size(12))
+                            .width(widths[column])
+                            .clip(true),
+                    );
+                }
+            }
             let item = container(cells)
                 .padding(7)
                 .width(Length::Fill)
@@ -970,7 +1226,7 @@ impl App {
                     .on_right_press(Message::LibToolMenu(index)),
             );
         }
-        let cutters = scrollable(list.width(1120))
+        let cutters = scrollable(list.width(Length::Shrink))
             .direction(scrollable::Direction::Both {
                 vertical: scrollable::Scrollbar::default(),
                 horizontal: scrollable::Scrollbar::default(),
@@ -2072,6 +2328,9 @@ mod performance_tests {
 
     #[test]
     fn camera_and_menu_events_reuse_geometry_but_hover_and_visibility_refresh_it() {
+        if !crate::test_fixture::available("test_project.ocam") {
+            return;
+        }
         let mut app = cad_app();
         let initial = app.machining_viewport();
         assert!(!initial.mesh_indices.is_empty());
@@ -2119,6 +2378,9 @@ mod performance_tests {
 
     #[test]
     fn simulation_draws_cad_without_selected_or_hovered_features_and_preserves_selection() {
+        if !crate::test_fixture::available("test_project.ocam") {
+            return;
+        }
         let mut app = cad_app();
         let geometry = app.controller.geometry_state();
         let instance = &geometry.instances[0];
@@ -2203,6 +2465,9 @@ mod performance_tests {
 
     #[test]
     fn cached_editor_and_stock_follow_uncommitted_edits() {
+        if !crate::test_fixture::available("test_project.ocam") {
+            return;
+        }
         let mut app = cad_app();
         app.model_view = None;
         app.controller.select(Selection::Setup);
@@ -2580,5 +2845,35 @@ mod performance_tests {
             let _ = app.update(Message::OrbitBy(0.01, 0.005));
             app.view()
         });
+    }
+}
+
+#[cfg(test)]
+mod tool_table_filter_tests {
+    use super::*;
+    #[test]
+    fn reorder_columns_before_and_after_targets() {
+        let mut order = [0, 1, 2, 3, 4, 5, 6, 7];
+        reorder_tool_column(&mut order, 1, 4, true);
+        assert_eq!(order, [0, 2, 3, 4, 1, 5, 6, 7]);
+        reorder_tool_column(&mut order, 6, 2, false);
+        assert_eq!(order, [0, 6, 2, 3, 4, 1, 5, 7]);
+        reorder_tool_column(&mut order, 6, 6, true);
+        assert_eq!(order, [0, 6, 2, 3, 4, 1, 5, 7]);
+    }
+
+    #[test]
+    fn search_and_value_filters_combine() {
+        let values = [
+            "T1", "Finisher", "End mill", "Maker", "123", "6.00", "50.00", "20.00",
+        ]
+        .map(String::from);
+        let mut filters: [Option<BTreeSet<String>>; 8] = Default::default();
+        filters[2] = Some(["End mill".to_string()].into_iter().collect());
+        filters[5] = Some(["6.00".to_string()].into_iter().collect());
+        assert!(tool_table_matches(&values, "maker", &filters));
+        assert!(!tool_table_matches(&values, "missing", &filters));
+        filters[5] = Some(BTreeSet::new());
+        assert!(!tool_table_matches(&values, "", &filters));
     }
 }
