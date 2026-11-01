@@ -1005,11 +1005,12 @@ impl App {
             }
         })?;
         if self.cad_pending_kind.is_some() {
-            return self
-                .library
-                .tools
-                .iter()
-                .find(|t| Some(t.number) == self.cad_tool_pick);
+            return self.cad_selected_project_tool.as_ref().or_else(|| {
+                self.library
+                    .tools
+                    .iter()
+                    .find(|t| Some(t.number) == self.cad_tool_pick)
+            });
         }
         self.operation_tools
             .iter()

@@ -56,6 +56,31 @@ unlinked before it can be deleted. Saved projects remain self-contained for
 toolpath generation when a material is unavailable in the local library.
 Cutting-force analysis requires that material's coefficient in the shared library.
 
+## Selecting an operation cutter
+
+On an operation's **Tool** tab, the cutter button shows its number, diameter, type,
+and description, or **select...** when no cutter is selected. Click it to open the
+selector. The top table lists cutters already used across the project's setups.
+The library table below starts with recommended cutter types for that operation.
+Use its search and column filters to narrow the list, or clear the filters to see
+other allowed choices. Unsupported cutters cannot be selected.
+
+Click a cutter row to use it. Choosing a project cutter uses its embedded values;
+choosing a library cutter uses its saved library values. The change remains part
+of the operation draft until Apply. **Cancel**, Escape, or clicking outside the
+selector closes it without changing the cutter. The Tools view's search and
+filters are restored when the selector closes.
+
+## Cutter dimension drawings
+
+In the Tools editor, click a geometry parameter or focus it with Tab to show its
+measurement on the cutter profile. Dimension lines, arrows, and labels follow the
+current working values as you edit. Selecting the flute count highlights the flutes.
+
+On an operation's **Tool** tab, click **i** beside the cutter selector to open the
+full dimension drawing for that operation's selected cutter, including a pending
+cutter change. Close it with **Close**, Escape, or a click outside the drawing.
+
 ## Roughing end mills
 
 Choose **Roughing End Mill** as the cutter type for a flat-bottomed rougher.

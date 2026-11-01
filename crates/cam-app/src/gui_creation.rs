@@ -8,10 +8,14 @@ impl App {
     }
     pub(super) fn wizard_tool(&self) -> Option<cam_model::Tool> {
         if self.cad_pending_kind.is_some() {
-            self.library
-                .tools
-                .iter()
-                .find(|tool| Some(tool.number) == self.cad_tool_pick)
+            self.cad_selected_project_tool
+                .as_ref()
+                .or_else(|| {
+                    self.library
+                        .tools
+                        .iter()
+                        .find(|tool| Some(tool.number) == self.cad_tool_pick)
+                })
                 .cloned()
         } else {
             let number = self.controller.pending_op()?.tool?;

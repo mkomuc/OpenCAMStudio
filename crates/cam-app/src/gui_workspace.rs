@@ -59,7 +59,7 @@ pub(super) fn reorder_tool_column(
     }
 }
 
-const TOOL_TABLE_LABELS: [&str; 8] = [
+pub(super) const TOOL_TABLE_LABELS: [&str; 8] = [
     "Tool",
     "Description",
     "Cutter",
@@ -964,7 +964,7 @@ impl App {
         })
         .into()
     }
-    fn tool_table_row_values(&self, tool: &cam_model::Tool) -> [String; 8] {
+    pub(super) fn tool_table_row_values(&self, tool: &cam_model::Tool) -> [String; 8] {
         [
             format!("T{}", tool.number),
             tool.description.clone(),
@@ -983,7 +983,9 @@ impl App {
             .iter()
             .enumerate()
             .map(|(index, committed)| {
-                let tool = if index == self.lib_sel {
+                let tool = if self.operation_tool_selector.is_some() {
+                    committed
+                } else if index == self.lib_sel {
                     self.tool_edit.as_ref().unwrap_or(committed)
                 } else {
                     self.tool_drafts
@@ -1190,14 +1192,22 @@ impl App {
             }),
         }
         for (index, committed) in tools {
-            let selected = index == self.lib_sel;
+            let selecting = self.operation_tool_selector.is_some();
+            let selected = if selecting {
+                self.operation_preset_tool()
+                    .is_some_and(|t| t.identity() == committed.identity())
+            } else {
+                index == self.lib_sel
+            };
             let draft = self.tool_drafts.get(&index);
-            let tool = if selected {
+            let tool = if self.operation_tool_selector.is_some() {
+                committed
+            } else if selected {
                 self.tool_edit.as_ref().unwrap_or(committed)
             } else {
                 draft.map(|draft| &draft.tool).unwrap_or(committed)
             };
-            let pending = draft.is_some() || (selected && self.inspector_dirty());
+            let pending = !selecting && (draft.is_some() || (selected && self.inspector_dirty()));
             let values = self.tool_table_row_values(tool);
             if !tool_table_matches(&values, &self.tool_table_search, &self.tool_table_filters) {
                 continue;
@@ -1225,11 +1235,24 @@ impl App {
                     background: selected.then_some(Background::Color(palette::SELECT_BG)),
                     ..Default::default()
                 });
-            list = list.push(
-                mouse_area(item)
-                    .on_press(Message::SelectLibraryTool(index))
-                    .on_right_press(Message::LibToolMenu(index)),
-            );
+            if selecting {
+                let supported = self
+                    .operation_tool_selector
+                    .as_ref()
+                    .is_some_and(|selector| selector.supports(tool));
+                list = list.push(
+                    button(item)
+                        .padding(0)
+                        .style(inspector_secondary)
+                        .on_press_maybe(supported.then_some(Message::OperationToolPicked(index))),
+                );
+            } else {
+                list = list.push(
+                    mouse_area(item)
+                        .on_press(Message::SelectLibraryTool(index))
+                        .on_right_press(Message::LibToolMenu(index)),
+                );
+            }
         }
         let cutters = scrollable(list.width(Length::Shrink))
             .direction(scrollable::Direction::Both {
@@ -1238,6 +1261,9 @@ impl App {
             })
             .height(Length::FillPortion(3))
             .width(Length::Fill);
+        if self.operation_tool_selector.is_some() {
+            return cutters.into();
+        }
         column![cutters, self.cutting_presets_table()]
             .spacing(8)
             .width(Length::Fill)
@@ -1248,9 +1274,9 @@ impl App {
         let mut body = column![].spacing(6);
         if let Some(tool) = self.preview_tool() {
             body = body.push(
-                canvas::Canvas::new(ToolCanvas::new(&tool))
+                canvas::Canvas::new(ToolCanvas::new(&tool).selected(self.selected_tool_parameter))
                     .width(Length::Fill)
-                    .height(190),
+                    .height(270),
             );
         }
         body = body.push(self.library_editor());

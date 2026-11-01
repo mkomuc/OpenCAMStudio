@@ -423,56 +423,21 @@ impl App {
             );
         }
         if tab == OperationTab::Tool {
-            let tool = self
-                .operation_tools
-                .iter()
-                .chain(self.controller.inspection_setup().tools.iter())
-                .find(|tool| tool.number == op.tool());
+            let tool = self.operation_drawing_tool(op);
             list = list.push(
-                text(match tool {
-                    Some(tool) => format!(
-                        "T{} · {} · ⌀ {:.3} mm",
-                        tool.number,
-                        ToolKindPick::of(tool.kind),
-                        tool.diameter
-                    ),
-                    None => format!("T{} · tool missing", op.tool()),
-                })
-                .size(12),
-            );
-            let choices: Vec<ToolChoice> = self
-                .library
-                .tools
-                .iter()
-                .enumerate()
-                .filter(|(_, tool)| {
-                    families_for(AppController::operation_kind(op))
-                        .contains(&ToolKindPick::of(tool.kind))
-                })
-                .map(|(index, tool)| ToolChoice {
-                    index,
-                    number: tool.number,
-                    diameter: tool.diameter,
-                    kind: tool.kind,
-                })
-                .collect();
-            let selected = tool.and_then(|selected| {
-                choices
-                    .iter()
-                    .find(|choice| {
-                        self.library.tools[choice.index].identity() == selected.identity()
-                    })
-                    .copied()
-            });
-            list = list.push(
-                pick_list(choices, selected, |choice| {
-                    Message::OperationToolPicked(choice.index)
-                })
-                .placeholder("Choose cutter")
-                .text_size(12)
-                .padding([7, 9])
-                .style(inspector_picker)
-                .width(Length::Fill),
+                row![
+                    inspector_button(operation_tool_selector::tool_button_label(tool))
+                        .on_press(Message::OpenOperationToolSelector)
+                        .width(Length::Fill),
+                    help_wrap(
+                        inspector_button("i")
+                            .on_press_maybe(tool.cloned().map(Message::ToolInfoOpen)),
+                        "Show cutter dimensions",
+                        self.tooltips,
+                    )
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
             );
             list = list.section("Cutting data").push(help_wrap(
                 self.operation_preset_picker(op),

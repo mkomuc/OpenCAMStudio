@@ -67,6 +67,8 @@ mod operation_metadata;
 mod operation_sections;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
+#[path = "gui_operation_tool_selector.rs"]
+mod operation_tool_selector;
 #[path = "gui_pattern_editor.rs"]
 mod pattern_editor_view;
 #[path = "gui_setup_editor.rs"]
@@ -97,6 +99,9 @@ mod cutting_forces;
 #[cfg(test)]
 #[path = "gui_performance.rs"]
 mod performance;
+#[path = "gui_tool_drawing.rs"]
+mod tool_drawing;
+use tool_drawing::ToolCanvas;
 #[path = "gui_tool_presets.rs"]
 mod tool_presets;
 use tool_presets::{MaterialChoice, PresetChoice, PresetField};
@@ -2193,6 +2198,10 @@ struct App {
     preset_values: BTreeMap<PresetField, String>,
     edited_preset_input: Option<PresetField>,
     edited_tool_input: Option<Field>,
+    selected_tool_parameter: Option<Field>,
+    tool_info: Option<cam_model::Tool>,
+    operation_tool_selector: Option<operation_tool_selector::ToolSelector>,
+    cad_selected_project_tool: Option<cam_model::Tool>,
     preset_buffers: BTreeMap<u64, BTreeMap<PresetField, String>>,
     new_material_name: String,
     selected_material: Option<u64>,
@@ -2615,6 +2624,9 @@ enum Message {
     OperationPositionClear(operation_positions::PositionKind),
     OperationPositionPicked([f64; 3]),
     OperationToolPicked(usize),
+    OpenOperationToolSelector,
+    CloseOperationToolSelector,
+    OperationProjectToolPicked(cam_model::Tool),
     EditDrawingGeometry(u32),
     UseDrawingGeometry,
     CancelDrawingGeometry,
@@ -2947,6 +2959,9 @@ enum Message {
     OpenMaterials,
     Noop,
     CloseMaterials,
+    ToolParameterFocus(Field, bool),
+    ToolInfoOpen(cam_model::Tool),
+    ToolInfoClose,
     ToolDetailChanged(tool_presets::ToolDetail, String),
     DeletePreset,
     PresetNameChanged(String),
@@ -3607,6 +3622,10 @@ impl App {
             preset_values: BTreeMap::new(),
             edited_preset_input: None,
             edited_tool_input: None,
+            selected_tool_parameter: None,
+            tool_info: None,
+            operation_tool_selector: None,
+            cad_selected_project_tool: None,
             preset_buffers: BTreeMap::new(),
             new_material_name: String::new(),
             selected_material: None,
@@ -3820,6 +3839,7 @@ impl App {
                 | Message::UseDrawingGeometry
                 | Message::BeginOp(_)
                 | Message::OperationToolPicked(_)
+                | Message::OperationProjectToolPicked(_)
         );
         let previous_status = self.status.clone();
         let context = self.output_context();
@@ -3847,6 +3867,37 @@ impl App {
     }
 
     fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        if self.operation_tool_selector.is_some() && matches!(message, Message::CadEscape) {
+            if self.tool_table_menu.is_some() {
+                self.tool_table_menu = None;
+            } else {
+                self.close_operation_tool_selector();
+            }
+            return iced::Task::none();
+        }
+        if self.operation_tool_selector.is_some()
+            && !operation_tool_selector::selector_message(&message)
+        {
+            return iced::Task::none();
+        }
+        if self.tool_info.is_some() && matches!(message, Message::CadEscape) {
+            self.tool_info = None;
+            return iced::Task::none();
+        }
+        if self.tool_info.is_some()
+            && !matches!(
+                &message,
+                Message::ToolInfoClose
+                    | Message::PollRun
+                    | Message::PollCadImport
+                    | Message::WindowResized(_)
+                    | Message::WindowCursor(_)
+                    | Message::ModifiersChanged(_)
+                    | Message::NoticeDismissed
+            )
+        {
+            return iced::Task::none();
+        }
         if self.processing_time_dialog.is_some()
             && self.notice.is_none()
             && matches!(message, Message::CadEscape)
@@ -4505,32 +4556,14 @@ impl App {
             Message::OperationPositionPick(kind) => self.begin_position_pick(kind),
             Message::OperationPositionClear(kind) => self.clear_operation_position(kind),
             Message::OperationPositionPicked(point) => self.pick_operation_surface_position(point),
+            Message::OpenOperationToolSelector => self.open_operation_tool_selector(),
+            Message::CloseOperationToolSelector => self.close_operation_tool_selector(),
+            Message::OperationProjectToolPicked(tool) => {
+                return self.choose_operation_tool(tool, true);
+            }
             Message::OperationToolPicked(index) => {
-                if self.creating_operation() {
-                    return self.update(Message::SetPendingLibraryTool(index));
-                }
-                if let (Some(tool), Selection::Operation(id)) = (
-                    self.library.tools.get(index).cloned(),
-                    self.controller.selection(),
-                ) {
-                    let Some(op) = self.current_operation(id) else {
-                        return iced::Task::none();
-                    };
-                    if !families_for(AppController::operation_kind(op))
-                        .contains(&ToolKindPick::of(tool.kind))
-                    {
-                        self.status =
-                            "This cutter kind is not supported by the selected operation.".into();
-                        return iced::Task::none();
-                    }
-                    let number = self.stage_operation_tool(tool);
-                    self.edit_operation_draft(|op| {
-                        op.set_tool(number);
-                        op.clear_tool_preset();
-                    });
-                    self.refresh_operation_fields();
-                    self.auto_operation_preset();
-                    self.refresh_cutting_fields(None);
+                if let Some(tool) = self.library.tools.get(index).cloned() {
+                    return self.choose_operation_tool(tool, false);
                 }
             }
             Message::EditDrawingGeometry(id) => {
@@ -5486,7 +5519,20 @@ impl App {
                     d.drawings.clear();
                 }
             }
+            Message::ToolInfoOpen(tool) => self.tool_info = Some(tool),
+            Message::ToolInfoClose => self.tool_info = None,
+            Message::ToolParameterFocus(field, focused) => {
+                if focused && self.library_mode() {
+                    self.selected_tool_parameter = Some(field);
+                }
+            }
             Message::CheckHeightFocus => {
+                if self.library_mode() {
+                    return iced::Task::batch(self.inspector_fields().into_iter().map(|field| {
+                        iced::widget::operation::is_focused(tool_drawing::parameter_id(field))
+                            .map(move |focused| Message::ToolParameterFocus(field, focused))
+                    }));
+                }
                 if self.operation_tab == OperationTab::Heights
                     && matches!(self.controller.selection(), Selection::Operation(_))
                 {
@@ -5507,6 +5553,7 @@ impl App {
             Message::FieldChanged(field, value) => {
                 if self.library_mode() {
                     self.edited_tool_input = Some(field);
+                    self.selected_tool_parameter = Some(field);
                 }
                 if matches!(field, Field::MajorDia | Field::Pitch) {
                     self.thread_parameters.mode = thread_parameters::ThreadMatchMode::Manual;
@@ -6473,6 +6520,7 @@ impl App {
                 }
             }
             Message::BeginOp(kind) => {
+                self.cad_selected_project_tool = None;
                 if self.controller.setups().is_empty() {
                     self.status =
                         "Select a model or body and create a setup before adding an operation."
@@ -6570,6 +6618,7 @@ impl App {
                 };
             }
             Message::SetPendingLibraryTool(i) => {
+                self.cad_selected_project_tool = None;
                 if let Some(tool) = self.library.tools.get(i).cloned() {
                     if let Some(op) = self.operation_draft.as_ref() {
                         if !families_for(AppController::operation_kind(op))
@@ -6591,6 +6640,7 @@ impl App {
                 }
             }
             Message::CancelOp => {
+                self.cad_selected_project_tool = None;
                 self.cutting_force_inputs
                     .remove(&(self.controller.inspection_setup().id, None));
                 self.geometry_editor = None;
@@ -8315,6 +8365,9 @@ impl App {
     }
 
     fn remember_tool_table(&mut self) {
+        if self.operation_tool_selector.is_some() {
+            return;
+        }
         let prefs = &mut self.settings.tool_table;
         prefs.visible = self.tool_table_columns;
         prefs.widths = self.tool_table_widths;
@@ -8475,6 +8528,7 @@ impl App {
     /// field buffers from it. Called at every "load" point (tool selection, New, Delete,
     /// tab switch, post-Apply), but *not* on an in-place field/picker edit.
     fn reload_tool_edit(&mut self) {
+        self.selected_tool_parameter = None;
         self.show_preset_editor = false;
         self.preset_editor_snapshot = None;
         self.library_preset = None;
@@ -9748,6 +9802,11 @@ impl App {
                 .on_press(Message::CloseLibMenu);
             layers = layers.push(catcher).push(menu);
         }
+        if let Some(dialog) = self.operation_tool_selector_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::CloseOperationToolSelector);
+            layers = layers.push(catcher).push(dialog);
+        }
         if let Some(menu) = self.tool_table_menu_overlay() {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::CloseToolTableMenu);
@@ -9776,6 +9835,11 @@ impl App {
         if let Some(dialog) = self.processing_time_overlay() {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::ProcessingTimeClose);
+            layers = layers.push(catcher).push(dialog);
+        }
+        if let Some(dialog) = self.tool_info_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::ToolInfoClose);
             layers = layers.push(catcher).push(dialog);
         }
         if let Some(dialog) = self.notice_overlay() {
@@ -12708,7 +12772,9 @@ fn field_row_labeled<'a>(
         .on_input(move |v| Message::FieldChanged(field, v))
         .on_submit(Message::Apply)
         .width(Length::Fixed(INSPECTOR_INPUT_W));
-    if operation_tabs::field_tab(field) == OperationTab::Heights {
+    if tool_drawing::is_parameter(field) {
+        input = input.id(tool_drawing::parameter_id(field));
+    } else if operation_tabs::field_tab(field) == OperationTab::Heights {
         input = input.id(height_planes::field_id(field));
     }
     if invalid {
@@ -14441,325 +14507,6 @@ impl shader::Primitive for ScenePrimitive {
         gizmo_pass.set_viewport(gx as f32, gy as f32, size as f32, size as f32, 0.0, 1.0);
         gizmo_pass.set_scissor_rect(gx, gy, size, size);
         pipeline.gizmo.draw(&mut gizmo_pass);
-    }
-}
-
-/// A 2D cross-section preview of a tool's generatrix (TOOLING_PLAN Phase 5), shown in
-/// place of the 3D backplot while a tool is being edited. The generatrix is mirrored
-/// about the axis for a full-silhouette read; **cutting** surfaces draw as a solid,
-/// thicker line and **non-cutting** (shank/neck/top) as a thin **dashed** line — the
-/// distinction is by *linestyle, never hue* (colour-blind-safe). A few dimension labels
-/// annotate the driving values.
-#[allow(dead_code)] // Existing 2D preview retained alongside the main 3D tool view.
-struct ToolCanvas {
-    profile: cam_geo::Profile2D,
-    diameter: f64,
-    length: f64,
-    flute_length: f64,
-    flutes: u32,
-    cutting_direction: CutDir,
-    /// Whether to draw the flute helix at all (off for V-bits).
-    draw_flutes: bool,
-    /// Axial advance per helix turn (drill bits ≈ 3·⌀ for a realistic pitch; other
-    /// kinds do one turn over the cutting region).
-    flute_pitch: f64,
-    /// Sign of the helix lean (+1 leans one way, −1 the other). Derived from the
-    /// cutting direction, but inverted for a twist drill so it reads right-hand.
-    flute_sign: f64,
-    /// Draw a row of 90° square inserts seated at the bottom of the body (face mills),
-    /// so the silhouette reads as a real shell mill rather than a bare inverted-T.
-    draw_face_inserts: bool,
-}
-
-impl ToolCanvas {
-    #[allow(dead_code)] // Constructor for the retained 2D preview.
-    fn new(tool: &cam_model::Tool) -> Self {
-        let profile = tool.profile();
-        // The flute helix spans the actual cutting region — the flute length for an end
-        // mill, the cone for a V-bit / drill — read off the profile's cutting segments.
-        let cutting_top = profile
-            .segs
-            .iter()
-            .filter(|s| s.cutting)
-            .map(|s| s.end.y)
-            .fold(0.0_f64, f64::max);
-        let cutting_top = cutting_top.max(1e-3);
-        Self {
-            diameter: tool.diameter,
-            length: tool.length,
-            flute_length: cutting_top,
-            flutes: tool.flutes,
-            cutting_direction: tool.cutting_direction,
-            // V-bits, chamfer mills, face mills and thread mills show no flute helix (the
-            // cone / shell-mill body / thread teeth read cleaner without it); a drill's
-            // helix revolves every ~3·⌀.
-            draw_flutes: !matches!(
-                tool.kind,
-                ToolKind::VBit { .. }
-                    | ToolKind::ChamferMill { .. }
-                    | ToolKind::FaceMill
-                    | ToolKind::ThreadMill { .. }
-            ),
-            flute_pitch: match tool.kind {
-                ToolKind::Drill { .. } => (3.0 * tool.diameter).max(1e-3),
-                _ => cutting_top,
-            },
-            flute_sign: {
-                let base = if tool.cutting_direction == CutDir::Up {
-                    1.0
-                } else {
-                    -1.0
-                };
-                // A twist drill leans the opposite way to a down-cut end mill.
-                if matches!(tool.kind, ToolKind::Drill { .. }) {
-                    -base
-                } else {
-                    base
-                }
-            },
-            draw_face_inserts: matches!(tool.kind, ToolKind::FaceMill),
-            profile,
-        }
-    }
-}
-
-impl canvas::Program<Message> for ToolCanvas {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &iced::Renderer,
-        theme: &iced::Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        use iced::Point as P;
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let fg = theme.palette().text;
-        let faint = Color { a: 0.4, ..fg };
-
-        let max_r = self.profile.max_radius().max(1e-3) as f32;
-        let height = self.profile.height().max(1e-3) as f32;
-        let margin = 28.0_f32;
-        let avail_w = (bounds.width - 2.0 * margin).max(1.0);
-        let avail_h = (bounds.height - 2.0 * margin).max(1.0);
-        // Fit the *mirrored* silhouette (width 2·max_r) and the height, keeping aspect.
-        let scale = (avail_w / (2.0 * max_r)).min(avail_h / height);
-        let cx = bounds.width / 2.0;
-        let bottom = bounds.height - margin;
-        let map = |r: f64, z: f64, sign: f32| {
-            P::new(cx + sign * (r as f32) * scale, bottom - (z as f32) * scale)
-        };
-
-        // Axis of revolution: a faint dashed vertical line spanning the whole viewport
-        // (top to bottom), not just the tool's extent — a full symmetry reference.
-        let axis_dash = [4.0_f32, 4.0];
-        let axis = canvas::Path::line(P::new(cx, 0.0), P::new(cx, bounds.height));
-        frame.stroke(
-            &axis,
-            canvas::Stroke {
-                line_dash: canvas::LineDash {
-                    segments: &axis_dash,
-                    offset: 0,
-                },
-                ..canvas::Stroke::default().with_color(faint).with_width(1.0)
-            },
-        );
-
-        // The generatrix, per segment, mirrored to both sides.
-        let dash = [5.0_f32, 4.0];
-        for (pts, cutting) in self.profile.segment_polylines(0.05) {
-            for sign in [1.0_f32, -1.0] {
-                let path = canvas::Path::new(|b| {
-                    let mut first = true;
-                    for p in &pts {
-                        let sp = map(p.x, p.y, sign);
-                        if first {
-                            b.move_to(sp);
-                            first = false;
-                        } else {
-                            b.line_to(sp);
-                        }
-                    }
-                });
-                let stroke = if cutting {
-                    canvas::Stroke::default().with_color(fg).with_width(2.2)
-                } else {
-                    canvas::Stroke {
-                        line_dash: canvas::LineDash {
-                            segments: &dash,
-                            offset: 0,
-                        },
-                        ..canvas::Stroke::default().with_color(fg).with_width(1.2)
-                    }
-                };
-                frame.stroke(&path, stroke);
-            }
-        }
-
-        // Face-mill inserts: a row of small 90° squares seated on the bottom face, their
-        // outer edges defining the cutting ⌀ — turns the bare body+arbor silhouette into a
-        // recognisable shell mill. (90° square inserts only; other insert shapes deferred.)
-        if self.draw_face_inserts {
-            let r = self.profile.max_radius();
-            let body_h = self.flute_length.max(1e-3);
-            let n = self.flutes.max(1);
-            // Insert side: a small glyph, never taller than the body (min-then-max avoids
-            // clamp's panic when the body is shorter than the floor).
-            let s = (r * 0.22).min(body_h * 0.6).max(0.1);
-            let insert_fill = Color { a: 0.30, ..fg };
-            for i in 0..n {
-                // Centres span the diameter; the two end inserts sit at ±(r − s/2) so
-                // their outer edge lands exactly on the periphery (±r).
-                let cxi = if n == 1 {
-                    0.0
-                } else {
-                    -(r - s / 2.0) + (i as f64) * (2.0 * (r - s / 2.0)) / ((n - 1) as f64)
-                };
-                let (x0, x1) = (cxi - s / 2.0, cxi + s / 2.0);
-                let rect = canvas::Path::new(|b| {
-                    b.move_to(map(x0, 0.0, 1.0));
-                    b.line_to(map(x1, 0.0, 1.0));
-                    b.line_to(map(x1, s, 1.0));
-                    b.line_to(map(x0, s, 1.0));
-                    b.close();
-                });
-                frame.fill(&rect, insert_fill);
-                frame.stroke(
-                    &rect,
-                    canvas::Stroke::default().with_color(fg).with_width(1.2),
-                );
-            }
-        }
-
-        // (Thread-mill teeth are part of the generatrix now — the saw-tooth is the cutting
-        // boundary itself — so there is no separate overlay: the profile loop above draws
-        // the threads solid and the non-cutting bottom/shank dashed.)
-
-        // Flutes + cutting direction. Each flute is projected onto the side view, drawn
-        // only where it faces the viewer, and **tapered to the tool's actual radius at
-        // that height** (`radius_at`) so on a ball / rounded nose the flutes converge at
-        // the tip instead of running full width. Count the lines for the flute number; a
-        // helical lean shows the cutting direction (Down vs Up), while straight (axial)
-        // flutes read as vertical. (Helix pitch = one turn over the flute length is a
-        // legibility choice, not the true helix angle.)
-        use std::f64::consts::{PI, TAU};
-        let boundary = self.profile.polyline(0.05);
-        let radius_at = |z: f64| -> f64 {
-            let mut best = 0.0_f64;
-            for w in boundary.windows(2) {
-                let (a, b) = (w[0], w[1]);
-                if z + 1e-9 < a.y.min(b.y) || z - 1e-9 > a.y.max(b.y) {
-                    continue;
-                }
-                let r = if (b.y - a.y).abs() < 1e-9 {
-                    a.x.max(b.x)
-                } else {
-                    let t = ((z - a.y) / (b.y - a.y)).clamp(0.0, 1.0);
-                    a.x + t * (b.x - a.x)
-                };
-                best = best.max(r);
-            }
-            best
-        };
-        if self.draw_flutes {
-            let n = self.flutes.max(1);
-            let flute_len = self.flute_length.max(1e-3);
-            let pitch = self.flute_pitch.max(1e-3);
-            let flute_col = Color { a: 0.75, ..fg };
-            // More samples when the helix wraps more times (keeps a tight drill smooth).
-            let turns = (flute_len / pitch).max(1.0);
-            let steps = ((48.0 * turns).ceil() as usize).clamp(48, 240);
-
-            let mut flute_paths: Vec<Vec<P>> = Vec::new();
-            match self.cutting_direction {
-                CutDir::Straight => {
-                    // ~N/2 visible front flutes, spread across the width, tapering to the tip.
-                    let front = n.div_ceil(2).max(1);
-                    for j in 0..front {
-                        let theta = ((j as f64 + 0.5) / front as f64) * PI - PI / 2.0;
-                        let pts = (0..=steps)
-                            .map(|i| {
-                                let z = flute_len * (i as f64) / (steps as f64);
-                                map(radius_at(z) * theta.sin(), z, 1.0)
-                            })
-                            .collect();
-                        flute_paths.push(pts);
-                    }
-                }
-                _ => {
-                    let s = self.flute_sign;
-                    for k in 0..n {
-                        let psi0 = (k as f64) * TAU / (n as f64);
-                        let mut seg: Vec<P> = Vec::new();
-                        for i in 0..=steps {
-                            let z = flute_len * (i as f64) / (steps as f64);
-                            let psi = psi0 + s * TAU * (z / pitch);
-                            if psi.cos() > 0.0 {
-                                seg.push(map(radius_at(z) * psi.sin(), z, 1.0));
-                            } else if seg.len() >= 2 {
-                                flute_paths.push(std::mem::take(&mut seg));
-                            } else {
-                                seg.clear();
-                            }
-                        }
-                        if seg.len() >= 2 {
-                            flute_paths.push(seg);
-                        }
-                    }
-                }
-            }
-            for pts in flute_paths {
-                if pts.len() < 2 {
-                    continue;
-                }
-                let path = canvas::Path::new(|b| {
-                    b.move_to(pts[0]);
-                    for p in &pts[1..] {
-                        b.line_to(*p);
-                    }
-                });
-                frame.stroke(
-                    &path,
-                    canvas::Stroke::default()
-                        .with_color(flute_col)
-                        .with_width(1.0),
-                );
-            }
-        }
-
-        // Dimension annotations (text only — no scale bars, kept minimal).
-        let label = |frame: &mut canvas::Frame, s: String, y: f32| {
-            frame.fill_text(canvas::Text {
-                content: s,
-                position: P::new(8.0, y),
-                color: fg,
-                size: iced::Pixels(12.0),
-                ..canvas::Text::default()
-            });
-        };
-        label(&mut frame, format!("⌀ {:.3} mm", self.diameter), 6.0);
-        label(&mut frame, format!("length {:.1} mm", self.length), 22.0);
-        if self.draw_flutes {
-            label(
-                &mut frame,
-                format!("flute {:.1} mm", self.flute_length),
-                38.0,
-            );
-            label(
-                &mut frame,
-                format!(
-                    "{} flute{}, {}",
-                    self.flutes,
-                    if self.flutes == 1 { "" } else { "s" },
-                    self.cutting_direction
-                ),
-                54.0,
-            );
-        }
-
-        vec![frame.into_geometry()]
     }
 }
 
