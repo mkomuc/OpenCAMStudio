@@ -284,6 +284,10 @@ fn pocket() -> Operation {
 
 fn chamfer() -> Operation {
     Operation::Chamfer(ChamferOp {
+        tip_offset: 0.0,
+        lead_in_enabled: None,
+        same_lead_out: false,
+        lead_out_enabled: None,
         closed: true,
         faces: Vec::new(),
         stepdown: 0.,

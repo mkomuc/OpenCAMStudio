@@ -342,8 +342,6 @@ impl App {
                     Field::ChamferWidth
                         | Field::ChamferDepth
                         | Field::ChamferStep
-                        | Field::LeadInSize
-                        | Field::LeadOutSize
                         | Field::LeadOverlap
                 )
             });

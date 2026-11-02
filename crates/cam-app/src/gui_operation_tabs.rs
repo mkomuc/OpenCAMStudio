@@ -191,7 +191,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::AdaptiveFineStepdown
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
-        Field::StockLeaveRadial | Field::StockLeaveAxial => value < 0.0,
+        Field::StockLeaveRadial | Field::StockLeaveAxial | Field::ChamferTipOffset => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
         Field::Stepdown
@@ -574,7 +574,7 @@ impl App {
                 continue; // Grouped beneath their section toggles.
             }
             if let Operation::Chamfer(chamfer) = op {
-                if field == Field::ChamferWidth
+                if matches!(field, Field::ChamferWidth | Field::ChamferTipOffset)
                     || (chamfer.faces.is_empty() && field == Field::Stepdown)
                     || (!chamfer.faces.is_empty()
                         && matches!(
@@ -582,8 +582,6 @@ impl App {
                             Field::ChamferWidth
                                 | Field::ChamferDepth
                                 | Field::ChamferStep
-                                | Field::LeadInSize
-                                | Field::LeadOutSize
                                 | Field::LeadOverlap
                         ))
                 {
@@ -750,8 +748,18 @@ impl App {
                     Message::FaceDirectionChanged,
                 ))
             }
-            Operation::Chamfer(c) if !c.faces.is_empty() => {
+            Operation::Chamfer(c) if !c.faces.is_empty() || self.chamfer_faces_active() => {
                 if tab == OperationTab::Passes {
+                    let field = Field::ChamferTipOffset;
+                    let value = self.fields.get(&field).cloned().unwrap_or_default();
+                    list = list.section("Chamfer").push(field_row_labeled(
+                        field,
+                        self.field_label(field),
+                        self.field_help(field),
+                        &value,
+                        self.tooltips,
+                        self.field_invalid(field),
+                    ));
                     list = list.section("Passes").push(text("Stepdown limits the height of each face band. 0 uses the cutter's usable flank automatically; smaller cutters use more passes.").size(12));
                 }
             }
@@ -769,7 +777,7 @@ impl App {
                 if tab == OperationTab::Passes {
                     let field = Field::ChamferWidth;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.section("Passes").push(field_row_labeled(
+                    list = list.section("Chamfer").push(field_row_labeled(
                         field,
                         self.field_label(field),
                         self.field_help(field),
@@ -777,6 +785,17 @@ impl App {
                         self.tooltips,
                         self.field_invalid(field),
                     ));
+                    let field = Field::ChamferTipOffset;
+                    let value = self.fields.get(&field).cloned().unwrap_or_default();
+                    list = list.push(field_row_labeled(
+                        field,
+                        self.field_label(field),
+                        self.field_help(field),
+                        &value,
+                        self.tooltips,
+                        self.field_invalid(field),
+                    ));
+                    list = list.section("Passes");
                     list = list.push(
                         row![
                             label_help("Gradual", help::CHAMFER_GRADUAL, self.tooltips),

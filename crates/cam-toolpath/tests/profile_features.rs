@@ -670,10 +670,51 @@ fn lead_end_distance_splits_the_contour_before_fitting_and_clamps_to_its_length(
         })
         .collect();
     assert_eq!(feeds, vec![(15., 300.), (20., 80.)]);
+    op.passes.lead_end_distance_enabled = Some(false);
+    let disabled = run(op.clone());
+    assert!(!disabled.has_errors(), "{:?}", disabled.diagnostics);
+    assert!(!disabled.program.steps().iter().any(|step| matches!(step, Step::Linear { feed, tag, .. } if tag.kind == MoveKind::Cutting && *feed == 80.)));
+    op.passes.lead_end_distance_enabled = Some(true);
     op.passes.lead_end_distance = 100.;
     let r = run(op);
     assert!(!r.has_errors(), "{:?}", r.diagnostics);
     assert!(r.program.steps().iter().any(|step| matches!(step, Step::Linear { to, feed, tag } if tag.kind == MoveKind::Cutting && to.x == 20. && *feed == 80.)));
+}
+
+#[test]
+fn exit_can_be_disabled_without_erasing_its_geometry() {
+    let mut op = profile();
+    op.lead_out = Lead::Arc { radius: 1.0 };
+    op.passes.lead_out_enabled = Some(false);
+    let disabled = run(op.clone());
+    assert!(!disabled.has_errors(), "{:?}", disabled.diagnostics);
+    assert!(!disabled.program.steps().iter().any(|step| matches!(step, Step::Arc { tag, .. } | Step::Linear { tag, .. } if tag.kind == MoveKind::LeadOut)));
+    op.passes.lead_out_enabled = Some(true);
+    let enabled = run(op);
+    assert!(!enabled.has_errors(), "{:?}", enabled.diagnostics);
+    assert!(enabled
+        .program
+        .steps()
+        .iter()
+        .any(|step| matches!(step, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadOut)));
+}
+
+#[test]
+fn disabled_entry_keeps_independent_exit_when_same_as_entry_was_selected() {
+    let mut op = profile();
+    op.lead_in = Lead::Arc { radius: 0.6 };
+    op.lead_out = Lead::Arc { radius: 1.0 };
+    op.passes.same_lead_out = true;
+    op.passes.lead_in_enabled = Some(false);
+    op.passes.lead_out_enabled = Some(true);
+    let result = run(op);
+    assert!(!result.has_errors(), "{:?}", result.diagnostics);
+    assert!(!result.program.steps().iter().any(|step| matches!(step, Step::Arc { tag, .. } | Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn)));
+    assert!(result
+        .program
+        .steps()
+        .iter()
+        .any(|step| matches!(step, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadOut)));
 }
 
 #[test]

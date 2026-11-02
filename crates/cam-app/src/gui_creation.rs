@@ -92,6 +92,7 @@ impl App {
                 .map(|id| self.controller.inspection_setup().stock_to_leave_for(id))
                 .unwrap_or_default(),
         );
+        self.stock_to_leave_initialized = self.stock_to_leave_value().enabled;
         self.height_draft_id = Some(0);
         let settings = cam_model::OperationHeightSettings::default();
         self.height_offsets = cam_model::HeightPlaneKind::ALL

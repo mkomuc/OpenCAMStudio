@@ -12,8 +12,15 @@ pub(super) fn compute(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> Str
         || !p.preserve_order
         || p.taper_angle != 0.;
     let mut effective = op.clone();
-    if p.same_lead_out {
+    let entry_enabled = p.lead_in_enabled.unwrap_or(effective.lead_in != Lead::None);
+    if p.same_lead_out && entry_enabled {
         effective.lead_out = effective.lead_in;
+    }
+    if !entry_enabled {
+        effective.lead_in = Lead::None;
+    }
+    if p.lead_out_enabled == Some(false) {
+        effective.lead_out = Lead::None;
     }
     let mut result = if advanced {
         scheduled(&effective, env, cancel)
@@ -323,6 +330,7 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
             start_extension: p.start_extension,
             end_extension: p.end_extension,
             lead_end_distance: p.lead_end_distance,
+            lead_end_distance_enabled: p.lead_end_distance_enabled,
             ..Default::default()
         };
         let pass_env = JobEnv {

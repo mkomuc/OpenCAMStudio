@@ -1619,6 +1619,9 @@ pub struct ChamferOp {
     /// to plunge further with the tip.
     #[serde(default)]
     pub depth: f64,
+    /// Extra axial distance below the cutting depth, in mm.
+    #[serde(default)]
+    pub tip_offset: f64,
     /// Chamfer-width increment per pass, mm. `0` (or `>= width`) cuts the whole
     /// bevel in a single pass; otherwise the bevel is reached in steps so the tool
     /// is not overloaded (protects the tool and cleans the cut on wide bevels/hard
@@ -1671,6 +1674,14 @@ pub struct ChamferOp {
     /// `0.0` (the default) closes exactly at the start, as before.
     #[serde(default)]
     pub lead_overlap: f64,
+    /// Reuse the entry geometry for the exit on edge chamfers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_in_enabled: Option<bool>,
+    #[serde(default)]
+    pub same_lead_out: bool,
+    /// None retains the behavior of the stored lead-out on older projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_out_enabled: Option<bool>,
 }
 
 /// A **V-carve engraving** operation: run a V-bit along a path with its tip *in* the

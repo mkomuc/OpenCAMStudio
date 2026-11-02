@@ -798,7 +798,7 @@ impl LeadKind {
     /// A `Lead` of this kind, carrying over the previous size where sensible.
     fn to_lead(self, prev: Lead) -> Lead {
         let size = match prev {
-            Lead::None => 3.0,
+            Lead::None => 0.6,
             Lead::Linear { length } => length,
             Lead::Arc { radius } | Lead::ArcSweep { radius, .. } => radius,
         };
@@ -1241,6 +1241,8 @@ enum Field {
     ChamferWidth,
     /// Chamfer tip depth below the top edge (mm); selects the flank section.
     ChamferDepth,
+    /// Additional tip clearance below the chamfer.
+    ChamferTipOffset,
     /// Chamfer width increment per pass (mm); 0 cuts in one pass.
     ChamferStep,
     /// Lead-in size (length for Linear, radius for Arc).
@@ -1385,6 +1387,7 @@ impl Field {
             Field::ChamferTop => "Top edge Z (mm)",
             Field::ChamferWidth => "Chamfer width (mm)",
             Field::ChamferDepth => "Tip depth (mm, 0=tip)",
+            Field::ChamferTipOffset => "Chamfer tip offset (mm)",
             Field::ChamferStep => "Step (mm, 0=one pass)",
             Field::LeadInSize => "Lead-in size (mm)",
             Field::LeadOutSize => "Lead-out size (mm)",
@@ -1658,13 +1661,13 @@ impl Field {
                  chamfer the rim of a pocket or a step that an earlier operation cut."
             }
             Field::ChamferWidth => {
-                "Width of the chamfer face measured along the slope (mm). With the tool \
-                 angle this sets how deep the tool drops."
+                "Horizontal width of the chamfer from the selected edge. Together with the tool angle it determines the bevel depth."
             }
             Field::ChamferDepth => {
                 "How far below the top edge the tool tip rides (mm), which picks where \
                  on the tool's flank the cut lands. 0 = cut at the tip."
             }
+            Field::ChamferTipOffset => "Additional distance below the chamfer edge. The tool moves outward by the corresponding amount to keep the cutting flank on the same bevel.",
             Field::ChamferStep => {
                 "Chamfer width added per pass (mm) for a multi-pass chamfer. 0 = cut the \
                  whole chamfer in a single pass."
@@ -2071,6 +2074,7 @@ struct App {
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
     stock_to_leave_draft: Option<cam_model::StockToLeave>,
+    stock_to_leave_initialized: bool,
     creation_edited_fields: BTreeSet<Field>,
     thread_parameters: thread_parameters::ThreadParameters,
     creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
@@ -2596,6 +2600,7 @@ enum BoreOption {
 #[derive(Debug, Clone)]
 enum Message {
     PollMcp,
+    TraverseFocus(bool),
     OutputAction(iced::widget::text_editor::Action),
     OutputCopy,
     OutputClear,
@@ -2933,6 +2938,9 @@ enum Message {
     /// immediately with default parameters; sizes are then edited as fields).
     LeadInKindChanged(LeadKind),
     LeadOutKindChanged(LeadKind),
+    ChamferExitEnabled(bool),
+    ChamferEntryEnabled(bool),
+    ChamferSameLeadOut(bool),
     PlungeKindChanged(PlungeKind),
     /// Change the selected face op's pass direction (committed immediately).
     FaceDirectionChanged(Axis),
@@ -3256,6 +3264,7 @@ impl App {
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
         self.stock_to_leave_draft = Some(self.controller.inspection_setup().stock_to_leave_for(id));
+        self.stock_to_leave_initialized = self.stock_to_leave_value().enabled;
         if matches!(self.operation_draft, Some(Operation::Profile(_))) {
             let first = self
                 .controller
@@ -3540,6 +3549,7 @@ impl App {
             setup_values: BTreeMap::new(),
             operation_draft: None,
             stock_to_leave_draft: None,
+            stock_to_leave_initialized: false,
             creation_edited_fields: BTreeSet::new(),
             thread_parameters: Default::default(),
             creation_geometry_height_defaults: None,
@@ -4171,6 +4181,13 @@ impl App {
             self.profile_tab_selection = None;
         }
         match message {
+            Message::TraverseFocus(backward) => {
+                return if backward {
+                    iced::widget::operation::focus_previous()
+                } else {
+                    iced::widget::operation::focus_next()
+                };
+            }
             Message::PollMcp => return self.poll_mcp(),
             Message::SimulationOption(option) => {
                 let continuous = matches!(option, SimulationOption::Tolerance(_));
@@ -4550,6 +4567,18 @@ impl App {
             }
             Message::StockToLeaveToggled(enabled) => {
                 let mut stock = self.stock_to_leave_with_fields();
+                if enabled
+                    && (!self.stock_to_leave_initialized
+                        || (self.stock_to_leave_draft.is_none() && !stock.enabled))
+                {
+                    stock.radial = if matches!(self.operation_draft, Some(Operation::Face(_))) {
+                        0.0
+                    } else {
+                        0.5
+                    };
+                    stock.axial = 0.5;
+                    self.stock_to_leave_initialized = true;
+                }
                 stock.enabled = enabled;
                 self.stock_to_leave_draft = Some(stock);
                 self.refresh_operation_fields();
@@ -7382,6 +7411,83 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::ChamferExitEnabled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Chamfer(c) = op {
+                        c.lead_out_enabled = Some(enabled);
+                        if enabled && c.lead_out == Lead::None {
+                            c.lead_out = Lead::Arc { radius: 0.6 };
+                        }
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ChamferEntryEnabled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Chamfer(c) = op {
+                        c.lead_in_enabled = Some(enabled);
+                        if !enabled && c.same_lead_out && c.lead_out == Lead::None {
+                            c.lead_out = if c.lead_in == Lead::None {
+                                Lead::Arc { radius: 0.6 }
+                            } else {
+                                c.lead_in
+                            };
+                        }
+                        if enabled && c.lead_in == Lead::None {
+                            c.lead_in = Lead::Arc { radius: 0.6 };
+                        }
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ChamferSameLeadOut(same) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Chamfer(c) = op {
+                        let entry_enabled =
+                            c.lead_in != Lead::None && c.lead_in_enabled.unwrap_or(true);
+                        let exit_enabled = c.lead_out_enabled.unwrap_or(true)
+                            && (c.lead_out != Lead::None || (c.same_lead_out && entry_enabled));
+                        if !same && c.same_lead_out && exit_enabled && c.lead_out == Lead::None {
+                            c.lead_out = c.lead_in;
+                        }
+                        c.same_lead_out = same;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::PlungeKindChanged(kind) => {
                 self.edit_operation_draft(|op| match op {
                     Operation::Profile(p) => p.plunge = kind.to_plunge(),
@@ -8151,12 +8257,23 @@ impl App {
             // Track the window-absolute cursor so overlays (the op context menu)
             // anchor exactly under the pointer — widget-local positions are offset
             // by the pane's origin, which is what caused the menu to appear astray.
-            iced::event::listen_with(|event, _status, _window| match event {
+            iced::event::listen_with(|event, status, _window| match event {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::Tree(TreeMessage::Release)),
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::WindowCursor(position))
+                }
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
+                    modifiers,
+                    ..
+                }) if status == iced::event::Status::Ignored
+                    && !modifiers.control()
+                    && !modifiers.alt()
+                    && !modifiers.logo() =>
+                {
+                    Some(Message::TraverseFocus(modifiers.shift()))
                 }
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F8),
@@ -12106,6 +12223,18 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (op, Field::LeadOutFeed) => Some(op.entry_feeds().lead_out.unwrap_or(0.)),
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
         (Operation::Profile(o), Field::Profile(n)) => Some(n.get(o)),
+        (Operation::Chamfer(o), Field::Profile(profile_parameters::Number::LeadInSweep)) => {
+            Some(match o.lead_in {
+                Lead::ArcSweep { angle_deg, .. } => angle_deg,
+                _ => 90.,
+            })
+        }
+        (Operation::Chamfer(o), Field::Profile(profile_parameters::Number::LeadOutSweep)) => {
+            Some(match o.lead_out {
+                Lead::ArcSweep { angle_deg, .. } => angle_deg,
+                _ => 90.,
+            })
+        }
         (Operation::Profile(o), Field::Stepover) => Some(o.stepover),
         (Operation::Profile(o), Field::TabWidth) => Some(o.tabs.width),
         (Operation::Profile(o), Field::TabHeight) => Some(o.tabs.height),
@@ -12171,6 +12300,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Chamfer(o), Field::ChamferTop) => Some(o.top),
         (Operation::Chamfer(o), Field::ChamferWidth) => Some(o.width),
         (Operation::Chamfer(o), Field::ChamferDepth) => Some(o.depth),
+        (Operation::Chamfer(o), Field::ChamferTipOffset) => Some(o.tip_offset),
         (Operation::Chamfer(o), Field::ChamferStep) => Some(o.step),
         (Operation::Chamfer(o), Field::Stepdown) => Some(o.stepdown),
         (Operation::Chamfer(o), Field::Feed) => Some(o.feed),
@@ -12397,6 +12527,24 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
         }
         Operation::Chamfer(o) => {
+            for (field, lead) in [
+                (
+                    Field::Profile(profile_parameters::Number::LeadInSweep),
+                    &mut o.lead_in,
+                ),
+                (
+                    Field::Profile(profile_parameters::Number::LeadOutSweep),
+                    &mut o.lead_out,
+                ),
+            ] {
+                if let Some(angle_deg) =
+                    get(field).filter(|v| v.is_finite() && *v > 0. && *v <= 170.)
+                {
+                    if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = *lead {
+                        *lead = Lead::ArcSweep { radius, angle_deg };
+                    }
+                }
+            }
             // Deliberately unclamped: an edge below the part datum is an ordinary
             // thing to chamfer, so a negative Z is a value, not a mistake.
             if let Some(v) = get(Field::ChamferTop) {
@@ -12407,6 +12555,9 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
             if let Some(v) = get(Field::ChamferDepth) {
                 o.depth = v.max(0.0);
+            }
+            if let Some(v) = get(Field::ChamferTipOffset) {
+                o.tip_offset = v;
             }
             if let Some(v) = get(Field::ChamferStep) {
                 o.step = v.max(0.0);
@@ -15136,6 +15287,14 @@ mod multi_setup_draft_tests {
         let (mut app, id) = stock_profile_app();
         let before = app.controller.inspection_setup().clone();
         send(&mut app, Message::StockToLeaveToggled(true));
+        assert_eq!(
+            app.stock_to_leave_with_fields(),
+            cam_model::StockToLeave {
+                enabled: true,
+                radial: 0.5,
+                axial: 0.5,
+            }
+        );
         send(
             &mut app,
             Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()),
@@ -15144,6 +15303,10 @@ mod multi_setup_draft_tests {
             &mut app,
             Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()),
         );
+        send(&mut app, Message::StockToLeaveToggled(false));
+        send(&mut app, Message::StockToLeaveToggled(true));
+        assert_eq!(app.stock_to_leave_with_fields().radial, 0.3);
+        assert_eq!(app.stock_to_leave_with_fields().axial, 0.2);
         assert_eq!(app.controller.inspection_setup(), &before);
         assert!(app.inspector_dirty());
 
@@ -15177,6 +15340,24 @@ mod multi_setup_draft_tests {
         assert_eq!(
             app.controller.inspection_setup().stock_to_leave_for(id),
             Default::default()
+        );
+    }
+
+    #[test]
+    fn face_stock_to_leave_defaults_to_axial_only() {
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Face, 1);
+        app.controller.add_operation(operation);
+        let id = app.controller.inspection_setup().operations[0].id();
+        app.begin_operation_draft(id);
+        send(&mut app, Message::StockToLeaveToggled(true));
+        assert_eq!(
+            app.stock_to_leave_with_fields(),
+            cam_model::StockToLeave {
+                enabled: true,
+                radial: 0.0,
+                axial: 0.5,
+            }
         );
     }
 
@@ -15847,6 +16028,10 @@ mod inspector_field_tests {
 
     fn chamfer(top: f64) -> Operation {
         Operation::Chamfer(cam_model::ChamferOp {
+            tip_offset: 0.0,
+            lead_in_enabled: None,
+            same_lead_out: false,
+            lead_out_enabled: None,
             closed: true,
             faces: Vec::new(),
             stepdown: 0.,

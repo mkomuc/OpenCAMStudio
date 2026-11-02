@@ -99,9 +99,17 @@ pub struct ProfilePasses {
     /// Feed between safe neighboring passes without returning to clearance.
     pub keep_tool_down: bool,
     pub feed_retract: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_in_enabled: Option<bool>,
     pub same_lead_out: bool,
+    /// None preserves the legacy lead-out choice, including `Lead::None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_out_enabled: Option<bool>,
     /// Distance before the contour end at which the exit feed begins.
     pub lead_end_distance: f64,
+    /// None preserves the legacy convention that a positive distance enables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_end_distance_enabled: Option<bool>,
     /// Zero keeps the cutting RPM during downward entry.
     pub ramp_rpm: f64,
 }
@@ -130,9 +138,25 @@ impl Default for ProfilePasses {
             taper_angle: 0.,
             keep_tool_down: false,
             feed_retract: false,
+            lead_in_enabled: None,
             same_lead_out: false,
+            lead_out_enabled: None,
             lead_end_distance: 0.,
+            lead_end_distance_enabled: None,
             ramp_rpm: 0.,
+        }
+    }
+}
+
+impl ProfilePasses {
+    pub fn effective_lead_end_distance(&self) -> f64 {
+        if self
+            .lead_end_distance_enabled
+            .unwrap_or(self.lead_end_distance > 0.)
+        {
+            self.lead_end_distance
+        } else {
+            0.
         }
     }
 }
@@ -151,15 +175,26 @@ impl ProfileOp {
         }
         let valid =
             |lead| matches!(lead,Lead::Linear{length} if length.is_finite() && length>=radius);
-        let exit = if self.passes.same_lead_out {
+        let entry_enabled = self
+            .passes
+            .lead_in_enabled
+            .unwrap_or(self.lead_in != Lead::None);
+        let entry = if entry_enabled {
             self.lead_in
+        } else {
+            Lead::None
+        };
+        let exit = if self.passes.lead_out_enabled == Some(false) {
+            Lead::None
+        } else if self.passes.same_lead_out && entry_enabled {
+            entry
         } else {
             self.lead_out
         };
         if !radius.is_finite()
             || radius <= 0.
             || self.contours().any(|c| c.side == Side::On)
-            || !valid(self.lead_in)
+            || !valid(entry)
             || !valid(exit)
         {
             return Err("Control compensation needs Inside/Outside cutter side and linear entry/exit at least one tool radius long".into());
@@ -334,12 +369,12 @@ impl ProfileOp {
         if p.ramp_rpm > 0. && (self.plunge == Plunge::Straight || self.spindle_rpm <= 0.) {
             return Err("Ramp RPM requires ramp/helix/zigzag descent and an explicit cutting RPM to restore".into());
         }
-        if p.lead_end_distance > 0. && self.tabs.enabled {
+        if p.effective_lead_end_distance() > 0. && self.tabs.enabled {
             return Err(
                 "Lead-end feed transitions currently require a profile without holding tabs".into(),
             );
         }
-        if p.lead_end_distance > 0. && self.stepover > 0. && !p.finishing {
+        if p.effective_lead_end_distance() > 0. && self.stepover > 0. && !p.finishing {
             return Err(
                 "Enable Finishing passes to apply a lead-end feed transition after roughing".into(),
             );
@@ -428,9 +463,12 @@ impl ProfileOp {
         }
         if self.comp != Comp::Computed
             && (!caps.control
+                || p.lead_in_enabled == Some(false)
                 || !matches!(self.lead_in, Lead::Linear { .. })
                 || !matches!(
-                    if p.same_lead_out {
+                    if p.lead_out_enabled == Some(false) {
+                        Lead::None
+                    } else if p.same_lead_out && p.lead_in_enabled != Some(false) {
                         self.lead_in
                     } else {
                         self.lead_out
@@ -469,6 +507,17 @@ pub fn equivalent_profile_contours(a: &crate::ProfileContour, b: &crate::Profile
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_lead_distance_and_explicit_switch_round_trip() {
+        let legacy: ProfilePasses = serde_json::from_str(r#"{"lead_end_distance":0.6}"#).unwrap();
+        assert_eq!(legacy.effective_lead_end_distance(), 0.6);
+        let mut disabled = legacy;
+        disabled.lead_end_distance_enabled = Some(false);
+        let restored: ProfilePasses =
+            serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert_eq!(restored.lead_end_distance, 0.6);
+        assert_eq!(restored.effective_lead_end_distance(), 0.);
+    }
     #[test]
     fn legacy_control_names_load_as_one_method_and_old_options_keep_defaults() {
         for name in ["ControlLeft", "ControlRight", "Control"] {

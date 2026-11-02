@@ -36,10 +36,13 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 }
             }
             // Lead/plunge sizes appear only when the kind uses them.
-            if p.lead_in != Lead::None {
+            if p.lead_in != Lead::None && p.passes.lead_in_enabled != Some(false) {
                 fields.push(Field::LeadInSize);
             }
-            if p.lead_out != Lead::None && !p.passes.same_lead_out {
+            if p.lead_out != Lead::None
+                && (!p.passes.same_lead_out || p.passes.lead_in_enabled == Some(false))
+                && p.passes.lead_out_enabled != Some(false)
+            {
                 fields.push(Field::LeadOutSize);
             }
             fields.push(Field::LeadOverlap);
@@ -109,17 +112,32 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 Field::ChamferTop,
                 Field::ChamferWidth,
                 Field::ChamferDepth,
+                Field::ChamferTipOffset,
                 Field::ChamferStep,
                 Field::Stepdown,
                 Field::SpindleRpm,
                 Field::Feed,
                 Field::PlungeFeed,
             ];
-            if c.lead_in != Lead::None {
+            if c.lead_in != Lead::None && c.lead_in_enabled != Some(false) {
                 fields.push(Field::LeadInSize);
             }
-            if c.lead_out != Lead::None {
+            if c.lead_in_enabled != Some(false)
+                && matches!(c.lead_in, Lead::Arc { .. } | Lead::ArcSweep { .. })
+            {
+                fields.push(Field::Profile(profile_parameters::Number::LeadInSweep));
+            }
+            if c.lead_out != Lead::None
+                && (!c.same_lead_out || c.lead_in_enabled == Some(false))
+                && c.lead_out_enabled != Some(false)
+            {
                 fields.push(Field::LeadOutSize);
+            }
+            if (!c.same_lead_out || c.lead_in_enabled == Some(false))
+                && c.lead_out_enabled != Some(false)
+                && matches!(c.lead_out, Lead::Arc { .. } | Lead::ArcSweep { .. })
+            {
+                fields.push(Field::Profile(profile_parameters::Number::LeadOutSweep));
             }
             if c.closed {
                 fields.push(Field::LeadOverlap);

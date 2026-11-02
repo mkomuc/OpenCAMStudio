@@ -955,7 +955,7 @@ fn emit_loop(
 /// Split at the feed boundary before fitting so a fitted arc cannot erase it.
 fn cut_profile_path(prog: &mut Program, points: &[Point], op: &ProfileOp, z: f64) {
     let tag = Tag::new(op.id, MoveKind::Cutting);
-    let distance = op.passes.lead_end_distance;
+    let distance = op.passes.effective_lead_end_distance();
     let emit = |prog: &mut Program, path: &[Point], feed| {
         crate::emit::cut_polyline_tolerance(prog, path, feed, tag, z, op.passes.tolerance);
     };
