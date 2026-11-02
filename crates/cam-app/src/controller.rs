@@ -2270,6 +2270,7 @@ impl AppController {
                     start,
                     end: None,
                     clear: ClearParams {
+                        keep_tool_down: false,
                         lift_height: 0.0,
                         clearing: cam_model::Clearing::default(),
                         stepdown: p.stepdown,
@@ -2832,6 +2833,7 @@ impl AppController {
                             end: None,
                             start: None,
                             clear: ClearParams {
+                                keep_tool_down: false,
                                 lift_height: 0.0,
                                 clearing: cam_model::Clearing::default(),
                                 stepdown: p.stepdown,

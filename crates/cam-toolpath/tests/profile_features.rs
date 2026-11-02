@@ -72,6 +72,16 @@ fn cuts(r: &StrategyResult) -> Vec<Point3> {
         })
         .collect()
 }
+// Direct keep-down bridges add material-removing moves between the original cuts.
+fn assert_cut_path_preserved(before: &StrategyResult, after: &StrategyResult) {
+    let mut actual = cuts(after).into_iter();
+    for expected in cuts(before) {
+        assert!(
+            actual.any(|point| point == expected),
+            "Missing original cut at {expected:?}"
+        );
+    }
+}
 fn plunges(r: &StrategyResult) -> Vec<Point3> {
     r.program
         .steps()
@@ -737,4 +747,87 @@ fn a_secondary_open_chain_cannot_silently_ignore_closed_contour_overlap() {
     let r = run(op);
     assert!(r.has_errors());
     assert!(r.program.is_empty());
+}
+
+#[test]
+fn keep_tool_down_links_depth_and_finishing_passes_without_changing_cuts() {
+    for finishing in [false, true] {
+        let mut op = profile();
+        op.lead_in = Lead::Arc { radius: 1. };
+        op.lead_out = Lead::Arc { radius: 1. };
+        op.passes.finishing = finishing;
+        op.passes.finish_count = 2;
+        op.passes.spring_passes = 1;
+        let lifted = run(op.clone());
+        op.passes.keep_tool_down = true;
+        let down = run(op);
+        assert!(!down.has_errors(), "{:?}", down.diagnostics);
+        down.program.validate().unwrap();
+        let retracts = |r: &StrategyResult| {
+            r.program
+                .steps()
+                .iter()
+                .filter(|s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract))
+                .count()
+        };
+        assert!(retracts(&lifted) > 1);
+        assert_eq!(retracts(&down), 1, "{:#?}", down.program.steps());
+        assert_cut_path_preserved(&lifted, &down);
+        assert!(
+            matches!(down.program.steps().last(), Some(Step::Rapid { to, tag })
+            if to.z == 8. && tag.kind == MoveKind::Retract)
+        );
+    }
+}
+
+#[test]
+fn keep_tool_down_is_saved_and_defaults_off_for_older_profiles() {
+    let mut op = profile();
+    op.passes.keep_tool_down = true;
+    let mut saved = serde_json::to_value(&op).unwrap();
+    let reopened: ProfileOp = serde_json::from_value(saved.clone()).unwrap();
+    assert!(reopened.passes.keep_tool_down);
+    saved["passes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("keep_tool_down");
+    let legacy: ProfileOp = serde_json::from_value(saved).unwrap();
+    assert!(!legacy.passes.keep_tool_down);
+}
+
+#[test]
+fn keep_tool_down_retraces_open_profiles_and_preserves_ramp_geometry() {
+    let mut open = profile();
+    open.closed = false;
+    open.chain = Contour::new(vec![
+        Point::new(0., 0.),
+        Point::new(20., 0.),
+        Point::new(20., 20.),
+    ]);
+    open.lead_in = Lead::Linear { length: 1. };
+    open.lead_out = Lead::Linear { length: 1. };
+    let mut ramp = profile();
+    ramp.plunge = Plunge::Ramp { angle_deg: 10. };
+    for mut op in [open, ramp] {
+        let lifted = run(op.clone());
+        op.passes.keep_tool_down = true;
+        let down = run(op);
+        assert!(!down.has_errors(), "{:?}", down.diagnostics);
+        down.program.validate().unwrap();
+        assert_cut_path_preserved(&lifted, &down);
+        assert_eq!(
+            down.program
+                .steps()
+                .iter()
+                .filter(|s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract))
+                .count(),
+            1
+        );
+        // Returning along the already cut path never uses a rapid at depth.
+        assert!(!down
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::Rapid { to, .. } if to.z < 0.)));
+    }
 }

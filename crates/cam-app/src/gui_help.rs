@@ -22,20 +22,62 @@ fn illustration(help: &str) -> Option<&'static [u8]> {
     if help == help::CLIMB {
         Some(include_bytes!("../assets/help/climb-conventional.svg").as_slice())
     } else if [
-        help::LEAD_IN,
-        help::LEAD_OUT,
-        Field::LeadOverlap.help(),
-        Field::LeadInSize.help(),
-        Field::LeadOutSize.help(),
-        Toggle::SameLeadOut.help(),
-        Toggle::FeedRetract.help(),
-        Number::LeadInSweep.help(),
-        Number::LeadOutSweep.help(),
-        Number::LeadEndDistance.help(),
+        Number::FinishDepths.help(),
+        Number::FinishDepthStep.help(),
+        Toggle::Even.help(),
     ]
     .contains(&help)
     {
-        Some(include_bytes!("../assets/help/leads.svg").as_slice())
+        Some(include_bytes!("../assets/help/profile-depths.svg").as_slice())
+    } else if help == Toggle::RoughFinal.help() {
+        Some(include_bytes!("../assets/help/profile-depth-policy.svg").as_slice())
+    } else if help == Toggle::FinishOnlyFinal.help() {
+        Some(include_bytes!("../assets/help/profile-finish-depth.svg").as_slice())
+    } else if [
+        Number::FinishStep.help(),
+        Number::FinishCount.help(),
+        Number::SpringPasses.help(),
+        profile_parameters::PROFILE_FINISHING_HELP,
+    ]
+    .contains(&help)
+    {
+        Some(include_bytes!("../assets/help/profile-finishing.svg").as_slice())
+    } else if help == Number::FloorLeave.help() {
+        Some(include_bytes!("../assets/help/profile-floor.svg").as_slice())
+    } else if help == profile_parameters::WALL_ALLOWANCE_HELP {
+        Some(include_bytes!("../assets/help/profile-wall.svg").as_slice())
+    } else if help == profile_parameters::CUT_ORDER_HELP {
+        Some(include_bytes!("../assets/help/profile-order.svg").as_slice())
+    } else if help == profile_parameters::CORNER_HELP {
+        Some(include_bytes!("../assets/help/profile-corners.svg").as_slice())
+    } else if help == Number::Taper.help() {
+        Some(include_bytes!("../assets/help/profile-taper.svg").as_slice())
+    } else if help == Number::Tolerance.help() {
+        Some(include_bytes!("../assets/help/profile-tolerance.svg").as_slice())
+    } else if [help::LEAD_IN, help::LEAD_OUT, Toggle::SameLeadOut.help()].contains(&help) {
+        Some(include_bytes!("../assets/help/lead-modes.svg").as_slice())
+    } else if [
+        Field::LeadInSize.help(),
+        Field::LeadOutSize.help(),
+        Field::ClearLeadInSize.help(),
+        Field::ClearLeadOutSize.help(),
+    ]
+    .contains(&help)
+    {
+        Some(include_bytes!("../assets/help/lead-size.svg").as_slice())
+    } else if [Field::LeadOverlap.help(), Field::ClearLeadOverlap.help()].contains(&help) {
+        Some(include_bytes!("../assets/help/lead-overlap.svg").as_slice())
+    } else if [Number::LeadInSweep.help(), Number::LeadOutSweep.help()].contains(&help) {
+        Some(include_bytes!("../assets/help/lead-sweep.svg").as_slice())
+    } else if help == Number::LeadEndDistance.help() {
+        Some(include_bytes!("../assets/help/lead-feed.svg").as_slice())
+    } else if [
+        Field::BoreLeadRadius.help(),
+        operation_linking::BORE_CENTER_HELP,
+    ]
+    .contains(&help)
+    {
+        Some(include_bytes!("../assets/help/lead-bore.svg").as_slice())
     } else if [help::PLUNGE, Field::PlungeA.help(), Field::PlungeB.help()].contains(&help)
         || [
             Plunge::Ramp { angle_deg: 5.0 },
@@ -70,7 +112,6 @@ fn illustration(help: &str) -> Option<&'static [u8]> {
     } else if [
         STOCK_TO_LEAVE,
         Field::ProfileOffset.help(),
-        Number::FloorLeave.help(),
         Field::StockLeaveRadial.help(),
         Field::StockLeaveAxial.help(),
     ]
@@ -80,15 +121,7 @@ fn illustration(help: &str) -> Option<&'static [u8]> {
     } else if [
         Field::Stepdown.help(),
         Field::Stepover.help(),
-        Number::FinishStep.help(),
-        Number::FinishDepthStep.help(),
-        Number::FinishCount.help(),
-        Number::FinishDepths.help(),
-        Number::SpringPasses.help(),
         Toggle::Finishing.help(),
-        Toggle::FinishOnlyFinal.help(),
-        Toggle::Even.help(),
-        Toggle::RoughFinal.help(),
     ]
     .contains(&help)
     {
@@ -134,6 +167,25 @@ mod tests {
 
     #[test]
     fn parameter_specific_help_keeps_its_illustration() {
+        for help in [
+            help::LEAD_IN,
+            help::LEAD_OUT,
+            Field::LeadInSize.help(),
+            Field::LeadOutSize.help(),
+            Field::ClearLeadInSize.help(),
+            Field::ClearLeadOutSize.help(),
+            Field::LeadOverlap.help(),
+            Field::ClearLeadOverlap.help(),
+            Field::BoreLeadRadius.help(),
+            operation_linking::BORE_CENTER_HELP,
+            Toggle::SameLeadOut.help(),
+            Number::LeadInSweep.help(),
+            Number::LeadOutSweep.help(),
+            Number::LeadEndDistance.help(),
+        ] {
+            assert!(illustration(help).is_some(), "missing illustration: {help}");
+        }
+        assert_eq!(illustration(help::LEAD_IN), illustration(help::LEAD_OUT));
         let plunge_image = illustration(help::PLUNGE).unwrap();
         for plunge in [
             Plunge::Ramp { angle_deg: 5.0 },
@@ -159,12 +211,85 @@ mod tests {
     }
 
     #[test]
+    fn profile_pass_help_uses_matching_diagrams() {
+        let depth = illustration(Number::FinishDepths.help()).unwrap();
+        assert_eq!(illustration(Number::FinishDepthStep.help()), Some(depth));
+        assert_eq!(illustration(Toggle::Even.help()), Some(depth));
+        let finishing = illustration(Number::FinishCount.help()).unwrap();
+        assert_eq!(illustration(Number::FinishStep.help()), Some(finishing));
+        assert_eq!(illustration(Number::SpringPasses.help()), Some(finishing));
+        for help in [
+            Number::FloorLeave.help(),
+            Number::Tolerance.help(),
+            Number::Taper.help(),
+            Toggle::RoughFinal.help(),
+            Toggle::FinishOnlyFinal.help(),
+            profile_parameters::WALL_ALLOWANCE_HELP,
+            profile_parameters::CUT_ORDER_HELP,
+            profile_parameters::CORNER_HELP,
+        ] {
+            let image = illustration(help).expect("profile pass help needs an illustration");
+            assert_ne!(image, depth);
+            assert_ne!(image, finishing);
+        }
+    }
+
+    #[test]
     fn illustrated_help_assets_are_valid_and_have_text_descriptions() {
         for (name, bytes) in [
             ("sides", include_str!("../assets/help/sides.svg")),
             ("allowances", include_str!("../assets/help/allowances.svg")),
             ("passes", include_str!("../assets/help/passes.svg")),
             ("leads", include_str!("../assets/help/leads.svg")),
+            ("lead modes", include_str!("../assets/help/lead-modes.svg")),
+            ("lead size", include_str!("../assets/help/lead-size.svg")),
+            (
+                "lead overlap",
+                include_str!("../assets/help/lead-overlap.svg"),
+            ),
+            ("lead sweep", include_str!("../assets/help/lead-sweep.svg")),
+            ("lead feed", include_str!("../assets/help/lead-feed.svg")),
+            ("lead bore", include_str!("../assets/help/lead-bore.svg")),
+            (
+                "profile depths",
+                include_str!("../assets/help/profile-depths.svg"),
+            ),
+            (
+                "depth policy",
+                include_str!("../assets/help/profile-depth-policy.svg"),
+            ),
+            (
+                "finish depth",
+                include_str!("../assets/help/profile-finish-depth.svg"),
+            ),
+            (
+                "profile finishing",
+                include_str!("../assets/help/profile-finishing.svg"),
+            ),
+            (
+                "profile floor",
+                include_str!("../assets/help/profile-floor.svg"),
+            ),
+            (
+                "profile wall",
+                include_str!("../assets/help/profile-wall.svg"),
+            ),
+            (
+                "profile order",
+                include_str!("../assets/help/profile-order.svg"),
+            ),
+            (
+                "profile corners",
+                include_str!("../assets/help/profile-corners.svg"),
+            ),
+            (
+                "profile taper",
+                include_str!("../assets/help/profile-taper.svg"),
+            ),
+            (
+                "profile tolerance",
+                include_str!("../assets/help/profile-tolerance.svg"),
+            ),
             ("plunge", include_str!("../assets/help/plunge.svg")),
             ("heights", include_str!("../assets/help/heights.svg")),
             ("tabs", include_str!("../assets/help/tabs.svg")),

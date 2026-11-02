@@ -27,6 +27,49 @@ pub(super) fn compute(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> Str
             ..Default::default()
         };
     }
+    if p.keep_tool_down
+        && !result.has_errors()
+        && !op.tabs.enabled
+        && op.comp == Comp::Computed
+        && op.additional_chains.is_empty()
+    {
+        if let Some(tool) = env.tool(op.tool) {
+            if let Ok(loops) = if op.closed {
+                compensated_loops(op, tool.diameter)
+            } else {
+                Ok(Vec::new())
+            } {
+                let guard = match op.side {
+                    Side::Inside if op.closed => loops,
+                    Side::Outside if loops.len() == 1 => profile_plunge_guard(
+                        loops[0].outer().points(),
+                        1.,
+                        Plunge::Helix {
+                            radius: tool.diameter,
+                            pitch: 1.,
+                        },
+                        loops[0].outer().points()[0],
+                    )
+                    .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                result.program = crate::linking::keep_down(
+                    &result.program,
+                    op.feed,
+                    2. * tool.diameter,
+                    |a, b| crate::linking::contained(&guard, a, b),
+                    cancel,
+                );
+            }
+        }
+    }
+    if cancel.is_cancelled() {
+        return StrategyResult {
+            cancelled: true,
+            diagnostics: result.diagnostics,
+            ..Default::default()
+        };
+    }
     if p.ramp_rpm > 0. && !result.has_errors() {
         let mut program = Program::new();
         let mut ramping = false;

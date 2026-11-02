@@ -3,6 +3,9 @@ use super::*;
 use cam_model::Comp;
 use iced::widget::{column, Column};
 
+pub(super) const KEEP_TOOL_DOWN_HELP: &str = "Continue from the current cutting height into the next depth or finishing pass using a safe feed link. Unsafe or disconnected transitions still retract to clearance.";
+pub(super) const BORE_CENTER_HELP: &str = "For an internal bore, start and end the tangent leads at the hole centre. The lead radius becomes half the tool-centre orbit. Each pass retracts to clearance.";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Section {
     Moves,
@@ -77,6 +80,24 @@ impl App {
         let mut ramping: Vec<Element<'_, Message>> = Vec::new();
         match op {
             Operation::Profile(p) => {
+                let keep_down_supported =
+                    p.comp == Comp::Computed && !p.tabs.enabled && p.additional_chains.is_empty();
+                moves.push(help_wrap(
+                    row![
+                        text("Keep tool down").size(12).width(Length::Fill),
+                        checkbox(p.passes.keep_tool_down).size(15).on_toggle_maybe(
+                            keep_down_supported.then_some(|v| {
+                                Message::ProfilePassToggle(profile_parameters::Toggle::KeepToolDown, v)
+                            }),
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                    if keep_down_supported { KEEP_TOOL_DOWN_HELP } else {
+                        "Keep tool down requires computed cutter compensation, a single contour, and no holding tabs."
+                    },
+                    self.tooltips,
+                ));
                 moves.push(help_wrap(
                     row![
                         text("Retract at lead-out feed")
@@ -133,6 +154,18 @@ impl App {
                 ));
             }
             Operation::Pocket(p) => {
+                moves.push(help_wrap(
+                    row![
+                        text("Keep tool down").size(12).width(Length::Fill),
+                        checkbox(p.clear.keep_tool_down)
+                            .size(15)
+                            .on_toggle(Message::PocketKeepToolDownToggled),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                    KEEP_TOOL_DOWN_HELP,
+                    self.tooltips,
+                ));
                 leads.push(profile_picker(
                     "Wall lead-in",
                     help::LEAD_IN,
@@ -231,9 +264,12 @@ impl App {
                     leads.push(help_wrap(
                         row![
                             text("Lead to centre").size(12).width(Length::Fill),
-                            checkbox(b.lead_to_center).size(15).on_toggle(|v| Message::BoreOption(BoreOption::Center(v))),
-                        ].spacing(8),
-                        "Tangent horizontal leads; retract to clearance between passes and features.",
+                            checkbox(b.lead_to_center)
+                                .size(15)
+                                .on_toggle(|v| Message::BoreOption(BoreOption::Center(v))),
+                        ]
+                        .spacing(8),
+                        BORE_CENTER_HELP,
                         self.tooltips,
                     ));
                 }

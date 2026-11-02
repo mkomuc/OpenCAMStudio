@@ -793,6 +793,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         end: None,
         start: None,
         clear: ClearParams {
+            keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 2.,
             overlap: 0.5,

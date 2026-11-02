@@ -1,5 +1,9 @@
 //! Inspector adapters for the shared profile pass model.
 use super::*;
+pub(super) const CUT_ORDER_HELP: &str = "By contour completes each contour before the next. By depth visits contours at each depth before going deeper. By radial pass completes each radial stage across contours and depths before the next. Outside stock clearing runs first when enabled.";
+pub(super) const CORNER_HELP: &str = "Roll around corner uses a rounded offset at outside corners. Keep sharp corner extends the offset edges to their intersection; very acute corners are bevelled to limit the extension.";
+pub(super) const WALL_ALLOWANCE_HELP: &str = "Signed offset of the final profile wall from the selected contour. Positive leaves material on the part; negative cuts past the nominal wall. This allowance remains after the finishing passes.";
+pub(super) const PROFILE_FINISHING_HELP: &str = "Enable radial finishing cuts after roughing. Set the number and spacing of finishing cuts, the finishing feed, and any spring passes. The final wall retains the wall allowance.";
 use cam_model::{ProfileOp, ProfileOrder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +40,31 @@ mod tests {
         app.begin_operation_draft(id);
         (app, id)
     }
+    #[test]
+    fn keep_tool_down_draft_applies_cancels_and_undoes() {
+        let (mut app, id) = editor();
+        let checked =
+            |op: &Operation| matches!(op, Operation::Profile(p) if p.passes.keep_tool_down);
+        let _ = app.update(Message::ProfilePassToggle(Toggle::KeepToolDown, true));
+        assert!(checked(app.current_operation(id).unwrap()));
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        let _ = app.update(Message::CancelOperationDraft);
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::ProfilePassToggle(Toggle::KeepToolDown, true));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::Apply);
+        assert!(
+            checked(app.controller.operation(id).unwrap()),
+            "{}",
+            app.status
+        );
+        assert!(app.controller.undo());
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        assert!(app.controller.redo());
+        assert!(checked(app.controller.operation(id).unwrap()));
+    }
+
     #[test]
     fn finishing_draft_survives_collapse_commits_atomically_and_undoes() {
         let (mut app, id) = editor();
@@ -74,6 +103,62 @@ mod tests {
         let _ = app.update(Message::CancelOperationDraft);
         assert_eq!(app.controller.operation(id), Some(&before));
     }
+    #[test]
+    fn profile_arc_leads_from_editor_reach_generated_program() {
+        use cam_toolpath::{ProfileStrategy, Strategy};
+        let (mut app, id) = editor();
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::SameLeadOut, false));
+        let _ = app.update(Message::LeadInKindChanged(LeadKind::Arc));
+        let _ = app.update(Message::LeadOutKindChanged(LeadKind::Arc));
+        let _ = app.update(Message::FieldChanged(Field::LeadInSize, "2.5".into()));
+        let _ = app.update(Message::FieldChanged(Field::LeadOutSize, "1.5".into()));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::Finishing, true));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::KeepToolDown, true));
+        let _ = app.update(Message::Apply);
+        let Some(Operation::Profile(op)) = app.controller.operation(id) else {
+            panic!("profile expected")
+        };
+        assert_eq!(
+            op.lead_in,
+            Lead::ArcSweep {
+                radius: 2.5,
+                angle_deg: 90.
+            }
+        );
+        assert_eq!(
+            op.lead_out,
+            Lead::ArcSweep {
+                radius: 1.5,
+                angle_deg: 90.
+            }
+        );
+        let tools = [cam_model::Tool {
+            number: op.tool,
+            diameter: 6.,
+            length: 30.,
+            ..Default::default()
+        }];
+        let result = ProfileStrategy::new(op.clone()).compute(
+            &cam_toolpath::JobEnv {
+                heights: cam_model::Heights::new(5., 2., 0.),
+                tools: &tools,
+                stock: None,
+                spindle: cam_cldata::SpindleDir::Cw,
+            },
+            &cam_toolpath::CancelToken::new(),
+        );
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        result.program.validate().unwrap();
+        for kind in [cam_cldata::MoveKind::LeadIn, cam_cldata::MoveKind::LeadOut] {
+            assert!(result
+                .program
+                .steps()
+                .iter()
+                .any(|step| matches!(step, cam_cldata::Step::Arc { tag, .. } if tag.kind == kind)));
+        }
+    }
+
     #[test]
     fn one_arc_editor_preserves_legacy_radius_and_edits_sweep_without_duplicate_modes() {
         let (mut app, _) = editor();
@@ -150,13 +235,13 @@ impl Number {
     }
     pub(super) fn help(self) -> &'static str {
         match self {
-        Self::FinishCount => "Number of radial finishing cuts, including the final wall. Each earlier cut is one finish spacing farther from the wall.",
-        Self::FinishStep => "Radial spacing between finishing cuts and between roughing and the first finishing cut. This is separate from the roughing stepover.",
+        Self::FinishCount => "Number of radial finishing cuts, including the final allowanced wall. Each earlier cut is one finish spacing farther from that wall.",
+        Self::FinishStep => "Radial spacing between finishing cuts and between the roughing contour and the first finishing cut. The final finishing cut still retains the wall allowance. Separate from roughing stepover.",
         Self::FinishFeed => "Feed for the finishing stage. Zero inherits the cutting feed.",
         Self::SpringPasses => "Additional repeats of the final wall path to remove material left by tool deflection.",
         Self::FloorLeave => "Signed axial allowance above the selected bottom. Positive leaves material; negative cuts below the nominal bottom. Linked CAD requires a nonnegative value.",
-        Self::FinishDepths => "Number of smaller depth increments reserved at the bottom. Zero uses the regular stepdown throughout.",
-        Self::FinishDepthStep => "Height of each final depth increment. Their combined height must be smaller than the total cut.",
+        Self::FinishDepths => "Number of fixed-size depth increments reserved at the bottom of the cut. Zero uses the regular stepdown throughout. This is independent of radial finishing passes.",
+        Self::FinishDepthStep => "Height of each reserved bottom depth increment. Their combined height must be smaller than the total cut. This is independent of radial finish spacing.",
         Self::StartExtension => "Extend the selected open chain backward along its first tangent before offsetting. This does not add a closing edge.",
         Self::EndExtension => "Extend the selected open chain forward along its last tangent before offsetting. Independent of the start extension.",
         Self::Tolerance => "Maximum error used when fitting arcs to the cutting polyline. This does not improve the accuracy of a coarse imported curve.",
@@ -257,6 +342,7 @@ pub(super) enum Toggle {
     Even,
     Preserve,
     BothWays,
+    KeepToolDown,
     FeedRetract,
     SameLeadOut,
     RoughFinal,
@@ -269,6 +355,7 @@ impl Toggle {
             Self::Even => "Even stepdowns",
             Self::Preserve => "Preserve contour order",
             Self::BothWays => "Both ways",
+            Self::KeepToolDown => "Keep tool down",
             Self::FeedRetract => "Retract at lead-out feed",
             Self::SameLeadOut => "Exit same as entry",
             Self::RoughFinal => "Small bottom steps on rough passes",
@@ -278,9 +365,10 @@ impl Toggle {
         match self {
             Self::Finishing => "Enable radial finishing cuts after roughing. Finish spacing, finishing feed and spring passes control how the final wall is cut.",
             Self::FinishOnlyFinal => "Run radial finishing cuts only at the final depth instead of after every depth level.",
-            Self::Even => "Distribute the total cutting depth across equal increments no larger than the maximum stepdown.",
+            Self::Even => "Divide the regular depth range into equal increments no larger than the maximum stepdown. Reserved bottom increments retain their specified finishing step.",
             Self::Preserve => "Keep contours in their selected order instead of reordering them to reduce travel.",
             Self::BothWays => "Alternate travel direction on successive passes of an open contour. The contour remains open.",
+            Self::KeepToolDown => operation_linking::KEEP_TOOL_DOWN_HELP,
             Self::FeedRetract => "Use the lead-out feed for the retract after leaving the contour.",
             Self::SameLeadOut => "Use the entry lead style, size and arc sweep for the exit lead as well.",
             Self::RoughFinal => "Use smaller bottom increments on every radial/roughing stage. When disabled, intermediate stages keep the regular maximum stepdown; the final wall and its spring passes retain the smaller increments.",
@@ -294,6 +382,7 @@ impl Toggle {
             Self::Even => p.even_stepdowns,
             Self::Preserve => p.preserve_order,
             Self::BothWays => p.both_ways,
+            Self::KeepToolDown => p.keep_tool_down,
             Self::FeedRetract => p.feed_retract,
             Self::SameLeadOut => p.same_lead_out,
             Self::RoughFinal => p.rough_final,
@@ -307,6 +396,7 @@ impl Toggle {
             Self::Even => p.even_stepdowns = v,
             Self::Preserve => p.preserve_order = v,
             Self::BothWays => p.both_ways = v,
+            Self::KeepToolDown => p.keep_tool_down = v,
             Self::FeedRetract => p.feed_retract = v,
             Self::SameLeadOut => p.same_lead_out = v,
             Self::RoughFinal => p.rough_final = v,
@@ -488,7 +578,7 @@ impl App {
             }
             list = list.push(profile_picker(
                 "Cut order",
-                "Choose one ordering policy for contour, depth and radial stages.",
+                CUT_ORDER_HELP,
                 self.tooltips,
                 p.passes.order,
                 &ProfileOrder::ALL[..],
@@ -515,7 +605,14 @@ impl App {
                 list = list.push(toggle(Toggle::FinishOnlyFinal));
             }
             list = list.section("Passes").push(number(Number::Tolerance));
-            list=list.push(profile_picker("Outer corners","Roll around the corner, or extend the offset edges to a sharp point. Very acute sharp joins are bevelled to bound the path.",self.tooltips,p.passes.outer_corner,&cam_model::ProfileCorner::ALL[..],Message::ProfileCorner));
+            list = list.push(profile_picker(
+                "Outer corners",
+                CORNER_HELP,
+                self.tooltips,
+                p.passes.outer_corner,
+                &cam_model::ProfileCorner::ALL[..],
+                Message::ProfileCorner,
+            ));
             if (!linked && !p.tabs.enabled) || p.passes.taper_angle != 0. {
                 list = list.push(number(Number::Taper));
             }

@@ -1582,6 +1582,7 @@ mod tests {
             start: None,
             end: None,
             clear: cam_model::ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 stepdown: 2.0,
                 overlap: 0.5,

@@ -33,6 +33,7 @@ mod face;
 mod frontadvance;
 mod guards;
 mod leads;
+mod linking;
 mod plan;
 mod pocket;
 mod profile;

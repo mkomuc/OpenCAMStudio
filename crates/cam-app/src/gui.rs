@@ -1429,7 +1429,7 @@ impl Field {
             Field::BoreAxialStock => "Raises the cut bottom by this amount. Negative extends below the bottom.",
             Field::BoreTolerance => "Maximum chord error when linearizing a tapered helix.",
             Field::BoreSafeDistance => "Minimum standoff above the feature at the retract height and outside boss leads.",
-            Field::BoreLeadRadius => "Tangent lead radius; hole leads are limited to half the tool-centre orbit.",
+            Field::BoreLeadRadius => "Radius of the horizontal tangent lead. For holes it is limited to half the tool-centre orbit; for bosses the safe distance can increase it.",
 
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
             Field::ParallelStepover => "Horizontal distance between parallel finishing passes, in millimetres.",
@@ -1671,7 +1671,7 @@ impl Field {
             }
             Field::LeadInSize => {
                 "Size of the lead-in that eases the tool onto the wall — arc radius for \
-                 an arc lead, ramp length for a linear one (mm). Avoids a dwell mark."
+                 an arc lead, tangent length for a linear one (mm)."
             }
             Field::LeadOutSize => {
                 "Size of the lead-out that eases the tool off the wall (see lead-in)."
@@ -1751,7 +1751,7 @@ impl Field {
             }
             Field::ClearLeadInSize => {
                 "Size of the clearing pass's lead-in onto the flat area's edge -- arc \
-                 radius for an arc lead, ramp length for a linear one (mm)."
+                 radius for an arc lead, tangent length for a linear one (mm)."
             }
             Field::ClearLeadOutSize => "Size of the clearing pass's lead-out (see lead-in).",
             // As for `PlungeA`/`PlungeB`: with a clearing pass selected, `plunge_help`
@@ -1824,11 +1824,11 @@ mod help {
     pub const SIDE: &str =
         "Which side of the chain the tool runs. Outside retains the enclosed part. Inside finishes the wall and can leave an uncut core: clear the pocket separately. On centers the tool on the line. Open left/right sides follow the selected chain direction.";
     pub const LEAD_IN: &str =
-        "How the tool eases onto the wall at the start of a pass instead of diving \
-         straight in — a flat arc or tangent line — to avoid a dwell/witness mark. None \
-         starts cutting directly.";
+        "None starts on the contour. Linear approaches along a tangent line; Arc approaches \
+         along a tangent arc. Leads are horizontal moves into the start of the cut.";
     pub const LEAD_OUT: &str =
-        "How the tool eases off the wall at the end of a pass (see lead-in).";
+        "None ends on the contour. Linear departs along a tangent line; Arc departs \
+         along a tangent arc. Leads are horizontal moves away from the end of the cut.";
     pub const PLUNGE: &str =
         "How the tool enters downward at each level. Straight drops vertically (needs a \
          centre-cutting tool or pre-drilled hole); Ramp descends along the toolpath itself, \
@@ -2941,6 +2941,7 @@ enum Message {
     ClearingClimbToggled(bool),
     ParallelBothWaysToggled(bool),
     ParallelStayDownToggled(bool),
+    PocketKeepToolDownToggled(bool),
     AdaptiveClimbToggled(bool),
     AdaptiveContainmentChanged(cam_model::AdaptiveContainment),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
@@ -7434,6 +7435,14 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::PocketKeepToolDownToggled(on) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Pocket(p) = op {
+                        p.clear.keep_tool_down = on;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::ParallelStayDownToggled(on) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Parallel(p) = op {
@@ -8715,6 +8724,10 @@ impl App {
     /// the cutting disc, …), so the help matches the (kind-aware) label. Non-tool fields,
     /// and kinds where the generic wording already fits, fall back to `field.help()`.
     fn field_help(&self, field: Field) -> &'static str {
+        if field == Field::ProfileOffset && self.geometry_operation_kind() == Some(OpKind::Profile)
+        {
+            return profile_parameters::WALL_ALLOWANCE_HELP;
+        }
         if field == Field::LiftHeight && self.geometry_operation_kind() == Some(OpKind::Parallel) {
             return "Lift above neighboring surface passes when Keep tool down is enabled, in millimetres. 0 continues the finishing cut along the surface without an added lift. With Keep tool down disabled, all passes retract to clearance. Gaps and unsafe transitions still use clearance; use on pre-roughed stock.";
         }
@@ -12831,8 +12844,15 @@ fn profile_picker_w<T>(
 where
     T: ToString + PartialEq + Clone + 'static,
 {
-    row![
-        label_help(label.to_string(), help, show),
+    let whole_row_help = [
+        help::LEAD_IN,
+        help::LEAD_OUT,
+        profile_parameters::CUT_ORDER_HELP,
+        profile_parameters::CORNER_HELP,
+    ]
+    .contains(&help);
+    let row = row![
+        label_help(label.to_string(), help, show && !whole_row_help),
         pick_list(options, Some(selected), on_select)
             .text_size(12)
             .padding([7, 9])
@@ -12840,8 +12860,12 @@ where
             .width(Length::Fixed(width)),
     ]
     .spacing(8)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    if whole_row_help {
+        help_wrap(row, help, show)
+    } else {
+        row.into()
+    }
 }
 
 // ---------------------------------------------------------------------------

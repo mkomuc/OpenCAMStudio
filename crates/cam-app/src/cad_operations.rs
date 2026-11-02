@@ -497,6 +497,7 @@ pub(crate) fn create_operation(
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 stepdown: defaults.stepdown,
                 overlap: 0.5,

@@ -96,6 +96,8 @@ pub struct ProfilePasses {
     pub tolerance: f64,
     /// Offset slope from the selected contour at the final nominal depth.
     pub taper_angle: f64,
+    /// Feed between safe neighboring passes without returning to clearance.
+    pub keep_tool_down: bool,
     pub feed_retract: bool,
     pub same_lead_out: bool,
     /// Distance before the contour end at which the exit feed begins.
@@ -126,6 +128,7 @@ impl Default for ProfilePasses {
             both_ways: false,
             tolerance: DEFAULT_ARC_FIT_TOLERANCE,
             taper_angle: 0.,
+            keep_tool_down: false,
             feed_retract: false,
             same_lead_out: false,
             lead_end_distance: 0.,

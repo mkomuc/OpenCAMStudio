@@ -193,6 +193,28 @@ impl Strategy for PocketStrategy {
             }
         }
 
+        if op.clear.keep_tool_down {
+            let link_guard = offset(
+                std::slice::from_ref(&region),
+                -(r + op.clear.offset),
+                JoinStyle::Round,
+            )
+            .unwrap_or_default();
+            program = crate::linking::keep_down(
+                &program,
+                op.clear.feed,
+                2. * tool.diameter,
+                |a, b| crate::linking::contained(&link_guard, a, b),
+                cancel,
+            );
+        }
+        if cancel.is_cancelled() {
+            return StrategyResult {
+                diagnostics,
+                cancelled: true,
+                ..Default::default()
+            };
+        }
         StrategyResult {
             program,
             diagnostics,
@@ -279,19 +301,7 @@ fn emit_with_finishing(
                 let seed = op
                     .start
                     .map(|p| cam_geo::Point::new(p[0], p[1]))
-                    .unwrap_or_else(|| {
-                        let (a, b) = ring
-                            .pts
-                            .iter()
-                            .zip(ring.pts.iter().cycle().skip(1))
-                            .max_by(|(a, b), (c, d)| {
-                                (b.x - a.x)
-                                    .hypot(b.y - a.y)
-                                    .total_cmp(&(d.x - c.x).hypot(d.y - c.y))
-                            })
-                            .unwrap();
-                        cam_geo::Point::new((a.x + b.x) / 2., (a.y + b.y) / 2.)
-                    });
+                    .unwrap_or_else(|| crate::rings::automatic_wall_start(&ring.pts));
                 let last = stage + 1 == paths.len();
                 let exit = crate::rings::emit_wall_ring(
                     program,
@@ -388,6 +398,73 @@ mod tests {
     }
 
     #[test]
+    fn keep_tool_down_connects_levels_and_finishing_and_preserves_final_retract() {
+        let mut op = PocketOp {
+            id: 0,
+            tool: 1,
+            boundary: square(24.),
+            islands: vec![],
+            depth: 3.,
+            spindle_rpm: 0.,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            start: None,
+            end: None,
+            clear: ClearParams {
+                stepdown: 1.5,
+                feed: 300.,
+                plunge_feed: 100.,
+                ..Default::default()
+            },
+            finishing: Default::default(),
+        };
+        let ts = tools(8.);
+        let env = JobEnv {
+            heights: Heights::new(5., 2., 0.),
+            tools: &ts,
+            stock: None,
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        for finishing in [false, true] {
+            op.finishing.enabled = finishing;
+            op.finishing.count = 2;
+            op.finishing.repeat_pass = true;
+            op.clear.keep_tool_down = false;
+            let lifted = PocketStrategy::new(op.clone()).compute(&env, &CancelToken::new());
+            op.clear.keep_tool_down = true;
+            let down = PocketStrategy::new(op.clone()).compute(&env, &CancelToken::new());
+            assert!(!down.has_errors(), "{:?}", down.diagnostics);
+            down.program.validate().unwrap();
+            assert!(retracts(&lifted) > 1);
+            assert_eq!(retracts(&down), 1, "{:#?}", down.program.steps());
+            assert!(cutting_moves(&down) >= cutting_moves(&lifted));
+            assert!(
+                matches!(down.program.steps().last(), Some(Step::Rapid { to, tag })
+                if to.z == 5. && tag.kind == MoveKind::Retract)
+            );
+        }
+        let mut saved = serde_json::to_value(&op).unwrap();
+        assert!(
+            serde_json::from_value::<PocketOp>(saved.clone())
+                .unwrap()
+                .clear
+                .keep_tool_down
+        );
+        saved["clear"]
+            .as_object_mut()
+            .unwrap()
+            .remove("keep_tool_down");
+        assert!(
+            !serde_json::from_value::<PocketOp>(saved)
+                .unwrap()
+                .clear
+                .keep_tool_down
+        );
+    }
+
+    #[test]
     fn clears_a_square_pocket_staying_down_per_level() {
         // 40×40 pocket, ⌀8 tool, 50% overlap ⇒ 4 mm spacing, rings at 4/8/12/16.
         // Depth 3 at 1.5 stepdown ⇒ 2 levels. Staying down means one plunge and one
@@ -407,6 +484,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
@@ -454,6 +532,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
@@ -516,6 +595,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
@@ -575,6 +655,7 @@ mod tests {
                 end: None,
                 start: None,
                 clear: ClearParams {
+                    keep_tool_down: false,
                     lift_height: 0.0,
                     clearing: cam_model::Clearing::default(),
                     stepdown: 1.5,
@@ -626,6 +707,7 @@ mod tests {
                 end: None,
                 start: None,
                 clear: ClearParams {
+                    keep_tool_down: false,
                     lift_height: 0.0,
                     clearing: cam_model::Clearing::default(),
                     stepdown: 1.5,
@@ -693,6 +775,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,
@@ -968,6 +1051,73 @@ mod tests {
     }
 
     #[test]
+    fn saved_pockets_with_missing_wall_leads_are_recomputed() {
+        let op = cam_model::Operation::Pocket(leaded_op(vec![]));
+        let env = JobEnv {
+            heights: Heights::new(5., 2., 0.),
+            tools: &[],
+            stock: None,
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        let token = CancelToken::new();
+        let mut cache = crate::OperationCache::default();
+        cache.compute(&op, &env, &token, StrategyResult::default);
+        let mut saved = serde_json::to_value(&cache).unwrap();
+        saved["entries"][0]["key"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pocket_lead_revision");
+        let mut reopened: crate::OperationCache = serde_json::from_value(saved).unwrap();
+        reopened.compute(&op, &env, &token, StrategyResult::default);
+        assert_eq!(reopened.stats.computed, 1);
+        assert_eq!(reopened.stats.reused, 0);
+        reopened.compute(&op, &env, &token, || {
+            panic!("Current leads should be reused")
+        });
+        assert_eq!(reopened.stats.reused, 1);
+    }
+
+    #[test]
+    fn single_ring_pocket_keeps_requested_wall_arc_leads() {
+        for down in [false, true] {
+            for start in [None, Some([5., 1.])] {
+                for climb in [false, true] {
+                    let mut op = leaded_op(vec![]);
+                    // A 10 mm pocket and 8 mm cutter produce one wall ring. A
+                    // small arc fits on its straight wall segments at both depths.
+                    op.boundary = square(10.);
+                    op.depth = 3.;
+                    op.start = start;
+                    op.clear.lead_in = Lead::Arc { radius: 0.25 };
+                    op.clear.lead_out = Lead::Arc { radius: 0.25 };
+                    op.clear.keep_tool_down = down;
+                    op.clear.clearing.climb = climb;
+                    let result = finishing_result(op);
+                    assert!(!result.has_errors(), "{:?}", result.diagnostics);
+                    result.program.validate().unwrap();
+                    assert_eq!(
+                        leadin_arcs(&result).len(),
+                        4,
+                        "down {down}, start {start:?}, climb {climb}: {:#?}",
+                        result.program.steps()
+                    );
+                    let sim = cam_sim::simulate(
+                        &result.program,
+                        [-1., -1., -4.],
+                        [11., 11., 0.],
+                        &cam_sim::SimOptions {
+                            resolution: 0.25,
+                            tool_radius: 4.,
+                        },
+                        &[],
+                    );
+                    assert!(sim.is_clean(), "{:?}", sim.collisions);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn wall_leads_ease_onto_the_boundary_from_inside() {
         let ts = tools(8.0);
         let env = JobEnv {
@@ -1084,6 +1234,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: Clearing {
                     engagement: 2.0,
@@ -1234,6 +1385,7 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
                 stepdown: 1.5,

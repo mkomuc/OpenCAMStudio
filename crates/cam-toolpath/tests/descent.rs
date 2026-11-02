@@ -266,6 +266,7 @@ fn pocket() -> Operation {
         end: None,
         start: None,
         clear: ClearParams {
+            keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 2.0,
             overlap: 0.4,

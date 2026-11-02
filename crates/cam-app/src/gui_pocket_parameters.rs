@@ -150,6 +150,30 @@ mod tests {
     }
 
     #[test]
+    fn keep_tool_down_draft_applies_cancels_and_undoes() {
+        let (mut app, id) = editor();
+        let checked = |op: &Operation| matches!(op, Operation::Pocket(p) if p.clear.keep_tool_down);
+        let _ = app.update(Message::PocketKeepToolDownToggled(true));
+        assert!(checked(app.current_operation(id).unwrap()));
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        let _ = app.update(Message::CancelOperationDraft);
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::PocketKeepToolDownToggled(true));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::Apply);
+        assert!(
+            checked(app.controller.operation(id).unwrap()),
+            "{}",
+            app.status
+        );
+        assert!(app.controller.undo());
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        assert!(app.controller.redo());
+        assert!(checked(app.controller.operation(id).unwrap()));
+    }
+
+    #[test]
     fn finishing_draft_keeps_settings_commits_and_undoes_atomically() {
         let (mut app, id) = editor();
         let before = app.controller.operation(id).unwrap().clone();

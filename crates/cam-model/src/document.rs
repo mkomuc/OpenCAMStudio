@@ -940,6 +940,9 @@ impl Default for Clearing {
 /// out to*.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClearParams {
+    /// Keep safe links between depth levels and finishing passes at cutting height.
+    #[serde(default)]
+    pub keep_tool_down: bool,
     /// Vertical lift above the cutting level during local linking moves, mm.
     /// Zero keeps transitions at depth; distant links still use clearance.
     #[serde(default)]
@@ -988,6 +991,7 @@ pub struct ClearParams {
 impl Default for ClearParams {
     fn default() -> Self {
         Self {
+            keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 0.0,
             // Half the diameter: the same spacing a pocket's own default overlap gives.
