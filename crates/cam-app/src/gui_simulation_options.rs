@@ -191,6 +191,12 @@ impl SimulationPlayer {
         if prefs.toolpath_mode == SimulationToolpathMode::Tail {
             let mut remaining = 20.; // A short, fixed 20 mm trail behind the tip.
             for step in self.timeline.steps.iter().rev().filter(|s| s.start < end) {
+                if self
+                    .path_operation
+                    .is_some_and(|id| motion_tag(&step.step).is_none_or(|tag| tag.op_id != id))
+                {
+                    continue;
+                }
                 let length = step.length();
                 if length <= 0. || step.end <= step.start {
                     continue;
@@ -223,8 +229,9 @@ impl SimulationPlayer {
                 MoveKind::Link | MoveKind::Traverse => prefs.show_links,
                 MoveKind::Cutting => prefs.show_cutting,
                 _ => prefs.show_leads,
-            } && (prefs.toolpath_mode != SimulationToolpathMode::Operation
-                || active == Some(tag.op_id));
+            } && self.path_operation.is_none_or(|id| tag.op_id == id)
+                && (prefs.toolpath_mode != SimulationToolpathMode::Operation
+                    || active == Some(tag.op_id));
             let lo = start.max(step.start);
             let hi = end.min(step.end);
             if !visible || hi <= lo || step.from.is_none() {
@@ -531,11 +538,17 @@ impl SimulationPlayer {
                         p.show_points,
                         SimulationOption::Points,
                     ))
-                    .push(picker(
-                        "Mode",
-                        SimulationToolpathMode::ALL,
-                        p.toolpath_mode,
-                        SimulationOption::Mode,
+                    .push(delayed_tooltip(
+                        picker(
+                            "Mode",
+                            SimulationToolpathMode::ALL,
+                            p.toolpath_mode,
+                            SimulationOption::Mode,
+                        ),
+                        container(text("Controls which simulated toolpath sections are visible.\n\nAll toolpaths: all simulated operations.\nTrailing: motion already traversed.\nLeading: motion still to be traversed.\nCurrent operation: the complete active operation.\nTail: the last 20 mm behind the tool.").size(12).width(280))
+                            .padding(10)
+                            .style(popup_surface),
+                        tooltip::Position::Left,
                     ))
                     .push(delayed_tooltip(
                         picker(

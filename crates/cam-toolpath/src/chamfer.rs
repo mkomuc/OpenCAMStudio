@@ -768,6 +768,75 @@ mod tests {
     }
 
     #[test]
+    fn modeled_face_band_approaches_cut_stock_instead_of_colliding() {
+        let mut operation = op(10.);
+        operation.id = 9;
+        operation.top = 20.;
+        operation.depth = 10.;
+        operation.tip_offset = 1.;
+        operation.stepdown = 2.;
+        operation.lead_in = Lead::Linear { length: 2. };
+        operation.faces = vec![cam_model::ChamferFace {
+            upper: [[0., 0.], [20., 0.]],
+            lower: [[0., -10.], [20., -10.]],
+            top: 20.,
+            bottom: 10.,
+            outward: [0., -1.],
+        }];
+        let tools = [chamfer_tool(90., 0.)];
+        let env = JobEnv {
+            heights: Heights::new(25., 22., 20.),
+            tools: &tools,
+            stock: Some(([-5., -15.], [25., 5.])),
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        let result = ChamferStrategy::new(operation).compute(&env, &CancelToken::new());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let mut program = result.program;
+        program.steps.insert(0, Step::ToolChange { tool: 1 });
+        let simulate = |program: &Program| {
+            cam_sim::simulate(
+                program,
+                [-5., -15., 0.],
+                [25., 5., 20.],
+                &cam_sim::SimOptions {
+                    resolution: 0.5,
+                    tool_radius: 3.,
+                },
+                &[cam_sim::SimTool {
+                    number: 1,
+                    profile: cam_sim::ToolProfile {
+                        radius: 3.,
+                        shape: cam_sim::ProfileShape::Cone {
+                            half_angle_rad: std::f64::consts::FRAC_PI_4,
+                            flat_radius: 0.,
+                        },
+                    },
+                    noncutting_tip_radius: None,
+                }],
+            )
+        };
+        let first_lead = program
+            .steps
+            .iter()
+            .position(
+                |step| matches!(step, Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn),
+            )
+            .unwrap();
+        let approach = simulate(&Program {
+            steps: program.steps[..=first_lead].to_vec(),
+        });
+        assert!(approach.is_clean(), "{:?}", approach.collisions);
+        assert!(
+            approach.removed_volume > 0.,
+            "the approach must remove stock"
+        );
+        let simulation = simulate(&program);
+        assert!(simulation.is_clean(), "{:?}", simulation.collisions);
+        assert!(simulation.removed_volume > 0.);
+    }
+
+    #[test]
     fn open_corner_offsets_both_sides_and_retracts_between_width_passes() {
         for (side, expected) in [
             (Side::Outside, [(0., 0.5), (9.5, 0.5), (9.5, 10.)]),
@@ -1067,11 +1136,18 @@ mod tests {
         o.lead_out_enabled = Some(true);
         let result = run(o, chamfer_tool(90.0, 0.0));
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        // Disabling the optional arc still leaves the required straight feed
+        // from the safe approach point to the face.
         assert!(!result
             .program
             .steps()
             .iter()
-            .any(|s| matches!(s, Step::Arc { tag, .. } | Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn)));
+            .any(|s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadIn)));
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn)));
         assert!(result
             .program
             .steps()

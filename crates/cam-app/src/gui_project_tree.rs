@@ -1905,6 +1905,28 @@ mod tests {
             app.simulation.as_ref().unwrap().position > 0.,
             "operation playback opens at the selected operation after its predecessors"
         );
+        {
+            send(
+                &mut app,
+                Message::SimulationOption(crate::gui::SimulationOption::Mode(
+                    crate::settings::SimulationToolpathMode::All,
+                )),
+            );
+            let player = app.simulation.as_ref().unwrap();
+            assert!(player
+                .preview
+                .scene
+                .strips
+                .iter()
+                .any(|s| s.op == Some(ids[1])));
+            assert!(player
+                .preview
+                .scene
+                .strips
+                .iter()
+                .filter_map(|s| s.op)
+                .all(|id| id == ids[1]));
+        }
         send(&mut app, Message::SimulationSpeed(4.));
         send(&mut app, Message::SimulationPlayPause);
         assert!(app.simulation.as_ref().unwrap().playing);

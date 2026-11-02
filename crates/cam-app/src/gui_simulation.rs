@@ -198,6 +198,7 @@ pub(super) struct SimulationPlayer {
     source: crate::JobStamp,
     inputs: JobInputs,
     timeline: Timeline,
+    path_operation: Option<u32>,
     jobs: JobService,
     force_jobs: JobService,
     force_trace: Option<forces::ForceTrace>,
@@ -276,6 +277,7 @@ impl SimulationPlayer {
             source,
             inputs,
             timeline,
+            path_operation: operation,
             jobs: JobService::default(),
             force_jobs: JobService::default(),
             force_trace: None,
@@ -866,6 +868,7 @@ mod tests {
             },
             inputs,
             timeline: Timeline::new(&program, 2000.).unwrap(),
+            path_operation: None,
             jobs: JobService::default(),
             force_jobs: JobService::default(),
             force_trace: None,
@@ -1187,6 +1190,7 @@ mod tests {
             },
             inputs: controller.job_inputs(),
             timeline,
+            path_operation: None,
             jobs: JobService::default(),
             force_jobs: JobService::default(),
             force_trace: None,
@@ -1318,6 +1322,25 @@ mod tests {
         player.options.toolpath_mode = SimulationToolpathMode::Operation;
         player.refresh_display();
         assert!(player.preview.scene.strips.iter().all(|s| s.op == Some(8)));
+    }
+    #[test]
+    fn operation_scoped_simulation_hides_predecessor_paths_in_every_mode() {
+        let mut player = display_player(45.);
+        player.path_operation = Some(8);
+        player.options.show_points = true;
+        for &mode in SimulationToolpathMode::ALL {
+            player.options.toolpath_mode = mode;
+            player.refresh_display();
+            assert!(!player.preview.scene.strips.is_empty(), "{mode}");
+            assert!(
+                player.preview.scene.strips.iter().all(|s| s.op == Some(8)),
+                "{mode}"
+            );
+            assert!(
+                player.preview.scene.path_cones.iter().all(|c| c.op == 8),
+                "{mode}"
+            );
+        }
     }
     #[test]
     fn simulation_filters_keep_motion_classes_and_points_independent() {

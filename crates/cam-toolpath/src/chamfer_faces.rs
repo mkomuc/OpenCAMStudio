@@ -177,7 +177,7 @@ pub(super) fn compute(
             program.push(Step::Linear {
                 to: Point3::new(lead_entry.x, lead_entry.y, z),
                 feed: op.entry_feeds.lead_in(op.feed),
-                tag: Tag::new(op.id, MoveKind::Link),
+                tag: Tag::new(op.id, MoveKind::LeadIn),
             });
             crate::leads::emit_lead(
                 &mut program,
@@ -209,7 +209,7 @@ pub(super) fn compute(
             program.push(Step::Linear {
                 to: Point3::new(exit.x, exit.y, z),
                 feed: op.entry_feeds.lead_out(op.feed),
-                tag: Tag::new(op.id, MoveKind::Link),
+                tag: Tag::new(op.id, MoveKind::LeadOut),
             });
             program.push(Step::Rapid {
                 to: Point3::new(exit.x, exit.y, env.heights.clearance),
