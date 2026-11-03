@@ -190,7 +190,8 @@ impl SimulationPlayer {
         };
         if prefs.toolpath_mode == SimulationToolpathMode::Tail {
             let mut remaining = 20.; // A short, fixed 20 mm trail behind the tip.
-            for step in self.timeline.steps.iter().rev().filter(|s| s.start < end) {
+            let end_index = self.timeline.steps.partition_point(|step| step.start < end);
+            for step in self.timeline.steps[..end_index].iter().rev() {
                 if self
                     .path_operation
                     .is_some_and(|id| motion_tag(&step.step).is_none_or(|tag| tag.op_id != id))
@@ -211,17 +212,34 @@ impl SimulationPlayer {
                 remaining -= available;
             }
         }
-        let active = self.active_operation();
+        let active = (prefs.toolpath_mode == SimulationToolpathMode::Operation)
+            .then(|| self.active_operation())
+            .flatten();
         let frame = &self.inputs.document.setup().frame;
         let mut run = Program::new();
         let flush = |run: &mut Program, scene: &mut Scene| {
+            if run.steps.is_empty() {
+                return;
+            }
             let mut part = Scene::from_program(run);
             scene.strips.append(&mut part.strips);
             scene.path_cones.append(&mut part.path_cones);
             run.steps.clear();
         };
         let mut previous_end = None;
-        for (step_index, step) in self.timeline.steps.iter().enumerate() {
+        let first = self
+            .timeline
+            .steps
+            .partition_point(|step| step.end <= start);
+        let last = self.timeline.steps.partition_point(|step| step.start < end);
+        for (step_index, step) in self
+            .timeline
+            .steps
+            .iter()
+            .enumerate()
+            .take(last)
+            .skip(first)
+        {
             let Some(tag) = motion_tag(&step.step) else {
                 continue;
             };
@@ -298,6 +316,7 @@ impl SimulationPlayer {
     }
 
     pub(super) fn refresh_display(&mut self) {
+        self.display_token = Arc::new(());
         let mut scene = self.path_scene();
         // Keep the imported drawing independently of the toolpath's display mode.
         if self.options.show_model {

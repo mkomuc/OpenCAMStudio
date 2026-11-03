@@ -17,7 +17,7 @@ pub use simulation::{
     analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache,
 };
 
-pub use heightfield::{Heightfield, SurfaceDiff, SurfaceLocation, SurfaceMesh};
+pub use heightfield::{Heightfield, StockMeshCache, SurfaceDiff, SurfaceLocation, SurfaceMesh};
 
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use cam_geo::{Arc, Point};

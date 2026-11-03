@@ -101,6 +101,7 @@ impl Heightfield {
                 continue;
             };
             let (x0, x1) = self.index_range(lo, hi, 0);
+            let mut changed = false;
             for x in x0..=x1 {
                 let (cx, cy) = self.center(x, y);
                 let (t, d2) = sweep.projection(cx, cy);
@@ -118,6 +119,7 @@ impl Heightfield {
                     if upper - lower <= 1e-6 {
                         continue;
                     }
+                    changed = true;
                     self.track_removed_interval(index, f64::from(lower), f64::from(upper));
                     let spans = self.bounded.entry(index).or_default();
                     spans.push(RemovedSpan {
@@ -146,6 +148,9 @@ impl Heightfield {
                     }
                     spans.truncate(count);
                 }
+            }
+            if changed {
+                self.invalidate_mesh_region([x0, y], [x1, y]);
             }
         }
     }

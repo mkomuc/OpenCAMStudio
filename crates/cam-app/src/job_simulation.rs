@@ -5,6 +5,7 @@ use cam_sim::{Heightfield, SimResult};
 #[derive(Default)]
 pub(crate) struct StockSimulationCache {
     current: SimulationCache,
+    mesh: cam_sim::StockMeshCache,
     previous: Option<(String, Heightfield)>,
 }
 
@@ -184,9 +185,9 @@ impl JobInputs {
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         // Render the stock as a watertight solid down to its floor, so the full
         // thickness shows and cut walls shade crisply (not a smooth top sheet).
-        let Some(surface) = sim
-            .field
-            .to_solid_mesh_controlled(min[2], &|| cancel.is_cancelled())
+        let Some(surface) = simulation
+            .mesh
+            .mesh_controlled(&sim.field, min[2], &|| cancel.is_cancelled())
         else {
             return Ok(StockSimulation::default());
         };
@@ -208,25 +209,12 @@ impl JobInputs {
         surface: &cam_sim::SurfaceMesh,
         cancel: &CancelToken,
     ) -> Option<Vec<MeshVertex>> {
-        let mut vertices = mesh_vertices(&surface.positions, &surface.normals);
-        for vertex in &mut vertices {
-            if cancel.is_cancelled() {
-                return None;
-            }
-            vertex.position = self
-                .document
-                .setup()
-                .frame
-                .to_world_vector(vertex.position.map(f64::from))
-                .map(|n| n as f32);
-            vertex.normal = self
-                .document
-                .setup()
-                .frame
-                .to_world_vector(vertex.normal.map(f64::from))
-                .map(|n| n as f32);
-        }
-        Some(vertices)
+        cam_render::stock_mesh_vertices_controlled(
+            &surface.positions,
+            &surface.normals,
+            &self.document.setup().frame,
+            &|| cancel.is_cancelled(),
+        )
     }
 
     fn simulate_field(

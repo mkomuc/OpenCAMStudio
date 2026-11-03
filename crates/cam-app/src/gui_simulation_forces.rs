@@ -881,6 +881,20 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_playback_does_not_start_force_analysis() {
+        let mut player = player();
+        let prefs = player.options.clone();
+        player.configure(&prefs, [0.2, 0.6, 0.3]);
+        player.seek_end(true);
+        drain_frames(&mut player);
+        assert!(!player.forces_enabled());
+        assert!(!player.force_jobs.pending());
+        assert!(player.force_trace.is_none());
+        assert!(player.preview.stock_cut_sources.is_empty());
+        assert!(player.preview.removal_samples.is_empty());
+    }
+
+    #[test]
     fn accuracy_changes_rebuild_the_trace_and_disabling_cancels_pending_work() {
         let mut player = player();
         enable(&mut player);

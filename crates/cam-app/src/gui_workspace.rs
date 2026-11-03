@@ -170,6 +170,7 @@ pub(super) struct ViewportKey {
     selection: Selection,
     pending: Option<crate::PendingOp>,
     outcome: Option<crate::JobStamp>,
+    simulation: Option<SimulationViewportKey>,
     operation_preview: Option<crate::JobStamp>,
     cad_selection: Vec<EntityRef>,
     cad_hover: Option<EntityRef>,
@@ -190,6 +191,21 @@ pub(super) struct ViewportKey {
     draft: Option<cam_model::Setup>,
     editor: Option<EditorKey>,
     pattern: Option<PatternDraft>,
+}
+
+#[derive(Clone)]
+struct SimulationViewportKey {
+    display_token: Arc<()>,
+    options: crate::settings::SimulationPrefs,
+    collision: bool,
+}
+
+impl PartialEq for SimulationViewportKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.display_token, &other.display_token)
+            && self.options == other.options
+            && self.collision == other.collision
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -517,12 +533,11 @@ impl App {
             .collect();
         let editing = self.operation_preview_active() || self.pattern_draft.is_some();
         let selected_geometry = self.editor_selected_geometry();
-        // Playback publishes fresh material meshes independently of the document.
-        // Keep it live, while sharing the CAD acceleration structure. Drafts have
-        // their own small semantic key so camera/menu events also stay cheap there.
+        // Playback geometry changes only when a new display frame is published.
+        // Reuse its geometry during intervening ticks and camera/menu events.
+        // Drafts have their own small semantic key as well.
         // Unstamped synchronous/headless results have no publication identity.
-        let cacheable = self.simulation.is_none()
-            && self.controller.outcome().is_none_or(|o| o.stamp.is_some());
+        let cacheable = self.controller.outcome().is_none_or(|o| o.stamp.is_some());
         let key = cacheable.then(|| ViewportKey {
             revision: self.controller.revision(),
             setup: self.controller.active_setup_id(),
@@ -530,6 +545,14 @@ impl App {
             selection: self.controller.selection(),
             pending: self.controller.pending_op(),
             outcome: self.controller.outcome().and_then(|o| o.stamp.clone()),
+            simulation: self
+                .simulation
+                .as_ref()
+                .map(|player| SimulationViewportKey {
+                    display_token: player.display_token.clone(),
+                    options: player.options.clone(),
+                    collision: player.collision_active(),
+                }),
             operation_preview: self
                 .operation_preview_outcome()
                 .and_then(|o| o.stamp.clone()),
@@ -2355,6 +2378,80 @@ mod performance_tests {
             ))
             .unwrap();
         app
+    }
+
+    #[test]
+    fn simulation_reuses_unchanged_frames_and_refreshes_after_seek_and_options() {
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.model_view = None;
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "playback.dxf").unwrap();
+        app.controller.new_operation(OpKind::Profile);
+        app.controller.start_run();
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while app.controller.run_needs_poll() {
+            app.controller.poll_run();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut player = SimulationPlayer::new_for_operation(&app.controller, None).unwrap();
+        while player.needs_tick() {
+            player.tick();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.simulation = Some(player);
+        let initial = app.machining_viewport();
+        assert!(!initial.mesh_vertices.is_empty());
+        let _ = app.update(Message::OrbitBy(0.3, 0.2));
+        app.simulation.as_mut().unwrap().tick();
+        let unchanged = app.machining_viewport();
+        assert!(Arc::ptr_eq(
+            &initial.mesh_vertices,
+            &unchanged.mesh_vertices
+        ));
+        assert!(Arc::ptr_eq(&initial.vertices, &unchanged.vertices));
+        assert!(Arc::ptr_eq(
+            &initial.setup_geometry,
+            &unchanged.setup_geometry
+        ));
+        assert_ne!(
+            initial.camera().view_proj(1.),
+            unchanged.camera().view_proj(1.)
+        );
+
+        let player = app.simulation.as_mut().unwrap();
+        let mut prefs = player.options.clone();
+        prefs.show_tool = false;
+        player.configure(&prefs, [0.2, 0.6, 0.3]);
+        let hidden_tool = app.machining_viewport();
+        assert!(!Arc::ptr_eq(
+            &unchanged.mesh_vertices,
+            &hidden_tool.mesh_vertices
+        ));
+        assert!(hidden_tool.mesh_vertices.len() < unchanged.mesh_vertices.len());
+        let player = app.simulation.as_mut().unwrap();
+        player.seek_end(true);
+        while player.needs_tick() {
+            player.tick();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let advanced = app.machining_viewport();
+        assert!(!Arc::ptr_eq(
+            &hidden_tool.mesh_vertices,
+            &advanced.mesh_vertices
+        ));
+        assert!(Arc::ptr_eq(
+            &advanced.mesh_vertices,
+            &app.machining_viewport().mesh_vertices
+        ));
+        app.simulation = None;
+        assert!(!Arc::ptr_eq(
+            &advanced.mesh_vertices,
+            &app.machining_viewport().mesh_vertices
+        ));
     }
 
     #[test]
