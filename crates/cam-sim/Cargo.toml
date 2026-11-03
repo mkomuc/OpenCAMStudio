@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+rayon.workspace = true
 cam-cldata = { path = "../cam-cldata" }
 cam-geo = { path = "../cam-geo" }
 

@@ -688,31 +688,36 @@ pub(super) fn compute(
     let margin = linker.error + p.tolerance + linker.axial;
     let reach = linker.radius + linker.error;
     let mut points = vec![None; nx * ny];
-    for y in 0..ny {
+    // Each sample is independent; retain f64 contact math and indexed storage.
+    // The distance propagation and motion ordering below remain deterministic.
+    points.par_iter_mut().enumerate().with_min_len(64).for_each(|(index, point)| {
         if cancel.is_cancelled() {
-            out.cancelled = true;
-            return out;
+            return;
         }
-        for x in 0..nx {
-            let mut q = [lo[0] + x as f64 * dx, lo[1] + y as f64 * dy, 0.];
-            if !selected.contact(q) {
-                continue;
-            }
-            let Some(z) = grid.height(q, reach) else {
-                continue;
-            };
-            let wall = grid
-                .indices(q, reach)
-                .iter()
-                .filter_map(|i| flat_height(q, &grid.mesh[*i], reach))
-                .fold(f64::NEG_INFINITY, f64::max);
-            q[2] = (z + margin)
-                .max(wall - linker.radius + margin)
-                .max(linker.bottom);
-            if q[2] <= linker.top + margin && q[2] < linker.clearance {
-                points[y * nx + x] = Some(q);
-            }
+        let x = index % nx;
+        let y = index / nx;
+        let mut q = [lo[0] + x as f64 * dx, lo[1] + y as f64 * dy, 0.];
+        if !selected.contact(q) {
+            return;
         }
+        let Some(z) = grid.height(q, reach) else {
+            return;
+        };
+        let wall = grid
+            .indices(q, reach)
+            .iter()
+            .filter_map(|i| flat_height(q, &grid.mesh[*i], reach))
+            .fold(f64::NEG_INFINITY, f64::max);
+        q[2] = (z + margin)
+            .max(wall - linker.radius + margin)
+            .max(linker.bottom);
+        if q[2] <= linker.top + margin && q[2] < linker.clearance {
+            *point = Some(q);
+        }
+    });
+    if cancel.is_cancelled() {
+        out.cancelled = true;
+        return out;
     }
     let mut distance = vec![f64::INFINITY; points.len()];
     let mut queue = BinaryHeap::new();

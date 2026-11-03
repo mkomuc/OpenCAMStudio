@@ -89,6 +89,9 @@ A CAM application for CNC toolpath generation, built in Rust.
   `iced` desktop GUI. Hover over a setup or operation status indicator for its
   current state; click an indicator with warnings or errors to read the details.
   Toolpath diagnostics do not open dialogs automatically.
+- **CPU acceleration** — multicore Parallel/Scallop surface calculation, stock
+  mesh tiles and stock-to-CAD comparison; portable double-precision SIMD uses
+  Apple Silicon NEON or x86-64 SSE2. See [performance controls and benchmarks](docs/performance.md).
 
 See the [user guides](docs/README.md) for workflows and limits,
 [ARCHITECTURE.md](ARCHITECTURE.md) for a brief overview and [ROADMAP.md](ROADMAP.md)

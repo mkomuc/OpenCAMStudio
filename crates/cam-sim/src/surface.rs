@@ -2,6 +2,7 @@
 //! surface is tessellated. Dual contour vertices recover walls from the actual
 //! cutter sweeps instead of following the edges of square heightfield cells.
 use super::{Heightfield, SurfaceMesh, MESH_TILE_SIZE};
+use rayon::prelude::*;
 
 #[derive(Clone, Copy)]
 struct Corner {
@@ -19,11 +20,13 @@ pub struct StockMeshCache {
 }
 
 impl StockMeshCache {
+    /// Rebuild changed tiles concurrently. The cancellation callback may be
+    /// polled from multiple worker threads; a cancelled build publishes no mesh.
     pub fn mesh_controlled(
         &mut self,
         field: &Heightfield,
         floor: f64,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Option<SurfaceMesh> {
         if cancelled() {
             return None;
@@ -34,15 +37,15 @@ impl StockMeshCache {
             self.tiles = vec![None; field.mesh_revisions.len()];
         }
         let width = field.nx.div_ceil(MESH_TILE_SIZE);
-        for (index, &revision) in field.mesh_revisions.iter().enumerate() {
+        // Tiles read one immutable stock snapshot and own disjoint cache slots.
+        // Assembly below stays in tile order, preserving vertex/provenance indices.
+        self.tiles.par_iter_mut().enumerate().try_for_each(|(index, tile)| {
             if cancelled() {
                 return None;
             }
-            if self.tiles[index]
-                .as_ref()
-                .is_some_and(|(saved, _)| *saved == revision)
-            {
-                continue;
+            let revision = field.mesh_revisions[index];
+            if tile.as_ref().is_some_and(|(saved, _)| *saved == revision) {
+                return Some(());
             }
             let x = index % width * MESH_TILE_SIZE;
             let y = index / width * MESH_TILE_SIZE;
@@ -55,8 +58,9 @@ impl StockMeshCache {
                 ],
                 cancelled,
             )?;
-            self.tiles[index] = Some((revision, mesh));
-        }
+            *tile = Some((revision, mesh));
+            Some(())
+        })?;
         let vertices = self
             .tiles
             .iter()
@@ -657,6 +661,21 @@ mod tests {
     }
 
     #[test]
+    fn tiled_mesh_is_identical_with_one_or_four_workers() {
+        let mut field = Heightfield::new([0., 0.], [48., 48.], 0.5, 0.);
+        field.set_surface_tracking(true);
+        field.set_cut_source(10, (0., 1.));
+        field.cut_segment_profile_controlled(
+            [4., 5., -3.], [40., 43., -2.], &ToolProfile::flat(3.), Some(7), &|| false,
+        );
+        let build = |threads| rayon::ThreadPoolBuilder::new().num_threads(threads)
+            .build().unwrap().install(|| {
+                StockMeshCache::default().mesh_controlled(&field, -6., &|| false).unwrap()
+            });
+        assert_eq!(build(1), build(4));
+    }
+
+    #[test]
     fn mesh_tiles_reuse_unchanged_regions_and_follow_rewinds_and_replacement_stock() {
         let mut cache = StockMeshCache::default();
         let mut field = Heightfield::new([0., 0.], [48., 48.], 0.5, 0.);
@@ -748,11 +767,10 @@ mod tests {
         check_cached_surface(&mut cache, &field, -6.);
         let earlier = field.clone();
         field.lower_rect([0., 0.], [48., 48.], -2.);
-        let checks = std::cell::Cell::new(0);
+        let checks = std::sync::atomic::AtomicUsize::new(0);
         assert!(cache
             .mesh_controlled(&field, -6., &|| {
-                checks.set(checks.get() + 1);
-                checks.get() > 150
+                checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 150
             })
             .is_none());
         check_cached_surface(&mut cache, &earlier, -6.);
