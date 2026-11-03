@@ -2,9 +2,9 @@
 //! accessible cutter-centre surface, then each contour is reprojected and
 //! certified by the same swept-cutter checks as Parallel.
 use super::*;
-use cam_model::ScallopRetraction;
+use cam_model::{ScallopOrder, ScallopRetraction};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 
 #[derive(Clone, Copy, PartialEq)]
 struct QueueItem {
@@ -35,6 +35,139 @@ fn edge(a: usize, b: usize) -> Edge {
     }
 }
 
+fn neighbors(index: usize, nx: usize, ny: usize) -> [Option<usize>; 4] {
+    let x = index % nx;
+    let y = index / nx;
+    [
+        (x > 0).then(|| index - 1),
+        (x + 1 < nx).then(|| index + 1),
+        (y > 0).then(|| index - nx),
+        (y + 1 < ny).then(|| index + nx),
+    ]
+}
+
+/// Adjust only when the previous pass and the furthest sampled point both
+/// remain within one stepover of the replacement pass.
+fn adjusted_final_level(
+    inner_edge: f64,
+    max_distance: f64,
+    spacing: f64,
+    step: f64,
+    levels: usize,
+) -> Option<f64> {
+    if levels <= 1 || !inner_edge.is_finite() {
+        return None;
+    }
+    let nominal = (levels as f64 - 0.499_999) * step;
+    let previous = nominal - step;
+    let remaining = (step - (max_distance - inner_edge)).max(0.);
+    let adjusted = inner_edge - spacing.min(remaining * 0.5);
+    (nominal < max_distance
+        && nominal > inner_edge
+        && adjusted > previous + step * 0.05
+        && max_distance - adjusted <= step)
+        .then_some(adjusted)
+}
+
+/// Seed only the outer boundary of each connected selected region. Enclosed
+/// holes are obstacles, not additional fronts moving toward the middle. Label
+/// each background component, then use the background above a region's
+/// topmost point as its exterior. This also handles a selected island inside
+/// another region's hole without confusing it with that hole's inner edge.
+fn outer_boundary_seeds(
+    points: &[Option<V>],
+    nx: usize,
+    ny: usize,
+    cancel: &CancelToken,
+) -> Option<Vec<usize>> {
+    let mut background = vec![usize::MAX; points.len()];
+    let mut queue = VecDeque::new();
+    for index in 0..points.len() {
+        let x = index % nx;
+        let y = index / nx;
+        if (x == 0 || y == 0 || x + 1 == nx || y + 1 == ny) && points[index].is_none() {
+            background[index] = 0;
+            queue.push_back(index);
+        }
+    }
+    let mut label = 0usize;
+    let mut search_from = 0usize;
+    loop {
+        while let Some(index) = queue.pop_front() {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            for next in neighbors(index, nx, ny).into_iter().flatten() {
+                if points[next].is_none() && background[next] == usize::MAX {
+                    background[next] = label;
+                    queue.push_back(next);
+                }
+            }
+        }
+        while search_from < points.len()
+            && (points[search_from].is_some() || background[search_from] != usize::MAX)
+        {
+            search_from += 1;
+        }
+        if search_from == points.len() {
+            break;
+        }
+        label += 1;
+        background[search_from] = label;
+        queue.push_back(search_from);
+    }
+    let mut visited = vec![false; points.len()];
+    let mut seeds = Vec::new();
+    for first in 0..points.len() {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        if points[first].is_none() || visited[first] {
+            continue;
+        }
+        visited[first] = true;
+        queue.push_back(first);
+        let mut component = Vec::new();
+        let mut topmost = first;
+        while let Some(index) = queue.pop_front() {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            component.push(index);
+            if index / nx < topmost / nx {
+                topmost = index;
+            }
+            for next in neighbors(index, nx, ny).into_iter().flatten() {
+                if points[next].is_some() && !visited[next] {
+                    visited[next] = true;
+                    queue.push_back(next);
+                }
+            }
+        }
+        let exterior = if topmost / nx == 0 {
+            0
+        } else {
+            background[topmost - nx]
+        };
+        for index in component {
+            let x = index % nx;
+            let y = index / nx;
+            if x == 0
+                || y == 0
+                || x + 1 == nx
+                || y + 1 == ny
+                || neighbors(index, nx, ny)
+                    .into_iter()
+                    .flatten()
+                    .any(|next| points[next].is_none() && background[next] == exterior)
+            {
+                seeds.push(index);
+            }
+        }
+    }
+    Some(seeds)
+}
+
 fn preferred_start(chain: &mut Vec<Edge>, positions: &HashMap<Edge, V>, start: Option<[f64; 2]>) {
     let Some(start) = start else {
         return;
@@ -56,6 +189,174 @@ fn preferred_start(chain: &mut Vec<Edge>, positions: &HashMap<Edge, V>, start: O
     } else if chain.len() > 1 && distance(chain.last().unwrap()) < distance(&chain[0]) {
         chain.reverse();
     }
+}
+
+const MAX_QUEUED_POINTS: usize = 2_000_000;
+const MAX_QUEUED_PATHS: usize = 100_000;
+const ORDER_BATCH: usize = 64;
+const ORDER_SAMPLES: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathEntry {
+    Original,
+    Reverse,
+    Rotate(usize),
+}
+
+fn xy_distance(a: V, b: V) -> f64 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
+}
+
+fn closed(path: &[V]) -> bool {
+    path.len() > 2 && path.first() == path.last()
+}
+
+/// Estimate a candidate's nearest entry using a bounded sample. Once selected,
+/// scan the whole contour so its actual start is the nearest eligible vertex.
+fn nearest_entry(
+    path: &[V],
+    from: V,
+    allow_reorientation: bool,
+    sampled: bool,
+) -> (f64, PathEntry) {
+    let mut best = (xy_distance(from, path[0]), PathEntry::Original);
+    if !allow_reorientation {
+        return best;
+    }
+    if closed(path) {
+        let n = path.len() - 1;
+        let stride = if sampled {
+            n.div_ceil(ORDER_SAMPLES)
+        } else {
+            1
+        };
+        for index in (0..n).step_by(stride) {
+            let distance = xy_distance(from, path[index]);
+            if distance < best.0 {
+                best = (distance, PathEntry::Rotate(index));
+            }
+        }
+    } else {
+        let distance = xy_distance(from, *path.last().unwrap());
+        if distance < best.0 {
+            best = (distance, PathEntry::Reverse);
+        }
+    }
+    best
+}
+
+fn entry_end(path: &[V], entry: PathEntry) -> (V, V) {
+    match entry {
+        PathEntry::Original => (path[0], *path.last().unwrap()),
+        PathEntry::Reverse => (*path.last().unwrap(), path[0]),
+        PathEntry::Rotate(index) => (path[index], path[index]),
+    }
+}
+
+/// Greedy selection within each stepover level, in bounded batches. Never
+/// jump across levels to save travel: that can leave uncut stock between
+/// passes. Retain the original order if the XY estimate does not improve it.
+fn shortest_order(
+    paths: &[Vec<V>],
+    levels: &[usize],
+    allow_reorientation: bool,
+    cancel: &CancelToken,
+) -> Option<Vec<(usize, PathEntry)>> {
+    let baseline: f64 = paths
+        .windows(2)
+        .map(|pair| xy_distance(*pair[0].last().unwrap(), pair[1][0]))
+        .sum();
+    let mut candidate = Vec::with_capacity(paths.len());
+    let mut used = vec![false; paths.len()];
+    let mut previous: Option<V> = None;
+    let mut total = 0.;
+    let mut batch_start = 0;
+    while batch_start < paths.len() {
+        let level = levels[batch_start];
+        let mut batch_end = batch_start;
+        while batch_end < paths.len()
+            && batch_end - batch_start < ORDER_BATCH
+            && levels[batch_end] == level
+        {
+            batch_end += 1;
+        }
+        for _ in batch_start..batch_end {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            let (chosen, entry) = if let Some(from) = previous {
+                let mut best: Option<(f64, usize)> = None;
+                for index in batch_start..batch_end {
+                    if used[index] {
+                        continue;
+                    }
+                    let (cost, _) = nearest_entry(&paths[index], from, allow_reorientation, true);
+                    if best.is_none_or(|(prior, prior_index)| {
+                        cost < prior || (cost == prior && index < prior_index)
+                    }) {
+                        best = Some((cost, index));
+                    }
+                }
+                let index = best.unwrap().1;
+                (
+                    index,
+                    nearest_entry(&paths[index], from, allow_reorientation, false).1,
+                )
+            } else {
+                (batch_start, PathEntry::Original)
+            };
+            used[chosen] = true;
+            let (start, end) = entry_end(&paths[chosen], entry);
+            if let Some(from) = previous {
+                total += xy_distance(from, start);
+            }
+            previous = Some(end);
+            candidate.push((chosen, entry));
+        }
+        batch_start = batch_end;
+    }
+    if total + 1e-9 < baseline {
+        Some(candidate)
+    } else {
+        Some((0..paths.len()).map(|i| (i, PathEntry::Original)).collect())
+    }
+}
+
+fn orient_path(path: &mut Vec<V>, entry: PathEntry) {
+    match entry {
+        PathEntry::Original => {}
+        PathEntry::Reverse => path.reverse(),
+        PathEntry::Rotate(index) => {
+            path.pop();
+            path.rotate_left(index);
+            path.push(path[0]);
+        }
+    }
+}
+
+fn accept_path(
+    out: &mut StrategyResult,
+    path: &mut Vec<V>,
+    pending: &mut Vec<Vec<V>>,
+    pending_levels: &mut Vec<usize>,
+    level: usize,
+    queued_points: &mut usize,
+    linker: &mut PassLinker,
+    op: &ParallelOp,
+    cancel: &CancelToken,
+) -> bool {
+    if op.params.scallop_order == ScallopOrder::Shortest && path.len() > 1 {
+        *queued_points = queued_points.saturating_add(path.len());
+        if *queued_points > MAX_QUEUED_POINTS || pending.len() >= MAX_QUEUED_PATHS {
+            return false;
+        }
+        pending.push(std::mem::take(path));
+        pending_levels.push(level);
+    } else {
+        emit_path(out, path, linker, op, cancel);
+        path.clear();
+    }
+    true
 }
 
 // Remove vertices only when the entire old polyline stays within the filter
@@ -415,28 +716,16 @@ pub(super) fn compute(
     }
     let mut distance = vec![f64::INFINITY; points.len()];
     let mut queue = BinaryHeap::new();
-    for y in 0..ny {
-        for x in 0..nx {
-            let i = y * nx + x;
-            if points[i].is_none() {
-                continue;
-            }
-            if x == 0
-                || y == 0
-                || x + 1 == nx
-                || y + 1 == ny
-                || points[i - 1].is_none()
-                || points[i + 1].is_none()
-                || points[i - nx].is_none()
-                || points[i + nx].is_none()
-            {
-                distance[i] = 0.;
-                queue.push(QueueItem {
-                    distance: 0.,
-                    index: i,
-                });
-            }
-        }
+    let Some(seeds) = outer_boundary_seeds(&points, nx, ny, cancel) else {
+        out.cancelled = true;
+        return out;
+    };
+    for index in seeds {
+        distance[index] = 0.;
+        queue.push(QueueItem {
+            distance: 0.,
+            index,
+        });
     }
     while let Some(QueueItem {
         distance: d,
@@ -497,16 +786,59 @@ pub(super) fn compute(
     if levels > 100_000 || levels.saturating_mul(points.len()) > 100_000_000 {
         fail!("Scallop exceeds the contour budget; increase stepover or reduce the machining area");
     }
-    for level_index in 0..levels {
+    // A nominal last level can graze an enclosed boundary at only a few grid
+    // cells. Marching that level then produces dozens of tiny disconnected
+    // paths even for a smooth circular bore. If a nearby continuous offset can
+    // cover the complete sampled domain without a gap exceeding one stepover,
+    // move the final level just before the first enclosed boundary. Otherwise
+    // retain all original fragments: uneven regions must not be discarded.
+    let mut final_level = None;
+    if levels > 1 {
+        let inner_edge = points
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                (p.is_some()
+                    && distance[i] > 0.
+                    && distance[i].is_finite()
+                    && neighbors(i, nx, ny)
+                        .into_iter()
+                        .flatten()
+                        .any(|j| points[j].is_none()))
+                .then_some(distance[i])
+            })
+            .fold(f64::INFINITY, f64::min);
+        final_level = adjusted_final_level(inner_edge, max_distance, spacing, p.stepover, levels);
+    }
+    let mut pending = Vec::new();
+    let mut pending_levels = Vec::new();
+    let mut queued_points = 0usize;
+    macro_rules! finish_path {
+        ($path:expr, $level:expr) => {
+            if !accept_path(&mut out, $path, &mut pending, &mut pending_levels, $level, &mut queued_points, linker, op, cancel) {
+                fail!("Scallop shortest-distance ordering exceeds its path memory budget; increase stepover or choose a fixed order");
+            }
+        };
+    }
+    for ordinal in 0..levels {
         if cancel.is_cancelled() {
             out.cancelled = true;
             return out;
         }
         // A half-step begins near the boundary and covers the centre without
         // relying on a degenerate contour exactly on a sampled vertex.
-        let level = (level_index as f64 + 0.500_001) * p.stepover;
+        let level_index = if p.scallop_order == ScallopOrder::InsideOut {
+            levels - 1 - ordinal
+        } else {
+            ordinal
+        };
+        let level = if level_index + 1 == levels {
+            final_level.unwrap_or((level_index as f64 + 0.500_001) * p.stepover)
+        } else {
+            (level_index as f64 + 0.500_001) * p.stepover
+        };
         if level >= max_distance {
-            break;
+            continue;
         }
         let mut positions = HashMap::<Edge, V>::new();
         let mut adjacency = HashMap::<Edge, Vec<Edge>>::new();
@@ -589,8 +921,7 @@ pub(super) fn compute(
             for key in chain {
                 let mut q = positions[&key];
                 let Some(z) = grid.height(q, reach) else {
-                    emit_path(&mut out, &mut path, linker, op, cancel);
-                    path.clear();
+                    finish_path!(&mut path, level_index);
                     continue;
                 };
                 let wall = grid
@@ -602,8 +933,7 @@ pub(super) fn compute(
                     .max(wall - linker.radius + margin)
                     .max(linker.bottom);
                 if q[2] > linker.top + margin || q[2] >= linker.clearance {
-                    emit_path(&mut out, &mut path, linker, op, cancel);
-                    path.clear();
+                    finish_path!(&mut path, level_index);
                     continue;
                 }
                 if let Some(prev) = path.last().copied() {
@@ -624,14 +954,34 @@ pub(super) fn compute(
                         )
                     {
                         path.truncate(length);
-                        emit_path(&mut out, &mut path, linker, op, cancel);
-                        path.clear();
+                        finish_path!(&mut path, level_index);
                         path.push(q);
                     }
                 } else {
                     path.push(q);
                 }
             }
+            finish_path!(&mut path, level_index);
+            if out.program.steps().len() > 2_000_000 {
+                fail!("Scallop exceeds the two-million motion budget");
+            }
+        }
+    }
+    if p.scallop_order == ScallopOrder::Shortest {
+        let Some(order) =
+            shortest_order(&pending, &pending_levels, p.scallop_start.is_none(), cancel)
+        else {
+            out.cancelled = true;
+            return out;
+        };
+        let mut paths: Vec<_> = pending.into_iter().map(Some).collect();
+        for (index, entry) in order {
+            if cancel.is_cancelled() {
+                out.cancelled = true;
+                return out;
+            }
+            let mut path = paths[index].take().expect("each contour is scheduled once");
+            orient_path(&mut path, entry);
             emit_path(&mut out, &mut path, linker, op, cancel);
             if out.program.steps().len() > 2_000_000 {
                 fail!("Scallop exceeds the two-million motion budget");
@@ -683,6 +1033,60 @@ pub(super) fn compute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_offset_adjustment_keeps_both_coverage_and_prior_stepover_bounded() {
+        let (inner_edge, furthest, spacing, step, levels) = (4.0725, 4.381, 0.125, 0.5, 9);
+        let adjusted = adjusted_final_level(inner_edge, furthest, spacing, step, levels).unwrap();
+        let previous = (levels as f64 - 1.499_999) * step;
+        assert!(adjusted < inner_edge && adjusted > previous);
+        assert!(adjusted - previous <= step);
+        assert!(furthest - adjusted <= step);
+        assert!(
+            adjusted_final_level(3., 5.4, spacing, step, 11).is_none(),
+            "an irregular wide region must retain its full offsets"
+        );
+        assert!(adjusted_final_level(f64::INFINITY, furthest, spacing, step, levels).is_none());
+    }
+
+    #[test]
+    fn outer_seeds_ignore_holes_but_include_nested_selected_islands() {
+        let (nx, ny) = (9, 9);
+        let mut points = vec![None; nx * ny];
+        for y in 1..=7 {
+            for x in 1..=7 {
+                if !(3..=5).contains(&x) || !(3..=5).contains(&y) || (x == 4 && y == 4) {
+                    points[y * nx + x] = Some([x as f64, y as f64, 0.]);
+                }
+            }
+        }
+        let seeds = outer_boundary_seeds(&points, nx, ny, &CancelToken::new()).unwrap();
+        assert!(
+            seeds.contains(&(4 * nx + 1)),
+            "outer ring must start at its exterior"
+        );
+        assert!(
+            !seeds.contains(&(4 * nx + 2)),
+            "the hole must not create an opposing front"
+        );
+        assert!(
+            seeds.contains(&(4 * nx + 4)),
+            "a separate island inside the hole has its own outer boundary"
+        );
+    }
+
+    #[test]
+    fn shortest_order_never_skips_to_a_later_stepover_level() {
+        let paths: Vec<Vec<V>> = [0., 100., 1., 2.]
+            .into_iter()
+            .map(|x| vec![[x, 0., 0.], [x, 1., 0.]])
+            .collect();
+        let order = shortest_order(&paths, &[0, 1, 2, 3], true, &CancelToken::new()).unwrap();
+        assert_eq!(
+            order.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
 
     #[test]
     fn smoothing_fits_only_certified_planar_arcs() {

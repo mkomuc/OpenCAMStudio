@@ -96,7 +96,8 @@ use crate::{BoreOp, Tool};
 /// v33: a distinct roughing end mill tool type.
 /// v34: surface-offset finishing mode.
 /// v35: Scallop entry and retraction preferences.
-pub const SCHEMA_VERSION: u32 = 35;
+/// v36: Scallop pass ordering.
+pub const SCHEMA_VERSION: u32 = 36;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

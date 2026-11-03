@@ -266,6 +266,7 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         32 => Ok(()), // Roughing end mills add a tool kind; existing tools are unchanged.
         33 => Ok(()), // Parallel operations default to their original row mode.
         34 => Ok(()), // Scallop keeps its full-clearance retraction by default.
+        35 => Ok(()), // Scallop keeps the existing outside-in pass order.
         29 => Ok(()), // Additive Parallel finishing operations and surface bindings.
         28 => Ok(()), // Additive Bore operations and cylindrical geometry bindings.
         _ => Err(MigrationError::MissingStep { from }),

@@ -2957,6 +2957,7 @@ enum Message {
     ParallelScallopToggled(bool),
     ScallopSmoothingToggled(bool),
     ScallopRetractionChanged(cam_model::ScallopRetraction),
+    ScallopOrderChanged(cam_model::ScallopOrder),
     ParallelStayDownToggled(bool),
     PocketKeepToolDownToggled(bool),
     AdaptiveClimbToggled(bool),
@@ -7570,6 +7571,14 @@ impl App {
                 self.edit_operation_draft(|op| {
                     if let Operation::Parallel(p) = op {
                         p.params.scallop_retraction = policy;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ScallopOrderChanged(order) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop_order = order;
                     }
                 });
                 self.refresh_operation_fields();
@@ -15212,6 +15221,10 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::ScallopSmoothingToggled(true));
         send(
             &mut app,
+            Message::ScallopOrderChanged(cam_model::ScallopOrder::InsideOut),
+        );
+        send(
+            &mut app,
             Message::ScallopRetractionChanged(cam_model::ScallopRetraction::Shortest),
         );
         send(
@@ -15235,6 +15248,7 @@ mod multi_setup_draft_tests {
             matches!(app.controller.operation(id), Some(Operation::Parallel(p))
             if p.params.scallop_smoothing && p.params.scallop_smoothing_tolerance == 0.07
                 && p.params.scallop_safe_distance == 0.8 && p.params.scallop_start == Some([3., 4.])
+                && p.params.scallop_order == cam_model::ScallopOrder::InsideOut
                 && p.params.scallop_retraction == cam_model::ScallopRetraction::Shortest),
             "{}",
             app.status
@@ -15243,6 +15257,7 @@ mod multi_setup_draft_tests {
         assert!(
             matches!(app.controller.operation(id), Some(Operation::Parallel(p))
             if !p.params.scallop_smoothing && p.params.scallop_start.is_none()
+                && p.params.scallop_order == cam_model::ScallopOrder::OutsideIn
                 && p.params.scallop_retraction == cam_model::ScallopRetraction::Full)
         );
     }

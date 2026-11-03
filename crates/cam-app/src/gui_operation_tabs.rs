@@ -930,6 +930,18 @@ impl App {
                     );
                 } else {
                     list = list.push(text("Sampled surface offsets; vertical walls and narrow features may remain unfinished. Inspect the simulation.").size(11).color(palette::GROUP_LABEL));
+                    list = list.push(profile_picker(
+                        "Inside/Outside direction",
+                        "Advance from the outer boundary inward or in reverse. Shortest keeps the outside-in stepover sequence and reduces travel within each level.",
+                        self.tooltips,
+                        p.params.scallop_order,
+                        &[
+                            cam_model::ScallopOrder::OutsideIn,
+                            cam_model::ScallopOrder::InsideOut,
+                            cam_model::ScallopOrder::Shortest,
+                        ][..],
+                        Message::ScallopOrderChanged,
+                    ));
                     list = list.push(
                         row![
                             text("Smoothing").size(12),

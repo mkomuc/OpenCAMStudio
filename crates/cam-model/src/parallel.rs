@@ -18,11 +18,32 @@ impl std::fmt::Display for ScallopRetraction {
     }
 }
 
+/// Order of Scallop passes by inward distance from the machining boundaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScallopOrder {
+    #[default]
+    OutsideIn,
+    InsideOut,
+    Shortest,
+}
+impl std::fmt::Display for ScallopOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OutsideIn => "Outside → in",
+            Self::InsideOut => "Inside → out",
+            Self::Shortest => "Shortest machining distance",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ParallelParams {
     /// Generate inward surface-distance contours instead of parallel rows.
     pub scallop: bool,
+    /// Pass order measured from the sampled machining boundaries.
+    pub scallop_order: ScallopOrder,
     /// Preferred lead-in location in setup XY; each contour starts nearby when possible.
     pub scallop_start: Option<[f64; 2]>,
     pub scallop_retraction: ScallopRetraction,
@@ -50,6 +71,7 @@ impl Default for ParallelParams {
     fn default() -> Self {
         Self {
             scallop: false,
+            scallop_order: ScallopOrder::OutsideIn,
             scallop_start: None,
             scallop_retraction: ScallopRetraction::Full,
             scallop_safe_distance: 1.,
@@ -79,6 +101,20 @@ mod tests {
         assert_eq!(params.lift_height, 0.);
         assert!(!params.stay_down);
         assert!(!params.scallop, "older operations retain parallel rows");
+        assert_eq!(params.scallop_order, ScallopOrder::OutsideIn);
+        for order in [
+            ScallopOrder::OutsideIn,
+            ScallopOrder::InsideOut,
+            ScallopOrder::Shortest,
+        ] {
+            let configured = ParallelParams {
+                scallop_order: order,
+                ..params
+            };
+            let restored: ParallelParams =
+                serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
+            assert_eq!(restored.scallop_order, order);
+        }
         assert_eq!(params.scallop_retraction, ScallopRetraction::Full);
         assert!(!params.scallop_smoothing);
         for (stay_down, lift_height) in [(false, 2.), (true, 0.), (true, 2.)] {
@@ -104,6 +140,7 @@ mod tests {
                 lift_height: 2.,
                 angle: 37.,
                 scallop: true,
+                scallop_order: ScallopOrder::Shortest,
                 scallop_start: Some([12., -4.]),
                 scallop_retraction: ScallopRetraction::Shortest,
                 scallop_safe_distance: 0.6,

@@ -207,7 +207,7 @@ pub struct ParallelStrategy {
     geometry: ParallelGeometry,
 }
 impl ParallelStrategy {
-    pub const DOMAIN_REVISION: u32 = 7;
+    pub const DOMAIN_REVISION: u32 = 10;
     pub fn new(op: ParallelOp, stock: StockToLeave, geometry: ParallelGeometry) -> Self {
         Self {
             op,
@@ -1041,6 +1041,474 @@ mod tests {
     }
 
     #[test]
+    fn scallop_annulus_progresses_from_outer_edge_without_starting_at_the_hole() {
+        let mut triangles = Vec::new();
+        for (x0, y0, x1, y1) in [
+            (0., 0., 20., 6.),
+            (0., 14., 20., 20.),
+            (0., 6., 6., 14.),
+            (14., 6., 20., 14.),
+        ] {
+            triangles.extend(rectangle(x0, y0, x1, y1));
+        }
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::Shortest,
+        ] {
+            let mut operation = op();
+            operation.params.scallop = true;
+            operation.params.scallop_order = order;
+            operation.params.containment = AdaptiveContainment::Center;
+            let result = run(operation, geometry.clone());
+            assert!(!result.has_errors(), "{order:?}: {:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut contours = Vec::<Vec<Point3>>::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        contours.push(vec![*to])
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        contours.last_mut().unwrap().push(*to)
+                    }
+                    _ => {}
+                }
+            }
+            let offsets: Vec<f64> = contours
+                .iter()
+                .map(|points| {
+                    points
+                        .iter()
+                        .map(|p| p.x.min(p.y).min(20. - p.x).min(20. - p.y))
+                        .fold(f64::INFINITY, f64::min)
+                })
+                .collect();
+            assert!(offsets.len() >= 5, "{order:?}: {offsets:?}");
+            assert!(
+                offsets[0] < 1.,
+                "{order:?}: first pass must be at the outer edge: {offsets:?}"
+            );
+            for pair in offsets.windows(2) {
+                assert!(
+                    pair[1] + 0.1 >= pair[0],
+                    "{order:?}: passes moved backwards across the ring: {offsets:?}"
+                );
+                assert!(
+                    pair[1] - pair[0] <= 1.2,
+                    "{order:?}: skipped an intervening pass: {offsets:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scallop_circular_sloped_ring_advances_towards_the_hole() {
+        let mut triangles = Vec::new();
+        for i in 0..96 {
+            let point = |index: usize, radius: f64, z: f64| {
+                let angle = index as f64 * std::f64::consts::TAU / 96.;
+                [radius * angle.cos(), radius * angle.sin(), z]
+            };
+            let outer_a = point(i, 10., 0.);
+            let outer_b = point(i + 1, 10., 0.);
+            let inner_a = point(i, 4., -2.);
+            let inner_b = point(i + 1, 4., -2.);
+            triangles.extend([[outer_a, outer_b, inner_b], [outer_a, inner_b, inner_a]]);
+        }
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -3.,
+            },
+        };
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::Shortest,
+        ] {
+            let mut operation = op();
+            operation.params.scallop = true;
+            operation.params.scallop_order = order;
+            operation.params.containment = AdaptiveContainment::Center;
+            let result = run(operation, geometry.clone());
+            assert!(!result.has_errors(), "{order:?}: {:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut contours = Vec::<Vec<Point3>>::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        contours.push(vec![*to])
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        contours.last_mut().unwrap().push(*to)
+                    }
+                    _ => {}
+                }
+            }
+            let radii: Vec<f64> = contours
+                .iter()
+                .map(|path| path.iter().map(|p| p.x.hypot(p.y)).sum::<f64>() / path.len() as f64)
+                .collect();
+            assert!(radii.len() >= 5, "{order:?}: {radii:?}");
+            assert!(
+                radii[0] > 9.,
+                "{order:?}: first pass should start outside: {radii:?}"
+            );
+            assert!(
+                radii.last().unwrap() < &6.,
+                "{order:?}: final passes should reach the inner edge: {radii:?}"
+            );
+            for pair in radii.windows(2) {
+                assert!(
+                    pair[1] <= pair[0] + 0.4,
+                    "{order:?}: path returned toward the outside: {radii:?}"
+                );
+                assert!(
+                    pair[0] - pair[1] < 1.5,
+                    "{order:?}: path skipped a middle pass: {radii:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scallop_rounded_bore_does_not_finish_with_tiny_disconnected_fragments() {
+        let angular = 96;
+        let radial = 24;
+        let mut selected = Vec::new();
+        let point = |i: usize, j: usize| {
+            let theta = i as f64 * std::f64::consts::TAU / angular as f64;
+            let phi = j as f64 * std::f64::consts::FRAC_PI_2 / radial as f64;
+            let radius = 19. - 4. * phi.sin();
+            [
+                radius * theta.cos(),
+                radius * theta.sin(),
+                16. + 4. * phi.cos(),
+            ]
+        };
+        for i in 0..angular {
+            for j in 0..radial {
+                let a = point(i, j);
+                let b = point(i + 1, j);
+                let c = point(i + 1, j + 1);
+                let d = point(i, j + 1);
+                selected.extend([[a, b, c], [a, c, d]]);
+            }
+        }
+        let geometry = ParallelGeometry {
+            triangles: selected.clone(),
+            selected,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 21.,
+                bottom: 16.,
+            },
+        };
+        let tools = [Tool {
+            kind: ToolKind::BallMill,
+            diameter: 6.,
+            number: 1,
+            length: 20.,
+            ..Default::default()
+        }];
+        let env = JobEnv {
+            heights: Heights::new(30., 25., 21.),
+            tools: &tools,
+            stock: None,
+            spindle: SpindleDir::Cw,
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.stepover = 0.5;
+        operation.params.tolerance = 0.1;
+        operation.params.containment = AdaptiveContainment::Center;
+        operation.params.scallop_smoothing = true;
+        operation.params.scallop_smoothing_tolerance = 0.05;
+        operation.params.scallop_retraction = cam_model::ScallopRetraction::Minimum;
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::Shortest,
+            cam_model::ScallopOrder::InsideOut,
+        ] {
+            operation.params.scallop_order = order;
+            let result =
+                ParallelStrategy::new(operation.clone(), StockToLeave::default(), geometry.clone())
+                    .compute(&env, &CancelToken::new());
+            assert!(!result.has_errors(), "{order:?}: {:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut lengths = Vec::new();
+            let mut last: Option<Point3> = None;
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        lengths.push(0.);
+                        last = Some(*to);
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        let from = last.unwrap();
+                        *lengths.last_mut().unwrap() += (to.x - from.x).hypot(to.y - from.y);
+                        last = Some(*to);
+                    }
+                    Step::Arc {
+                        end,
+                        center,
+                        dir,
+                        tag,
+                        ..
+                    } if tag.kind == MoveKind::Cutting => {
+                        let from = last.unwrap();
+                        *lengths.last_mut().unwrap() += (from.x - center.x)
+                            .hypot(from.y - center.y)
+                            * cam_cldata::arc_sweep(from, *end, *center, *dir);
+                        last = Some(*end);
+                    }
+                    _ => {}
+                }
+            }
+            assert!(lengths.len() >= 5, "{order:?}: {lengths:?}");
+            assert!(
+                lengths.iter().all(|length| *length >= 1.),
+                "{order:?}: isolated fragments at the bore edge: {lengths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scallop_preserves_offsets_in_a_wide_region_next_to_an_eccentric_hole() {
+        let mut triangles = Vec::new();
+        for (x0, y0, x1, y1) in [
+            (0., 0., 20., 6.),
+            (0., 14., 20., 20.),
+            (0., 6., 3., 14.),
+            (9., 6., 20., 14.),
+        ] {
+            triangles.extend(rectangle(x0, y0, x1, y1));
+        }
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let result = run(operation, geometry);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let max_offset = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                    Some(to.x.min(to.y).min(20. - to.x).min(20. - to.y))
+                }
+                _ => None,
+            })
+            .fold(0., f64::max);
+        assert!(
+            max_offset > 4.5,
+            "wide region lost its deeper offsets: {max_offset}"
+        );
+    }
+
+    #[test]
+    fn scallop_fixed_directions_reverse_contour_order_without_changing_cuts() {
+        let triangles = rectangle(0., 0., 10., 10.).to_vec();
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let outside = run(operation.clone(), geometry.clone());
+        operation.params.scallop_order = cam_model::ScallopOrder::InsideOut;
+        let inside = run(operation, geometry);
+        assert!(
+            !outside.has_errors() && !inside.has_errors(),
+            "{:?} {:?}",
+            outside.diagnostics,
+            inside.diagnostics
+        );
+        let contours = |result: &StrategyResult| {
+            let mut all = Vec::<Vec<[f64; 3]>>::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        all.push(vec![[to.x, to.y, to.z]])
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        all.last_mut().unwrap().push([to.x, to.y, to.z])
+                    }
+                    _ => {}
+                }
+            }
+            all
+        };
+        let outer_contours = contours(&outside);
+        let mut inner_contours = contours(&inside);
+        assert!(outer_contours.len() >= 4);
+        inner_contours.reverse();
+        assert_eq!(
+            outer_contours, inner_contours,
+            "ordering must preserve the certified cuts"
+        );
+        assert!(inside.program.validate().is_ok());
+    }
+
+    #[test]
+    fn scallop_shortest_order_reduces_repositioning_between_separate_regions() {
+        let mut triangles = rectangle(0., 0., 4., 8.).to_vec();
+        triangles.extend(rectangle(8., 0., 12., 8.));
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let outside = run(operation.clone(), geometry.clone());
+        operation.params.scallop_order = cam_model::ScallopOrder::Shortest;
+        let shortest = run(operation, geometry);
+        assert!(
+            !outside.has_errors() && !shortest.has_errors(),
+            "{:?} {:?}",
+            outside.diagnostics,
+            shortest.diagnostics
+        );
+        let travel = |result: &StrategyResult| {
+            let mut last_retract: Option<Point3> = None;
+            let mut sum = 0.;
+            for step in result.program.steps() {
+                match step {
+                    Step::Rapid { to, tag } if tag.kind == MoveKind::Retract => {
+                        last_retract = Some(*to)
+                    }
+                    Step::Rapid { to, tag } if tag.kind == MoveKind::Link => {
+                        if let Some(from) = last_retract.take() {
+                            sum += (to.x - from.x).hypot(to.y - from.y);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            sum
+        };
+        assert!(
+            travel(&shortest) < travel(&outside),
+            "{} >= {}",
+            travel(&shortest),
+            travel(&outside)
+        );
+        assert!(shortest.program.validate().is_ok());
+        let cutting_count = |result: &StrategyResult| {
+            result.program.steps().iter()
+            .filter(|step| matches!(step, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting)).count()
+        };
+        assert_eq!(cutting_count(&outside), cutting_count(&shortest));
+        let segments = |result: &StrategyResult| {
+            let mut previous: Option<[u64; 3]> = None;
+            let mut cuts = Vec::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } | Step::Rapid { to, tag } => {
+                        let point = [to.x.to_bits(), to.y.to_bits(), to.z.to_bits()];
+                        if tag.kind == MoveKind::Cutting {
+                            let from = previous.unwrap();
+                            cuts.push(if from < point {
+                                (from, point)
+                            } else {
+                                (point, from)
+                            });
+                        }
+                        previous = Some(point);
+                    }
+                    _ => {}
+                }
+            }
+            cuts.sort_unstable();
+            cuts
+        };
+        assert_eq!(
+            segments(&outside),
+            segments(&shortest),
+            "reordering must preserve every certified cutting segment"
+        );
+    }
+
+    #[test]
+    fn scallop_shortest_order_respects_preferred_entry_positions() {
+        let mut triangles = rectangle(0., 0., 4., 8.).to_vec();
+        triangles.extend(rectangle(8., 0., 12., 8.));
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        operation.params.scallop_start = Some([2., 7.]);
+        let outside = run(operation.clone(), geometry.clone());
+        operation.params.scallop_order = cam_model::ScallopOrder::Shortest;
+        let shortest = run(operation, geometry);
+        assert!(!outside.has_errors() && !shortest.has_errors());
+        let positions = |result: &StrategyResult| {
+            let mut points: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        Some([to.x, to.y, to.z])
+                    }
+                    _ => None,
+                })
+                .collect();
+            points.sort_by(|a, b| {
+                a[0].total_cmp(&b[0])
+                    .then(a[1].total_cmp(&b[1]))
+                    .then(a[2].total_cmp(&b[2]))
+            });
+            points
+        };
+        assert_eq!(
+            positions(&outside),
+            positions(&shortest),
+            "ordering must not override a preferred entry"
+        );
+    }
+
+    #[test]
     fn scallop_retracts_between_disconnected_surface_regions() {
         let mut triangles = rectangle(0., 0., 4., 8.).to_vec();
         triangles.extend(rectangle(6., 0., 10., 8.));
@@ -1090,33 +1558,46 @@ mod tests {
         geometry.heights.top = 5.;
         let mut operation = op();
         operation.params.scallop = true;
-        let result = run(operation, geometry);
-        assert!(!result.has_errors(), "{:?}", result.diagnostics);
-        let mut previous: Option<Point3> = None;
-        let mut cuts = 0;
-        for step in result.program.steps() {
-            match step {
-                Step::Linear { to, tag, .. } => {
-                    if tag.kind == MoveKind::Cutting {
-                        let from = previous.unwrap();
-                        for triangle in &boss {
-                            assert!(
-                                segment_triangle(
-                                    [from.x, from.y, from.z + 1.],
-                                    [to.x, to.y, to.z + 1.],
-                                    triangle
-                                ) >= 1.0025_f64.powi(2)
-                            );
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::InsideOut,
+            cam_model::ScallopOrder::Shortest,
+        ] {
+            operation.params.scallop_order = order;
+            operation.params.scallop_retraction = cam_model::ScallopRetraction::Shortest;
+            let result = run(operation.clone(), geometry.clone());
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut previous: Option<Point3> = None;
+            let mut cuts = 0;
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } => {
+                        if matches!(tag.kind, MoveKind::Cutting | MoveKind::Link) {
+                            let from = previous.unwrap();
+                            for triangle in &boss {
+                                assert!(
+                                    segment_triangle(
+                                        [from.x, from.y, from.z + 1.],
+                                        [to.x, to.y, to.z + 1.],
+                                        triangle
+                                    ) >= 1.0025_f64.powi(2),
+                                    "{order:?} {:?}",
+                                    tag.kind
+                                );
+                            }
+                            if tag.kind == MoveKind::Cutting {
+                                cuts += 1;
+                            }
                         }
-                        cuts += 1;
+                        previous = Some(*to);
                     }
-                    previous = Some(*to);
+                    Step::Rapid { to, .. } => previous = Some(*to),
+                    _ => {}
                 }
-                Step::Rapid { .. } => previous = None,
-                _ => {}
             }
+            assert!(cuts > 0);
         }
-        assert!(cuts > 0);
     }
 
     #[test]
