@@ -209,16 +209,29 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
-        Operation::Parallel(_) => vec![
-            Field::LiftHeight,
-            Field::ParallelStepover,
-            Field::ParallelAngle,
-            Field::AdaptiveTolerance,
-            Field::AdaptiveOffset,
-            Field::SpindleRpm,
-            Field::Feed,
-            Field::PlungeFeed,
-        ],
+        Operation::Parallel(o) => {
+            let mut fields = Vec::new();
+            if !o.params.scallop {
+                fields.push(Field::LiftHeight);
+            }
+            fields.push(Field::ParallelStepover);
+            if !o.params.scallop {
+                fields.push(Field::ParallelAngle);
+            } else {
+                fields.push(Field::ScallopSafeDistance);
+                if o.params.scallop_smoothing {
+                    fields.push(Field::ScallopSmoothingTolerance);
+                }
+            }
+            fields.extend([
+                Field::AdaptiveTolerance,
+                Field::AdaptiveOffset,
+                Field::SpindleRpm,
+                Field::Feed,
+                Field::PlungeFeed,
+            ]);
+            fields
+        }
         Operation::Adaptive(_) => vec![
             Field::LiftHeight,
             Field::AdaptiveTolerance,

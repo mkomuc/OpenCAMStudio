@@ -55,6 +55,11 @@ impl App {
             ),
             (PositionKind::Exit, "Lead-out position", operation_end(op)),
         ] {
+            if kind == PositionKind::Exit
+                && matches!(op, Operation::Parallel(p) if p.params.scallop)
+            {
+                continue;
+            }
             let picking = self.operation_position_pick == Some(kind);
             controls = controls.push(
                 row![

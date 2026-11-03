@@ -94,7 +94,9 @@ use crate::{BoreOp, Tool};
 /// v31: remaining stock inherited from the immediately preceding setup.
 /// v32: operation pattern spacing, directions and execution options.
 /// v33: a distinct roughing end mill tool type.
-pub const SCHEMA_VERSION: u32 = 33;
+/// v34: surface-offset finishing mode.
+/// v35: Scallop entry and retraction preferences.
+pub const SCHEMA_VERSION: u32 = 35;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -81,9 +81,10 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::TabSpacing
         | Field::AdaptiveOffset => OperationTab::Geometry,
         Field::BoreDiameter | Field::BoreTaper => OperationTab::Geometry,
-        Field::LiftHeight | Field::BoreSafeDistance | Field::BoreLeadRadius => {
-            OperationTab::Linking
-        }
+        Field::LiftHeight
+        | Field::BoreSafeDistance
+        | Field::BoreLeadRadius
+        | Field::ScallopSafeDistance => OperationTab::Linking,
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -132,6 +133,7 @@ pub(super) fn operation_start(op: &Operation) -> Option<[f64; 2]> {
         Operation::Engrave(o) if o.closed => o.start,
         Operation::Carve(o) => o.start,
         Operation::Adaptive(o) => o.params.start,
+        Operation::Parallel(o) if o.params.scallop => o.params.scallop_start,
         _ => None,
     }
 }
@@ -143,6 +145,7 @@ pub(super) fn set_operation_start(op: &mut Operation, enabled: bool) {
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
         Operation::Adaptive(o) => &mut o.params.start,
+        Operation::Parallel(o) if o.params.scallop => &mut o.params.scallop_start,
         _ => return,
     };
     *start = if enabled {
@@ -162,6 +165,7 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
         Operation::Adaptive(o) => &mut o.params.start,
+        Operation::Parallel(o) if o.params.scallop => &mut o.params.scallop_start,
         _ => return,
     };
     if let Some(point) = start {
@@ -187,6 +191,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::CuttingSpeed
         | Field::FeedPerTooth
         | Field::AdaptiveTolerance
+        | Field::ScallopSmoothingTolerance
         | Field::AdaptiveOptimalLoad
         | Field::AdaptiveFineStepdown
         | Field::MajorDia
@@ -906,13 +911,35 @@ impl App {
             Operation::Parallel(p) if tab == OperationTab::Passes => {
                 list = list.section("Passes").push(
                     row![
-                        text("Both ways (zigzag)").size(12),
-                        checkbox(p.params.both_ways)
+                        text("Scallop (surface offsets)").size(12),
+                        checkbox(p.params.scallop)
                             .size(15)
-                            .on_toggle(Message::ParallelBothWaysToggled)
+                            .on_toggle(Message::ParallelScallopToggled)
                     ]
                     .spacing(8),
                 );
+                if !p.params.scallop {
+                    list = list.push(
+                        row![
+                            text("Both ways (zigzag)").size(12),
+                            checkbox(p.params.both_ways)
+                                .size(15)
+                                .on_toggle(Message::ParallelBothWaysToggled)
+                        ]
+                        .spacing(8),
+                    );
+                } else {
+                    list = list.push(text("Sampled surface offsets; vertical walls and narrow features may remain unfinished. Inspect the simulation.").size(11).color(palette::GROUP_LABEL));
+                    list = list.push(
+                        row![
+                            text("Smoothing").size(12),
+                            checkbox(p.params.scallop_smoothing)
+                                .size(15)
+                                .on_toggle(Message::ScallopSmoothingToggled)
+                        ]
+                        .spacing(8),
+                    );
+                }
             }
             Operation::Parallel(p) if tab == OperationTab::Geometry => {
                 list = list.push(profile_picker(

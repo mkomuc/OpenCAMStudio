@@ -6,7 +6,8 @@ A CAM application for CNC toolpath generation, built in Rust.
 > import, toolpath generation, material-removal simulation and G-code export.
 > 3D Adaptive Clearing provides CAD-derived roughing levels; 3D Parallel finishing
 > follows freeform surfaces with a ball nose cutter on pre-roughed stock.
-> Additional 3D finishing strategies, turning and plugins remain roadmap work.
+> Sampled 3D Scallop finishing is also available; additional 3D finishing
+> strategies, turning and plugins remain roadmap work.
 
 ![3D Parallel finishing toolpath generated for the tray project](docs/tray-parallel-toolpath.png)
 

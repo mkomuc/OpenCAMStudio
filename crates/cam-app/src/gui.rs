@@ -373,7 +373,7 @@ impl Icon {
                             with a V-bit. Unlike engraving, the tool never touches the boundary: its \
                             flanks land on it, and the depth follows from the shape's own width."
             }
-            Icon::Parallel => "Add a 3D Parallel finishing operation for selected CAD bodies or faces.",
+            Icon::Parallel => "Add a 3D Parallel or sampled Scallop finishing operation for selected CAD bodies or faces.",
             Icon::Adaptive => "Add a 3D Adaptive Clearing operation for selected CAD bodies or faces.",
             Icon::Face => "Add a Face operation — skim the top of the stock flat.",
             Icon::NewTool => "Add a new tool to the library.",
@@ -1194,6 +1194,8 @@ enum Field {
     Stepdown,
     ParallelStepover,
     ParallelAngle,
+    ScallopSafeDistance,
+    ScallopSmoothingTolerance,
     AdaptiveTolerance,
     AdaptiveOptimalLoad,
     AdaptiveFineStepdown,
@@ -1361,6 +1363,8 @@ impl Field {
             Field::Stepdown => "Stepdown (mm)",
             Field::ParallelStepover => "Stepover (mm)",
             Field::ParallelAngle => "Pass angle (deg)",
+            Field::ScallopSafeDistance => "Safe distance (mm)",
+            Field::ScallopSmoothingTolerance => "Smoothing tolerance (mm)",
             Field::AdaptiveTolerance => "Tolerance (mm)",
             Field::AdaptiveOptimalLoad => "Optimal load (mm)",
             Field::AdaptiveFineStepdown => "Fine stepdown (mm)",
@@ -1435,9 +1439,11 @@ impl Field {
             Field::BoreLeadRadius => "Radius of the horizontal tangent lead. For holes it is limited to half the tool-centre orbit; for bosses the safe distance can increase it.",
 
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
-            Field::ParallelStepover => "Horizontal distance between parallel finishing passes, in millimetres.",
+            Field::ParallelStepover => "Target distance between finishing passes, in millimetres. Scallop uses approximate surface distance.",
             Field::ParallelAngle => "Direction of the cutting rows measured counterclockwise from setup X, in degrees.",
-            Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres. Path simplification is calculated automatically from this tolerance.",
+            Field::ScallopSafeDistance => "Vertical clearance above the model for minimum retraction. Unsafe links return to full clearance.",
+            Field::ScallopSmoothingTolerance => "Maximum additional filtering deviation from the generated path. This is added to the machining tolerance.",
+            Field::AdaptiveTolerance => "Machining tolerance in millimetres. Scallop smoothing, when enabled, adds its separate filtering tolerance.",
             Field::AdaptiveOptimalLoad => "Target radial engagement for adaptive clearing, in millimetres.",
             Field::AdaptiveFineStepdown => "Axial spacing for intermediate terrace refinement, in millimetres. Fine passes are added only where shelves or slopes expose additional material; unchanged vertical walls use the primary stepdown.",
             Field::AdaptiveOffset => "Signed shift of the selected adaptive boundary. Positive values move it outward, except Inside containment moves it inward.",
@@ -2948,6 +2954,9 @@ enum Message {
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
     ParallelBothWaysToggled(bool),
+    ParallelScallopToggled(bool),
+    ScallopSmoothingToggled(bool),
+    ScallopRetractionChanged(cam_model::ScallopRetraction),
     ParallelStayDownToggled(bool),
     PocketKeepToolDownToggled(bool),
     AdaptiveClimbToggled(bool),
@@ -7541,6 +7550,30 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::ParallelScallopToggled(on) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop = on;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ScallopSmoothingToggled(on) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop_smoothing = on;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ScallopRetractionChanged(policy) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop_retraction = policy;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::PocketKeepToolDownToggled(on) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Pocket(p) = op {
@@ -10726,7 +10759,11 @@ impl App {
                         "3D Adaptive Clearing",
                         begin(OpKind::Adaptive),
                     ),
-                    cmd(Icon::Parallel, "3D Parallel", begin(OpKind::Parallel)),
+                    cmd(
+                        Icon::Parallel,
+                        "3D Parallel / Scallop",
+                        begin(OpKind::Parallel),
+                    ),
                 ],
             }],
             RibbonTab::Machinery => vec![GroupSpec {
@@ -12202,6 +12239,7 @@ fn op_kind(op: &Operation) -> &'static str {
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
         Operation::Adaptive(_) => "3D Adaptive Clearing",
+        Operation::Parallel(o) if o.params.scallop => "3D Scallop",
         Operation::Parallel(_) => "3D Parallel",
     }
 }
@@ -12334,6 +12372,12 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Thread(o), Field::PlungeFeed) => Some(o.plunge_feed),
         (Operation::Parallel(o), Field::ParallelStepover) => Some(o.params.stepover),
         (Operation::Parallel(o), Field::ParallelAngle) => Some(o.params.angle),
+        (Operation::Parallel(o), Field::ScallopSafeDistance) => {
+            Some(o.params.scallop_safe_distance)
+        }
+        (Operation::Parallel(o), Field::ScallopSmoothingTolerance) => {
+            Some(o.params.scallop_smoothing_tolerance)
+        }
         (Operation::Parallel(o), Field::AdaptiveTolerance) => Some(o.params.tolerance),
         (Operation::Parallel(o), Field::AdaptiveOffset) => Some(o.params.additional_offset),
         (Operation::Parallel(o), Field::Feed) => Some(o.params.feed),
@@ -12665,6 +12709,12 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
             if let Some(v) = get(Field::ParallelAngle) {
                 o.params.angle = v;
+            }
+            if let Some(v) = get(Field::ScallopSafeDistance) {
+                o.params.scallop_safe_distance = v;
+            }
+            if let Some(v) = get(Field::ScallopSmoothingTolerance) {
+                o.params.scallop_smoothing_tolerance = v;
             }
             if let Some(v) = get(Field::AdaptiveTolerance) {
                 o.params.tolerance = v;
@@ -15128,6 +15178,72 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::CancelOperationDraft);
         assert!(
             matches!(app.controller.operation(id), Some(Operation::Parallel(p)) if p.params.both_ways && p.params.angle == 0.)
+        );
+    }
+
+    #[test]
+    fn scallop_mode_is_a_saved_and_cancelable_finishing_choice() {
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Parallel, 1);
+        let id = operation.id();
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        send(&mut app, Message::ParallelScallopToggled(true));
+        let draft = app.current_operation(id).unwrap();
+        assert!(matches!(draft, Operation::Parallel(p) if p.params.scallop));
+        assert!(!operation_fields(draft).contains(&Field::ParallelAngle));
+        assert!(!operation_fields(draft).contains(&Field::LiftHeight));
+        send(&mut app, Message::CancelOperationDraft);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Parallel(p)) if !p.params.scallop)
+        );
+    }
+
+    #[test]
+    fn scallop_linking_and_smoothing_controls_apply_and_undo() {
+        let mut app = blank_app();
+        let mut operation = app.controller.operation_template(OpKind::Parallel, 1);
+        if let Operation::Parallel(p) = &mut operation {
+            p.params.scallop = true;
+        }
+        let id = operation.id();
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        send(&mut app, Message::ScallopSmoothingToggled(true));
+        send(
+            &mut app,
+            Message::ScallopRetractionChanged(cam_model::ScallopRetraction::Shortest),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ScallopSmoothingTolerance, "0.07".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ScallopSafeDistance, "0.8".into()),
+        );
+        send(
+            &mut app,
+            Message::OperationPositionPick(operation_positions::PositionKind::Entry),
+        );
+        send(&mut app, Message::OperationPositionPicked([3., 4., 2.]));
+        let draft = app.current_operation(id).unwrap();
+        assert!(operation_fields(draft).contains(&Field::ScallopSmoothingTolerance));
+        assert_eq!(operation_tabs::operation_start(draft), Some([3., 4.]));
+        send(&mut app, Message::Apply);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Parallel(p))
+            if p.params.scallop_smoothing && p.params.scallop_smoothing_tolerance == 0.07
+                && p.params.scallop_safe_distance == 0.8 && p.params.scallop_start == Some([3., 4.])
+                && p.params.scallop_retraction == cam_model::ScallopRetraction::Shortest),
+            "{}",
+            app.status
+        );
+        assert!(app.controller.undo());
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Parallel(p))
+            if !p.params.scallop_smoothing && p.params.scallop_start.is_none()
+                && p.params.scallop_retraction == cam_model::ScallopRetraction::Full)
         );
     }
 

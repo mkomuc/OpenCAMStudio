@@ -318,7 +318,7 @@ impl App {
                     Message::PlungeKindChanged,
                 ));
             }
-            Operation::Parallel(p) => {
+            Operation::Parallel(p) if !p.params.scallop => {
                 moves.push(help_wrap(
                     row![
                         text("Keep tool down").size(12).width(Length::Fill),
@@ -328,6 +328,20 @@ impl App {
                     ].spacing(8).align_y(Alignment::Center),
                     "Enable short transitions between neighboring passes when the swept cutter clears the model. At 0 mm Lift height, the tool continues finishing along the surface without an added lift. Gaps and unsafe transitions retract to clearance. Use on pre-roughed stock.",
                     self.tooltips,
+                ));
+            }
+            Operation::Parallel(p) if p.params.scallop => {
+                moves.push(profile_picker(
+                    "Retraction policy",
+                    "Full clearance, a checked raised link, or a checked direct feed link. Links blocked by stock are rerouted during verification.",
+                    self.tooltips,
+                    p.params.scallop_retraction,
+                    &[
+                        cam_model::ScallopRetraction::Full,
+                        cam_model::ScallopRetraction::Minimum,
+                        cam_model::ScallopRetraction::Shortest,
+                    ][..],
+                    Message::ScallopRetractionChanged,
                 ));
             }
             Operation::Adaptive(_) => {
@@ -574,6 +588,7 @@ impl App {
                 | Operation::Carve(_)
                 | Operation::Adaptive(_)
         ) || matches!(op, Operation::Engrave(o) if o.closed)
+            || matches!(op, Operation::Parallel(o) if o.params.scallop)
             || matches!(op, Operation::Chamfer(o) if o.closed && o.faces.is_empty());
         if supports_positions {
             let positions = column![self.operation_position_controls(op)].spacing(10);

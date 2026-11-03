@@ -313,7 +313,11 @@ impl JobInputs {
                 let cam_model::Operation::Parallel(parallel) = op else {
                     return None;
                 };
-                if !parallel.params.stay_down || parallel.params.lift_height <= 0. {
+                let scallop_links = parallel.params.scallop
+                    && parallel.params.scallop_retraction != cam_model::ScallopRetraction::Full;
+                if !scallop_links
+                    && (!parallel.params.stay_down || parallel.params.lift_height <= 0.)
+                {
                     return None;
                 }
                 let clearance = match setup.height_settings.get(&op.id()) {
@@ -869,6 +873,32 @@ mod tests {
             pre_roughed, original,
             "pre-roughed stock keeps all the requested stay-down links"
         );
+
+        for policy in [
+            cam_model::ScallopRetraction::Minimum,
+            cam_model::ScallopRetraction::Shortest,
+        ] {
+            let mut scallop_inputs = inputs.clone();
+            let operation = std::sync::Arc::make_mut(&mut scallop_inputs.document)
+                .setup_mut()
+                .operations
+                .iter_mut()
+                .find(|op| op.id() == 7)
+                .unwrap();
+            if let Operation::Parallel(parallel) = operation {
+                parallel.params.scallop = true;
+                parallel.params.stay_down = false;
+                parallel.params.scallop_retraction = policy;
+            }
+            let mut program = original.clone();
+            let result = simulate(&scallop_inputs, &mut program, None);
+            assert!(result.is_clean(), "{policy:?}: {:?}", result.collisions);
+            assert_eq!(
+                program.len(),
+                original.len() + 2,
+                "blocked Scallop links need the same stock repair"
+            );
+        }
 
         let mut unrelated = original.clone();
         if let Step::Linear { tag, .. } = &mut unrelated.steps[4] {

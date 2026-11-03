@@ -1,7 +1,37 @@
 //! Surface finishing controls, in setup coordinates and millimetres.
+/// How a Scallop operation moves between separate cutting contours.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScallopRetraction {
+    #[default]
+    Full,
+    Minimum,
+    Shortest,
+}
+impl std::fmt::Display for ScallopRetraction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Full => "Full retraction",
+            Self::Minimum => "Minimum retraction",
+            Self::Shortest => "Shortest path",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ParallelParams {
+    /// Generate inward surface-distance contours instead of parallel rows.
+    pub scallop: bool,
+    /// Preferred lead-in location in setup XY; each contour starts nearby when possible.
+    pub scallop_start: Option<[f64; 2]>,
+    pub scallop_retraction: ScallopRetraction,
+    /// Additional vertical clearance for minimum retraction, in millimetres.
+    pub scallop_safe_distance: f64,
+    /// Optional post-filtering of the certified Scallop path.
+    pub scallop_smoothing: bool,
+    /// Maximum additional filtering deviation in millimetres.
+    pub scallop_smoothing_tolerance: f64,
     /// Enable checked local links between neighboring surface passes.
     pub stay_down: bool,
     /// Lift above the higher endpoint of neighboring surface passes, mm.
@@ -19,6 +49,12 @@ pub struct ParallelParams {
 impl Default for ParallelParams {
     fn default() -> Self {
         Self {
+            scallop: false,
+            scallop_start: None,
+            scallop_retraction: ScallopRetraction::Full,
+            scallop_safe_distance: 1.,
+            scallop_smoothing: false,
+            scallop_smoothing_tolerance: 0.01,
             stay_down: false,
             lift_height: 0.,
             tolerance: 0.02,
@@ -42,6 +78,9 @@ mod tests {
         assert_eq!(params, ParallelParams::default());
         assert_eq!(params.lift_height, 0.);
         assert!(!params.stay_down);
+        assert!(!params.scallop, "older operations retain parallel rows");
+        assert_eq!(params.scallop_retraction, ScallopRetraction::Full);
+        assert!(!params.scallop_smoothing);
         for (stay_down, lift_height) in [(false, 2.), (true, 0.), (true, 2.)] {
             let configured = ParallelParams {
                 stay_down,
@@ -64,6 +103,12 @@ mod tests {
                 stay_down: true,
                 lift_height: 2.,
                 angle: 37.,
+                scallop: true,
+                scallop_start: Some([12., -4.]),
+                scallop_retraction: ScallopRetraction::Shortest,
+                scallop_safe_distance: 0.6,
+                scallop_smoothing: true,
+                scallop_smoothing_tolerance: 0.05,
                 stepover: 0.25,
                 both_ways: false,
                 ..params
