@@ -2069,6 +2069,7 @@ struct App {
     cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
     notice: Option<Notice>,
     notice_queue: VecDeque<Notice>,
+    notice_filters: [bool; 3],
     status_messages: StatusMessages,
     /// Shared transactional editor for setup, stock and postprocess settings. The
     /// draft survives tab changes; only the footer can commit or discard it.
@@ -2763,6 +2764,7 @@ enum Message {
     CancelCadImport,
     NoticeDismissed,
     NoticeBackdrop,
+    NoticeFilterChanged(usize, bool),
     ReplaceCadAsset(u64),
     CadReplacementChosen(u64, Option<PathBuf>),
     RemoveCadAsset(u64),
@@ -3550,6 +3552,7 @@ impl App {
             cad_scene_cache: Default::default(),
             notice: None,
             notice_queue: VecDeque::new(),
+            notice_filters: [true; 3],
             status_messages: StatusMessages::default(),
             setup_draft: None,
             pattern_draft: None,
@@ -3915,6 +3918,7 @@ impl App {
                     | Message::WindowCursor(_)
                     | Message::ModifiersChanged(_)
                     | Message::NoticeDismissed
+                    | Message::NoticeFilterChanged(..)
             )
         {
             return iced::Task::none();
@@ -4005,6 +4009,7 @@ impl App {
                 &message,
                 Message::NoticeDismissed
                     | Message::NoticeBackdrop
+                    | Message::NoticeFilterChanged(..)
                     | Message::PollCadImport
                     | Message::PollRun
                     | Message::WindowResized(_)
@@ -5881,6 +5886,11 @@ impl App {
                         self.status = error.clone();
                         return self.queue_notice(Notice {
                             title: "Cannot replace model".into(),
+                            entries: vec![notices::NoticeEntry {
+                                severity: Severity::Error,
+                                message: error.clone(),
+                                source: None,
+                            }],
                             detail: error,
                             error: true,
                         });
@@ -5899,6 +5909,11 @@ impl App {
                     self.status =
                         "Model removed. Dependent operations need reselection; Undo restores it."
                             .into();
+                }
+            }
+            Message::NoticeFilterChanged(index, value) => {
+                if let Some(filter) = self.notice_filters.get_mut(index) {
+                    *filter = value;
                 }
             }
             Message::NoticeBackdrop => {}

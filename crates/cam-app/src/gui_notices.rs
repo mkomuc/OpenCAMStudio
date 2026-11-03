@@ -6,12 +6,25 @@ pub(super) struct Notice {
     pub title: String,
     pub detail: String,
     pub error: bool,
+    pub entries: Vec<NoticeEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct NoticeEntry {
+    pub severity: Severity,
+    pub message: String,
+    pub source: Option<String>,
 }
 
 impl Notice {
     fn import_error(detail: String) -> Self {
         Self {
             title: "Cannot import geometry".into(),
+            entries: vec![NoticeEntry {
+                severity: Severity::Error,
+                message: detail.clone(),
+                source: None,
+            }],
             detail,
             error: true,
         }
@@ -19,38 +32,60 @@ impl Notice {
 }
 
 pub(super) fn job_notice(outcome: &crate::RunOutcome) -> Option<Notice> {
-    let mut lines: Vec<_> = outcome
+    let notice = job_notice_with_info(outcome)?;
+    notice
+        .entries
+        .iter()
+        .any(|entry| entry.severity != Severity::Info)
+        .then_some(notice)
+}
+
+pub(super) fn job_notice_with_info(outcome: &crate::RunOutcome) -> Option<Notice> {
+    let mut entries: Vec<_> = outcome
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.severity != Severity::Info)
-        .map(|diagnostic| format!("{:?}: {}", diagnostic.severity, diagnostic.message))
+        .map(|diagnostic| NoticeEntry {
+            severity: diagnostic.severity,
+            message: diagnostic.message.clone(),
+            source: None,
+        })
         .collect();
-    lines.extend(
-        outcome
-            .collisions
-            .iter()
-            .map(|collision| format!("Verification: {}", collision.message)),
-    );
-    let error = outcome
-        .diagnostics
+    entries.extend(outcome.collisions.iter().map(|collision| NoticeEntry {
+        severity: Severity::Error,
+        message: format!("Verification: {}", collision.message),
+        source: None,
+    }));
+    let error = entries
         .iter()
-        .any(|d| d.severity == Severity::Error)
-        || !outcome.collisions.is_empty()
+        .any(|entry| entry.severity == Severity::Error)
         || matches!(
             outcome.completion,
             JobCompletion::Failed | JobCompletion::Incomplete
         );
-    if error && lines.is_empty() {
-        lines.push("The toolpath or verification did not complete. Export is unavailable.".into());
+    if error
+        && !entries
+            .iter()
+            .any(|entry| entry.severity == Severity::Error)
+    {
+        entries.push(NoticeEntry {
+            severity: Severity::Error,
+            message: "The toolpath or verification did not complete. Export is unavailable.".into(),
+            source: None,
+        });
     }
-    (!lines.is_empty()).then(|| Notice {
+    (!entries.is_empty()).then(|| Notice {
         title: if error {
             "Toolpath / verification errors"
         } else {
             "Toolpath warnings"
         }
         .into(),
-        detail: lines.join("\n\n"),
+        detail: entries
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        entries,
         error,
     })
 }
@@ -69,12 +104,61 @@ impl App {
             return iced::Task::none();
         };
         self.cancel_tree_drag();
+        self.notice_filters = [true; 3];
         self.notice = Some(notice);
         iced::Task::none()
     }
 
     pub(super) fn notice_overlay(&self) -> Option<Element<'_, Message>> {
         let notice = self.notice.as_ref()?;
+        let mut list = iced::widget::column![].spacing(8);
+        for entry in &notice.entries {
+            let (index, icon, label, color) = match entry.severity {
+                Severity::Error => (0, "✕", "Error", Color::from_rgb(0.95, 0.48, 0.40)),
+                Severity::Warning => (1, "⚠", "Warning", palette::WARN),
+                Severity::Info => (2, "ℹ", "Info", palette::ACCENT_BLUE),
+            };
+            if !self.notice_filters[index] {
+                continue;
+            }
+            let mut body = iced::widget::column![text(label).size(12).color(color)];
+            if let Some(source) = &entry.source {
+                body = body.push(text(source).size(12).color(palette::GROUP_LABEL));
+            }
+            body = body.push(text(&entry.message).size(13));
+            list = list.push(
+                container(row![text(icon).size(16).color(color), body.spacing(3)].spacing(10))
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(|theme: &iced::Theme| container::Style {
+                        background: Some(Background::Color(
+                            theme.extended_palette().background.base.color,
+                        )),
+                        border: Border {
+                            color: palette::SEPARATOR,
+                            width: 1.,
+                            radius: 4.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+            );
+        }
+        if !notice.entries.iter().any(|entry| {
+            self.notice_filters[match entry.severity {
+                Severity::Error => 0,
+                Severity::Warning => 1,
+                Severity::Info => 2,
+            }]
+        }) {
+            list = list.push(text("No messages match the selected filters.").size(13));
+        }
+        let counts = [Severity::Error, Severity::Warning, Severity::Info].map(|severity| {
+            notice
+                .entries
+                .iter()
+                .filter(|entry| entry.severity == severity)
+                .count()
+        });
         let card = container(
             iced::widget::column![
                 text(&notice.title).size(18).color(if notice.error {
@@ -82,7 +166,25 @@ impl App {
                 } else {
                     palette::WARN
                 }),
-                container(scrollable(text(&notice.detail).size(13)))
+                row![
+                    checkbox(self.notice_filters[0])
+                        .label(format!("Errors ({})", counts[0]))
+                        .size(14)
+                        .text_size(12)
+                        .on_toggle(|value| Message::NoticeFilterChanged(0, value)),
+                    checkbox(self.notice_filters[1])
+                        .label(format!("Warnings ({})", counts[1]))
+                        .size(14)
+                        .text_size(12)
+                        .on_toggle(|value| Message::NoticeFilterChanged(1, value)),
+                    checkbox(self.notice_filters[2])
+                        .label(format!("Info ({})", counts[2]))
+                        .size(14)
+                        .text_size(12)
+                        .on_toggle(|value| Message::NoticeFilterChanged(2, value)),
+                ]
+                .spacing(16),
+                container(scrollable(list))
                     .max_height((self.window.height * 0.45).clamp(100., 340.)),
                 row![
                     Space::new().width(Length::Fill),
@@ -186,6 +288,14 @@ impl App {
                     self.queue_notice(Notice {
                         title: "Geometry import warnings".into(),
                         detail: warnings.join("\n\n"),
+                        entries: warnings
+                            .into_iter()
+                            .map(|message| NoticeEntry {
+                                severity: Severity::Warning,
+                                message,
+                                source: None,
+                            })
+                            .collect(),
                         error: false,
                     })
                 }
@@ -369,6 +479,19 @@ mod tests {
         assert!(app.notice_queue.is_empty());
     }
     #[test]
+    fn filters_change_while_modal_is_open_and_reset_for_next_notice() {
+        let mut app = app();
+        let notice = Notice::import_error("First error".into());
+        let _ = app.queue_notice(notice.clone());
+        let _ = app.queue_notice(notice);
+        let _ = app.update(Message::NoticeFilterChanged(0, false));
+        assert_eq!(app.notice_filters, [false, true, true]);
+        let _ = app.update(Message::NoticeDismissed);
+        assert_eq!(app.notice_filters, [true; 3]);
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
     fn warning_dialog_blocks_project_actions_until_acknowledged() {
         let mut app = app();
         app.controller.new_operation(OpKind::Drill);
@@ -377,6 +500,11 @@ mod tests {
         let _ = app.queue_notice(Notice {
             title: "Warning".into(),
             detail: "Test warning".into(),
+            entries: vec![NoticeEntry {
+                severity: Severity::Warning,
+                message: "Test warning".into(),
+                source: None,
+            }],
             error: false,
         });
         let _ = app.update(Message::NewProject);
