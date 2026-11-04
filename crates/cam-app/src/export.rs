@@ -31,6 +31,14 @@ impl AppController {
         if noncutting > 0 {
             return Err(ExportError::NonCuttingThroughStock(noncutting));
         }
+        let fixtures = outcome
+            .collisions
+            .iter()
+            .filter(|c| c.kind == CollisionKind::Fixture)
+            .count();
+        if fixtures > 0 {
+            return Err(ExportError::FixtureCollision(fixtures));
+        }
         let mut options = self.post_options();
         if self.post_kind == PostKind::Estlcam {
             options.tools = self.setup().tools.clone();

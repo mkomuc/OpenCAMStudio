@@ -333,7 +333,10 @@ impl App {
                     Some(TreeNode::Asset(id)) => instance.asset_id == *id,
                     Some(TreeNode::Model(id)) => instance.id == *id,
                     Some(_) => true,
-                    None => setup.model_instances.contains(&instance.id),
+                    None => {
+                        setup.model_instances.contains(&instance.id)
+                            || setup.fixture_instances.contains(&instance.id)
+                    }
                 }
             };
             if !in_scope || self.hidden_assets.contains(&instance.asset_id) {
@@ -532,6 +535,13 @@ impl App {
                     .geometry_state()
                     .instances
                     .iter()
+                    .filter(|i| {
+                        !self
+                            .controller
+                            .inspection_setup()
+                            .fixture_instances
+                            .contains(&i.id)
+                    })
                     .map(|i| i.id),
             );
         }
@@ -735,6 +745,7 @@ impl App {
                 let selected: Vec<_> = draft
                     .model_instances
                     .iter()
+                    .chain(&draft.fixture_instances)
                     .filter_map(|id| {
                         let instance = geometry.instance(*id)?;
                         let asset = geometry.asset(instance.asset_id)?;

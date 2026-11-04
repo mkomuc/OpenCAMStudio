@@ -87,6 +87,8 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "part.dxf".into(),
         heights: Heights::new(5.0, 2.0, 0.0),

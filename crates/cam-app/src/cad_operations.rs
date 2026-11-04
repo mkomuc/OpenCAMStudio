@@ -1082,6 +1082,24 @@ pub(crate) fn resolve_document_checked(
         resolved_operation.map_err(|message| error(message).for_op(id))?;
     }
     resolved.setup_mut().operations = operations;
+    // Keep fixture placements for the planner's independent safety checks, after
+    // resolving machining references against model bodies only.
+    document
+        .setup()
+        .validate_fixtures(&document.geometry)
+        .map_err(error)?;
+    if !document.setup().fixture_instances.is_empty() {
+        let setup_geometry = document
+            .geometry
+            .geometry_in_setup(&document.setup().frame)
+            .map_err(error)?;
+        resolved.geometry.instances.extend(
+            setup_geometry
+                .instances
+                .into_iter()
+                .filter(|instance| document.setup().fixture_instances.contains(&instance.id)),
+        );
+    }
     Ok(resolved)
 }
 

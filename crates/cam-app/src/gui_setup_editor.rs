@@ -3,9 +3,16 @@ use super::*;
 use iced::widget::column;
 
 impl App {
-    fn setup_geometry_list(&self, draft: &cam_model::Setup) -> Element<'_, Message> {
+    fn setup_geometry_list(&self, draft: &cam_model::Setup, fixture: bool) -> Element<'_, Message> {
         let geometry = self.controller.geometry_state();
-        let included = |id| draft.model_instances.contains(&id);
+        let included = |id| {
+            if fixture {
+                draft.fixture_instances.contains(&id)
+            } else {
+                draft.model_instances.contains(&id)
+            }
+        };
+        let picking = self.setup_model_pick && self.setup_fixture_pick == fixture;
         let mut entries = column![].spacing(2).width(Length::Fill);
         let mut count = 0;
         for instance in &geometry.instances {
@@ -15,21 +22,48 @@ impl App {
                 .unwrap_or_else(|| instance.name.clone());
             if included(instance.id) {
                 count += 1;
-                let selected = self.setup_model_selection == Some(instance.id);
+                let selected = (if fixture {
+                    self.setup_fixture_selection
+                } else {
+                    self.setup_model_selection
+                }) == Some(instance.id);
                 entries = entries.push(
                     button(text(label).size(12).width(Length::Fill))
                         .width(Length::Fill)
                         .padding([8, 9])
                         .style(move |theme, status| inspector_tab(theme, status, selected))
-                        .on_press(Message::SetupModelSelected(instance.id)),
+                        .on_press(if fixture {
+                            Message::SetupFixtureSelected(instance.id)
+                        } else {
+                            Message::SetupModelSelected(instance.id)
+                        }),
                 );
+            }
+        }
+        if fixture {
+            for id in &draft.fixture_instances {
+                if geometry.instance(*id).is_none() {
+                    count += 1;
+                    entries = entries.push(
+                        button(
+                            text(format!("Missing fixture body {id}"))
+                                .size(12)
+                                .color(palette::ERROR),
+                        )
+                        .on_press(Message::SetupFixtureSelected(*id)),
+                    );
+                }
             }
         }
         if count == 0 {
             entries = entries.push(
                 container(
                     text(if self.controller.has_geometry() {
-                        "No models selected. Click Add, then pick bodies in the view."
+                        if fixture {
+                            "No fixtures selected. Click Add, then pick bodies in the view."
+                        } else {
+                            "No models selected. Click Add, then pick bodies in the view."
+                        }
                     } else {
                         "Import a model to add setup geometry."
                     })
@@ -40,9 +74,12 @@ impl App {
             );
         }
         let mut form = column![
-            text(format!("Models · {count}"))
-                .size(11)
-                .color(INSPECTOR_MUTED),
+            text(format!(
+                "{} · {count}",
+                if fixture { "Fixtures" } else { "Models" }
+            ))
+            .size(11)
+            .color(INSPECTOR_MUTED),
             container(scrollable(entries).height(120).width(Length::Fill))
                 .padding(4)
                 .width(Length::Fill)
@@ -57,20 +94,32 @@ impl App {
                 }),
         ]
         .spacing(8);
-        if !geometry.instances.is_empty() {
-            let remove = self
-                .setup_model_selection
-                .filter(|id| included(*id))
-                .map(|id| Message::SetupModelToggled(id, false));
+        if !geometry.instances.is_empty() || count > 0 {
+            let remove = (if fixture {
+                self.setup_fixture_selection
+            } else {
+                self.setup_model_selection
+            })
+            .filter(|id| included(*id))
+            .map(|id| {
+                if fixture {
+                    Message::SetupFixtureToggled(id, false)
+                } else {
+                    Message::SetupModelToggled(id, false)
+                }
+            });
             form = form.push(
                 row![
-                    inspector_button(if self.setup_model_pick { "Done" } else { "Add" })
-                        .on_press(Message::SetupModelPick),
+                    inspector_button(if picking { "Done" } else { "Add" }).on_press(if fixture {
+                        Message::SetupFixturePick
+                    } else {
+                        Message::SetupModelPick
+                    }),
                     inspector_button("Remove").on_press_maybe(remove),
                 ]
                 .spacing(6),
             );
-            if self.setup_model_pick {
+            if picking {
                 form = form.push(
                     text("Click bodies in the view to add them. Click Done when finished.")
                         .size(11)
@@ -135,7 +184,22 @@ impl App {
                     inspector_input("Setup name", &draft.name).on_input(Message::SetupNameChanged),
                 );
                 list = list.push(inspector_section("Geometry"));
-                list = list.push(self.setup_geometry_list(draft));
+                list = list.push(self.setup_geometry_list(draft, false));
+                list = list.push(inspector_section("Fixture"));
+                list = list.push(self.setup_geometry_list(draft, true));
+                for (axis, label, clearance) in [
+                    (0, "Radial clearance", draft.fixture_clearance.radial),
+                    (1, "Axial clearance", draft.fixture_clearance.axial),
+                ] {
+                    let value = self.setup_value(42 + axis, fmt_num(clearance));
+                    list = list.push(inspector_value(label, &value, "mm", move |v| {
+                        Message::SetupFixtureClearanceChanged(axis, v)
+                    }));
+                }
+                list = list.push(text("Clearance protects conservative fixture body boxes, including holes and recesses, against the cutter and shank. Selecting a fixture removes it from machining models.").size(11).color(INSPECTOR_MUTED));
+                if let Err(reason) = draft.validate_fixtures(self.controller.geometry_state()) {
+                    list = list.push(text(reason).size(11).color(palette::ERROR));
+                }
                 list = list.push(self.setup_wcs_editor(draft));
                 list = list.push(inspector_section("Tool change"));
                 list = list.push(
@@ -335,7 +399,11 @@ impl App {
                 .setup_values
                 .get(&40)
                 .is_none_or(|v| v.trim().parse::<u32>().is_ok());
-        let can_commit = numbers_valid && self.setup_frame_issue(draft).is_none();
+        let can_commit = numbers_valid
+            && self.setup_frame_issue(draft).is_none()
+            && draft
+                .validate_fixtures(self.controller.geometry_state())
+                .is_ok();
         let footer = inspector_footer(
             row![
                 inspector_button("Cancel").on_press(Message::SetupCancel),

@@ -193,6 +193,8 @@ pub struct SimTool {
 /// The kind of a detected problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollisionKind {
+    /// Tool or shank enters a setup fixture keep-out envelope.
+    Fixture,
     /// A rapid (`G0`) traverse passes through remaining stock.
     RapidThroughStock,
     /// A feed reposition or a non-cutting cutter tip enters remaining stock.
@@ -218,9 +220,14 @@ pub struct Collision {
 }
 
 impl CollisionKind {
-    /// Whether playback should stop at contact with remaining stock.
+    /// Whether the collision involves non-cutting motion through remaining stock.
     pub fn is_stock_collision(self) -> bool {
         matches!(self, Self::RapidThroughStock | Self::NonCuttingThroughStock)
+    }
+
+    /// Whether playback should stop at contact with stock or a fixture.
+    pub fn stops_playback(self) -> bool {
+        self.is_stock_collision() || self == Self::Fixture
     }
 }
 

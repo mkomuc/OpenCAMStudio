@@ -146,6 +146,34 @@ fn build_job_with_compute(
             completion: JobCompletion::Failed,
         };
     };
+    let fixtures = match setup.fixture_envelopes(&doc.geometry) {
+        Ok(fixtures) => fixtures,
+        Err(reason) => {
+            return JobResult {
+                diagnostics: vec![Diagnostic::error(reason).for_setup(setup.id)],
+                completion: JobCompletion::Failed,
+                ..Default::default()
+            }
+        }
+    };
+    let fixture_top = fixtures
+        .iter()
+        .map(|f| f.max[2] + 0.01)
+        .fold(f64::NEG_INFINITY, f64::max);
+    // Strategy inputs contain machining models only. Fixture envelopes are
+    // checked independently against the fully assembled program below.
+    let mut machining_document;
+    let doc = if fixtures.is_empty() {
+        doc
+    } else {
+        machining_document = doc.clone();
+        machining_document
+            .geometry
+            .instances
+            .retain(|i| !setup.fixture_instances.contains(&i.id));
+        &machining_document
+    };
+    let setup = doc.setup();
     let mut env = JobEnv {
         heights: setup.heights,
         tools: &setup.tools,
@@ -234,7 +262,7 @@ fn build_job_with_compute(
             max_clearance - origin_z
         )));
     }
-    let tool_change_height = tool_change_height.max(max_clearance);
+    let tool_change_height = tool_change_height.max(max_clearance).max(fixture_top);
 
     program.push(Step::Comment(setup.name.clone()));
 
@@ -278,6 +306,8 @@ fn build_job_with_compute(
         if let Some(Ok(heights)) = configured {
             env.heights = heights.safety();
         }
+        env.heights.clearance = env.heights.clearance.max(fixture_top);
+        env.heights.retract = env.heights.retract.max(fixture_top);
         let mut result = if let Some(Err(reason)) = &configured {
             StrategyResult {
                 diagnostics: vec![Diagnostic::error(reason.clone())],
@@ -632,6 +662,53 @@ fn build_job_with_compute(
     if cancel.is_cancelled() {
         completion = JobCompletion::Cancelled;
     }
+    if !fixtures.is_empty() && completion != JobCompletion::Cancelled && program.validate().is_ok()
+    {
+        let profiles = setup
+            .operations
+            .iter()
+            .filter_map(|operation| {
+                if let Operation::Profile(profile) = operation {
+                    if profile.comp == cam_model::Comp::Computed
+                        && profile.plunge == cam_model::Plunge::Straight
+                        && !profile.tabs.enabled
+                    {
+                        return Some((profile.id, profile.plunge_feed));
+                    }
+                }
+                None
+            })
+            .collect();
+        match crate::fixtures::avoid_profile_fixtures(
+            &program,
+            &profiles,
+            &setup.tools,
+            &fixtures,
+            max_clearance.max(fixture_top),
+            cancel,
+        ) {
+            Ok(routed) => {
+                if routed.has_errors() {
+                    completion = JobCompletion::Failed;
+                }
+                program = routed.program;
+                diagnostics.extend(
+                    routed
+                        .diagnostics
+                        .into_iter()
+                        .map(|d| d.for_setup(setup.id)),
+                );
+            }
+            Err(reason) => {
+                completion = if cancel.is_cancelled() {
+                    JobCompletion::Cancelled
+                } else {
+                    JobCompletion::Failed
+                };
+                diagnostics.push(Diagnostic::error(reason).for_setup(setup.id));
+            }
+        }
+    }
     if let Err(error) = program.validate() {
         let mut diagnostic = Diagnostic::error(error.to_string());
         if let Some(op) = error.op {
@@ -650,6 +727,32 @@ fn build_job_with_compute(
         );
         if completion != JobCompletion::Cancelled {
             completion = JobCompletion::Failed;
+        }
+    }
+    if !fixtures.is_empty() && completion != JobCompletion::Cancelled && program.validate().is_ok()
+    {
+        match crate::verify_fixture_clearance(&program, &setup.tools, &fixtures, cancel) {
+            Ok(contacts) => {
+                for contact in contacts {
+                    let mut diagnostic = Diagnostic::error(format!("Tool or shank enters the clearance envelope of fixture {}. Change the machining boundary, heights, tool or fixture placement.", contact.fixture_name))
+                    .for_setup(setup.id).for_op(contact.tag.op_id).for_segment(contact.step_index);
+                    if let (Some(pattern), Some(instance)) =
+                        (contact.tag.pattern_id, contact.tag.instance_index)
+                    {
+                        diagnostic = diagnostic.for_pattern(pattern, instance);
+                    }
+                    diagnostics.push(diagnostic);
+                    completion = JobCompletion::Failed;
+                }
+            }
+            Err(reason) => {
+                completion = if cancel.is_cancelled() {
+                    JobCompletion::Cancelled
+                } else {
+                    JobCompletion::Failed
+                };
+                diagnostics.push(Diagnostic::error(reason).for_setup(setup.id));
+            }
         }
     }
     JobResult {
@@ -1382,6 +1485,8 @@ mod tests {
             material: String::new(),
             material_id: None,
             model_instances: Vec::new(),
+            fixture_instances: Vec::new(),
+            fixture_clearance: Default::default(),
             program_name: String::new(),
             name: "completion test".into(),
             heights: Heights::new(5.0, 2.0, 0.0),

@@ -197,7 +197,7 @@ impl JobInputs {
             job
         };
         let mut completion = job.completion;
-        let stock = if !self.toolpath_preview
+        let mut stock = if !self.toolpath_preview
             && completion == JobCompletion::Complete
             && !cancel.is_cancelled()
         {
@@ -212,6 +212,21 @@ impl JobInputs {
         } else {
             simulation::StockSimulation::default()
         };
+        // Verify the actual output after stock-link repairs as well as playback
+        // prefixes and generation-only previews, even when there is no stock.
+        if completion != JobCompletion::Cancelled {
+            match self.fixture_collisions(&job.program, cancel) {
+                Ok(contacts) => stock.collisions.extend(contacts),
+                Err(error) => {
+                    completion = if cancel.is_cancelled() {
+                        JobCompletion::Cancelled
+                    } else {
+                        JobCompletion::Failed
+                    };
+                    job.diagnostics.push(error);
+                }
+            }
+        }
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         // Playback constructs its display scene separately with timeline clipping and
         // visibility options. Avoid rebuilding the entire growing prefix here.

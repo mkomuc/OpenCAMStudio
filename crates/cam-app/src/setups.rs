@@ -94,6 +94,7 @@ impl AppController {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        setup.fixture_instances.clear();
         setup.operations.clear();
         setup.patterns.clear();
         setup.operation_heights.clear();
@@ -1112,6 +1113,7 @@ impl AppController {
             return Err("Enter a setup name".into());
         }
         self.validate_setup_frame(&setup)?;
+        setup.validate_fixtures(self.geometry_state())?;
         if !setup.origin.iter().all(|v| v.is_finite()) {
             return Err("Origin must contain finite coordinates".into());
         }

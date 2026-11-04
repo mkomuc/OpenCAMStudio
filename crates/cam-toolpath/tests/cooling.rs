@@ -55,6 +55,8 @@ fn doc(ops: Vec<Operation>) -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "spindle".into(),
         heights: Heights::new(5.0, 2.0, 0.0),

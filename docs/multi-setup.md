@@ -80,8 +80,8 @@ operations require the same axes when transferred between setups.
 Initial stock is a box. Cylindrical stock and stock from another solid are not
 available. Material-removal simulation uses a heightfield with bounded material
 intervals for transferred cavities. Stock transfer is sampled at the simulation
-accuracy and stock bounds/heights use the enclosing original blank. Simulation
-does not verify fixtures, holders or an entire machine assembly.
+accuracy and stock bounds/heights use the enclosing original blank. Simulation checks setup fixture envelopes, but does not verify holders or an
+entire machine assembly.
 
 ## Browser visibility
 
@@ -91,10 +91,38 @@ body choices. Picking geometry in the 3D view highlights its body in the browser
 and expands the parent model. The browser title is the project filename without
 `.ocam`, or Untitled before the first save. Selecting Models shows the collection; selecting a model or body
 shows that item. Selecting a setup or one of its operations scopes CAD display,
-picking, snapping and framing to the setup's model instances (including draft
-membership). An empty setup shows no CAD bodies. Add-model picking temporarily
+picking, snapping and framing to the setup's model and fixture instances (including
+draft membership). Empty model and fixture lists show no CAD bodies. Add-model picking temporarily
 exposes other visible models so bodies can be added to the setup.
 
 Tools (in use) starts collapsed. Operations expand to show their own tool details,
 including both tools for a clearing/carving operation in cutting order. Expansion
 and visibility are view state and do not change machining inclusion or the project.
+
+The Setup tab also has a **Fixture** section. Click **Add**, select fixture bodies
+in the viewport, and click **Done**. Selecting a fixture removes that body from
+machining models; selecting it as a model removes it from fixtures. Set separate
+**Radial clearance** (setup XY) and **Axial clearance** (setup Z), in millimetres;
+both default to 5 mm and accept zero. Apply and Cancel include these settings in
+the same setup transaction. Duplicated setups retain their fixture configuration.
+
+Fixtures never become stock or machining targets. Their clearance envelopes use
+conservative transformed solid body bounding boxes, protecting holes and recesses
+as well. The planner raises clearance/retract and tool-change planes above the
+fixture envelopes, then checks the complete path, including drilling cycles,
+arcs/helices, patterns, cutting moves and transitions, against the cutter and
+shank's conservative cylindrical envelope. Computed-compensation profiles with
+straight plunge and no holding tabs are split around fixture keep-out regions.
+Surviving sections reconnect above the fixtures and re-enter at plunge feed;
+exact arcs and pattern ownership are preserved. A warning identifies omitted
+sections and the protected material that needs another setup. A fully blocked
+profile instance fails. Other operations and unsupported profile configurations
+retain collision rejection. Every generated escape and re-entry is verified,
+including overhead-fixture conflicts. Playback checks the same envelopes
+and stops at contact. Fixture collisions block NC export. Holder and machine
+geometry are not included. Fixtures remain visible when simulation hides the model.
+Changing fixtures, clearances, source revisions or placements invalidates generated
+results. Missing fixture geometry must be removed or reselected before generation.
+
+Fixture settings use project schema 37. Earlier projects migrate with no fixtures;
+older builds refuse the newer schema rather than discarding fixture protection.

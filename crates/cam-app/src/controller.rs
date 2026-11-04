@@ -181,6 +181,8 @@ pub enum ExportError {
     RapidThroughStock(usize),
     /// Non-cutting feeds or cutter tips contact remaining stock.
     NonCuttingThroughStock(usize),
+    /// Tool or shank contacts a fixture clearance envelope.
+    FixtureCollision(usize),
     /// The post rejected the program.
     Post(PostError),
 }
@@ -216,6 +218,7 @@ impl std::fmt::Display for ExportError {
                 f,
                 "{n} non-cutting move(s) or cutter tips contact remaining stock — a crash hazard, so the export is blocked."
             ),
+            ExportError::FixtureCollision(n) => write!(f, "{n} fixture clearance collision(s). Move the fixture or change the toolpath before exporting."),
             ExportError::Post(e) => write!(f, "{e}."),
         }
     }
@@ -2865,6 +2868,8 @@ impl AppController {
             material: String::new(),
             material_id: None,
             model_instances: Vec::new(),
+            fixture_instances: Vec::new(),
+            fixture_clearance: Default::default(),
             program_name: String::new(),
             name: self.program_name(),
             heights: Heights::new(p.clearance, p.retract, p.top_of_stock),
@@ -3329,6 +3334,8 @@ fn default_setup(p: &JobParams) -> Setup {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "Untitled".to_string(),
         heights: Heights::new(p.clearance, p.retract, p.top_of_stock),

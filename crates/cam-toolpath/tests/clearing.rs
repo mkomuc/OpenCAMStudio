@@ -72,6 +72,8 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "clearing".into(),
         heights: Heights::new(CLEARANCE, RETRACT, TOP),

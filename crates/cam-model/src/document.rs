@@ -97,7 +97,8 @@ use crate::{BoreOp, Tool};
 /// v34: surface-offset finishing mode.
 /// v35: Scallop entry and retraction preferences.
 /// v36: Scallop pass ordering.
-pub const SCHEMA_VERSION: u32 = 36;
+/// v37: setup fixture bodies and radial/axial fixture clearances.
+pub const SCHEMA_VERSION: u32 = 37;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2135,6 +2136,12 @@ pub struct Setup {
     /// Model instance identities included in machining for this setup. Empty selects none.
     #[serde(default)]
     pub model_instances: Vec<u64>,
+    /// Body instances used as fixtures; excluded from machining models and stock.
+    #[serde(default)]
+    pub fixture_instances: Vec<u64>,
+    /// Keep-out distances around fixture bodies in setup axes, millimetres.
+    #[serde(default)]
+    pub fixture_clearance: crate::FixtureClearance,
     /// NC program name for this setup.
     #[serde(default)]
     pub program_name: String,
@@ -2830,6 +2837,8 @@ mod tests {
             material: String::new(),
             material_id: None,
             model_instances: Vec::new(),
+            fixture_instances: Vec::new(),
+            fixture_clearance: Default::default(),
             program_name: String::new(),
             name: "stock allowance test".into(),
             heights: Heights::new(10.0, 5.0, 0.0),

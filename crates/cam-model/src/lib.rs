@@ -21,6 +21,8 @@ pub use bore::{BoreOp, BoreOrder};
 mod thread_standards;
 pub use thread_standards::*;
 mod document;
+mod fixtures;
+pub use fixtures::{FixtureClearance, FixtureEnvelope};
 mod profile_selection;
 pub use profile_selection::*;
 mod profile_parameters;

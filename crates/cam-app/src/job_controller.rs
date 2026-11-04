@@ -307,7 +307,10 @@ impl AppController {
                 .geometry
                 .instances
                 .iter()
-                .filter(|instance| setup.model_instances.contains(&instance.id))
+                .filter(|instance| {
+                    setup.model_instances.contains(&instance.id)
+                        || setup.fixture_instances.contains(&instance.id)
+                })
                 .map(|instance| {
                     let asset = document.geometry.asset(instance.asset_id).map(|asset| {
                         (
@@ -326,7 +329,13 @@ impl AppController {
                 &setup.stock,
                 (setup.stock == Stock::PreviousSetup).then_some(&previous_setup),
                 document.stock_bounds_for(setup),
-                &setup.model_instances,
+                (
+                    &setup.model_instances,
+                    &setup.fixture_instances,
+                    setup.fixture_clearance,
+                    (!setup.fixture_instances.is_empty())
+                        .then_some(cam_toolpath::FIXTURE_ROUTING_REVISION),
+                ),
                 &setup.extra_origins,
                 setup.origin,
                 setup.origin_index,

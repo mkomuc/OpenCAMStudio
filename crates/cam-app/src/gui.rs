@@ -2094,6 +2094,8 @@ struct App {
     pattern_draft: Option<PatternDraft>,
     pattern_tab: pattern_editor_view::PatternTab,
     setup_model_selection: Option<InstanceId>,
+    setup_fixture_selection: Option<InstanceId>,
+    setup_fixture_pick: bool,
     setup_model_pick: bool,
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
@@ -2683,6 +2685,10 @@ enum Message {
     SetupToolChangeAutomatic(bool),
     SetupToolChangeHeightChanged(String),
     SetupModelPick,
+    SetupFixturePick,
+    SetupFixtureSelected(InstanceId),
+    SetupFixtureToggled(InstanceId, bool),
+    SetupFixtureClearanceChanged(usize, String),
     SetupModelSelected(InstanceId),
     SetupModelToggled(u64, bool),
     SetupStockKindChanged(StockEditorKind),
@@ -3178,6 +3184,7 @@ impl App {
         self.setup_draft = self.controller.document().active_setup().cloned();
         self.setup_values.clear();
         self.setup_model_selection = None;
+        self.setup_fixture_selection = None;
         self.operation_draft = None;
         self.operation_tools.clear();
         self.operation_geometry = None;
@@ -3188,6 +3195,7 @@ impl App {
         self.setup_draft = None;
         self.setup_values.clear();
         self.setup_model_selection = None;
+        self.setup_fixture_selection = None;
         self.cancel_setup_picks();
         self.inspector_active = false;
     }
@@ -3207,6 +3215,7 @@ impl App {
             .cloned();
         self.setup_values.clear();
         self.setup_model_selection = None;
+        self.setup_fixture_selection = None;
         self.setup_orientation = None;
         self.setup_origin_mode = None;
     }
@@ -3241,6 +3250,7 @@ impl App {
             self.cad_candidates.clear();
         }
         self.setup_model_pick = false;
+        self.setup_fixture_pick = false;
         self.setup_hover = SetupHover::default();
         self.setup_axis_pick = None;
         self.setting_origin = false;
@@ -3649,6 +3659,8 @@ impl App {
             pattern_draft: None,
             pattern_tab: pattern_editor_view::PatternTab::Placement,
             setup_model_selection: None,
+            setup_fixture_selection: None,
+            setup_fixture_pick: false,
             setup_model_pick: false,
             setup_values: BTreeMap::new(),
             operation_draft: None,
@@ -4947,7 +4959,7 @@ impl App {
             }
             Message::SetupModelPick => {
                 if self.setup_draft.is_some() {
-                    let picking = !self.setup_model_pick;
+                    let picking = !self.setup_model_pick || self.setup_fixture_pick;
                     self.cancel_setup_picks();
                     self.setup_model_pick = picking;
                     self.cad_hover = None;
@@ -4955,6 +4967,78 @@ impl App {
                     self.status = if picking {
                         "Click bodies in the view to add them to this setup. Click Done when finished."
                     } else { "Setup body selection finished." }.into();
+                }
+            }
+            Message::SetupFixturePick => {
+                if self.setup_draft.is_some() {
+                    let picking = !(self.setup_model_pick && self.setup_fixture_pick);
+                    self.cancel_setup_picks();
+                    self.setup_model_pick = picking;
+                    self.setup_fixture_pick = picking;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                    self.status = if picking {
+                        "Click bodies in the view to use as fixtures. Click Done when finished."
+                    } else {
+                        "Fixture selection finished."
+                    }
+                    .into();
+                }
+            }
+            Message::SetupFixtureSelected(instance) => {
+                if self
+                    .setup_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.fixture_instances.contains(&instance))
+                {
+                    self.setup_fixture_selection = Some(instance);
+                }
+            }
+            Message::SetupFixtureToggled(instance, included) => {
+                if included
+                    && self
+                        .controller
+                        .geometry_state()
+                        .instance(instance)
+                        .is_none()
+                {
+                    return iced::Task::none();
+                }
+                if let Some(draft) = &mut self.setup_draft {
+                    if included {
+                        if !draft.fixture_instances.contains(&instance) {
+                            draft.fixture_instances.push(instance);
+                        }
+                        draft.model_instances.retain(|id| *id != instance);
+                        if self.setup_model_selection == Some(instance) {
+                            self.setup_model_selection = None;
+                        }
+                        self.setup_fixture_selection = Some(instance);
+                        if let Some(body) = self.controller.geometry_state().instance(instance) {
+                            self.collapsed_assets.remove(&body.asset_id);
+                        }
+                    } else {
+                        draft.fixture_instances.retain(|id| *id != instance);
+                        if self.setup_fixture_selection == Some(instance) {
+                            self.setup_fixture_selection = draft.fixture_instances.last().copied();
+                        }
+                    }
+                }
+            }
+            Message::SetupFixtureClearanceChanged(axis, value) => {
+                if axis < 2 {
+                    self.setup_values.insert(42 + axis, value.clone());
+                    if let (Some(draft), Ok(v)) =
+                        (&mut self.setup_draft, value.trim().parse::<f64>())
+                    {
+                        if v.is_finite() {
+                            if axis == 0 {
+                                draft.fixture_clearance.radial = v;
+                            } else {
+                                draft.fixture_clearance.axial = v;
+                            }
+                        }
+                    }
                 }
             }
             Message::SetupModelSelected(instance) => {
@@ -4981,6 +5065,10 @@ impl App {
                             draft.model_instances.push(instance);
                         }
                         self.setup_model_selection = Some(instance);
+                        draft.fixture_instances.retain(|id| *id != instance);
+                        if self.setup_fixture_selection == Some(instance) {
+                            self.setup_fixture_selection = None;
+                        }
                         if let Some(body) = self.controller.geometry_state().instance(instance) {
                             self.collapsed_assets.remove(&body.asset_id);
                         }
@@ -6249,10 +6337,11 @@ impl App {
                 }
                 if self.setup_model_pick {
                     if let Some(candidate) = candidates.first() {
-                        return self.update(Message::SetupModelToggled(
-                            candidate.entity.instance_id,
-                            true,
-                        ));
+                        return self.update(if self.setup_fixture_pick {
+                            Message::SetupFixtureToggled(candidate.entity.instance_id, true)
+                        } else {
+                            Message::SetupModelToggled(candidate.entity.instance_id, true)
+                        });
                     }
                     return iced::Task::none();
                 }
@@ -6324,7 +6413,11 @@ impl App {
                     return iced::Task::none();
                 }
                 if self.setup_model_pick {
-                    return self.update(Message::SetupModelToggled(entity.instance_id, true));
+                    return self.update(if self.setup_fixture_pick {
+                        Message::SetupFixtureToggled(entity.instance_id, true)
+                    } else {
+                        Message::SetupModelToggled(entity.instance_id, true)
+                    });
                 }
                 if self.height_reference_pick.is_some() {
                     self.height_geometry_selected(entity);
@@ -15890,6 +15983,116 @@ mod multi_setup_draft_tests {
             .unwrap();
         app.begin_setup_draft();
         app
+    }
+
+    #[test]
+    fn fixture_body_picking_clearances_and_role_changes_share_the_setup_draft() {
+        let mut app = model_list_app();
+        send(&mut app, Message::SetupModelToggled(1, true));
+        send(&mut app, Message::SetupCommit);
+        app.begin_setup_draft();
+        let before = app.controller.document().clone();
+        send(&mut app, Message::SetupFixturePick);
+        assert!(app.setup_fixture_pick && app.setup_model_pick);
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Body);
+        for instance in [1, 2, 2] {
+            send(
+                &mut app,
+                Message::CadPicked(vec![PickCandidate {
+                    entity: EntityRef {
+                        asset_id: 1,
+                        revision: 1,
+                        instance_id: instance,
+                        body_id: instance,
+                        kind: EntityKind::Body,
+                        id: instance,
+                    },
+                    depth: 0.,
+                    occluded: false,
+                }]),
+            );
+        }
+        let draft = app.setup_draft.as_ref().unwrap();
+        assert_eq!(draft.fixture_instances, vec![1, 2]);
+        assert!(draft.model_instances.is_empty());
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(0, "2.5".into()),
+        );
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(1, "0".into()),
+        );
+        send(&mut app, Message::CadEscape);
+        assert!(!app.setup_fixture_pick && !app.setup_model_pick);
+        assert_eq!(app.controller.document(), &before);
+        send(&mut app, Message::SetupCancel);
+        assert_eq!(app.controller.document(), &before);
+        app.begin_setup_draft();
+        send(&mut app, Message::SetupFixtureToggled(2, true));
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(0, "2.5".into()),
+        );
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(1, "0".into()),
+        );
+        send(&mut app, Message::SetupCommit);
+        assert_eq!(app.controller.inspection_setup().fixture_instances, vec![2]);
+        assert_eq!(
+            app.controller.inspection_setup().fixture_clearance.radial,
+            2.5
+        );
+        assert_eq!(
+            app.controller.inspection_setup().fixture_clearance.axial,
+            0.
+        );
+        assert!(!app.viewport_hidden_instances().contains(&2));
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document(), &before);
+        assert!(app.controller.redo());
+        app.begin_setup_draft();
+        send(&mut app, Message::SetupModelToggled(2, true));
+        assert!(app
+            .setup_draft
+            .as_ref()
+            .unwrap()
+            .fixture_instances
+            .is_empty());
+    }
+
+    #[test]
+    fn invalid_fixture_clearance_keeps_draft_open_and_missing_fixtures_can_be_removed() {
+        let mut app = model_list_app();
+        let before = app.controller.document().clone();
+        send(&mut app, Message::SetupFixtureToggled(2, true));
+        for invalid in ["-1", "NaN", "", "-"] {
+            send(
+                &mut app,
+                Message::SetupFixtureClearanceChanged(0, invalid.into()),
+            );
+            send(&mut app, Message::SetupCommit);
+            assert!(app.setup_draft.is_some());
+            assert_eq!(app.controller.document(), &before);
+        }
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(0, "0".into()),
+        );
+        send(&mut app, Message::SetupCommit);
+        assert!(app.setup_draft.is_none());
+        app.begin_setup_draft();
+        app.setup_draft
+            .as_mut()
+            .unwrap()
+            .fixture_instances
+            .push(999);
+        send(&mut app, Message::SetupFixtureSelected(999));
+        assert_eq!(app.setup_fixture_selection, Some(999));
+        let _ = app.setup_editor();
+        send(&mut app, Message::SetupFixtureToggled(999, false));
+        assert_eq!(app.setup_draft.as_ref().unwrap().fixture_instances, vec![2]);
     }
 
     #[test]
