@@ -381,7 +381,25 @@ impl App {
     }
     pub(super) fn workspace_main(&self) -> Element<'_, Message> {
         if self.workspace == Workspace::Tools {
-            return self.tools_table();
+            let mut content = row![self.libraries_sidebar()]
+                .height(Length::Fill)
+                .width(Length::Fill);
+            if !self.settings.tool_table.library_sidebar_collapsed {
+                content = content.push(
+                    mouse_area(
+                        container(Space::new().width(1).height(Length::Fill))
+                            .center_x(8)
+                            .height(Length::Fill)
+                            .style(|_| container::Style {
+                                background: Some(Background::Color(palette::BORDER_DARK)),
+                                ..container::Style::default()
+                            }),
+                    )
+                    .interaction(iced::mouse::Interaction::ResizingColumn)
+                    .on_press(Message::LibrarySidebarResizeStart),
+                );
+            }
+            return content.push(self.tools_table()).into();
         }
         let viewport = self.machining_viewport();
         let workpiece =
@@ -1131,6 +1149,74 @@ impl App {
         )
     }
 
+    /// Library selection and management are kept beside the cutter table.
+    fn libraries_sidebar(&self) -> Element<'_, Message> {
+        if self.settings.tool_table.library_sidebar_collapsed {
+            return container(inspector_button("›").on_press(Message::ToggleLibrarySidebar))
+                .padding(5)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(palette::RIBBON_BG)),
+                    ..container::Style::default()
+                })
+                .into();
+        }
+        let mut entries = column![].spacing(2);
+        for name in self.libraries.libraries.keys() {
+            if self.library_renaming && *name == self.libraries.active {
+                entries = entries.push(
+                    row![
+                        inspector_input("Library name", &self.library_name_edit)
+                            .on_input(Message::LibraryNameChanged)
+                            .on_submit(Message::RenameToolLibrary)
+                            .width(Length::Fill),
+                        inspector_button("✓").on_press(Message::RenameToolLibrary),
+                        inspector_button("×").on_press(Message::CancelLibraryRename),
+                    ]
+                    .spacing(3),
+                );
+            } else {
+                entries = entries.push(
+                    mouse_area(select_row(
+                        name.clone(),
+                        *name == self.libraries.active,
+                        Message::SelectToolLibrary(name.clone()),
+                    ))
+                    .on_right_press(Message::OpenLibraryContextMenu(name.clone())),
+                );
+            }
+        }
+        let active = self.libraries.active.clone();
+        let heading = row![
+            text("Libraries").size(14),
+            Space::new().width(Length::Fill),
+            inspector_button("+").on_press(Message::NewToolLibrary),
+            inspector_button("⋯").on_press(Message::OpenLibraryContextMenu(active.clone())),
+            inspector_button("‹").on_press(Message::ToggleLibrarySidebar),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        let list = mouse_area(
+            container(scrollable(entries).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_right_press(Message::OpenLibraryContextMenu(active));
+        container(column![heading, list].spacing(8).padding(10))
+            .width(self.settings.tool_table.library_sidebar_width)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(palette::RIBBON_BG)),
+                border: Border {
+                    color: palette::BORDER_DARK,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     pub(super) fn tools_table(&self) -> Element<'_, Message> {
         let mode = |view, label| {
             let active = self.library_view == view;
@@ -1139,17 +1225,22 @@ impl App {
                 .style(move |_, status| snap_toggle_style(active, status))
         };
         let widths = self.tool_table_widths;
-        let controls = row![
-            text("Tool library").size(14),
-            mode(LibraryView::Ordered, "By number"),
-            mode(LibraryView::Grouped, "By family"),
-            inspector_input("Search tools", &self.tool_table_search)
-                .on_input(Message::ToolTableSearch)
-                .width(180),
-            inspector_button("Clear filters").on_press(Message::ClearToolTableFilters),
-            inspector_button("Columns").on_press(Message::OpenToolTableMenu(8, true)),
-        ]
-        .spacing(12);
+        let mut controls = row![].spacing(12).align_y(Alignment::Center);
+        if self.operation_tool_selector.is_some() {
+            controls = controls
+                .push(text("Tool library").size(14))
+                .push(self.library_picker());
+        }
+        controls = controls
+            .push(mode(LibraryView::Ordered, "By number"))
+            .push(mode(LibraryView::Grouped, "By family"))
+            .push(
+                inspector_input("Search tools", &self.tool_table_search)
+                    .on_input(Message::ToolTableSearch)
+                    .width(180),
+            )
+            .push(inspector_button("Clear filters").on_press(Message::ClearToolTableFilters))
+            .push(inspector_button("Columns").on_press(Message::OpenToolTableMenu(8, true)));
         let mut headers = row![].spacing(4);
         for &index in &self.tool_table_order {
             if self.tool_table_columns[index] {
@@ -1199,12 +1290,10 @@ impl App {
                 );
             }
         }
-        let mut list = column![
-            controls,
-            container(headers).padding(Padding::from([0.0, 7.0]))
-        ]
-        .spacing(6)
-        .padding(16);
+        let toolbar = column![controls].spacing(6).padding([8, 16]);
+        let mut list = column![container(headers).padding(Padding::from([0.0, 7.0]))]
+            .spacing(6)
+            .padding([0, 16]);
         let mut tools: Vec<_> = self.library.tools.iter().enumerate().collect();
         match self.library_view {
             LibraryView::Ordered => tools.sort_by_key(|(_, tool)| tool.number),
@@ -1285,9 +1374,9 @@ impl App {
             .height(Length::FillPortion(3))
             .width(Length::Fill);
         if self.operation_tool_selector.is_some() {
-            return cutters.into();
+            return column![toolbar, cutters].height(Length::Fill).into();
         }
-        column![cutters, self.cutting_presets_table()]
+        column![toolbar, cutters, self.cutting_presets_table()]
             .spacing(8)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -2001,6 +2090,28 @@ mod tests {
             .snap
             .is_none());
     }
+    #[test]
+    fn library_sidebar_resize_and_collapse_preserve_width() {
+        let (mut app, _) = App::new();
+        app.switch_workspace(Workspace::Tools);
+        assert!(!app.settings.tool_table.library_sidebar_collapsed);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(210.0, 30.0)));
+        let _ = app.update(Message::LibrarySidebarResizeStart);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(310.0, 30.0)));
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 310.0);
+        let _ = app.update(Message::ToolColumnRelease);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(700.0, 30.0)));
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 310.0);
+        let _ = app.update(Message::ToggleLibrarySidebar);
+        assert!(app.settings.tool_table.library_sidebar_collapsed);
+        let _ = app.update(Message::ToggleLibrarySidebar);
+        assert!(!app.settings.tool_table.library_sidebar_collapsed);
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 310.0);
+        let _ = app.update(Message::LibrarySidebarResizeStart);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(-1000.0, 30.0)));
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 180.0);
+    }
+
     #[test]
     fn default_workspace_and_clean_round_trip_preserve_machining_context() {
         let (mut app, _) = App::new();

@@ -46,7 +46,8 @@ pub(super) fn tool_button_label(tool: Option<&cam_model::Tool>) -> String {
 pub(super) fn selector_message(message: &Message) -> bool {
     matches!(
         message,
-        Message::CloseOperationToolSelector
+        Message::SelectToolLibrary(_)
+            | Message::CloseOperationToolSelector
             | Message::OperationToolPicked(_)
             | Message::OperationProjectToolPicked(_)
             | Message::SetLibraryView(_)
@@ -311,6 +312,68 @@ mod tests {
     }
 
     #[test]
+    fn library_context_menu_targets_selected_library_and_rename_can_be_cancelled() {
+        let mut app = app();
+        let _ = app.update(Message::NewToolLibrary);
+        let _ = app.update(Message::SelectToolLibrary("Default tools".into()));
+        let _ = app.update(Message::OpenLibraryContextMenu("New library".into()));
+        assert_eq!(app.libraries.active, "New library");
+        assert!(app.library_context_menu.is_some());
+        let _ = app.update(Message::BeginLibraryRename);
+        assert!(app.library_context_menu.is_none());
+        assert!(app.library_renaming);
+        let _ = app.update(Message::LibraryNameChanged("changed".into()));
+        let _ = app.update(Message::CancelLibraryRename);
+        assert_eq!(app.library_name_edit, "New library");
+        assert!(!app.library_renaming);
+    }
+
+    #[test]
+    fn libraries_can_be_created_renamed_and_deleted() {
+        let mut app = app();
+        let initial = app.libraries.active.clone();
+        let _ = app.update(Message::NewToolLibrary);
+        assert_eq!(app.libraries.active, "New library");
+        let _ = app.update(Message::LibraryNameChanged("Shop tools".into()));
+        let _ = app.update(Message::RenameToolLibrary);
+        assert_eq!(app.libraries.active, "Shop tools");
+        let _ = app.update(Message::DeleteToolLibraryConfirmed((
+            "Shop tools".into(),
+            false,
+        )));
+        assert!(app.libraries.libraries.contains_key("Shop tools"));
+        let _ = app.update(Message::DeleteToolLibraryConfirmed((
+            "Shop tools".into(),
+            true,
+        )));
+        assert_eq!(app.libraries.active, initial);
+        assert!(!app.libraries.libraries.contains_key("Shop tools"));
+        let _ = app.update(Message::DeleteToolLibraryConfirmed((initial, true)));
+        assert_eq!(app.libraries.active, "Default tools");
+        assert_eq!(app.libraries.libraries.len(), 1);
+        assert_eq!(app.library, ToolLibrary::defaults());
+    }
+
+    #[test]
+    fn selector_switches_between_libraries_without_losing_tools() {
+        let mut app = app();
+        let original = app.library.clone();
+        let mut other = ToolLibrary::default();
+        other
+            .tools
+            .push(crate::tool_library::default_tool(7, ToolKind::EndMill));
+        app.libraries
+            .libraries
+            .insert("Other".into(), other.clone());
+        let original_name = app.libraries.active.clone();
+        let _ = app.update(Message::OpenOperationToolSelector);
+        let _ = app.update(Message::SelectToolLibrary("Other".into()));
+        assert_eq!(app.library, other);
+        let _ = app.update(Message::SelectToolLibrary(original_name));
+        assert_eq!(app.library, original);
+    }
+
+    #[test]
     fn selector_presets_family_filters_and_restores_tools_view_on_cancel_and_pick() {
         let mut app = app();
         app.tool_table_search = "shop search".into();
@@ -460,6 +523,59 @@ mod tests {
                 app.library.tools[0].identity()
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter; exports a tools workspace preview to /tmp"]
+    fn render_tools_workspace_libraries() {
+        use iced::advanced::renderer::Headless;
+        let (mut app, _) = App::new();
+        app.window = iced::Size::new(1200.0, 850.0);
+        app.switch_workspace(workspace_view::Workspace::Tools);
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(12.0),
+            None,
+        ))
+        .expect("graphics adapter");
+        let mut element = app.workspace_main();
+        let mut tree = iced::advanced::widget::Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(iced::Size::ZERO, app.window),
+        );
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &iced::Event::Window(iced::window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            )),
+            iced::advanced::Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &iced::Rectangle::with_size(app.window),
+        );
+        element.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &iced::Theme::Dark,
+            &iced::advanced::renderer::Style {
+                text_color: iced::Theme::Dark.palette().text,
+            },
+            iced::advanced::Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &iced::Rectangle::with_size(app.window),
+        );
+        let pixels =
+            Headless::screenshot(&mut renderer, iced::Size::new(1200, 850), 1.0, Color::WHITE);
+        let mut ppm = b"P6\n1200 850\n255\n".to_vec();
+        for pixel in pixels.chunks_exact(4) {
+            ppm.extend_from_slice(&pixel[..3]);
+        }
+        std::fs::write("/tmp/opencam-tools-workspace.ppm", ppm).unwrap();
     }
 
     #[test]

@@ -102,7 +102,7 @@ are converted to millimeters. Presets are imported without a material link.
 Cut direction is inferred from recognizable wording in the description; otherwise
 it defaults to down-cut. Check the imported tool geometry, direction and cutting
 data before use. Fusion coolant and preset step settings are not imported.
-Importing an OpenCAMStudio `.ocam` library continues to replace the working library.
+Importing an OpenCAMStudio `.ocam` library adds a separate library named after the file. Select a library in the left-hand list in Tools, or use the operation cutter picker. Right-click a library or use the menu button above the list to create, import, rename, export, or delete libraries. Deleting the last library restores a fresh default library. A new installation starts with only the default library; existing installations retain their previous library alongside the starter tools.
 
 ## Cooling
 

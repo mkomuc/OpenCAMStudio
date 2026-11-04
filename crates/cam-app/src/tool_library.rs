@@ -149,6 +149,77 @@ pub enum LibraryLoad {
     Rejected(String),
 }
 
+/// Named libraries kept together so switching never overwrites another library.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LibraryCollection {
+    version: u32,
+    pub active: String,
+    pub libraries: std::collections::BTreeMap<String, ToolLibrary>,
+}
+
+impl crate::config::ConfigFile for LibraryCollection {
+    const FILE_NAME: &'static str = "tool-libraries.json";
+    const VERSION: u32 = 1;
+    const SEED_ON_MISSING: bool = false;
+    const WHAT: &'static str = "tool libraries";
+    fn stated_version(&self) -> u32 {
+        self.version
+    }
+    fn migrate(&mut self, _: u32) {
+        self.version = 1;
+    }
+    fn validate(&self) -> Result<(), String> {
+        if self.libraries.is_empty() || !self.libraries.contains_key(&self.active) {
+            return Err("The active tool library is missing".into());
+        }
+        for (name, library) in &self.libraries {
+            if name.trim().is_empty() || library.library_version > LIBRARY_VERSION {
+                return Err("Invalid library name or unsupported library version".into());
+            }
+            library.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl LibraryCollection {
+    pub(crate) fn from_legacy(library: ToolLibrary) -> Self {
+        let mut libraries = std::collections::BTreeMap::new();
+        let active = if library == ToolLibrary::defaults() {
+            "Default tools"
+        } else {
+            "My tools"
+        };
+        if active != "Default tools" {
+            libraries.insert("Default tools".into(), ToolLibrary::defaults());
+        }
+        libraries.insert(active.into(), library);
+        Self {
+            version: 1,
+            active: active.into(),
+            libraries,
+        }
+    }
+    #[cfg(any(feature = "gui", test))]
+    pub(crate) fn unique_name(&self, base: &str) -> String {
+        let base = if base.trim().is_empty() {
+            "Library"
+        } else {
+            base.trim()
+        };
+        if !self.libraries.contains_key(base) {
+            return base.into();
+        }
+        for n in 2.. {
+            let name = format!("{base} ({n})");
+            if !self.libraries.contains_key(&name) {
+                return name;
+            }
+        }
+        unreachable!()
+    }
+}
+
 /// A reusable set of tool definitions, persisted to the config directory.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolLibrary {
@@ -1478,5 +1549,49 @@ mod preset_file_tests {
             std::fs::read_to_string(scratch.file("tools.json.bak")).unwrap(),
             invalid
         );
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+    use crate::config::ConfigFile;
+
+    #[test]
+    fn fresh_install_has_only_the_default_library() {
+        let collection = LibraryCollection::from_legacy(ToolLibrary::defaults());
+        assert_eq!(collection.active, "Default tools");
+        assert_eq!(collection.libraries.len(), 1);
+        assert_eq!(
+            collection.libraries["Default tools"],
+            ToolLibrary::defaults()
+        );
+    }
+
+    #[test]
+    fn legacy_library_and_defaults_remain_distinct_and_round_trip() {
+        let mut legacy = ToolLibrary::defaults();
+        legacy.tools.pop();
+        let mut collection = LibraryCollection::from_legacy(legacy.clone());
+        assert_eq!(collection.active, "My tools");
+        assert_eq!(collection.libraries["My tools"], legacy);
+        assert_eq!(
+            collection.libraries["Default tools"],
+            ToolLibrary::defaults()
+        );
+        let name = collection.unique_name("My tools");
+        collection
+            .libraries
+            .insert(name.clone(), ToolLibrary::default());
+        collection.active = name;
+        let path = crate::config::tests::Scratch::new("libraries");
+        crate::config::save_to(&collection, &path.file("libraries.json")).unwrap();
+        let (loaded, outcome) =
+            crate::config::load_from::<LibraryCollection>(&path.file("libraries.json"));
+        assert_eq!(outcome, crate::config::ConfigLoad::Loaded);
+        assert_eq!(loaded.active, "My tools (2)");
+        assert_eq!(loaded.libraries["My tools"], legacy);
+        assert!(loaded.libraries["My tools (2)"].tools.is_empty());
+        assert!(loaded.validate().is_ok());
     }
 }

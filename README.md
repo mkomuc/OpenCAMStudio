@@ -61,7 +61,7 @@ A CAM application for CNC toolpath generation, built in Rust.
   and undo. Included in release packages. Source builds require OCCT 7.9.3 and
   `--features gui,occt`; see the
   [CAD import guide](docs/cad-import.md).
-- **Tooling** — a cross-project tool library with every cutter kind fully
+- **Tooling** — named cross-project tool libraries with every cutter kind fully
   characterised: square / ball-nose / rounded-edge end mills, drill, V-bit,
   chamfer mill, face mill (shell mill), and single-profile / full-form thread
   mills. Each carries real flute/shank/neck geometry and a per-kind revolve

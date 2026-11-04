@@ -565,6 +565,23 @@ async fn confirm_renumber(detail: String) -> bool {
         == rfd::MessageDialogResult::Yes
 }
 
+async fn confirm_delete_library(name: String, last: bool) -> (String, bool) {
+    let detail = if last {
+        format!("Delete the library ‘{name}’ and all its tools? A fresh default library will be created.")
+    } else {
+        format!("Delete the library ‘{name}’ and all its tools? Tools already used in projects are retained.")
+    };
+    let confirmed = rfd::AsyncMessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("Delete tool library")
+        .set_description(detail)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        .await
+        == rfd::MessageDialogResult::Yes;
+    (name, confirmed)
+}
+
 /// The docked panes. Any of them can be shown or hidden from the Windows ribbon
 /// tab (except the Viewport, which is always present as the main view).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2196,6 +2213,11 @@ struct App {
     /// Cross-project tool library (loaded from the config dir), picked from during
     /// op setup and managed from the Tools tab.
     library: ToolLibrary,
+    libraries: crate::tool_library::LibraryCollection,
+    library_name_edit: String,
+    library_renaming: bool,
+    library_context_menu: Option<iced::Point>,
+    library_sidebar_drag: Option<(f32, f32)>,
     /// The library tool selected for editing in the Tools-tab library editor.
     lib_sel: usize,
     fusion_import: Option<Vec<crate::fusion_tools::ImportEntry>>,
@@ -2747,8 +2769,20 @@ enum Message {
     ExportLibrary,
     /// The chosen path to write the library to (`None` = cancelled).
     LibraryToExport(Option<PathBuf>),
-    /// Prompt for a `.ocam` tool library to **import** (replaces the working library).
+    /// Prompt for a `.ocam` or Fusion tool library to import.
     ImportLibrary,
+    SelectToolLibrary(String),
+    NewToolLibrary,
+    LibraryNameChanged(String),
+    RenameToolLibrary,
+    BeginLibraryRename,
+    CancelLibraryRename,
+    OpenLibraryContextMenu(String),
+    CloseLibraryContextMenu,
+    ToggleLibrarySidebar,
+    LibrarySidebarResizeStart,
+    DeleteToolLibrary,
+    DeleteToolLibraryConfirmed((String, bool)),
     /// The chosen library file to import (`None` = cancelled).
     LibraryToImport(Option<PathBuf>),
     FusionImportToggle(usize, bool),
@@ -3520,12 +3554,67 @@ impl App {
         Ok((app, task))
     }
 
+    fn save_tool_libraries(&mut self) {
+        self.libraries
+            .libraries
+            .insert(self.libraries.active.clone(), self.library.clone());
+        crate::config::save(&self.libraries);
+    }
+
+    fn switch_tool_library(&mut self, name: String) {
+        if name == self.libraries.active {
+            return;
+        }
+        if self.library_mode() && self.inspector_dirty() {
+            self.status =
+                "Apply or discard the current tool edits before switching libraries.".into();
+            return;
+        }
+        let Some(next) = self.libraries.libraries.get(&name).cloned() else {
+            return;
+        };
+        self.libraries
+            .libraries
+            .insert(self.libraries.active.clone(), self.library.clone());
+        self.library_name_edit = name.clone();
+        self.library_renaming = false;
+        self.libraries.active = name;
+        self.library = next;
+        self.lib_sel = 0;
+        self.tool_drafts.clear();
+        self.reload_tool_edit();
+        if let Some(player) = &mut self.simulation {
+            player.sync_force_material(&self.library);
+        }
+        self.save_tool_libraries();
+    }
+
+    fn library_picker(&self) -> Element<'_, Message> {
+        pick_list(
+            self.libraries.libraries.keys().cloned().collect::<Vec<_>>(),
+            Some(self.libraries.active.clone()),
+            Message::SelectToolLibrary,
+        )
+        .text_size(12)
+        .padding([7, 9])
+        .style(inspector_picker)
+        .into()
+    }
+
     fn new() -> (Self, iced::Task<Message>) {
         // Destructured rather than discarded: a library that failed to load is the one
         // thing at startup the operator must be *told* about, or they meet the stock
         // tools and assume theirs were lost. They are not — the file is untouched, with
         // a `.bak` beside it — but only if nobody edits a tool first.
-        let (library, library_load) = ToolLibrary::load();
+        let (legacy, library_load) = ToolLibrary::load();
+        let (loaded_libraries, collection_load) =
+            crate::config::load::<crate::tool_library::LibraryCollection>();
+        let libraries = if matches!(collection_load, crate::config::ConfigLoad::Loaded) {
+            loaded_libraries
+        } else {
+            crate::tool_library::LibraryCollection::from_legacy(legacy)
+        };
+        let library = libraries.libraries[&libraries.active].clone();
         // Preferences seed the session. A rejected settings file is deliberately not
         // reported the way a rejected *library* is: defaults here cost the user a
         // layout, not their tools.
@@ -3633,6 +3722,11 @@ impl App {
             view: ViewControls::default(),
             cursor: None,
             library,
+            library_name_edit: libraries.active.clone(),
+            library_renaming: false,
+            library_context_menu: None,
+            library_sidebar_drag: None,
+            libraries,
             machines,
             active_machine,
             machine_name_edit: None,
@@ -3739,6 +3833,9 @@ impl App {
                 "Machine library {why}. Using the default machine; your file is untouched \
                  (a copy is beside it as machines.json.bak)."
             );
+        }
+        if let crate::config::ConfigLoad::Rejected(why) = &collection_load {
+            app.status = format!("Tool libraries {why}. Your file was preserved with a backup.");
         }
         if let crate::LibraryLoad::Rejected(why) = &library_load {
             app.status = format!(
@@ -3891,6 +3988,15 @@ impl App {
     }
 
     fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        if matches!(message, Message::CadEscape) && self.library_context_menu.is_some() {
+            self.library_context_menu = None;
+            return iced::Task::none();
+        }
+        if matches!(message, Message::CadEscape) && self.library_renaming {
+            self.library_renaming = false;
+            self.library_name_edit = self.libraries.active.clone();
+            return iced::Task::none();
+        }
         if self.operation_tool_selector.is_some() && matches!(message, Message::CadEscape) {
             if self.tool_table_menu.is_some() {
                 self.tool_table_menu = None;
@@ -4026,6 +4132,10 @@ impl App {
                 Message::NewTool
                     | Message::DeleteTool
                     | Message::ImportLibrary
+                    | Message::NewToolLibrary
+                    | Message::DeleteToolLibrary
+                    | Message::DeleteToolLibraryConfirmed((_, true))
+                    | Message::SelectToolLibrary(_)
                     | Message::LibMenuSetNumber
                     | Message::RenumberLibrary
                     | Message::RenumberConfirmed(true)
@@ -5763,6 +5873,7 @@ impl App {
             }
             Message::ProjectToSave(Some(path)) => self.save_to(&path),
             Message::ExportLibrary => {
+                self.library_context_menu = None;
                 return iced::Task::perform(
                     pick_save("OpenCAMStudio tool library", "tools.ocam", &["ocam"]),
                     Message::LibraryToExport,
@@ -5778,7 +5889,112 @@ impl App {
                     Err(e) => format!("Library export failed: {e}"),
                 };
             }
+            Message::ToggleLibrarySidebar => {
+                self.settings.tool_table.library_sidebar_collapsed =
+                    !self.settings.tool_table.library_sidebar_collapsed;
+                self.library_sidebar_drag = None;
+                self.library_context_menu = None;
+                self.settings.save();
+            }
+            Message::LibrarySidebarResizeStart => {
+                self.library_sidebar_drag = Some((
+                    self.window_cursor.x,
+                    self.settings.tool_table.library_sidebar_width,
+                ));
+            }
+            Message::SelectToolLibrary(name) => self.switch_tool_library(name),
+            Message::OpenLibraryContextMenu(name) => {
+                if self.library_mode()
+                    && (self.inspector_dirty() || !self.tool_drafts.is_empty())
+                    && name != self.libraries.active
+                {
+                    self.status = "OK or Cancel tool changes before changing the library.".into();
+                } else {
+                    self.switch_tool_library(name);
+                    self.library_context_menu = Some(self.window_cursor);
+                }
+            }
+            Message::CloseLibraryContextMenu => self.library_context_menu = None,
+            Message::BeginLibraryRename => {
+                self.library_context_menu = None;
+                self.library_name_edit = self.libraries.active.clone();
+                self.library_renaming = true;
+            }
+            Message::CancelLibraryRename => {
+                self.library_renaming = false;
+                self.library_name_edit = self.libraries.active.clone();
+            }
+            Message::LibraryNameChanged(name) => self.library_name_edit = name,
+            Message::RenameToolLibrary => {
+                let name = self.library_name_edit.trim().to_string();
+                if name.is_empty()
+                    || (name != self.libraries.active
+                        && self.libraries.libraries.contains_key(&name))
+                {
+                    self.status = "Enter a unique, non-empty library name.".into();
+                } else if name != self.libraries.active {
+                    self.libraries.libraries.remove(&self.libraries.active);
+                    self.libraries.active = name.clone();
+                    self.library_name_edit = name;
+                    self.save_tool_libraries();
+                    self.library_renaming = false;
+                } else {
+                    self.library_renaming = false;
+                }
+            }
+            Message::NewToolLibrary => {
+                self.library_context_menu = None;
+                if self.library_mode() && self.inspector_dirty() {
+                    self.status =
+                        "Apply or discard the current tool edits before creating a library.".into();
+                    return iced::Task::none();
+                }
+                let name = self.libraries.unique_name("New library");
+                self.libraries
+                    .libraries
+                    .insert(name.clone(), ToolLibrary::default());
+                self.switch_tool_library(name);
+            }
+            Message::DeleteToolLibrary => {
+                self.library_context_menu = None;
+                return iced::Task::perform(
+                    confirm_delete_library(
+                        self.libraries.active.clone(),
+                        self.libraries.libraries.len() == 1,
+                    ),
+                    Message::DeleteToolLibraryConfirmed,
+                );
+            }
+            Message::DeleteToolLibraryConfirmed((name, confirmed)) => {
+                if confirmed && name == self.libraries.active {
+                    self.libraries.libraries.remove(&name);
+                    if self.libraries.libraries.is_empty() {
+                        self.libraries
+                            .libraries
+                            .insert("Default tools".into(), ToolLibrary::defaults());
+                    }
+                    let next = self.libraries.libraries.keys().next().cloned().unwrap();
+                    self.libraries.active = next.clone();
+                    self.library_name_edit = next.clone();
+                    self.library = self.libraries.libraries[&next].clone();
+                    self.lib_sel = 0;
+                    self.tool_drafts.clear();
+                    self.reload_tool_edit();
+                    if let Some(player) = &mut self.simulation {
+                        player.sync_force_material(&self.library);
+                    }
+                    self.save_tool_libraries();
+                    self.status = format!("Deleted tool library ‘{name}’.");
+                }
+            }
             Message::ImportLibrary => {
+                self.library_context_menu = None;
+                if self.library_mode() && self.inspector_dirty() {
+                    self.status =
+                        "Apply or discard the current tool edits before importing a library."
+                            .into();
+                    return iced::Task::none();
+                }
                 return iced::Task::perform(
                     pick_open("Tool library (.ocam or Fusion .tools)", &["ocam", "tools"]),
                     Message::LibraryToImport,
@@ -5802,13 +6018,13 @@ impl App {
                     Ok(text) => match OcamFile::from_json(&text) {
                         Ok(OcamFile::Library(lib)) => {
                             let n = lib.tools.len();
-                            self.library = lib;
-                            if let Some(player) = &mut self.simulation {
-                                player.sync_force_material(&self.library);
-                            }
-                            self.library.save(); // becomes the working (config-dir) library
-                            self.lib_sel = 0;
-                            self.reload_tool_edit();
+                            let base = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Imported library");
+                            let name = self.libraries.unique_name(base);
+                            self.libraries.libraries.insert(name.clone(), lib);
+                            self.switch_tool_library(name);
                             format!("Imported {n} tool(s) from {}.", path.display())
                         }
                         Ok(OcamFile::Project(_)) => {
@@ -5848,7 +6064,7 @@ impl App {
                     }
                     let count = self.library.tools.len() - first;
                     if count > 0 {
-                        self.library.save();
+                        self.save_tool_libraries();
                         self.lib_sel = first;
                         self.reload_tool_edit();
                     }
@@ -7923,7 +8139,7 @@ impl App {
             Message::AddStarterMaterials => {
                 let count = self.library.add_starter_materials();
                 if count > 0 {
-                    self.library.save();
+                    self.save_tool_libraries();
                 }
                 self.status = format!("Added {count} starter material(s).");
             }
@@ -7955,7 +8171,7 @@ impl App {
                     .map(|t| t.kind)
                     .unwrap_or(ToolKind::EndMill);
                 self.lib_sel = self.library.add_of_kind(seed_kind);
-                self.library.save();
+                self.save_tool_libraries();
                 if self.controller.pending_op().is_some() {
                     if let Some(tool) = self.library.tools.get(self.lib_sel).cloned() {
                         let number = self.controller.use_tool(tool);
@@ -7968,7 +8184,7 @@ impl App {
                 if self.lib_sel < self.library.tools.len() && self.library.tools.len() > 1 {
                     self.library.tools.remove(self.lib_sel);
                     self.lib_sel = self.lib_sel.min(self.library.tools.len() - 1);
-                    self.library.save();
+                    self.save_tool_libraries();
                     self.reload_tool_edit();
                 }
             }
@@ -7990,7 +8206,7 @@ impl App {
                     .cloned();
                 if let Some(tool) = tool {
                     self.library.add_tool(tool);
-                    self.library.save();
+                    self.save_tool_libraries();
                     let report = self.controller.reconcile_tools(&self.library.tools);
                     self.refresh_fields();
                     self.status = match report.summary() {
@@ -8035,6 +8251,9 @@ impl App {
                 }
             }
             Message::ToolColumnRelease => {
+                if self.library_sidebar_drag.take().is_some() {
+                    self.settings.save();
+                }
                 let had_drag = self.tool_table_drag.is_some();
                 if let Some(workspace_view::ToolColumnDrag::Reorder {
                     column,
@@ -8158,7 +8377,7 @@ impl App {
                         .and_then(|s| s.trim().parse::<u32>().ok())
                     {
                         self.library.set_number(menu.index, n);
-                        self.library.save();
+                        self.save_tool_libraries();
                         self.reload_tool_edit();
                     }
                 }
@@ -8181,7 +8400,7 @@ impl App {
             Message::RenumberConfirmed(true) => {
                 let order = self.renumber_order();
                 self.library.set_numbers_in_order(&order);
-                self.library.save();
+                self.save_tool_libraries();
                 self.reload_tool_edit();
                 self.status = "Renumbered the tool library.".to_string();
             }
@@ -8216,6 +8435,10 @@ impl App {
             Message::WindowCursor(p) => {
                 self.window_cursor = p;
                 self.tree_pointer_moved(p);
+                if let Some((start_x, width)) = self.library_sidebar_drag {
+                    self.settings.tool_table.library_sidebar_width =
+                        (width + p.x - start_x).clamp(180.0, 480.0);
+                }
                 if let Some(workspace_view::ToolColumnDrag::Resize {
                     column,
                     start_x,
@@ -9686,7 +9909,7 @@ impl App {
             ) {
                 *slot = edit;
             }
-            self.library.save();
+            self.save_tool_libraries();
             self.reload_tool_edit();
             return;
         }
@@ -9982,6 +10205,11 @@ impl App {
         if let Some(menu) = self.tool_menu_overlay() {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::CloseToolMenu);
+            layers = layers.push(catcher).push(menu);
+        }
+        if let Some(menu) = self.library_context_menu_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::CloseLibraryContextMenu);
             layers = layers.push(catcher).push(menu);
         }
         if let Some(menu) = self.lib_menu_overlay() {
@@ -10565,6 +10793,49 @@ impl App {
                 bottom: 0.0,
             });
         Some(positioned.into())
+    }
+
+    fn library_context_menu_overlay(&self) -> Option<Element<'_, Message>> {
+        let pos = self.library_context_menu?;
+        let item = |label: &'static str, message| {
+            button(text(label).size(13))
+                .width(Length::Fill)
+                .padding([6, 10])
+                .on_press(message)
+                .style(|_, status| command_button_style(status))
+        };
+        let popup = container(column![
+            item("New library", Message::NewToolLibrary),
+            item("Import library…", Message::ImportLibrary),
+            item("Rename", Message::BeginLibraryRename),
+            item("Export library…", Message::ExportLibrary),
+            item("Delete", Message::DeleteToolLibrary),
+        ])
+        .width(190)
+        .padding(4)
+        .style(|_| container::Style {
+            background: Some(Background::Color(palette::RIBBON_BG)),
+            border: Border {
+                color: palette::BORDER_DARK,
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            ..container::Style::default()
+        });
+        Some(
+            container(popup)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding {
+                    top: pos.y.min((self.window.height - 190.0).max(0.0)),
+                    left: pos.x.min((self.window.width - 200.0).max(0.0)),
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
+        )
     }
 
     /// The Library-pane right-click menu, anchored under the cursor. Shows a "Set number…"
