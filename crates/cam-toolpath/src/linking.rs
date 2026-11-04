@@ -226,7 +226,7 @@ mod tests {
         )
         .unwrap();
         assert!(!contained(
-            &[region.clone()],
+            std::slice::from_ref(&region),
             Point::new(1., 10.),
             Point::new(19., 10.)
         ));

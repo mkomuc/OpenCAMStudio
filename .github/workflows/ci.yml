@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, work ]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -75,7 +76,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Finishing and SIMD correctness
-        run: cargo test --locked -p cam-toolpath --lib parallel::
+        run: 'cargo test --locked -p cam-toolpath --lib parallel::'
       - name: Stock meshing, cancellation and provenance
         run: cargo test --locked -p cam-sim --lib
 

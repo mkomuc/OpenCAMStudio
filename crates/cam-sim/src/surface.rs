@@ -624,7 +624,7 @@ mod tests {
     fn surface_measures(mesh: &SurfaceMesh) -> (f64, f64) {
         let mut area = 0.;
         let mut volume = 0.;
-        for triangle in mesh.indices.chunks_exact(3) {
+        for triangle in mesh.indices.as_chunks::<3>().0 {
             let [a, b, c] = [0, 1, 2].map(|i| mesh.positions[triangle[i] as usize].map(f64::from));
             let u = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
             let v = std::array::from_fn::<_, 3, _>(|i| c[i] - a[i]);

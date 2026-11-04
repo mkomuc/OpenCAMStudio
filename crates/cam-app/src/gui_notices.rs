@@ -31,6 +31,7 @@ impl Notice {
     }
 }
 
+#[cfg(test)]
 pub(super) fn job_notice(outcome: &crate::RunOutcome) -> Option<Notice> {
     let notice = job_notice_with_info(outcome)?;
     notice

@@ -334,6 +334,7 @@ fn orient_path(path: &mut Vec<V>, entry: PathEntry) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn accept_path(
     out: &mut StrategyResult,
     path: &mut Vec<V>,
@@ -448,6 +449,8 @@ fn arc_clear(
     if sweep < 1e-9 || sweep > std::f64::consts::TAU - 1e-9 {
         return false;
     }
+    // Keep the existing finite fallback when tolerance is NaN.
+    #[allow(clippy::manual_clamp)]
     let max_sag = (tolerance * 0.125).min(0.005).max(1e-7);
     let max_angle = (2. * (1. - (max_sag / radius).min(1.)).acos()).min(0.1);
     let count = (sweep / max_angle).ceil() as usize;
