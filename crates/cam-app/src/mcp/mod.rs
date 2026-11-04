@@ -39,7 +39,13 @@ impl Default for Session {
 impl Session {
     pub fn from_user_settings() -> Self {
         let (settings, _) = crate::load_settings();
-        let (library, _) = crate::ToolLibrary::load();
+        let (legacy, _) = crate::ToolLibrary::load();
+        let (collection, outcome) = crate::config::load::<crate::tool_library::LibraryCollection>();
+        let library = if matches!(outcome, crate::config::ConfigLoad::Loaded) {
+            collection.libraries[&collection.active].clone()
+        } else {
+            legacy
+        };
         let (machines, _) = crate::load_machines();
         let active = machines
             .resolve(settings.session.machine.as_deref())

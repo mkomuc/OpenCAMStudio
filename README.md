@@ -6,7 +6,8 @@ A CAM application for CNC toolpath generation, built in Rust.
 > import, toolpath generation, material-removal simulation and G-code export.
 > 3D Adaptive Clearing provides CAD-derived roughing levels; 3D Parallel finishing
 > follows freeform surfaces with a ball nose cutter on pre-roughed stock.
-> Additional 3D finishing strategies, turning and plugins remain roadmap work.
+> Sampled 3D Scallop finishing is also available; additional 3D finishing
+> strategies, turning and plugins remain roadmap work.
 
 ![3D Parallel finishing toolpath generated for the tray project](docs/tray-parallel-toolpath.png)
 
@@ -60,7 +61,7 @@ A CAM application for CNC toolpath generation, built in Rust.
   and undo. Included in release packages. Source builds require OCCT 7.9.3 and
   `--features gui,occt`; see the
   [CAD import guide](docs/cad-import.md).
-- **Tooling** — a cross-project tool library with every cutter kind fully
+- **Tooling** — named cross-project tool libraries with every cutter kind fully
   characterised: square / ball-nose / rounded-edge end mills, drill, V-bit,
   chamfer mill, face mill (shell mill), and single-profile / full-form thread
   mills. Each carries real flute/shank/neck geometry and a per-kind revolve
@@ -88,6 +89,9 @@ A CAM application for CNC toolpath generation, built in Rust.
   `iced` desktop GUI. Hover over a setup or operation status indicator for its
   current state; click an indicator with warnings or errors to read the details.
   Toolpath diagnostics do not open dialogs automatically.
+- **CPU acceleration** — multicore Parallel/Scallop surface calculation, stock
+  mesh tiles and stock-to-CAD comparison; portable double-precision SIMD uses
+  Apple Silicon NEON or x86-64 SSE2. See [performance controls and benchmarks](docs/performance.md).
 
 See the [user guides](docs/README.md) for workflows and limits,
 [ARCHITECTURE.md](ARCHITECTURE.md) for a brief overview and [ROADMAP.md](ROADMAP.md)

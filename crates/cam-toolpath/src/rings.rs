@@ -305,6 +305,17 @@ fn approach(
     )
 }
 
+/// An automatic wall seam needs space on both sides for entry and exit leads.
+/// Match the finishing strategy by starting at the longest edge's midpoint.
+pub(crate) fn automatic_wall_start(pts: &[Point]) -> Point {
+    let (a, b) = pts
+        .iter()
+        .zip(pts.iter().cycle().skip(1))
+        .max_by(|(a, b), (c, d)| a.distance_sq(**b).total_cmp(&c.distance_sq(**d)))
+        .expect("a wall ring has at least three points");
+    Point::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
+}
+
 /// Cut a finished-wall ring with a lead-in/out eased from the cleared side, and
 /// return the exit point. Handles boundary (lead inward) and island (lead outward)
 /// walls uniformly via the loop winding.
@@ -490,66 +501,99 @@ pub(crate) fn emit_stay_down(
         // helix/ramp is placed on the inward, cleared side), per the operator's
         // start preference. The descent after the first level is one stepdown into
         // stock cleared above.
-        let r0 = crate::profile::rotate_to_start(&rings[0].pts, start);
+        let entry_start = start.or_else(|| {
+            (rings[0].is_wall && leaded).then(|| {
+                let seed = automatic_wall_start(&rings[0].pts);
+                [seed.x, seed.y]
+            })
+        });
+        let r0 = crate::profile::rotate_to_start(&rings[0].pts, entry_start);
         let tan = crate::profile::start_tangent(&r0);
         let out = crate::profile::outward_normal(&r0);
         // The side the lead eases in from — into the pocket, as for a wall ring.
         let cin = cleared_normal(tan, reversed);
-        let on_ring = enter_with_plunge(
-            prog,
-            r0[0],
-            tan,
-            (-out.0, -out.1),
-            from_z,
-            z,
-            h,
-            plunge,
-            plunge_feed,
-            entry_feeds,
-            feed,
-            id,
-            &r0,
-            // **The lead-in applies here too.** It used to be omitted, on the reasoning
-            // that a clearing lead is the *wall-finish* lead and this is the interior
-            // entry. But the operator selected an arc lead-in *and* a ramp, and got
-            // neither an arc nor a lead — the ramp simply started on the ring. The rule
-            // is the one Andreas gave: if there is a lead-in, the ramp comes down it.
-            //
-            // Safe here despite there being nothing cleared at this level yet: the ramp
-            // flies its lead *above* the material, meeting the surface where the ring
-            // starts, so the lead cuts nothing on the way in.
-            {
-                let eff = crate::leads::guard_lead(guard, r0[0], tan, cin, lead_in, true);
-                let entry = crate::leads::lead_start_point(r0[0], tan, cin, eff);
-                crate::profile::lead_in_path(r0[0], entry, cin, eff)
-            },
-            guard,
-            None,
-        );
-        // A ramped entry begins its cut where the ramp ended, and goes a full perimeter
-        // from there so the sloped stretch is re-machined at depth.
-        let mut prev_end = match on_ring {
-            Some(from) => {
-                let perim = crate::profile::loop_perimeter(&r0);
-                let overlap = crate::profile::exit_overlap(
-                    &r0,
-                    from,
-                    lead_overlap,
-                    end.filter(|_| rings.len() == 1),
-                );
-                let walked = crate::profile::walk_loop(&r0, from, perim + overlap);
-                crate::emit::cut_polyline(prog, &walked, feed, cut, z);
-                walked[walked.len() - 1]
-            }
-            None => cut_ring(
+        let mut prev_end = if rings[0].is_wall && leaded {
+            // A pocket with no interior rings still needs the wall emitter: the
+            // ordinary first-ring path only uses leads as part of a ramp, and
+            // never emits a flat lead-in or lead-out.
+            emit_wall_ring(
                 prog,
                 &r0,
-                feed,
-                cut,
-                lead_overlap,
-                end.filter(|_| rings.len() == 1),
+                r0[0],
+                from_z,
                 z,
-            ),
+                id,
+                feed,
+                plunge_feed,
+                entry_feeds,
+                lead_overlap,
+                lead_in,
+                lead_out,
+                guard,
+                reversed,
+                h,
+                plunge,
+                -1.,
+                lift_height,
+                end.filter(|_| rings.len() == 1),
+            )
+        } else {
+            let on_ring = enter_with_plunge(
+                prog,
+                r0[0],
+                tan,
+                (-out.0, -out.1),
+                from_z,
+                z,
+                h,
+                plunge,
+                plunge_feed,
+                entry_feeds,
+                feed,
+                id,
+                &r0,
+                // **The lead-in applies here too.** It used to be omitted, on the reasoning
+                // that a clearing lead is the *wall-finish* lead and this is the interior
+                // entry. But the operator selected an arc lead-in *and* a ramp, and got
+                // neither an arc nor a lead — the ramp simply started on the ring. The rule
+                // is the one Andreas gave: if there is a lead-in, the ramp comes down it.
+                //
+                // Safe here despite there being nothing cleared at this level yet: the ramp
+                // flies its lead *above* the material, meeting the surface where the ring
+                // starts, so the lead cuts nothing on the way in.
+                {
+                    let eff = crate::leads::guard_lead(guard, r0[0], tan, cin, lead_in, true);
+                    let entry = crate::leads::lead_start_point(r0[0], tan, cin, eff);
+                    crate::profile::lead_in_path(r0[0], entry, cin, eff)
+                },
+                guard,
+                None,
+            );
+            // A ramped entry begins its cut where the ramp ended, and goes a full perimeter
+            // from there so the sloped stretch is re-machined at depth.
+            match on_ring {
+                Some(from) => {
+                    let perim = crate::profile::loop_perimeter(&r0);
+                    let overlap = crate::profile::exit_overlap(
+                        &r0,
+                        from,
+                        lead_overlap,
+                        end.filter(|_| rings.len() == 1),
+                    );
+                    let walked = crate::profile::walk_loop(&r0, from, perim + overlap);
+                    crate::emit::cut_polyline(prog, &walked, feed, cut, z);
+                    walked[walked.len() - 1]
+                }
+                None => cut_ring(
+                    prog,
+                    &r0,
+                    feed,
+                    cut,
+                    lead_overlap,
+                    end.filter(|_| rings.len() == 1),
+                    z,
+                ),
+            }
         };
 
         for (index, ring) in rings[1..].iter().enumerate() {

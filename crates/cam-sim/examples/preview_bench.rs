@@ -1,6 +1,6 @@
 //! Reproducible CPU preview benchmark: cargo run -p cam-sim --release --example preview_bench
 use cam_cldata::{MoveKind, Point3, ProgramBuilder};
-use cam_sim::{simulate, SimOptions, SimulationCache};
+use cam_sim::{simulate, SimOptions, SimulationCache, StockMeshCache};
 use std::time::Instant;
 
 fn main() {
@@ -40,7 +40,13 @@ fn main() {
             mesh.indices.len() / 3,
             (mesh.positions.len() * 25 + mesh.indices.len() * 4) as f64 / 1048576.
         );
+        let start = Instant::now();
+        let tiled = StockMeshCache::default()
+            .mesh_controlled(&sim.field, -10., &|| false).unwrap();
+        println!("  parallel tiled mesh: {:.2} ms, {} triangles",
+            start.elapsed().as_secs_f64() * 1000., tiled.indices.len() / 3);
         let mut cache = SimulationCache::default();
+        let mut mesh_cache = StockMeshCache::default();
         let opts = SimOptions {
             resolution,
             tool_radius: 3.,
@@ -63,7 +69,7 @@ fn main() {
                     |_, _| {},
                 )
                 .unwrap();
-            last_mesh = Some(sim.field.to_solid_mesh(-10.));
+            last_mesh = mesh_cache.mesh_controlled(&sim.field, -10., &|| false);
             frames.push(start.elapsed().as_secs_f64() * 1000.);
         }
         std::hint::black_box(last_mesh);

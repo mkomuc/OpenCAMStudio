@@ -1,5 +1,9 @@
 //! Inspector adapters for the shared profile pass model.
 use super::*;
+pub(super) const CUT_ORDER_HELP: &str = "By contour completes each contour before the next. By depth visits contours at each depth before going deeper. By radial pass completes each radial stage across contours and depths before the next. Outside stock clearing runs first when enabled.";
+pub(super) const CORNER_HELP: &str = "Roll around corner uses a rounded offset at outside corners. Keep sharp corner extends the offset edges to their intersection; very acute corners are bevelled to limit the extension.";
+pub(super) const WALL_ALLOWANCE_HELP: &str = "Signed offset of the final profile wall from the selected contour. Positive leaves material on the part; negative cuts past the nominal wall. This allowance remains after the finishing passes.";
+pub(super) const PROFILE_FINISHING_HELP: &str = "Enable radial finishing cuts after roughing. Set the number and spacing of finishing cuts, the finishing feed, and any spring passes. The final wall retains the wall allowance.";
 use cam_model::{ProfileOp, ProfileOrder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +40,31 @@ mod tests {
         app.begin_operation_draft(id);
         (app, id)
     }
+    #[test]
+    fn keep_tool_down_draft_applies_cancels_and_undoes() {
+        let (mut app, id) = editor();
+        let checked =
+            |op: &Operation| matches!(op, Operation::Profile(p) if p.passes.keep_tool_down);
+        let _ = app.update(Message::ProfilePassToggle(Toggle::KeepToolDown, true));
+        assert!(checked(app.current_operation(id).unwrap()));
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        let _ = app.update(Message::CancelOperationDraft);
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::ProfilePassToggle(Toggle::KeepToolDown, true));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::Apply);
+        assert!(
+            checked(app.controller.operation(id).unwrap()),
+            "{}",
+            app.status
+        );
+        assert!(app.controller.undo());
+        assert!(!checked(app.controller.operation(id).unwrap()));
+        assert!(app.controller.redo());
+        assert!(checked(app.controller.operation(id).unwrap()));
+    }
+
     #[test]
     fn finishing_draft_survives_collapse_commits_atomically_and_undoes() {
         let (mut app, id) = editor();
@@ -75,6 +104,62 @@ mod tests {
         assert_eq!(app.controller.operation(id), Some(&before));
     }
     #[test]
+    fn profile_arc_leads_from_editor_reach_generated_program() {
+        use cam_toolpath::{ProfileStrategy, Strategy};
+        let (mut app, id) = editor();
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Linking));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::SameLeadOut, false));
+        let _ = app.update(Message::LeadInKindChanged(LeadKind::Arc));
+        let _ = app.update(Message::LeadOutKindChanged(LeadKind::Arc));
+        let _ = app.update(Message::FieldChanged(Field::LeadInSize, "2.5".into()));
+        let _ = app.update(Message::FieldChanged(Field::LeadOutSize, "1.5".into()));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::Finishing, true));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::KeepToolDown, true));
+        let _ = app.update(Message::Apply);
+        let Some(Operation::Profile(op)) = app.controller.operation(id) else {
+            panic!("profile expected")
+        };
+        assert_eq!(
+            op.lead_in,
+            Lead::ArcSweep {
+                radius: 2.5,
+                angle_deg: 90.
+            }
+        );
+        assert_eq!(
+            op.lead_out,
+            Lead::ArcSweep {
+                radius: 1.5,
+                angle_deg: 90.
+            }
+        );
+        let tools = [cam_model::Tool {
+            number: op.tool,
+            diameter: 6.,
+            length: 30.,
+            ..Default::default()
+        }];
+        let result = ProfileStrategy::new(op.clone()).compute(
+            &cam_toolpath::JobEnv {
+                heights: cam_model::Heights::new(5., 2., 0.),
+                tools: &tools,
+                stock: None,
+                spindle: cam_cldata::SpindleDir::Cw,
+            },
+            &cam_toolpath::CancelToken::new(),
+        );
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        result.program.validate().unwrap();
+        for kind in [cam_cldata::MoveKind::LeadIn, cam_cldata::MoveKind::LeadOut] {
+            assert!(result
+                .program
+                .steps()
+                .iter()
+                .any(|step| matches!(step, cam_cldata::Step::Arc { tag, .. } if tag.kind == kind)));
+        }
+    }
+
+    #[test]
     fn one_arc_editor_preserves_legacy_radius_and_edits_sweep_without_duplicate_modes() {
         let (mut app, _) = editor();
         let _ = app.update(Message::LeadInKindChanged(LeadKind::Arc));
@@ -105,6 +190,92 @@ mod tests {
         let _ = app.update(Message::ClearingClimbToggled(false));
         let _ = app.update(Message::ProfileCompChanged(cam_model::Comp::Control));
         assert!(matches!(&app.operation_draft,Some(Operation::Profile(p)) if !p.clearing.climb));
+    }
+
+    #[test]
+    fn lead_end_switch_preserves_distance_and_starts_disabled() {
+        let (mut app, _) = editor();
+        let Some(Operation::Profile(p)) = &app.operation_draft else {
+            panic!("profile draft")
+        };
+        assert_eq!(p.passes.lead_end_distance, 0.6);
+        assert_eq!(p.passes.effective_lead_end_distance(), 0.);
+        let _ = app.update(Message::ProfilePassToggle(Toggle::LeadEndDistance, true));
+        assert_eq!(app.fields[&Field::Profile(Number::LeadEndDistance)], "0.6");
+        let _ = app.update(Message::FieldChanged(
+            Field::Profile(Number::LeadEndDistance),
+            "1.2".into(),
+        ));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::LeadEndDistance, false));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::LeadEndDistance, true));
+        assert_eq!(app.fields[&Field::Profile(Number::LeadEndDistance)], "1.2");
+    }
+
+    #[test]
+    fn entry_and_exit_remain_independent_when_entry_is_disabled() {
+        let (mut app, _) = editor();
+        let _ = app.update(Message::ProfilePassToggle(Toggle::SameLeadOut, true));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::LeadInEnabled, false));
+        let Some(Operation::Profile(p)) = &app.operation_draft else {
+            panic!("profile draft")
+        };
+        assert_eq!(p.passes.lead_in_enabled, Some(false));
+        assert!(p.passes.same_lead_out);
+        assert!(p.lead_out != Lead::None);
+        assert!(app.fields.contains_key(&Field::LeadOutSize));
+        assert!(!app.fields.contains_key(&Field::LeadInSize));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::LeadInEnabled, true));
+        assert!(!app.fields.contains_key(&Field::LeadOutSize));
+        assert!(app.fields.contains_key(&Field::LeadInSize));
+    }
+
+    #[test]
+    fn disabling_same_as_entry_keeps_implicit_exit_enabled() {
+        let (mut app, _) = editor();
+        let Some(Operation::Profile(profile)) = &mut app.operation_draft else {
+            panic!("profile draft")
+        };
+        profile.lead_in = Lead::ArcSweep {
+            radius: 1.2,
+            angle_deg: 60.,
+        };
+        profile.lead_out = Lead::None;
+        profile.passes.same_lead_out = true;
+        profile.passes.lead_out_enabled = None;
+        app.refresh_fields();
+        let _ = app.update(Message::ProfilePassToggle(Toggle::SameLeadOut, false));
+        let Some(Operation::Profile(profile)) = &app.operation_draft else {
+            panic!("profile draft")
+        };
+        assert!(!profile.passes.same_lead_out);
+        assert!(Toggle::LeadOutEnabled.get(profile));
+        assert_eq!(
+            profile.lead_out,
+            Lead::ArcSweep {
+                radius: 1.2,
+                angle_deg: 60.
+            }
+        );
+        assert_eq!(app.fields[&Field::LeadOutSize], "1.2");
+        assert_eq!(app.fields[&Field::Profile(Number::LeadOutSweep)], "60");
+    }
+
+    #[test]
+    fn disabling_same_as_entry_preserves_disabled_exit() {
+        let (mut app, _) = editor();
+        let Some(Operation::Profile(profile)) = &mut app.operation_draft else {
+            panic!("profile draft")
+        };
+        profile.lead_out = Lead::None;
+        profile.passes.same_lead_out = true;
+        profile.passes.lead_out_enabled = Some(false);
+        app.refresh_fields();
+        let _ = app.update(Message::ProfilePassToggle(Toggle::SameLeadOut, false));
+        let Some(Operation::Profile(profile)) = &app.operation_draft else {
+            panic!("profile draft")
+        };
+        assert!(!Toggle::LeadOutEnabled.get(profile));
+        assert_eq!(profile.lead_out, Lead::None);
     }
 }
 
@@ -142,27 +313,27 @@ impl Number {
             Self::Tolerance => "Arc-fit tolerance (mm)",
             Self::Taper => "Wall taper (deg)",
             Self::TabCount => "Tabs per contour",
-            Self::LeadInSweep => "Entry sweep (deg)",
-            Self::LeadOutSweep => "Exit sweep (deg)",
+            Self::LeadInSweep => "Lead-In Sweep Angle (deg)",
+            Self::LeadOutSweep => "Lead-Out Sweep Angle (deg)",
             Self::LeadEndDistance => "Lead end distance (mm)",
             Self::RampRpm => "Ramp spindle (rpm)",
         }
     }
     pub(super) fn help(self) -> &'static str {
         match self {
-        Self::FinishCount => "Number of radial finishing cuts, including the final wall. Each earlier cut is one finish spacing farther from the wall.",
-        Self::FinishStep => "Radial spacing between finishing cuts. This is separate from the roughing stepover.",
+        Self::FinishCount => "Number of radial finishing cuts, including the final allowanced wall. Each earlier cut is one finish spacing farther from that wall.",
+        Self::FinishStep => "Radial spacing between finishing cuts and between the roughing contour and the first finishing cut. The final finishing cut still retains the wall allowance. Separate from roughing stepover.",
         Self::FinishFeed => "Feed for the finishing stage. Zero inherits the cutting feed.",
         Self::SpringPasses => "Additional repeats of the final wall path to remove material left by tool deflection.",
         Self::FloorLeave => "Signed axial allowance above the selected bottom. Positive leaves material; negative cuts below the nominal bottom. Linked CAD requires a nonnegative value.",
-        Self::FinishDepths => "Number of smaller depth increments reserved at the bottom. Zero uses the regular stepdown throughout.",
-        Self::FinishDepthStep => "Height of each final depth increment. Their combined height must be smaller than the total cut.",
+        Self::FinishDepths => "Number of fixed-size depth increments reserved at the bottom of the cut. Zero uses the regular stepdown throughout. This is independent of radial finishing passes.",
+        Self::FinishDepthStep => "Height of each reserved bottom depth increment. Their combined height must be smaller than the total cut. This is independent of radial finish spacing.",
         Self::StartExtension => "Extend the selected open chain backward along its first tangent before offsetting. This does not add a closing edge.",
         Self::EndExtension => "Extend the selected open chain forward along its last tangent before offsetting. Independent of the start extension.",
         Self::Tolerance => "Maximum error used when fitting arcs to the cutting polyline. This does not improve the accuracy of a coarse imported curve.",
         Self::Taper => "Stepped wall slope from the contour at the nominal bottom. Use a negative angle to remove more material at higher levels; stepdown controls the staircase height. Positive angles form an unreachable undercut and are rejected. Unavailable for linked CAD and tabs.",
         Self::LeadInSweep | Self::LeadOutSweep => "Sweep of the tangent lead arc, greater than zero and at most 170 degrees. A smaller angle shortens the arc while retaining tangency at the wall.",
-        Self::LeadEndDistance => "Start using the lead-out feed this far before the end of the contour. The path is split before arc fitting so the feed boundary is retained. Zero changes feed at the exit lead. Unavailable with tabs.",
+        Self::LeadEndDistance => "Start using the lead-out feed this far before the end of the contour. The path is split before arc fitting so the feed boundary is retained. Unavailable with tabs.",
         Self::RampRpm => "Optional spindle speed during ramp, helix or zigzag entry. Zero keeps the cutting speed. Set an explicit cutting RPM; it is restored before leads or normal cutting, and before leaving each entry. Machine spindle limits still apply.",
         Self::TabCount => "Exact number of equally spaced holding tabs on the compensated contour. Tabs must leave room for the cutter and entry.",
     }
@@ -257,8 +428,12 @@ pub(super) enum Toggle {
     Even,
     Preserve,
     BothWays,
+    KeepToolDown,
     FeedRetract,
     SameLeadOut,
+    LeadInEnabled,
+    LeadOutEnabled,
+    LeadEndDistance,
     RoughFinal,
 }
 impl Toggle {
@@ -269,8 +444,12 @@ impl Toggle {
             Self::Even => "Even stepdowns",
             Self::Preserve => "Preserve contour order",
             Self::BothWays => "Both ways",
+            Self::KeepToolDown => "Keep tool down",
             Self::FeedRetract => "Retract at lead-out feed",
             Self::SameLeadOut => "Exit same as entry",
+            Self::LeadInEnabled => "Lead-In (Entry)",
+            Self::LeadOutEnabled => "Exit",
+            Self::LeadEndDistance => "Lead end distance",
             Self::RoughFinal => "Small bottom steps on rough passes",
         }
     }
@@ -278,15 +457,27 @@ impl Toggle {
         match self {
             Self::Finishing => "Enable radial finishing cuts after roughing. Finish spacing, finishing feed and spring passes control how the final wall is cut.",
             Self::FinishOnlyFinal => "Run radial finishing cuts only at the final depth instead of after every depth level.",
-            Self::Even => "Distribute the total cutting depth across equal increments no larger than the maximum stepdown.",
+            Self::Even => "Divide the regular depth range into equal increments no larger than the maximum stepdown. Reserved bottom increments retain their specified finishing step.",
             Self::Preserve => "Keep contours in their selected order instead of reordering them to reduce travel.",
             Self::BothWays => "Alternate travel direction on successive passes of an open contour. The contour remains open.",
+            Self::KeepToolDown => operation_linking::KEEP_TOOL_DOWN_HELP,
             Self::FeedRetract => "Use the lead-out feed for the retract after leaving the contour.",
             Self::SameLeadOut => "Use the entry lead style, size and arc sweep for the exit lead as well.",
+            Self::LeadInEnabled => "Enable the entry lead.",
+            Self::LeadOutEnabled => "Enable a lead-out move after the contour.",
+            Self::LeadEndDistance => "Start the lead-out feed before the end of the contour.",
             Self::RoughFinal => "Use smaller bottom increments on every radial/roughing stage. When disabled, intermediate stages keep the regular maximum stepdown; the final wall and its spring passes retain the smaller increments.",
         }
     }
     fn get(self, p: &ProfileOp) -> bool {
+        if matches!(self, Self::LeadInEnabled) {
+            return p.passes.lead_in_enabled.unwrap_or(p.lead_in != Lead::None);
+        }
+        if matches!(self, Self::LeadOutEnabled) {
+            return p.passes.lead_out_enabled.unwrap_or(
+                p.lead_out != Lead::None || (p.passes.same_lead_out && p.lead_in != Lead::None),
+            );
+        }
         let p = &p.passes;
         match self {
             Self::Finishing => p.finishing,
@@ -294,12 +485,51 @@ impl Toggle {
             Self::Even => p.even_stepdowns,
             Self::Preserve => p.preserve_order,
             Self::BothWays => p.both_ways,
+            Self::KeepToolDown => p.keep_tool_down,
             Self::FeedRetract => p.feed_retract,
             Self::SameLeadOut => p.same_lead_out,
+            Self::LeadInEnabled => unreachable!(),
+            Self::LeadOutEnabled => unreachable!(),
+            Self::LeadEndDistance => p
+                .lead_end_distance_enabled
+                .unwrap_or(p.lead_end_distance > 0.),
             Self::RoughFinal => p.rough_final,
         }
     }
     pub(super) fn set(self, p: &mut ProfileOp, v: bool) {
+        if matches!(self, Self::SameLeadOut) {
+            let exit_enabled = Self::LeadOutEnabled.get(p);
+            if !v && p.passes.same_lead_out && exit_enabled && p.lead_out == Lead::None {
+                p.lead_out = if p.lead_in == Lead::None {
+                    Lead::Arc { radius: 0.6 }
+                } else {
+                    p.lead_in
+                };
+            }
+            p.passes.same_lead_out = v;
+            return;
+        }
+        if matches!(self, Self::LeadInEnabled) {
+            p.passes.lead_in_enabled = Some(v);
+            if !v && p.passes.same_lead_out && p.lead_out == Lead::None {
+                p.lead_out = if p.lead_in == Lead::None {
+                    Lead::Arc { radius: 0.6 }
+                } else {
+                    p.lead_in
+                };
+            }
+            if v && p.lead_in == Lead::None {
+                p.lead_in = Lead::Arc { radius: 0.6 };
+            }
+            return;
+        }
+        if matches!(self, Self::LeadOutEnabled) {
+            p.passes.lead_out_enabled = Some(v);
+            if v && p.lead_out == Lead::None {
+                p.lead_out = Lead::Arc { radius: 0.6 };
+            }
+            return;
+        }
         let p = &mut p.passes;
         match self {
             Self::Finishing => p.finishing = v,
@@ -307,8 +537,17 @@ impl Toggle {
             Self::Even => p.even_stepdowns = v,
             Self::Preserve => p.preserve_order = v,
             Self::BothWays => p.both_ways = v,
+            Self::KeepToolDown => p.keep_tool_down = v,
             Self::FeedRetract => p.feed_retract = v,
-            Self::SameLeadOut => p.same_lead_out = v,
+            Self::SameLeadOut => unreachable!(),
+            Self::LeadInEnabled => unreachable!(),
+            Self::LeadOutEnabled => unreachable!(),
+            Self::LeadEndDistance => {
+                if v && p.lead_end_distance == 0. {
+                    p.lead_end_distance = 0.6;
+                }
+                p.lead_end_distance_enabled = Some(v);
+            }
             Self::RoughFinal => p.rough_final = v,
         }
     }
@@ -321,8 +560,13 @@ pub(super) fn numeric_fields(p: &ProfileOp) -> Vec<Field> {
         Number::FinishDepthStep,
         Number::Tolerance,
         Number::Taper,
-        Number::LeadEndDistance,
     ];
+    if p.passes
+        .lead_end_distance_enabled
+        .unwrap_or(p.passes.lead_end_distance > 0.)
+    {
+        values.push(Number::LeadEndDistance);
+    }
     if p.plunge != Plunge::Straight || p.passes.ramp_rpm != 0. {
         values.push(Number::RampRpm);
     }
@@ -340,10 +584,15 @@ pub(super) fn numeric_fields(p: &ProfileOp) -> Vec<Field> {
     if p.tabs.enabled && !p.tabs.manual && p.tabs.count.is_some() {
         values.push(Number::TabCount);
     }
-    if matches!(p.lead_in, Lead::Arc { .. } | Lead::ArcSweep { .. }) {
+    if p.passes.lead_in_enabled != Some(false)
+        && matches!(p.lead_in, Lead::Arc { .. } | Lead::ArcSweep { .. })
+    {
         values.push(Number::LeadInSweep);
     }
-    if !p.passes.same_lead_out && matches!(p.lead_out, Lead::Arc { .. } | Lead::ArcSweep { .. }) {
+    if (!p.passes.same_lead_out || p.passes.lead_in_enabled == Some(false))
+        && p.passes.lead_out_enabled != Some(false)
+        && matches!(p.lead_out, Lead::Arc { .. } | Lead::ArcSweep { .. })
+    {
         values.push(Number::LeadOutSweep);
     }
     values.into_iter().map(Field::Profile).collect()
@@ -488,7 +737,7 @@ impl App {
             }
             list = list.push(profile_picker(
                 "Cut order",
-                "Choose one ordering policy for contour, depth and radial stages.",
+                CUT_ORDER_HELP,
                 self.tooltips,
                 p.passes.order,
                 &ProfileOrder::ALL[..],
@@ -515,23 +764,26 @@ impl App {
                 list = list.push(toggle(Toggle::FinishOnlyFinal));
             }
             list = list.section("Passes").push(number(Number::Tolerance));
-            list=list.push(profile_picker("Outer corners","Roll around the corner, or extend the offset edges to a sharp point. Very acute sharp joins are bevelled to bound the path.",self.tooltips,p.passes.outer_corner,&cam_model::ProfileCorner::ALL[..],Message::ProfileCorner));
+            list = list.push(profile_picker(
+                "Outer corners",
+                CORNER_HELP,
+                self.tooltips,
+                p.passes.outer_corner,
+                &cam_model::ProfileCorner::ALL[..],
+                Message::ProfileCorner,
+            ));
             if (!linked && !p.tabs.enabled) || p.passes.taper_angle != 0. {
                 list = list.push(number(Number::Taper));
             }
         }
         if tab == OperationTab::Linking {
-            if matches!(p.lead_in, Lead::Arc { .. } | Lead::ArcSweep { .. }) {
-                list = list.push(number(Number::LeadInSweep));
-            }
-            if !p.passes.same_lead_out
-                && matches!(p.lead_out, Lead::Arc { .. } | Lead::ArcSweep { .. })
+            list = list.push(toggle(Toggle::LeadEndDistance));
+            if p.passes
+                .lead_end_distance_enabled
+                .unwrap_or(p.passes.lead_end_distance > 0.)
             {
-                list = list.push(number(Number::LeadOutSweep));
+                list = list.push(number(Number::LeadEndDistance));
             }
-            list = list
-                .push(toggle(Toggle::SameLeadOut))
-                .push(number(Number::LeadEndDistance));
             if p.contours().any(|c| !c.closed) {
                 list = list
                     .section("Open contour extensions")

@@ -59,7 +59,7 @@ pub(super) fn reorder_tool_column(
     }
 }
 
-const TOOL_TABLE_LABELS: [&str; 8] = [
+pub(super) const TOOL_TABLE_LABELS: [&str; 8] = [
     "Tool",
     "Description",
     "Cutter",
@@ -170,6 +170,7 @@ pub(super) struct ViewportKey {
     selection: Selection,
     pending: Option<crate::PendingOp>,
     outcome: Option<crate::JobStamp>,
+    simulation: Option<SimulationViewportKey>,
     operation_preview: Option<crate::JobStamp>,
     cad_selection: Vec<EntityRef>,
     cad_hover: Option<EntityRef>,
@@ -190,6 +191,21 @@ pub(super) struct ViewportKey {
     draft: Option<cam_model::Setup>,
     editor: Option<EditorKey>,
     pattern: Option<PatternDraft>,
+}
+
+#[derive(Clone)]
+struct SimulationViewportKey {
+    display_token: Arc<()>,
+    options: crate::settings::SimulationPrefs,
+    collision: bool,
+}
+
+impl PartialEq for SimulationViewportKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.display_token, &other.display_token)
+            && self.options == other.options
+            && self.collision == other.collision
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -365,7 +381,25 @@ impl App {
     }
     pub(super) fn workspace_main(&self) -> Element<'_, Message> {
         if self.workspace == Workspace::Tools {
-            return self.tools_table();
+            let mut content = row![self.libraries_sidebar()]
+                .height(Length::Fill)
+                .width(Length::Fill);
+            if !self.settings.tool_table.library_sidebar_collapsed {
+                content = content.push(
+                    mouse_area(
+                        container(Space::new().width(1).height(Length::Fill))
+                            .center_x(8)
+                            .height(Length::Fill)
+                            .style(|_| container::Style {
+                                background: Some(Background::Color(palette::BORDER_DARK)),
+                                ..container::Style::default()
+                            }),
+                    )
+                    .interaction(iced::mouse::Interaction::ResizingColumn)
+                    .on_press(Message::LibrarySidebarResizeStart),
+                );
+            }
+            return content.push(self.tools_table()).into();
         }
         let viewport = self.machining_viewport();
         let workpiece =
@@ -432,7 +466,12 @@ impl App {
                     .height(Length::Fill),
             );
         }
-        if let Some(legend) = self.simulation.as_ref().and_then(|player| player.force_viewport_legend(viewport_browser_width, self.show_gizmo.then_some(self.gizmo_size))) {
+        if let Some(legend) = self.simulation.as_ref().and_then(|player| {
+            player.force_viewport_legend(
+                viewport_browser_width,
+                self.show_gizmo.then_some(self.gizmo_size),
+            )
+        }) {
             overlays = overlays.push(legend);
         }
         layers = layers.push(overlays.width(Length::Fill).height(Length::Fill));
@@ -512,12 +551,11 @@ impl App {
             .collect();
         let editing = self.operation_preview_active() || self.pattern_draft.is_some();
         let selected_geometry = self.editor_selected_geometry();
-        // Playback publishes fresh material meshes independently of the document.
-        // Keep it live, while sharing the CAD acceleration structure. Drafts have
-        // their own small semantic key so camera/menu events also stay cheap there.
+        // Playback geometry changes only when a new display frame is published.
+        // Reuse its geometry during intervening ticks and camera/menu events.
+        // Drafts have their own small semantic key as well.
         // Unstamped synchronous/headless results have no publication identity.
-        let cacheable = self.simulation.is_none()
-            && self.controller.outcome().is_none_or(|o| o.stamp.is_some());
+        let cacheable = self.controller.outcome().is_none_or(|o| o.stamp.is_some());
         let key = cacheable.then(|| ViewportKey {
             revision: self.controller.revision(),
             setup: self.controller.active_setup_id(),
@@ -525,6 +563,14 @@ impl App {
             selection: self.controller.selection(),
             pending: self.controller.pending_op(),
             outcome: self.controller.outcome().and_then(|o| o.stamp.clone()),
+            simulation: self
+                .simulation
+                .as_ref()
+                .map(|player| SimulationViewportKey {
+                    display_token: player.display_token.clone(),
+                    options: player.options.clone(),
+                    collision: player.collision_active(),
+                }),
             operation_preview: self
                 .operation_preview_outcome()
                 .and_then(|o| o.stamp.clone()),
@@ -959,7 +1005,7 @@ impl App {
         })
         .into()
     }
-    fn tool_table_row_values(&self, tool: &cam_model::Tool) -> [String; 8] {
+    pub(super) fn tool_table_row_values(&self, tool: &cam_model::Tool) -> [String; 8] {
         [
             format!("T{}", tool.number),
             tool.description.clone(),
@@ -978,7 +1024,9 @@ impl App {
             .iter()
             .enumerate()
             .map(|(index, committed)| {
-                let tool = if index == self.lib_sel {
+                let tool = if self.operation_tool_selector.is_some() {
+                    committed
+                } else if index == self.lib_sel {
                     self.tool_edit.as_ref().unwrap_or(committed)
                 } else {
                     self.tool_drafts
@@ -1101,6 +1149,74 @@ impl App {
         )
     }
 
+    /// Library selection and management are kept beside the cutter table.
+    fn libraries_sidebar(&self) -> Element<'_, Message> {
+        if self.settings.tool_table.library_sidebar_collapsed {
+            return container(inspector_button("›").on_press(Message::ToggleLibrarySidebar))
+                .padding(5)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(palette::RIBBON_BG)),
+                    ..container::Style::default()
+                })
+                .into();
+        }
+        let mut entries = column![].spacing(2);
+        for name in self.libraries.libraries.keys() {
+            if self.library_renaming && *name == self.libraries.active {
+                entries = entries.push(
+                    row![
+                        inspector_input("Library name", &self.library_name_edit)
+                            .on_input(Message::LibraryNameChanged)
+                            .on_submit(Message::RenameToolLibrary)
+                            .width(Length::Fill),
+                        inspector_button("✓").on_press(Message::RenameToolLibrary),
+                        inspector_button("×").on_press(Message::CancelLibraryRename),
+                    ]
+                    .spacing(3),
+                );
+            } else {
+                entries = entries.push(
+                    mouse_area(select_row(
+                        name.clone(),
+                        *name == self.libraries.active,
+                        Message::SelectToolLibrary(name.clone()),
+                    ))
+                    .on_right_press(Message::OpenLibraryContextMenu(name.clone())),
+                );
+            }
+        }
+        let active = self.libraries.active.clone();
+        let heading = row![
+            text("Libraries").size(14),
+            Space::new().width(Length::Fill),
+            inspector_button("+").on_press(Message::NewToolLibrary),
+            inspector_button("⋯").on_press(Message::OpenLibraryContextMenu(active.clone())),
+            inspector_button("‹").on_press(Message::ToggleLibrarySidebar),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        let list = mouse_area(
+            container(scrollable(entries).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_right_press(Message::OpenLibraryContextMenu(active));
+        container(column![heading, list].spacing(8).padding(10))
+            .width(self.settings.tool_table.library_sidebar_width)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(palette::RIBBON_BG)),
+                border: Border {
+                    color: palette::BORDER_DARK,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     pub(super) fn tools_table(&self) -> Element<'_, Message> {
         let mode = |view, label| {
             let active = self.library_view == view;
@@ -1109,17 +1225,22 @@ impl App {
                 .style(move |_, status| snap_toggle_style(active, status))
         };
         let widths = self.tool_table_widths;
-        let controls = row![
-            text("Tool library").size(14),
-            mode(LibraryView::Ordered, "By number"),
-            mode(LibraryView::Grouped, "By family"),
-            inspector_input("Search tools", &self.tool_table_search)
-                .on_input(Message::ToolTableSearch)
-                .width(180),
-            inspector_button("Clear filters").on_press(Message::ClearToolTableFilters),
-            inspector_button("Columns").on_press(Message::OpenToolTableMenu(8, true)),
-        ]
-        .spacing(12);
+        let mut controls = row![].spacing(12).align_y(Alignment::Center);
+        if self.operation_tool_selector.is_some() {
+            controls = controls
+                .push(text("Tool library").size(14))
+                .push(self.library_picker());
+        }
+        controls = controls
+            .push(mode(LibraryView::Ordered, "By number"))
+            .push(mode(LibraryView::Grouped, "By family"))
+            .push(
+                inspector_input("Search tools", &self.tool_table_search)
+                    .on_input(Message::ToolTableSearch)
+                    .width(180),
+            )
+            .push(inspector_button("Clear filters").on_press(Message::ClearToolTableFilters))
+            .push(inspector_button("Columns").on_press(Message::OpenToolTableMenu(8, true)));
         let mut headers = row![].spacing(4);
         for &index in &self.tool_table_order {
             if self.tool_table_columns[index] {
@@ -1169,12 +1290,10 @@ impl App {
                 );
             }
         }
-        let mut list = column![
-            controls,
-            container(headers).padding(Padding::from([0.0, 7.0]))
-        ]
-        .spacing(6)
-        .padding(16);
+        let toolbar = column![controls].spacing(6).padding([8, 16]);
+        let mut list = column![container(headers).padding(Padding::from([0.0, 7.0]))]
+            .spacing(6)
+            .padding([0, 16]);
         let mut tools: Vec<_> = self.library.tools.iter().enumerate().collect();
         match self.library_view {
             LibraryView::Ordered => tools.sort_by_key(|(_, tool)| tool.number),
@@ -1185,14 +1304,22 @@ impl App {
             }),
         }
         for (index, committed) in tools {
-            let selected = index == self.lib_sel;
+            let selecting = self.operation_tool_selector.is_some();
+            let selected = if selecting {
+                self.operation_preset_tool()
+                    .is_some_and(|t| t.identity() == committed.identity())
+            } else {
+                index == self.lib_sel
+            };
             let draft = self.tool_drafts.get(&index);
-            let tool = if selected {
+            let tool = if self.operation_tool_selector.is_some() {
+                committed
+            } else if selected {
                 self.tool_edit.as_ref().unwrap_or(committed)
             } else {
                 draft.map(|draft| &draft.tool).unwrap_or(committed)
             };
-            let pending = draft.is_some() || (selected && self.inspector_dirty());
+            let pending = !selecting && (draft.is_some() || (selected && self.inspector_dirty()));
             let values = self.tool_table_row_values(tool);
             if !tool_table_matches(&values, &self.tool_table_search, &self.tool_table_filters) {
                 continue;
@@ -1220,11 +1347,24 @@ impl App {
                     background: selected.then_some(Background::Color(palette::SELECT_BG)),
                     ..Default::default()
                 });
-            list = list.push(
-                mouse_area(item)
-                    .on_press(Message::SelectLibraryTool(index))
-                    .on_right_press(Message::LibToolMenu(index)),
-            );
+            if selecting {
+                let supported = self
+                    .operation_tool_selector
+                    .as_ref()
+                    .is_some_and(|selector| selector.supports(tool));
+                list = list.push(
+                    button(item)
+                        .padding(0)
+                        .style(inspector_secondary)
+                        .on_press_maybe(supported.then_some(Message::OperationToolPicked(index))),
+                );
+            } else {
+                list = list.push(
+                    mouse_area(item)
+                        .on_press(Message::SelectLibraryTool(index))
+                        .on_right_press(Message::LibToolMenu(index)),
+                );
+            }
         }
         let cutters = scrollable(list.width(Length::Shrink))
             .direction(scrollable::Direction::Both {
@@ -1233,7 +1373,10 @@ impl App {
             })
             .height(Length::FillPortion(3))
             .width(Length::Fill);
-        column![cutters, self.cutting_presets_table()]
+        if self.operation_tool_selector.is_some() {
+            return column![toolbar, cutters].height(Length::Fill).into();
+        }
+        column![toolbar, cutters, self.cutting_presets_table()]
             .spacing(8)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1243,9 +1386,9 @@ impl App {
         let mut body = column![].spacing(6);
         if let Some(tool) = self.preview_tool() {
             body = body.push(
-                canvas::Canvas::new(ToolCanvas::new(&tool))
+                canvas::Canvas::new(ToolCanvas::new(&tool).selected(self.selected_tool_parameter))
                     .width(Length::Fill)
-                    .height(190),
+                    .height(270),
             );
         }
         body = body.push(self.library_editor());
@@ -1948,6 +2091,28 @@ mod tests {
             .is_none());
     }
     #[test]
+    fn library_sidebar_resize_and_collapse_preserve_width() {
+        let (mut app, _) = App::new();
+        app.switch_workspace(Workspace::Tools);
+        assert!(!app.settings.tool_table.library_sidebar_collapsed);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(210.0, 30.0)));
+        let _ = app.update(Message::LibrarySidebarResizeStart);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(310.0, 30.0)));
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 310.0);
+        let _ = app.update(Message::ToolColumnRelease);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(700.0, 30.0)));
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 310.0);
+        let _ = app.update(Message::ToggleLibrarySidebar);
+        assert!(app.settings.tool_table.library_sidebar_collapsed);
+        let _ = app.update(Message::ToggleLibrarySidebar);
+        assert!(!app.settings.tool_table.library_sidebar_collapsed);
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 310.0);
+        let _ = app.update(Message::LibrarySidebarResizeStart);
+        let _ = app.update(Message::WindowCursor(iced::Point::new(-1000.0, 30.0)));
+        assert_eq!(app.settings.tool_table.library_sidebar_width, 180.0);
+    }
+
+    #[test]
     fn default_workspace_and_clean_round_trip_preserve_machining_context() {
         let (mut app, _) = App::new();
         assert_eq!(app.workspace, Workspace::Machining);
@@ -2324,6 +2489,80 @@ mod performance_tests {
             ))
             .unwrap();
         app
+    }
+
+    #[test]
+    fn simulation_reuses_unchanged_frames_and_refreshes_after_seek_and_options() {
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.model_view = None;
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "playback.dxf").unwrap();
+        app.controller.new_operation(OpKind::Profile);
+        app.controller.start_run();
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while app.controller.run_needs_poll() {
+            app.controller.poll_run();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut player = SimulationPlayer::new_for_operation(&app.controller, None).unwrap();
+        while player.needs_tick() {
+            player.tick();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.simulation = Some(player);
+        let initial = app.machining_viewport();
+        assert!(!initial.mesh_vertices.is_empty());
+        let _ = app.update(Message::OrbitBy(0.3, 0.2));
+        app.simulation.as_mut().unwrap().tick();
+        let unchanged = app.machining_viewport();
+        assert!(Arc::ptr_eq(
+            &initial.mesh_vertices,
+            &unchanged.mesh_vertices
+        ));
+        assert!(Arc::ptr_eq(&initial.vertices, &unchanged.vertices));
+        assert!(Arc::ptr_eq(
+            &initial.setup_geometry,
+            &unchanged.setup_geometry
+        ));
+        assert_ne!(
+            initial.camera().view_proj(1.),
+            unchanged.camera().view_proj(1.)
+        );
+
+        let player = app.simulation.as_mut().unwrap();
+        let mut prefs = player.options.clone();
+        prefs.show_tool = false;
+        player.configure(&prefs, [0.2, 0.6, 0.3]);
+        let hidden_tool = app.machining_viewport();
+        assert!(!Arc::ptr_eq(
+            &unchanged.mesh_vertices,
+            &hidden_tool.mesh_vertices
+        ));
+        assert!(hidden_tool.mesh_vertices.len() < unchanged.mesh_vertices.len());
+        let player = app.simulation.as_mut().unwrap();
+        player.seek_end(true);
+        while player.needs_tick() {
+            player.tick();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let advanced = app.machining_viewport();
+        assert!(!Arc::ptr_eq(
+            &hidden_tool.mesh_vertices,
+            &advanced.mesh_vertices
+        ));
+        assert!(Arc::ptr_eq(
+            &advanced.mesh_vertices,
+            &app.machining_viewport().mesh_vertices
+        ));
+        app.simulation = None;
+        assert!(!Arc::ptr_eq(
+            &advanced.mesh_vertices,
+            &app.machining_viewport().mesh_vertices
+        ));
     }
 
     #[test]

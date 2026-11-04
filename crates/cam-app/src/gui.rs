@@ -67,6 +67,8 @@ mod operation_metadata;
 mod operation_sections;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
+#[path = "gui_operation_tool_selector.rs"]
+mod operation_tool_selector;
 #[path = "gui_pattern_editor.rs"]
 mod pattern_editor_view;
 #[path = "gui_setup_editor.rs"]
@@ -97,6 +99,9 @@ mod cutting_forces;
 #[cfg(test)]
 #[path = "gui_performance.rs"]
 mod performance;
+#[path = "gui_tool_drawing.rs"]
+mod tool_drawing;
+use tool_drawing::ToolCanvas;
 #[path = "gui_tool_presets.rs"]
 mod tool_presets;
 use tool_presets::{MaterialChoice, PresetChoice, PresetField};
@@ -368,7 +373,7 @@ impl Icon {
                             with a V-bit. Unlike engraving, the tool never touches the boundary: its \
                             flanks land on it, and the depth follows from the shape's own width."
             }
-            Icon::Parallel => "Add a 3D Parallel finishing operation for selected CAD bodies or faces.",
+            Icon::Parallel => "Add a 3D Parallel or sampled Scallop finishing operation for selected CAD bodies or faces.",
             Icon::Adaptive => "Add a 3D Adaptive Clearing operation for selected CAD bodies or faces.",
             Icon::Face => "Add a Face operation — skim the top of the stock flat.",
             Icon::NewTool => "Add a new tool to the library.",
@@ -558,6 +563,23 @@ async fn confirm_renumber(detail: String) -> bool {
         .show()
         .await
         == rfd::MessageDialogResult::Yes
+}
+
+async fn confirm_delete_library(name: String, last: bool) -> (String, bool) {
+    let detail = if last {
+        format!("Delete the library ‘{name}’ and all its tools? A fresh default library will be created.")
+    } else {
+        format!("Delete the library ‘{name}’ and all its tools? Tools already used in projects are retained.")
+    };
+    let confirmed = rfd::AsyncMessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("Delete tool library")
+        .set_description(detail)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        .await
+        == rfd::MessageDialogResult::Yes;
+    (name, confirmed)
 }
 
 /// The docked panes. Any of them can be shown or hidden from the Windows ribbon
@@ -793,7 +815,7 @@ impl LeadKind {
     /// A `Lead` of this kind, carrying over the previous size where sensible.
     fn to_lead(self, prev: Lead) -> Lead {
         let size = match prev {
-            Lead::None => 3.0,
+            Lead::None => 0.6,
             Lead::Linear { length } => length,
             Lead::Arc { radius } | Lead::ArcSweep { radius, .. } => radius,
         };
@@ -1189,6 +1211,8 @@ enum Field {
     Stepdown,
     ParallelStepover,
     ParallelAngle,
+    ScallopSafeDistance,
+    ScallopSmoothingTolerance,
     AdaptiveTolerance,
     AdaptiveOptimalLoad,
     AdaptiveFineStepdown,
@@ -1236,6 +1260,8 @@ enum Field {
     ChamferWidth,
     /// Chamfer tip depth below the top edge (mm); selects the flank section.
     ChamferDepth,
+    /// Additional tip clearance below the chamfer.
+    ChamferTipOffset,
     /// Chamfer width increment per pass (mm); 0 cuts in one pass.
     ChamferStep,
     /// Lead-in size (length for Linear, radius for Arc).
@@ -1354,6 +1380,8 @@ impl Field {
             Field::Stepdown => "Stepdown (mm)",
             Field::ParallelStepover => "Stepover (mm)",
             Field::ParallelAngle => "Pass angle (deg)",
+            Field::ScallopSafeDistance => "Safe distance (mm)",
+            Field::ScallopSmoothingTolerance => "Smoothing tolerance (mm)",
             Field::AdaptiveTolerance => "Tolerance (mm)",
             Field::AdaptiveOptimalLoad => "Optimal load (mm)",
             Field::AdaptiveFineStepdown => "Fine stepdown (mm)",
@@ -1380,6 +1408,7 @@ impl Field {
             Field::ChamferTop => "Top edge Z (mm)",
             Field::ChamferWidth => "Chamfer width (mm)",
             Field::ChamferDepth => "Tip depth (mm, 0=tip)",
+            Field::ChamferTipOffset => "Chamfer tip offset (mm)",
             Field::ChamferStep => "Step (mm, 0=one pass)",
             Field::LeadInSize => "Lead-in size (mm)",
             Field::LeadOutSize => "Lead-out size (mm)",
@@ -1424,12 +1453,14 @@ impl Field {
             Field::BoreAxialStock => "Raises the cut bottom by this amount. Negative extends below the bottom.",
             Field::BoreTolerance => "Maximum chord error when linearizing a tapered helix.",
             Field::BoreSafeDistance => "Minimum standoff above the feature at the retract height and outside boss leads.",
-            Field::BoreLeadRadius => "Tangent lead radius; hole leads are limited to half the tool-centre orbit.",
+            Field::BoreLeadRadius => "Radius of the horizontal tangent lead. For holes it is limited to half the tool-centre orbit; for bosses the safe distance can increase it.",
 
             Field::OperationTop => "Absolute cutting top in setup Z, in millimetres.",
-            Field::ParallelStepover => "Horizontal distance between parallel finishing passes, in millimetres.",
+            Field::ParallelStepover => "Target distance between finishing passes, in millimetres. Scallop uses approximate surface distance.",
             Field::ParallelAngle => "Direction of the cutting rows measured counterclockwise from setup X, in degrees.",
-            Field::AdaptiveTolerance => "Maximum allowed deviation of the computed toolpath from the model boundary, in millimetres. Path simplification is calculated automatically from this tolerance.",
+            Field::ScallopSafeDistance => "Vertical clearance above the model for minimum retraction. Unsafe links return to full clearance.",
+            Field::ScallopSmoothingTolerance => "Maximum additional filtering deviation from the generated path. This is added to the machining tolerance.",
+            Field::AdaptiveTolerance => "Machining tolerance in millimetres. Scallop smoothing, when enabled, adds its separate filtering tolerance.",
             Field::AdaptiveOptimalLoad => "Target radial engagement for adaptive clearing, in millimetres.",
             Field::AdaptiveFineStepdown => "Axial spacing for intermediate terrace refinement, in millimetres. Fine passes are added only where shelves or slopes expose additional material; unchanged vertical walls use the primary stepdown.",
             Field::AdaptiveOffset => "Signed shift of the selected adaptive boundary. Positive values move it outward, except Inside containment moves it inward.",
@@ -1653,20 +1684,20 @@ impl Field {
                  chamfer the rim of a pocket or a step that an earlier operation cut."
             }
             Field::ChamferWidth => {
-                "Width of the chamfer face measured along the slope (mm). With the tool \
-                 angle this sets how deep the tool drops."
+                "Horizontal width of the chamfer from the selected edge. Together with the tool angle it determines the bevel depth."
             }
             Field::ChamferDepth => {
                 "How far below the top edge the tool tip rides (mm), which picks where \
                  on the tool's flank the cut lands. 0 = cut at the tip."
             }
+            Field::ChamferTipOffset => "Additional distance below the chamfer edge. The tool moves outward by the corresponding amount to keep the cutting flank on the same bevel.",
             Field::ChamferStep => {
                 "Chamfer width added per pass (mm) for a multi-pass chamfer. 0 = cut the \
                  whole chamfer in a single pass."
             }
             Field::LeadInSize => {
                 "Size of the lead-in that eases the tool onto the wall — arc radius for \
-                 an arc lead, ramp length for a linear one (mm). Avoids a dwell mark."
+                 an arc lead, tangent length for a linear one (mm)."
             }
             Field::LeadOutSize => {
                 "Size of the lead-out that eases the tool off the wall (see lead-in)."
@@ -1746,7 +1777,7 @@ impl Field {
             }
             Field::ClearLeadInSize => {
                 "Size of the clearing pass's lead-in onto the flat area's edge -- arc \
-                 radius for an arc lead, ramp length for a linear one (mm)."
+                 radius for an arc lead, tangent length for a linear one (mm)."
             }
             Field::ClearLeadOutSize => "Size of the clearing pass's lead-out (see lead-in).",
             // As for `PlungeA`/`PlungeB`: with a clearing pass selected, `plunge_help`
@@ -1819,11 +1850,11 @@ mod help {
     pub const SIDE: &str =
         "Which side of the chain the tool runs. Outside retains the enclosed part. Inside finishes the wall and can leave an uncut core: clear the pocket separately. On centers the tool on the line. Open left/right sides follow the selected chain direction.";
     pub const LEAD_IN: &str =
-        "How the tool eases onto the wall at the start of a pass instead of diving \
-         straight in — a flat arc or tangent line — to avoid a dwell/witness mark. None \
-         starts cutting directly.";
+        "None starts on the contour. Linear approaches along a tangent line; Arc approaches \
+         along a tangent arc. Leads are horizontal moves into the start of the cut.";
     pub const LEAD_OUT: &str =
-        "How the tool eases off the wall at the end of a pass (see lead-in).";
+        "None ends on the contour. Linear departs along a tangent line; Arc departs \
+         along a tangent arc. Leads are horizontal moves away from the end of the cut.";
     pub const PLUNGE: &str =
         "How the tool enters downward at each level. Straight drops vertically (needs a \
          centre-cutting tool or pre-drilled hole); Ramp descends along the toolpath itself, \
@@ -2055,6 +2086,7 @@ struct App {
     cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
     notice: Option<Notice>,
     notice_queue: VecDeque<Notice>,
+    notice_filters: [bool; 3],
     status_messages: StatusMessages,
     /// Shared transactional editor for setup, stock and postprocess settings. The
     /// draft survives tab changes; only the footer can commit or discard it.
@@ -2066,6 +2098,7 @@ struct App {
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
     stock_to_leave_draft: Option<cam_model::StockToLeave>,
+    stock_to_leave_initialized: bool,
     creation_edited_fields: BTreeSet<Field>,
     thread_parameters: thread_parameters::ThreadParameters,
     creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
@@ -2180,6 +2213,11 @@ struct App {
     /// Cross-project tool library (loaded from the config dir), picked from during
     /// op setup and managed from the Tools tab.
     library: ToolLibrary,
+    libraries: crate::tool_library::LibraryCollection,
+    library_name_edit: String,
+    library_renaming: bool,
+    library_context_menu: Option<iced::Point>,
+    library_sidebar_drag: Option<(f32, f32)>,
     /// The library tool selected for editing in the Tools-tab library editor.
     lib_sel: usize,
     fusion_import: Option<Vec<crate::fusion_tools::ImportEntry>>,
@@ -2193,8 +2231,15 @@ struct App {
     preset_values: BTreeMap<PresetField, String>,
     edited_preset_input: Option<PresetField>,
     edited_tool_input: Option<Field>,
+    selected_tool_parameter: Option<Field>,
+    tool_info: Option<cam_model::Tool>,
+    operation_tool_selector: Option<operation_tool_selector::ToolSelector>,
+    cad_selected_project_tool: Option<cam_model::Tool>,
     preset_buffers: BTreeMap<u64, BTreeMap<PresetField, String>>,
     new_material_name: String,
+    selected_material: Option<u64>,
+    editing_material: Option<u64>,
+    creating_material: bool,
     material_force_inputs: BTreeMap<u64, String>,
     /// Session-only what-if engagement; None identifies an unsaved creation draft.
     cutting_force_inputs: BTreeMap<(u64, Option<u32>), [String; 3]>,
@@ -2584,6 +2629,7 @@ enum BoreOption {
 #[derive(Debug, Clone)]
 enum Message {
     PollMcp,
+    TraverseFocus(bool),
     OutputAction(iced::widget::text_editor::Action),
     OutputCopy,
     OutputClear,
@@ -2612,6 +2658,9 @@ enum Message {
     OperationPositionClear(operation_positions::PositionKind),
     OperationPositionPicked([f64; 3]),
     OperationToolPicked(usize),
+    OpenOperationToolSelector,
+    CloseOperationToolSelector,
+    OperationProjectToolPicked(cam_model::Tool),
     EditDrawingGeometry(u32),
     UseDrawingGeometry,
     CancelDrawingGeometry,
@@ -2720,8 +2769,20 @@ enum Message {
     ExportLibrary,
     /// The chosen path to write the library to (`None` = cancelled).
     LibraryToExport(Option<PathBuf>),
-    /// Prompt for a `.ocam` tool library to **import** (replaces the working library).
+    /// Prompt for a `.ocam` or Fusion tool library to import.
     ImportLibrary,
+    SelectToolLibrary(String),
+    NewToolLibrary,
+    LibraryNameChanged(String),
+    RenameToolLibrary,
+    BeginLibraryRename,
+    CancelLibraryRename,
+    OpenLibraryContextMenu(String),
+    CloseLibraryContextMenu,
+    ToggleLibrarySidebar,
+    LibrarySidebarResizeStart,
+    DeleteToolLibrary,
+    DeleteToolLibraryConfirmed((String, bool)),
     /// The chosen library file to import (`None` = cancelled).
     LibraryToImport(Option<PathBuf>),
     FusionImportToggle(usize, bool),
@@ -2737,6 +2798,7 @@ enum Message {
     CancelCadImport,
     NoticeDismissed,
     NoticeBackdrop,
+    NoticeFilterChanged(usize, bool),
     ReplaceCadAsset(u64),
     CadReplacementChosen(u64, Option<PathBuf>),
     RemoveCadAsset(u64),
@@ -2918,6 +2980,9 @@ enum Message {
     /// immediately with default parameters; sizes are then edited as fields).
     LeadInKindChanged(LeadKind),
     LeadOutKindChanged(LeadKind),
+    ChamferExitEnabled(bool),
+    ChamferEntryEnabled(bool),
+    ChamferSameLeadOut(bool),
     PlungeKindChanged(PlungeKind),
     /// Change the selected face op's pass direction (committed immediately).
     FaceDirectionChanged(Axis),
@@ -2925,7 +2990,12 @@ enum Message {
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
     ParallelBothWaysToggled(bool),
+    ParallelScallopToggled(bool),
+    ScallopSmoothingToggled(bool),
+    ScallopRetractionChanged(cam_model::ScallopRetraction),
+    ScallopOrderChanged(cam_model::ScallopOrder),
     ParallelStayDownToggled(bool),
+    PocketKeepToolDownToggled(bool),
     AdaptiveClimbToggled(bool),
     AdaptiveContainmentChanged(cam_model::AdaptiveContainment),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
@@ -2944,6 +3014,9 @@ enum Message {
     OpenMaterials,
     Noop,
     CloseMaterials,
+    ToolParameterFocus(Field, bool),
+    ToolInfoOpen(cam_model::Tool),
+    ToolInfoClose,
     ToolDetailChanged(tool_presets::ToolDetail, String),
     DeletePreset,
     PresetNameChanged(String),
@@ -2954,8 +3027,13 @@ enum Message {
     PresetValueChanged(PresetField, String),
     OperationPresetPicked(PresetChoice),
     SetupMaterialPicked(MaterialChoice),
+    SelectMaterial(u64),
+    NewMaterial,
+    EditMaterial,
+    EditMaterialRow(u64),
     NewMaterialNameChanged(String),
     AddMaterial,
+    AddStarterMaterials,
     MaterialRenamed(u64, String),
     MaterialCuttingForceChanged(u64, String),
     CuttingForceCustomToggled(u32, bool),
@@ -3232,6 +3310,7 @@ impl App {
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
         self.stock_to_leave_draft = Some(self.controller.inspection_setup().stock_to_leave_for(id));
+        self.stock_to_leave_initialized = self.stock_to_leave_value().enabled;
         if matches!(self.operation_draft, Some(Operation::Profile(_))) {
             let first = self
                 .controller
@@ -3475,12 +3554,67 @@ impl App {
         Ok((app, task))
     }
 
+    fn save_tool_libraries(&mut self) {
+        self.libraries
+            .libraries
+            .insert(self.libraries.active.clone(), self.library.clone());
+        crate::config::save(&self.libraries);
+    }
+
+    fn switch_tool_library(&mut self, name: String) {
+        if name == self.libraries.active {
+            return;
+        }
+        if self.library_mode() && self.inspector_dirty() {
+            self.status =
+                "Apply or discard the current tool edits before switching libraries.".into();
+            return;
+        }
+        let Some(next) = self.libraries.libraries.get(&name).cloned() else {
+            return;
+        };
+        self.libraries
+            .libraries
+            .insert(self.libraries.active.clone(), self.library.clone());
+        self.library_name_edit = name.clone();
+        self.library_renaming = false;
+        self.libraries.active = name;
+        self.library = next;
+        self.lib_sel = 0;
+        self.tool_drafts.clear();
+        self.reload_tool_edit();
+        if let Some(player) = &mut self.simulation {
+            player.sync_force_material(&self.library);
+        }
+        self.save_tool_libraries();
+    }
+
+    fn library_picker(&self) -> Element<'_, Message> {
+        pick_list(
+            self.libraries.libraries.keys().cloned().collect::<Vec<_>>(),
+            Some(self.libraries.active.clone()),
+            Message::SelectToolLibrary,
+        )
+        .text_size(12)
+        .padding([7, 9])
+        .style(inspector_picker)
+        .into()
+    }
+
     fn new() -> (Self, iced::Task<Message>) {
         // Destructured rather than discarded: a library that failed to load is the one
         // thing at startup the operator must be *told* about, or they meet the stock
         // tools and assume theirs were lost. They are not — the file is untouched, with
         // a `.bak` beside it — but only if nobody edits a tool first.
-        let (library, library_load) = ToolLibrary::load();
+        let (legacy, library_load) = ToolLibrary::load();
+        let (loaded_libraries, collection_load) =
+            crate::config::load::<crate::tool_library::LibraryCollection>();
+        let libraries = if matches!(collection_load, crate::config::ConfigLoad::Loaded) {
+            loaded_libraries
+        } else {
+            crate::tool_library::LibraryCollection::from_legacy(legacy)
+        };
+        let library = libraries.libraries[&libraries.active].clone();
         // Preferences seed the session. A rejected settings file is deliberately not
         // reported the way a rejected *library* is: defaults here cost the user a
         // layout, not their tools.
@@ -3507,6 +3641,7 @@ impl App {
             cad_scene_cache: Default::default(),
             notice: None,
             notice_queue: VecDeque::new(),
+            notice_filters: [true; 3],
             status_messages: StatusMessages::default(),
             setup_draft: None,
             pattern_draft: None,
@@ -3516,6 +3651,7 @@ impl App {
             setup_values: BTreeMap::new(),
             operation_draft: None,
             stock_to_leave_draft: None,
+            stock_to_leave_initialized: false,
             creation_edited_fields: BTreeSet::new(),
             thread_parameters: Default::default(),
             creation_geometry_height_defaults: None,
@@ -3586,6 +3722,11 @@ impl App {
             view: ViewControls::default(),
             cursor: None,
             library,
+            library_name_edit: libraries.active.clone(),
+            library_renaming: false,
+            library_context_menu: None,
+            library_sidebar_drag: None,
+            libraries,
             machines,
             active_machine,
             machine_name_edit: None,
@@ -3599,8 +3740,15 @@ impl App {
             preset_values: BTreeMap::new(),
             edited_preset_input: None,
             edited_tool_input: None,
+            selected_tool_parameter: None,
+            tool_info: None,
+            operation_tool_selector: None,
+            cad_selected_project_tool: None,
             preset_buffers: BTreeMap::new(),
             new_material_name: String::new(),
+            selected_material: None,
+            editing_material: None,
+            creating_material: false,
             material_force_inputs: BTreeMap::new(),
             cutting_force_inputs: BTreeMap::new(),
             show_materials: false,
@@ -3685,6 +3833,9 @@ impl App {
                 "Machine library {why}. Using the default machine; your file is untouched \
                  (a copy is beside it as machines.json.bak)."
             );
+        }
+        if let crate::config::ConfigLoad::Rejected(why) = &collection_load {
+            app.status = format!("Tool libraries {why}. Your file was preserved with a backup.");
         }
         if let crate::LibraryLoad::Rejected(why) = &library_load {
             app.status = format!(
@@ -3809,6 +3960,7 @@ impl App {
                 | Message::UseDrawingGeometry
                 | Message::BeginOp(_)
                 | Message::OperationToolPicked(_)
+                | Message::OperationProjectToolPicked(_)
         );
         let previous_status = self.status.clone();
         let context = self.output_context();
@@ -3836,6 +3988,47 @@ impl App {
     }
 
     fn update_message(&mut self, message: Message) -> iced::Task<Message> {
+        if matches!(message, Message::CadEscape) && self.library_context_menu.is_some() {
+            self.library_context_menu = None;
+            return iced::Task::none();
+        }
+        if matches!(message, Message::CadEscape) && self.library_renaming {
+            self.library_renaming = false;
+            self.library_name_edit = self.libraries.active.clone();
+            return iced::Task::none();
+        }
+        if self.operation_tool_selector.is_some() && matches!(message, Message::CadEscape) {
+            if self.tool_table_menu.is_some() {
+                self.tool_table_menu = None;
+            } else {
+                self.close_operation_tool_selector();
+            }
+            return iced::Task::none();
+        }
+        if self.operation_tool_selector.is_some()
+            && !operation_tool_selector::selector_message(&message)
+        {
+            return iced::Task::none();
+        }
+        if self.tool_info.is_some() && matches!(message, Message::CadEscape) {
+            self.tool_info = None;
+            return iced::Task::none();
+        }
+        if self.tool_info.is_some()
+            && !matches!(
+                &message,
+                Message::ToolInfoClose
+                    | Message::PollRun
+                    | Message::PollCadImport
+                    | Message::WindowResized(_)
+                    | Message::WindowCursor(_)
+                    | Message::ModifiersChanged(_)
+                    | Message::NoticeDismissed
+                    | Message::NoticeFilterChanged(..)
+            )
+        {
+            return iced::Task::none();
+        }
         if self.processing_time_dialog.is_some()
             && self.notice.is_none()
             && matches!(message, Message::CadEscape)
@@ -3922,6 +4115,7 @@ impl App {
                 &message,
                 Message::NoticeDismissed
                     | Message::NoticeBackdrop
+                    | Message::NoticeFilterChanged(..)
                     | Message::PollCadImport
                     | Message::PollRun
                     | Message::WindowResized(_)
@@ -3938,6 +4132,10 @@ impl App {
                 Message::NewTool
                     | Message::DeleteTool
                     | Message::ImportLibrary
+                    | Message::NewToolLibrary
+                    | Message::DeleteToolLibrary
+                    | Message::DeleteToolLibraryConfirmed((_, true))
+                    | Message::SelectToolLibrary(_)
                     | Message::LibMenuSetNumber
                     | Message::RenumberLibrary
                     | Message::RenumberConfirmed(true)
@@ -4108,6 +4306,13 @@ impl App {
             self.profile_tab_selection = None;
         }
         match message {
+            Message::TraverseFocus(backward) => {
+                return if backward {
+                    iced::widget::operation::focus_previous()
+                } else {
+                    iced::widget::operation::focus_next()
+                };
+            }
             Message::PollMcp => return self.poll_mcp(),
             Message::SimulationOption(option) => {
                 let continuous = matches!(option, SimulationOption::Tolerance(_));
@@ -4487,6 +4692,18 @@ impl App {
             }
             Message::StockToLeaveToggled(enabled) => {
                 let mut stock = self.stock_to_leave_with_fields();
+                if enabled
+                    && (!self.stock_to_leave_initialized
+                        || (self.stock_to_leave_draft.is_none() && !stock.enabled))
+                {
+                    stock.radial = if matches!(self.operation_draft, Some(Operation::Face(_))) {
+                        0.0
+                    } else {
+                        0.5
+                    };
+                    stock.axial = 0.5;
+                    self.stock_to_leave_initialized = true;
+                }
                 stock.enabled = enabled;
                 self.stock_to_leave_draft = Some(stock);
                 self.refresh_operation_fields();
@@ -4494,32 +4711,14 @@ impl App {
             Message::OperationPositionPick(kind) => self.begin_position_pick(kind),
             Message::OperationPositionClear(kind) => self.clear_operation_position(kind),
             Message::OperationPositionPicked(point) => self.pick_operation_surface_position(point),
+            Message::OpenOperationToolSelector => self.open_operation_tool_selector(),
+            Message::CloseOperationToolSelector => self.close_operation_tool_selector(),
+            Message::OperationProjectToolPicked(tool) => {
+                return self.choose_operation_tool(tool, true);
+            }
             Message::OperationToolPicked(index) => {
-                if self.creating_operation() {
-                    return self.update(Message::SetPendingLibraryTool(index));
-                }
-                if let (Some(tool), Selection::Operation(id)) = (
-                    self.library.tools.get(index).cloned(),
-                    self.controller.selection(),
-                ) {
-                    let Some(op) = self.current_operation(id) else {
-                        return iced::Task::none();
-                    };
-                    if !families_for(AppController::operation_kind(op))
-                        .contains(&ToolKindPick::of(tool.kind))
-                    {
-                        self.status =
-                            "This cutter kind is not supported by the selected operation.".into();
-                        return iced::Task::none();
-                    }
-                    let number = self.stage_operation_tool(tool);
-                    self.edit_operation_draft(|op| {
-                        op.set_tool(number);
-                        op.clear_tool_preset();
-                    });
-                    self.refresh_operation_fields();
-                    self.auto_operation_preset();
-                    self.refresh_cutting_fields(None);
+                if let Some(tool) = self.library.tools.get(index).cloned() {
+                    return self.choose_operation_tool(tool, false);
                 }
             }
             Message::EditDrawingGeometry(id) => {
@@ -5475,7 +5674,20 @@ impl App {
                     d.drawings.clear();
                 }
             }
+            Message::ToolInfoOpen(tool) => self.tool_info = Some(tool),
+            Message::ToolInfoClose => self.tool_info = None,
+            Message::ToolParameterFocus(field, focused) => {
+                if focused && self.library_mode() {
+                    self.selected_tool_parameter = Some(field);
+                }
+            }
             Message::CheckHeightFocus => {
+                if self.library_mode() {
+                    return iced::Task::batch(self.inspector_fields().into_iter().map(|field| {
+                        iced::widget::operation::is_focused(tool_drawing::parameter_id(field))
+                            .map(move |focused| Message::ToolParameterFocus(field, focused))
+                    }));
+                }
                 if self.operation_tab == OperationTab::Heights
                     && matches!(self.controller.selection(), Selection::Operation(_))
                 {
@@ -5496,6 +5708,7 @@ impl App {
             Message::FieldChanged(field, value) => {
                 if self.library_mode() {
                     self.edited_tool_input = Some(field);
+                    self.selected_tool_parameter = Some(field);
                 }
                 if matches!(field, Field::MajorDia | Field::Pitch) {
                     self.thread_parameters.mode = thread_parameters::ThreadMatchMode::Manual;
@@ -5660,6 +5873,7 @@ impl App {
             }
             Message::ProjectToSave(Some(path)) => self.save_to(&path),
             Message::ExportLibrary => {
+                self.library_context_menu = None;
                 return iced::Task::perform(
                     pick_save("OpenCAMStudio tool library", "tools.ocam", &["ocam"]),
                     Message::LibraryToExport,
@@ -5675,7 +5889,112 @@ impl App {
                     Err(e) => format!("Library export failed: {e}"),
                 };
             }
+            Message::ToggleLibrarySidebar => {
+                self.settings.tool_table.library_sidebar_collapsed =
+                    !self.settings.tool_table.library_sidebar_collapsed;
+                self.library_sidebar_drag = None;
+                self.library_context_menu = None;
+                self.settings.save();
+            }
+            Message::LibrarySidebarResizeStart => {
+                self.library_sidebar_drag = Some((
+                    self.window_cursor.x,
+                    self.settings.tool_table.library_sidebar_width,
+                ));
+            }
+            Message::SelectToolLibrary(name) => self.switch_tool_library(name),
+            Message::OpenLibraryContextMenu(name) => {
+                if self.library_mode()
+                    && (self.inspector_dirty() || !self.tool_drafts.is_empty())
+                    && name != self.libraries.active
+                {
+                    self.status = "OK or Cancel tool changes before changing the library.".into();
+                } else {
+                    self.switch_tool_library(name);
+                    self.library_context_menu = Some(self.window_cursor);
+                }
+            }
+            Message::CloseLibraryContextMenu => self.library_context_menu = None,
+            Message::BeginLibraryRename => {
+                self.library_context_menu = None;
+                self.library_name_edit = self.libraries.active.clone();
+                self.library_renaming = true;
+            }
+            Message::CancelLibraryRename => {
+                self.library_renaming = false;
+                self.library_name_edit = self.libraries.active.clone();
+            }
+            Message::LibraryNameChanged(name) => self.library_name_edit = name,
+            Message::RenameToolLibrary => {
+                let name = self.library_name_edit.trim().to_string();
+                if name.is_empty()
+                    || (name != self.libraries.active
+                        && self.libraries.libraries.contains_key(&name))
+                {
+                    self.status = "Enter a unique, non-empty library name.".into();
+                } else if name != self.libraries.active {
+                    self.libraries.libraries.remove(&self.libraries.active);
+                    self.libraries.active = name.clone();
+                    self.library_name_edit = name;
+                    self.save_tool_libraries();
+                    self.library_renaming = false;
+                } else {
+                    self.library_renaming = false;
+                }
+            }
+            Message::NewToolLibrary => {
+                self.library_context_menu = None;
+                if self.library_mode() && self.inspector_dirty() {
+                    self.status =
+                        "Apply or discard the current tool edits before creating a library.".into();
+                    return iced::Task::none();
+                }
+                let name = self.libraries.unique_name("New library");
+                self.libraries
+                    .libraries
+                    .insert(name.clone(), ToolLibrary::default());
+                self.switch_tool_library(name);
+            }
+            Message::DeleteToolLibrary => {
+                self.library_context_menu = None;
+                return iced::Task::perform(
+                    confirm_delete_library(
+                        self.libraries.active.clone(),
+                        self.libraries.libraries.len() == 1,
+                    ),
+                    Message::DeleteToolLibraryConfirmed,
+                );
+            }
+            Message::DeleteToolLibraryConfirmed((name, confirmed)) => {
+                if confirmed && name == self.libraries.active {
+                    self.libraries.libraries.remove(&name);
+                    if self.libraries.libraries.is_empty() {
+                        self.libraries
+                            .libraries
+                            .insert("Default tools".into(), ToolLibrary::defaults());
+                    }
+                    let next = self.libraries.libraries.keys().next().cloned().unwrap();
+                    self.libraries.active = next.clone();
+                    self.library_name_edit = next.clone();
+                    self.library = self.libraries.libraries[&next].clone();
+                    self.lib_sel = 0;
+                    self.tool_drafts.clear();
+                    self.reload_tool_edit();
+                    if let Some(player) = &mut self.simulation {
+                        player.sync_force_material(&self.library);
+                    }
+                    self.save_tool_libraries();
+                    self.status = format!("Deleted tool library ‘{name}’.");
+                }
+            }
             Message::ImportLibrary => {
+                self.library_context_menu = None;
+                if self.library_mode() && self.inspector_dirty() {
+                    self.status =
+                        "Apply or discard the current tool edits before importing a library."
+                            .into();
+                    return iced::Task::none();
+                }
                 return iced::Task::perform(
                     pick_open("Tool library (.ocam or Fusion .tools)", &["ocam", "tools"]),
                     Message::LibraryToImport,
@@ -5699,13 +6018,13 @@ impl App {
                     Ok(text) => match OcamFile::from_json(&text) {
                         Ok(OcamFile::Library(lib)) => {
                             let n = lib.tools.len();
-                            self.library = lib;
-                            if let Some(player) = &mut self.simulation {
-                                player.sync_force_material(&self.library);
-                            }
-                            self.library.save(); // becomes the working (config-dir) library
-                            self.lib_sel = 0;
-                            self.reload_tool_edit();
+                            let base = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Imported library");
+                            let name = self.libraries.unique_name(base);
+                            self.libraries.libraries.insert(name.clone(), lib);
+                            self.switch_tool_library(name);
                             format!("Imported {n} tool(s) from {}.", path.display())
                         }
                         Ok(OcamFile::Project(_)) => {
@@ -5745,7 +6064,7 @@ impl App {
                     }
                     let count = self.library.tools.len() - first;
                     if count > 0 {
-                        self.library.save();
+                        self.save_tool_libraries();
                         self.lib_sel = first;
                         self.reload_tool_edit();
                     }
@@ -5783,6 +6102,11 @@ impl App {
                         self.status = error.clone();
                         return self.queue_notice(Notice {
                             title: "Cannot replace model".into(),
+                            entries: vec![notices::NoticeEntry {
+                                severity: Severity::Error,
+                                message: error.clone(),
+                                source: None,
+                            }],
                             detail: error,
                             error: true,
                         });
@@ -5801,6 +6125,11 @@ impl App {
                     self.status =
                         "Model removed. Dependent operations need reselection; Undo restores it."
                             .into();
+                }
+            }
+            Message::NoticeFilterChanged(index, value) => {
+                if let Some(filter) = self.notice_filters.get_mut(index) {
+                    *filter = value;
                 }
             }
             Message::NoticeBackdrop => {}
@@ -6462,6 +6791,7 @@ impl App {
                 }
             }
             Message::BeginOp(kind) => {
+                self.cad_selected_project_tool = None;
                 if self.controller.setups().is_empty() {
                     self.status =
                         "Select a model or body and create a setup before adding an operation."
@@ -6559,6 +6889,7 @@ impl App {
                 };
             }
             Message::SetPendingLibraryTool(i) => {
+                self.cad_selected_project_tool = None;
                 if let Some(tool) = self.library.tools.get(i).cloned() {
                     if let Some(op) = self.operation_draft.as_ref() {
                         if !families_for(AppController::operation_kind(op))
@@ -6580,7 +6911,9 @@ impl App {
                 }
             }
             Message::CancelOp => {
-                self.cutting_force_inputs.remove(&(self.controller.inspection_setup().id, None));
+                self.cad_selected_project_tool = None;
+                self.cutting_force_inputs
+                    .remove(&(self.controller.inspection_setup().id, None));
                 self.geometry_editor = None;
                 self.cad_pending_kind = None;
                 self.cad_filter_explicit = false;
@@ -6612,8 +6945,11 @@ impl App {
                     match result {
                         Ok(id) => {
                             let setup_id = self.controller.inspection_setup().id;
-                            if let Some(inputs) = self.cutting_force_inputs.remove(&(setup_id, None)) {
-                                self.cutting_force_inputs.insert((setup_id, Some(id)), inputs);
+                            if let Some(inputs) =
+                                self.cutting_force_inputs.remove(&(setup_id, None))
+                            {
+                                self.cutting_force_inputs
+                                    .insert((setup_id, Some(id)), inputs);
                             }
                             // The creation draft was used to stage the allowance, but
                             // the committed setup is now the source of truth for the
@@ -7316,6 +7652,83 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::ChamferExitEnabled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Chamfer(c) = op {
+                        c.lead_out_enabled = Some(enabled);
+                        if enabled && c.lead_out == Lead::None {
+                            c.lead_out = Lead::Arc { radius: 0.6 };
+                        }
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ChamferEntryEnabled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Chamfer(c) = op {
+                        c.lead_in_enabled = Some(enabled);
+                        if !enabled && c.same_lead_out && c.lead_out == Lead::None {
+                            c.lead_out = if c.lead_in == Lead::None {
+                                Lead::Arc { radius: 0.6 }
+                            } else {
+                                c.lead_in
+                            };
+                        }
+                        if enabled && c.lead_in == Lead::None {
+                            c.lead_in = Lead::Arc { radius: 0.6 };
+                        }
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ChamferSameLeadOut(same) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Chamfer(c) = op {
+                        let entry_enabled =
+                            c.lead_in != Lead::None && c.lead_in_enabled.unwrap_or(true);
+                        let exit_enabled = c.lead_out_enabled.unwrap_or(true)
+                            && (c.lead_out != Lead::None || (c.same_lead_out && entry_enabled));
+                        if !same && c.same_lead_out && exit_enabled && c.lead_out == Lead::None {
+                            c.lead_out = c.lead_in;
+                        }
+                        c.same_lead_out = same;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::PlungeKindChanged(kind) => {
                 self.edit_operation_draft(|op| match op {
                     Operation::Profile(p) => p.plunge = kind.to_plunge(),
@@ -7365,6 +7778,46 @@ impl App {
                 self.edit_operation_draft(|op| {
                     if let Operation::Parallel(p) = op {
                         p.params.both_ways = on;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ParallelScallopToggled(on) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop = on;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ScallopSmoothingToggled(on) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop_smoothing = on;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ScallopRetractionChanged(policy) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop_retraction = policy;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ScallopOrderChanged(order) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Parallel(p) = op {
+                        p.params.scallop_order = order;
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::PocketKeepToolDownToggled(on) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Pocket(p) = op {
+                        p.clear.keep_tool_down = on;
                     }
                 });
                 self.refresh_operation_fields();
@@ -7610,6 +8063,8 @@ impl App {
             Message::CloseMaterials => {
                 // Valid entries are saved immediately; abandon incomplete input on close.
                 self.material_force_inputs.clear();
+                self.editing_material = None;
+                self.creating_material = false;
                 self.show_materials = false;
             }
             Message::ToolDetailChanged(field, value) => {
@@ -7660,11 +8115,41 @@ impl App {
                     };
                 }
             }
+            Message::SelectMaterial(id) => {
+                self.selected_material = Some(id);
+                self.editing_material = None;
+                self.creating_material = false;
+            }
+            Message::NewMaterial => {
+                self.creating_material = true;
+                self.editing_material = None;
+                self.new_material_name.clear();
+            }
+            Message::EditMaterialRow(id) => {
+                self.selected_material = Some(id);
+                self.editing_material = Some(id);
+                self.creating_material = false;
+            }
+            Message::EditMaterial => {
+                self.editing_material = self.selected_material;
+                self.creating_material = false;
+            }
             Message::NewMaterialNameChanged(name) => self.new_material_name = name,
             Message::AddMaterial => self.add_managed_material(),
+            Message::AddStarterMaterials => {
+                let count = self.library.add_starter_materials();
+                if count > 0 {
+                    self.save_tool_libraries();
+                }
+                self.status = format!("Added {count} starter material(s).");
+            }
             Message::MaterialRenamed(id, name) => self.rename_managed_material(id, name),
-            Message::MaterialCuttingForceChanged(id, value) => self.edit_material_cutting_force(id, value),
-            Message::CuttingForceCustomToggled(id, enabled) => self.toggle_custom_cutting_force(id, enabled),
+            Message::MaterialCuttingForceChanged(id, value) => {
+                self.edit_material_cutting_force(id, value)
+            }
+            Message::CuttingForceCustomToggled(id, enabled) => {
+                self.toggle_custom_cutting_force(id, enabled)
+            }
             Message::CuttingForceInputChanged(id, index, value) => {
                 let key = self.cutting_force_key(id);
                 if let Some(inputs) = self.cutting_force_inputs.get_mut(&key) {
@@ -7686,7 +8171,7 @@ impl App {
                     .map(|t| t.kind)
                     .unwrap_or(ToolKind::EndMill);
                 self.lib_sel = self.library.add_of_kind(seed_kind);
-                self.library.save();
+                self.save_tool_libraries();
                 if self.controller.pending_op().is_some() {
                     if let Some(tool) = self.library.tools.get(self.lib_sel).cloned() {
                         let number = self.controller.use_tool(tool);
@@ -7699,7 +8184,7 @@ impl App {
                 if self.lib_sel < self.library.tools.len() && self.library.tools.len() > 1 {
                     self.library.tools.remove(self.lib_sel);
                     self.lib_sel = self.lib_sel.min(self.library.tools.len() - 1);
-                    self.library.save();
+                    self.save_tool_libraries();
                     self.reload_tool_edit();
                 }
             }
@@ -7721,7 +8206,7 @@ impl App {
                     .cloned();
                 if let Some(tool) = tool {
                     self.library.add_tool(tool);
-                    self.library.save();
+                    self.save_tool_libraries();
                     let report = self.controller.reconcile_tools(&self.library.tools);
                     self.refresh_fields();
                     self.status = match report.summary() {
@@ -7766,6 +8251,9 @@ impl App {
                 }
             }
             Message::ToolColumnRelease => {
+                if self.library_sidebar_drag.take().is_some() {
+                    self.settings.save();
+                }
                 let had_drag = self.tool_table_drag.is_some();
                 if let Some(workspace_view::ToolColumnDrag::Reorder {
                     column,
@@ -7889,7 +8377,7 @@ impl App {
                         .and_then(|s| s.trim().parse::<u32>().ok())
                     {
                         self.library.set_number(menu.index, n);
-                        self.library.save();
+                        self.save_tool_libraries();
                         self.reload_tool_edit();
                     }
                 }
@@ -7912,7 +8400,7 @@ impl App {
             Message::RenumberConfirmed(true) => {
                 let order = self.renumber_order();
                 self.library.set_numbers_in_order(&order);
-                self.library.save();
+                self.save_tool_libraries();
                 self.reload_tool_edit();
                 self.status = "Renumbered the tool library.".to_string();
             }
@@ -7947,6 +8435,10 @@ impl App {
             Message::WindowCursor(p) => {
                 self.window_cursor = p;
                 self.tree_pointer_moved(p);
+                if let Some((start_x, width)) = self.library_sidebar_drag {
+                    self.settings.tool_table.library_sidebar_width =
+                        (width + p.x - start_x).clamp(180.0, 480.0);
+                }
                 if let Some(workspace_view::ToolColumnDrag::Resize {
                     column,
                     start_x,
@@ -8045,12 +8537,23 @@ impl App {
             // Track the window-absolute cursor so overlays (the op context menu)
             // anchor exactly under the pointer — widget-local positions are offset
             // by the pane's origin, which is what caused the menu to appear astray.
-            iced::event::listen_with(|event, _status, _window| match event {
+            iced::event::listen_with(|event, status, _window| match event {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::Tree(TreeMessage::Release)),
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::WindowCursor(position))
+                }
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
+                    modifiers,
+                    ..
+                }) if status == iced::event::Status::Ignored
+                    && !modifiers.control()
+                    && !modifiers.alt()
+                    && !modifiers.logo() =>
+                {
+                    Some(Message::TraverseFocus(modifiers.shift()))
                 }
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::F8),
@@ -8268,6 +8771,9 @@ impl App {
     }
 
     fn remember_tool_table(&mut self) {
+        if self.operation_tool_selector.is_some() {
+            return;
+        }
         let prefs = &mut self.settings.tool_table;
         prefs.visible = self.tool_table_columns;
         prefs.widths = self.tool_table_widths;
@@ -8428,6 +8934,7 @@ impl App {
     /// field buffers from it. Called at every "load" point (tool selection, New, Delete,
     /// tab switch, post-Apply), but *not* on an in-place field/picker edit.
     fn reload_tool_edit(&mut self) {
+        self.selected_tool_parameter = None;
         self.show_preset_editor = false;
         self.preset_editor_snapshot = None;
         self.library_preset = None;
@@ -8614,6 +9121,10 @@ impl App {
     /// the cutting disc, …), so the help matches the (kind-aware) label. Non-tool fields,
     /// and kinds where the generic wording already fits, fall back to `field.help()`.
     fn field_help(&self, field: Field) -> &'static str {
+        if field == Field::ProfileOffset && self.geometry_operation_kind() == Some(OpKind::Profile)
+        {
+            return profile_parameters::WALL_ALLOWANCE_HELP;
+        }
         if field == Field::LiftHeight && self.geometry_operation_kind() == Some(OpKind::Parallel) {
             return "Lift above neighboring surface passes when Keep tool down is enabled, in millimetres. 0 continues the finishing cut along the surface without an added lift. With Keep tool down disabled, all passes retract to clearance. Gaps and unsafe transitions still use clearance; use on pre-roughed stock.";
         }
@@ -9398,7 +9909,7 @@ impl App {
             ) {
                 *slot = edit;
             }
-            self.library.save();
+            self.save_tool_libraries();
             self.reload_tool_edit();
             return;
         }
@@ -9696,10 +10207,20 @@ impl App {
                 .on_press(Message::CloseToolMenu);
             layers = layers.push(catcher).push(menu);
         }
+        if let Some(menu) = self.library_context_menu_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::CloseLibraryContextMenu);
+            layers = layers.push(catcher).push(menu);
+        }
         if let Some(menu) = self.lib_menu_overlay() {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::CloseLibMenu);
             layers = layers.push(catcher).push(menu);
+        }
+        if let Some(dialog) = self.operation_tool_selector_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::CloseOperationToolSelector);
+            layers = layers.push(catcher).push(dialog);
         }
         if let Some(menu) = self.tool_table_menu_overlay() {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
@@ -9729,6 +10250,11 @@ impl App {
         if let Some(dialog) = self.processing_time_overlay() {
             let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::ProcessingTimeClose);
+            layers = layers.push(catcher).push(dialog);
+        }
+        if let Some(dialog) = self.tool_info_overlay() {
+            let catcher = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::ToolInfoClose);
             layers = layers.push(catcher).push(dialog);
         }
         if let Some(dialog) = self.notice_overlay() {
@@ -10269,6 +10795,49 @@ impl App {
         Some(positioned.into())
     }
 
+    fn library_context_menu_overlay(&self) -> Option<Element<'_, Message>> {
+        let pos = self.library_context_menu?;
+        let item = |label: &'static str, message| {
+            button(text(label).size(13))
+                .width(Length::Fill)
+                .padding([6, 10])
+                .on_press(message)
+                .style(|_, status| command_button_style(status))
+        };
+        let popup = container(column![
+            item("New library", Message::NewToolLibrary),
+            item("Import library…", Message::ImportLibrary),
+            item("Rename", Message::BeginLibraryRename),
+            item("Export library…", Message::ExportLibrary),
+            item("Delete", Message::DeleteToolLibrary),
+        ])
+        .width(190)
+        .padding(4)
+        .style(|_| container::Style {
+            background: Some(Background::Color(palette::RIBBON_BG)),
+            border: Border {
+                color: palette::BORDER_DARK,
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            ..container::Style::default()
+        });
+        Some(
+            container(popup)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding {
+                    top: pos.y.min((self.window.height - 190.0).max(0.0)),
+                    left: pos.x.min((self.window.width - 200.0).max(0.0)),
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
+        )
+    }
+
     /// The Library-pane right-click menu, anchored under the cursor. Shows a "Set number…"
     /// item that morphs into a small number input (Enter or Set commits; swaps on clash).
     fn lib_menu_overlay(&self) -> Option<Element<'_, Message>> {
@@ -10485,7 +11054,11 @@ impl App {
                         "3D Adaptive Clearing",
                         begin(OpKind::Adaptive),
                     ),
-                    cmd(Icon::Parallel, "3D Parallel", begin(OpKind::Parallel)),
+                    cmd(
+                        Icon::Parallel,
+                        "3D Parallel / Scallop",
+                        begin(OpKind::Parallel),
+                    ),
                 ],
             }],
             RibbonTab::Machinery => vec![GroupSpec {
@@ -11961,6 +12534,7 @@ fn op_kind(op: &Operation) -> &'static str {
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
         Operation::Adaptive(_) => "3D Adaptive Clearing",
+        Operation::Parallel(o) if o.params.scallop => "3D Scallop",
         Operation::Parallel(_) => "3D Parallel",
     }
 }
@@ -11982,6 +12556,18 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (op, Field::LeadOutFeed) => Some(op.entry_feeds().lead_out.unwrap_or(0.)),
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
         (Operation::Profile(o), Field::Profile(n)) => Some(n.get(o)),
+        (Operation::Chamfer(o), Field::Profile(profile_parameters::Number::LeadInSweep)) => {
+            Some(match o.lead_in {
+                Lead::ArcSweep { angle_deg, .. } => angle_deg,
+                _ => 90.,
+            })
+        }
+        (Operation::Chamfer(o), Field::Profile(profile_parameters::Number::LeadOutSweep)) => {
+            Some(match o.lead_out {
+                Lead::ArcSweep { angle_deg, .. } => angle_deg,
+                _ => 90.,
+            })
+        }
         (Operation::Profile(o), Field::Stepover) => Some(o.stepover),
         (Operation::Profile(o), Field::TabWidth) => Some(o.tabs.width),
         (Operation::Profile(o), Field::TabHeight) => Some(o.tabs.height),
@@ -12047,6 +12633,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Chamfer(o), Field::ChamferTop) => Some(o.top),
         (Operation::Chamfer(o), Field::ChamferWidth) => Some(o.width),
         (Operation::Chamfer(o), Field::ChamferDepth) => Some(o.depth),
+        (Operation::Chamfer(o), Field::ChamferTipOffset) => Some(o.tip_offset),
         (Operation::Chamfer(o), Field::ChamferStep) => Some(o.step),
         (Operation::Chamfer(o), Field::Stepdown) => Some(o.stepdown),
         (Operation::Chamfer(o), Field::Feed) => Some(o.feed),
@@ -12080,6 +12667,12 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Thread(o), Field::PlungeFeed) => Some(o.plunge_feed),
         (Operation::Parallel(o), Field::ParallelStepover) => Some(o.params.stepover),
         (Operation::Parallel(o), Field::ParallelAngle) => Some(o.params.angle),
+        (Operation::Parallel(o), Field::ScallopSafeDistance) => {
+            Some(o.params.scallop_safe_distance)
+        }
+        (Operation::Parallel(o), Field::ScallopSmoothingTolerance) => {
+            Some(o.params.scallop_smoothing_tolerance)
+        }
         (Operation::Parallel(o), Field::AdaptiveTolerance) => Some(o.params.tolerance),
         (Operation::Parallel(o), Field::AdaptiveOffset) => Some(o.params.additional_offset),
         (Operation::Parallel(o), Field::Feed) => Some(o.params.feed),
@@ -12273,6 +12866,24 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
         }
         Operation::Chamfer(o) => {
+            for (field, lead) in [
+                (
+                    Field::Profile(profile_parameters::Number::LeadInSweep),
+                    &mut o.lead_in,
+                ),
+                (
+                    Field::Profile(profile_parameters::Number::LeadOutSweep),
+                    &mut o.lead_out,
+                ),
+            ] {
+                if let Some(angle_deg) =
+                    get(field).filter(|v| v.is_finite() && *v > 0. && *v <= 170.)
+                {
+                    if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = *lead {
+                        *lead = Lead::ArcSweep { radius, angle_deg };
+                    }
+                }
+            }
             // Deliberately unclamped: an edge below the part datum is an ordinary
             // thing to chamfer, so a negative Z is a value, not a mistake.
             if let Some(v) = get(Field::ChamferTop) {
@@ -12283,6 +12894,9 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
             if let Some(v) = get(Field::ChamferDepth) {
                 o.depth = v.max(0.0);
+            }
+            if let Some(v) = get(Field::ChamferTipOffset) {
+                o.tip_offset = v;
             }
             if let Some(v) = get(Field::ChamferStep) {
                 o.step = v.max(0.0);
@@ -12390,6 +13004,12 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             }
             if let Some(v) = get(Field::ParallelAngle) {
                 o.params.angle = v;
+            }
+            if let Some(v) = get(Field::ScallopSafeDistance) {
+                o.params.scallop_safe_distance = v;
+            }
+            if let Some(v) = get(Field::ScallopSmoothingTolerance) {
+                o.params.scallop_smoothing_tolerance = v;
             }
             if let Some(v) = get(Field::AdaptiveTolerance) {
                 o.params.tolerance = v;
@@ -12661,7 +13281,9 @@ fn field_row_labeled<'a>(
         .on_input(move |v| Message::FieldChanged(field, v))
         .on_submit(Message::Apply)
         .width(Length::Fixed(INSPECTOR_INPUT_W));
-    if operation_tabs::field_tab(field) == OperationTab::Heights {
+    if tool_drawing::is_parameter(field) {
+        input = input.id(tool_drawing::parameter_id(field));
+    } else if operation_tabs::field_tab(field) == OperationTab::Heights {
         input = input.id(height_planes::field_id(field));
     }
     if invalid {
@@ -12718,8 +13340,15 @@ fn profile_picker_w<T>(
 where
     T: ToString + PartialEq + Clone + 'static,
 {
-    row![
-        label_help(label.to_string(), help, show),
+    let whole_row_help = [
+        help::LEAD_IN,
+        help::LEAD_OUT,
+        profile_parameters::CUT_ORDER_HELP,
+        profile_parameters::CORNER_HELP,
+    ]
+    .contains(&help);
+    let row = row![
+        label_help(label.to_string(), help, show && !whole_row_help),
         pick_list(options, Some(selected), on_select)
             .text_size(12)
             .padding([7, 9])
@@ -12727,8 +13356,12 @@ where
             .width(Length::Fixed(width)),
     ]
     .spacing(8)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    if whole_row_help {
+        help_wrap(row, help, show)
+    } else {
+        row.into()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -14397,325 +15030,6 @@ impl shader::Primitive for ScenePrimitive {
     }
 }
 
-/// A 2D cross-section preview of a tool's generatrix (TOOLING_PLAN Phase 5), shown in
-/// place of the 3D backplot while a tool is being edited. The generatrix is mirrored
-/// about the axis for a full-silhouette read; **cutting** surfaces draw as a solid,
-/// thicker line and **non-cutting** (shank/neck/top) as a thin **dashed** line — the
-/// distinction is by *linestyle, never hue* (colour-blind-safe). A few dimension labels
-/// annotate the driving values.
-#[allow(dead_code)] // Existing 2D preview retained alongside the main 3D tool view.
-struct ToolCanvas {
-    profile: cam_geo::Profile2D,
-    diameter: f64,
-    length: f64,
-    flute_length: f64,
-    flutes: u32,
-    cutting_direction: CutDir,
-    /// Whether to draw the flute helix at all (off for V-bits).
-    draw_flutes: bool,
-    /// Axial advance per helix turn (drill bits ≈ 3·⌀ for a realistic pitch; other
-    /// kinds do one turn over the cutting region).
-    flute_pitch: f64,
-    /// Sign of the helix lean (+1 leans one way, −1 the other). Derived from the
-    /// cutting direction, but inverted for a twist drill so it reads right-hand.
-    flute_sign: f64,
-    /// Draw a row of 90° square inserts seated at the bottom of the body (face mills),
-    /// so the silhouette reads as a real shell mill rather than a bare inverted-T.
-    draw_face_inserts: bool,
-}
-
-impl ToolCanvas {
-    #[allow(dead_code)] // Constructor for the retained 2D preview.
-    fn new(tool: &cam_model::Tool) -> Self {
-        let profile = tool.profile();
-        // The flute helix spans the actual cutting region — the flute length for an end
-        // mill, the cone for a V-bit / drill — read off the profile's cutting segments.
-        let cutting_top = profile
-            .segs
-            .iter()
-            .filter(|s| s.cutting)
-            .map(|s| s.end.y)
-            .fold(0.0_f64, f64::max);
-        let cutting_top = cutting_top.max(1e-3);
-        Self {
-            diameter: tool.diameter,
-            length: tool.length,
-            flute_length: cutting_top,
-            flutes: tool.flutes,
-            cutting_direction: tool.cutting_direction,
-            // V-bits, chamfer mills, face mills and thread mills show no flute helix (the
-            // cone / shell-mill body / thread teeth read cleaner without it); a drill's
-            // helix revolves every ~3·⌀.
-            draw_flutes: !matches!(
-                tool.kind,
-                ToolKind::VBit { .. }
-                    | ToolKind::ChamferMill { .. }
-                    | ToolKind::FaceMill
-                    | ToolKind::ThreadMill { .. }
-            ),
-            flute_pitch: match tool.kind {
-                ToolKind::Drill { .. } => (3.0 * tool.diameter).max(1e-3),
-                _ => cutting_top,
-            },
-            flute_sign: {
-                let base = if tool.cutting_direction == CutDir::Up {
-                    1.0
-                } else {
-                    -1.0
-                };
-                // A twist drill leans the opposite way to a down-cut end mill.
-                if matches!(tool.kind, ToolKind::Drill { .. }) {
-                    -base
-                } else {
-                    base
-                }
-            },
-            draw_face_inserts: matches!(tool.kind, ToolKind::FaceMill),
-            profile,
-        }
-    }
-}
-
-impl canvas::Program<Message> for ToolCanvas {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &iced::Renderer,
-        theme: &iced::Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        use iced::Point as P;
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let fg = theme.palette().text;
-        let faint = Color { a: 0.4, ..fg };
-
-        let max_r = self.profile.max_radius().max(1e-3) as f32;
-        let height = self.profile.height().max(1e-3) as f32;
-        let margin = 28.0_f32;
-        let avail_w = (bounds.width - 2.0 * margin).max(1.0);
-        let avail_h = (bounds.height - 2.0 * margin).max(1.0);
-        // Fit the *mirrored* silhouette (width 2·max_r) and the height, keeping aspect.
-        let scale = (avail_w / (2.0 * max_r)).min(avail_h / height);
-        let cx = bounds.width / 2.0;
-        let bottom = bounds.height - margin;
-        let map = |r: f64, z: f64, sign: f32| {
-            P::new(cx + sign * (r as f32) * scale, bottom - (z as f32) * scale)
-        };
-
-        // Axis of revolution: a faint dashed vertical line spanning the whole viewport
-        // (top to bottom), not just the tool's extent — a full symmetry reference.
-        let axis_dash = [4.0_f32, 4.0];
-        let axis = canvas::Path::line(P::new(cx, 0.0), P::new(cx, bounds.height));
-        frame.stroke(
-            &axis,
-            canvas::Stroke {
-                line_dash: canvas::LineDash {
-                    segments: &axis_dash,
-                    offset: 0,
-                },
-                ..canvas::Stroke::default().with_color(faint).with_width(1.0)
-            },
-        );
-
-        // The generatrix, per segment, mirrored to both sides.
-        let dash = [5.0_f32, 4.0];
-        for (pts, cutting) in self.profile.segment_polylines(0.05) {
-            for sign in [1.0_f32, -1.0] {
-                let path = canvas::Path::new(|b| {
-                    let mut first = true;
-                    for p in &pts {
-                        let sp = map(p.x, p.y, sign);
-                        if first {
-                            b.move_to(sp);
-                            first = false;
-                        } else {
-                            b.line_to(sp);
-                        }
-                    }
-                });
-                let stroke = if cutting {
-                    canvas::Stroke::default().with_color(fg).with_width(2.2)
-                } else {
-                    canvas::Stroke {
-                        line_dash: canvas::LineDash {
-                            segments: &dash,
-                            offset: 0,
-                        },
-                        ..canvas::Stroke::default().with_color(fg).with_width(1.2)
-                    }
-                };
-                frame.stroke(&path, stroke);
-            }
-        }
-
-        // Face-mill inserts: a row of small 90° squares seated on the bottom face, their
-        // outer edges defining the cutting ⌀ — turns the bare body+arbor silhouette into a
-        // recognisable shell mill. (90° square inserts only; other insert shapes deferred.)
-        if self.draw_face_inserts {
-            let r = self.profile.max_radius();
-            let body_h = self.flute_length.max(1e-3);
-            let n = self.flutes.max(1);
-            // Insert side: a small glyph, never taller than the body (min-then-max avoids
-            // clamp's panic when the body is shorter than the floor).
-            let s = (r * 0.22).min(body_h * 0.6).max(0.1);
-            let insert_fill = Color { a: 0.30, ..fg };
-            for i in 0..n {
-                // Centres span the diameter; the two end inserts sit at ±(r − s/2) so
-                // their outer edge lands exactly on the periphery (±r).
-                let cxi = if n == 1 {
-                    0.0
-                } else {
-                    -(r - s / 2.0) + (i as f64) * (2.0 * (r - s / 2.0)) / ((n - 1) as f64)
-                };
-                let (x0, x1) = (cxi - s / 2.0, cxi + s / 2.0);
-                let rect = canvas::Path::new(|b| {
-                    b.move_to(map(x0, 0.0, 1.0));
-                    b.line_to(map(x1, 0.0, 1.0));
-                    b.line_to(map(x1, s, 1.0));
-                    b.line_to(map(x0, s, 1.0));
-                    b.close();
-                });
-                frame.fill(&rect, insert_fill);
-                frame.stroke(
-                    &rect,
-                    canvas::Stroke::default().with_color(fg).with_width(1.2),
-                );
-            }
-        }
-
-        // (Thread-mill teeth are part of the generatrix now — the saw-tooth is the cutting
-        // boundary itself — so there is no separate overlay: the profile loop above draws
-        // the threads solid and the non-cutting bottom/shank dashed.)
-
-        // Flutes + cutting direction. Each flute is projected onto the side view, drawn
-        // only where it faces the viewer, and **tapered to the tool's actual radius at
-        // that height** (`radius_at`) so on a ball / rounded nose the flutes converge at
-        // the tip instead of running full width. Count the lines for the flute number; a
-        // helical lean shows the cutting direction (Down vs Up), while straight (axial)
-        // flutes read as vertical. (Helix pitch = one turn over the flute length is a
-        // legibility choice, not the true helix angle.)
-        use std::f64::consts::{PI, TAU};
-        let boundary = self.profile.polyline(0.05);
-        let radius_at = |z: f64| -> f64 {
-            let mut best = 0.0_f64;
-            for w in boundary.windows(2) {
-                let (a, b) = (w[0], w[1]);
-                if z + 1e-9 < a.y.min(b.y) || z - 1e-9 > a.y.max(b.y) {
-                    continue;
-                }
-                let r = if (b.y - a.y).abs() < 1e-9 {
-                    a.x.max(b.x)
-                } else {
-                    let t = ((z - a.y) / (b.y - a.y)).clamp(0.0, 1.0);
-                    a.x + t * (b.x - a.x)
-                };
-                best = best.max(r);
-            }
-            best
-        };
-        if self.draw_flutes {
-            let n = self.flutes.max(1);
-            let flute_len = self.flute_length.max(1e-3);
-            let pitch = self.flute_pitch.max(1e-3);
-            let flute_col = Color { a: 0.75, ..fg };
-            // More samples when the helix wraps more times (keeps a tight drill smooth).
-            let turns = (flute_len / pitch).max(1.0);
-            let steps = ((48.0 * turns).ceil() as usize).clamp(48, 240);
-
-            let mut flute_paths: Vec<Vec<P>> = Vec::new();
-            match self.cutting_direction {
-                CutDir::Straight => {
-                    // ~N/2 visible front flutes, spread across the width, tapering to the tip.
-                    let front = n.div_ceil(2).max(1);
-                    for j in 0..front {
-                        let theta = ((j as f64 + 0.5) / front as f64) * PI - PI / 2.0;
-                        let pts = (0..=steps)
-                            .map(|i| {
-                                let z = flute_len * (i as f64) / (steps as f64);
-                                map(radius_at(z) * theta.sin(), z, 1.0)
-                            })
-                            .collect();
-                        flute_paths.push(pts);
-                    }
-                }
-                _ => {
-                    let s = self.flute_sign;
-                    for k in 0..n {
-                        let psi0 = (k as f64) * TAU / (n as f64);
-                        let mut seg: Vec<P> = Vec::new();
-                        for i in 0..=steps {
-                            let z = flute_len * (i as f64) / (steps as f64);
-                            let psi = psi0 + s * TAU * (z / pitch);
-                            if psi.cos() > 0.0 {
-                                seg.push(map(radius_at(z) * psi.sin(), z, 1.0));
-                            } else if seg.len() >= 2 {
-                                flute_paths.push(std::mem::take(&mut seg));
-                            } else {
-                                seg.clear();
-                            }
-                        }
-                        if seg.len() >= 2 {
-                            flute_paths.push(seg);
-                        }
-                    }
-                }
-            }
-            for pts in flute_paths {
-                if pts.len() < 2 {
-                    continue;
-                }
-                let path = canvas::Path::new(|b| {
-                    b.move_to(pts[0]);
-                    for p in &pts[1..] {
-                        b.line_to(*p);
-                    }
-                });
-                frame.stroke(
-                    &path,
-                    canvas::Stroke::default()
-                        .with_color(flute_col)
-                        .with_width(1.0),
-                );
-            }
-        }
-
-        // Dimension annotations (text only — no scale bars, kept minimal).
-        let label = |frame: &mut canvas::Frame, s: String, y: f32| {
-            frame.fill_text(canvas::Text {
-                content: s,
-                position: P::new(8.0, y),
-                color: fg,
-                size: iced::Pixels(12.0),
-                ..canvas::Text::default()
-            });
-        };
-        label(&mut frame, format!("⌀ {:.3} mm", self.diameter), 6.0);
-        label(&mut frame, format!("length {:.1} mm", self.length), 22.0);
-        if self.draw_flutes {
-            label(
-                &mut frame,
-                format!("flute {:.1} mm", self.flute_length),
-                38.0,
-            );
-            label(
-                &mut frame,
-                format!(
-                    "{} flute{}, {}",
-                    self.flutes,
-                    if self.flutes == 1 { "" } else { "s" },
-                    self.cutting_direction
-                ),
-                54.0,
-            );
-        }
-
-        vec![frame.into_geometry()]
-    }
-}
-
 #[cfg(test)]
 mod startup_tests {
     use super::*;
@@ -15163,6 +15477,78 @@ mod multi_setup_draft_tests {
     }
 
     #[test]
+    fn scallop_mode_is_a_saved_and_cancelable_finishing_choice() {
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Parallel, 1);
+        let id = operation.id();
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        send(&mut app, Message::ParallelScallopToggled(true));
+        let draft = app.current_operation(id).unwrap();
+        assert!(matches!(draft, Operation::Parallel(p) if p.params.scallop));
+        assert!(!operation_fields(draft).contains(&Field::ParallelAngle));
+        assert!(!operation_fields(draft).contains(&Field::LiftHeight));
+        send(&mut app, Message::CancelOperationDraft);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Parallel(p)) if !p.params.scallop)
+        );
+    }
+
+    #[test]
+    fn scallop_linking_and_smoothing_controls_apply_and_undo() {
+        let mut app = blank_app();
+        let mut operation = app.controller.operation_template(OpKind::Parallel, 1);
+        if let Operation::Parallel(p) = &mut operation {
+            p.params.scallop = true;
+        }
+        let id = operation.id();
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        send(&mut app, Message::ScallopSmoothingToggled(true));
+        send(
+            &mut app,
+            Message::ScallopOrderChanged(cam_model::ScallopOrder::InsideOut),
+        );
+        send(
+            &mut app,
+            Message::ScallopRetractionChanged(cam_model::ScallopRetraction::Shortest),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ScallopSmoothingTolerance, "0.07".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::ScallopSafeDistance, "0.8".into()),
+        );
+        send(
+            &mut app,
+            Message::OperationPositionPick(operation_positions::PositionKind::Entry),
+        );
+        send(&mut app, Message::OperationPositionPicked([3., 4., 2.]));
+        let draft = app.current_operation(id).unwrap();
+        assert!(operation_fields(draft).contains(&Field::ScallopSmoothingTolerance));
+        assert_eq!(operation_tabs::operation_start(draft), Some([3., 4.]));
+        send(&mut app, Message::Apply);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Parallel(p))
+            if p.params.scallop_smoothing && p.params.scallop_smoothing_tolerance == 0.07
+                && p.params.scallop_safe_distance == 0.8 && p.params.scallop_start == Some([3., 4.])
+                && p.params.scallop_order == cam_model::ScallopOrder::InsideOut
+                && p.params.scallop_retraction == cam_model::ScallopRetraction::Shortest),
+            "{}",
+            app.status
+        );
+        assert!(app.controller.undo());
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Parallel(p))
+            if !p.params.scallop_smoothing && p.params.scallop_start.is_none()
+                && p.params.scallop_order == cam_model::ScallopOrder::OutsideIn
+                && p.params.scallop_retraction == cam_model::ScallopRetraction::Full)
+        );
+    }
+
+    #[test]
     fn parallel_keep_tool_down_checkbox_supports_zero_lift_apply_cancel_and_undo() {
         let mut app = blank_app();
         let operation = app.controller.operation_template(OpKind::Parallel, 1);
@@ -15318,6 +15704,14 @@ mod multi_setup_draft_tests {
         let (mut app, id) = stock_profile_app();
         let before = app.controller.inspection_setup().clone();
         send(&mut app, Message::StockToLeaveToggled(true));
+        assert_eq!(
+            app.stock_to_leave_with_fields(),
+            cam_model::StockToLeave {
+                enabled: true,
+                radial: 0.5,
+                axial: 0.5,
+            }
+        );
         send(
             &mut app,
             Message::FieldChanged(Field::StockLeaveRadial, "0.3".into()),
@@ -15326,6 +15720,10 @@ mod multi_setup_draft_tests {
             &mut app,
             Message::FieldChanged(Field::StockLeaveAxial, "0.2".into()),
         );
+        send(&mut app, Message::StockToLeaveToggled(false));
+        send(&mut app, Message::StockToLeaveToggled(true));
+        assert_eq!(app.stock_to_leave_with_fields().radial, 0.3);
+        assert_eq!(app.stock_to_leave_with_fields().axial, 0.2);
         assert_eq!(app.controller.inspection_setup(), &before);
         assert!(app.inspector_dirty());
 
@@ -15359,6 +15757,24 @@ mod multi_setup_draft_tests {
         assert_eq!(
             app.controller.inspection_setup().stock_to_leave_for(id),
             Default::default()
+        );
+    }
+
+    #[test]
+    fn face_stock_to_leave_defaults_to_axial_only() {
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Face, 1);
+        app.controller.add_operation(operation);
+        let id = app.controller.inspection_setup().operations[0].id();
+        app.begin_operation_draft(id);
+        send(&mut app, Message::StockToLeaveToggled(true));
+        assert_eq!(
+            app.stock_to_leave_with_fields(),
+            cam_model::StockToLeave {
+                enabled: true,
+                radial: 0.0,
+                axial: 0.5,
+            }
         );
     }
 
@@ -16029,6 +16445,10 @@ mod inspector_field_tests {
 
     fn chamfer(top: f64) -> Operation {
         Operation::Chamfer(cam_model::ChamferOp {
+            tip_offset: 0.0,
+            lead_in_enabled: None,
+            same_lead_out: false,
+            lead_out_enabled: None,
             closed: true,
             faces: Vec::new(),
             stepdown: 0.,

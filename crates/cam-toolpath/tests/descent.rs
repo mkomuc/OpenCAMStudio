@@ -266,6 +266,7 @@ fn pocket() -> Operation {
         end: None,
         start: None,
         clear: ClearParams {
+            keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 2.0,
             overlap: 0.4,
@@ -283,6 +284,10 @@ fn pocket() -> Operation {
 
 fn chamfer() -> Operation {
     Operation::Chamfer(ChamferOp {
+        tip_offset: 0.0,
+        lead_in_enabled: None,
+        same_lead_out: false,
+        lead_out_enabled: None,
         closed: true,
         faces: Vec::new(),
         stepdown: 0.,

@@ -4,6 +4,9 @@ use cam_cldata::{MoveKind, Point3, Step, Tag};
 use cam_geometry3d::ParallelGeometry;
 use cam_model::{AdaptiveContainment, ParallelOp, StockToLeave, ToolKind};
 use std::collections::HashMap;
+use rayon::prelude::*;
+use wide::{f64x4, CmpLe};
+mod scallop;
 type V = [f64; 3];
 fn sub(a: V, b: V) -> V {
     std::array::from_fn(|i| a[i] - b[i])
@@ -78,7 +81,7 @@ fn drop_ball(p: V, t: &[V; 3], r: f64) -> Option<f64> {
 struct Grid<'a> {
     mesh: &'a [[V; 3]],
     cells: HashMap<(i32, i32), Vec<usize>>,
-    bounds: Vec<([f64; 2], [f64; 2])>,
+    bounds: Vec<Bounds4>,
     size: f64,
 }
 impl<'a> Grid<'a> {
@@ -86,9 +89,10 @@ impl<'a> Grid<'a> {
         let mut out = Self {
             mesh,
             cells: HashMap::new(),
-            bounds: Vec::with_capacity(mesh.len()),
+            bounds: Vec::new(),
             size,
         };
+        let mut bounds = Vec::with_capacity(mesh.len());
         let mut entries = 0u64;
         for (i, t) in mesh.iter().enumerate() {
             if i % 1024 == 0 && cancel.is_cancelled() {
@@ -96,7 +100,7 @@ impl<'a> Grid<'a> {
             }
             let lo = [0, 1].map(|a| t.iter().map(|p| p[a]).fold(f64::INFINITY, f64::min));
             let hi = [0, 1].map(|a| t.iter().map(|p| p[a]).fold(f64::NEG_INFINITY, f64::max));
-            out.bounds.push((lo, hi));
+            bounds.push((lo, hi));
             let width = (i64::from(out.key(hi[0])) - i64::from(out.key(lo[0])) + 1) as u64;
             let height = (i64::from(out.key(hi[1])) - i64::from(out.key(lo[1])) + 1) as u64;
             entries = entries.saturating_add(width.saturating_mul(height));
@@ -109,6 +113,7 @@ impl<'a> Grid<'a> {
                 }
             }
         }
+        out.bounds = pack_bounds(&bounds);
         Ok(out)
     }
     fn key(&self, x: f64) -> i32 {
@@ -125,12 +130,7 @@ impl<'a> Grid<'a> {
         }
         ids.sort_unstable();
         ids.dedup();
-        ids.retain(|i| {
-            let (lo, hi) = self.bounds[*i];
-            let dx = (lo[0] - p[0]).max(p[0] - hi[0]).max(0.);
-            let dy = (lo[1] - p[1]).max(p[1] - hi[1]).max(0.);
-            dx * dx + dy * dy <= r * r + 1e-10
-        });
+        filter_bounds(&mut ids, &self.bounds, p, r);
         ids
     }
     fn height(&self, p: V, r: f64) -> Option<f64> {
@@ -199,6 +199,75 @@ impl<'a> Grid<'a> {
         false
     }
 }
+
+/// Four independent XY bounding-box tests at a time, using double precision.
+/// `wide` uses two NEON vectors on Apple Silicon and baseline SSE2 on x86-64;
+/// other targets retain its portable fallback. Exact cutter tests still follow.
+struct Bounds4 {
+    lx: f64x4,
+    ly: f64x4,
+    hx: f64x4,
+    hy: f64x4,
+}
+fn pack_bounds(bounds: &[([f64; 2], [f64; 2])]) -> Vec<Bounds4> {
+    bounds.chunks(4).map(|batch| {
+        let lane = |i: usize| batch.get(i).copied().unwrap_or(([0.; 2], [0.; 2]));
+        Bounds4 {
+            lx: f64x4::new(std::array::from_fn(|i| lane(i).0[0])),
+            ly: f64x4::new(std::array::from_fn(|i| lane(i).0[1])),
+            hx: f64x4::new(std::array::from_fn(|i| lane(i).1[0])),
+            hy: f64x4::new(std::array::from_fn(|i| lane(i).1[1])),
+        }
+    }).collect()
+}
+fn filter_bounds(ids: &mut Vec<usize>, bounds: &[Bounds4], p: V, r: f64) {
+    let px = f64x4::splat(p[0]);
+    let py = f64x4::splat(p[1]);
+    let limit = f64x4::splat(r * r + 1e-10);
+    let mut written = 0;
+    let mut offset = 0;
+    while offset < ids.len() {
+        let first = offset;
+        let block = ids[first] / 4;
+        // Sorted candidate IDs commonly share a packed block. Load its bounds
+        // once instead of gathering sixteen scalar coordinates for each query.
+        let b = &bounds[block];
+        let dx = (b.lx - px).max(px - b.hx).max(f64x4::ZERO);
+        let dy = (b.ly - py).max(py - b.hy).max(f64x4::ZERO);
+        let mask = (dx * dx + dy * dy).cmp_le(limit).move_mask();
+        // The spatial index emits sorted, unique IDs. Most interior blocks are
+        // complete, so avoid scanning their group boundaries a second time.
+        if ids[first].is_multiple_of(4) && first + 4 <= ids.len() && ids[first + 3] == ids[first] + 3 {
+            for lane in 0..4 {
+                if mask & (1 << lane) != 0 {
+                    ids[written] = block * 4 + lane;
+                    written += 1;
+                }
+            }
+            offset += 4;
+            continue;
+        }
+        while offset < ids.len() && ids[offset] / 4 == block {
+            offset += 1;
+        }
+        for index in first..offset {
+            let id = ids[index];
+            if mask & (1 << (id % 4)) != 0 {
+                ids[written] = id;
+                written += 1;
+            }
+        }
+    }
+    ids.truncate(written);
+}
+
+fn split_row(fragments: &mut Vec<(Vec<V>, bool)>, path: &mut Vec<V>) {
+    // Consecutive empty trims have the same linker effect. Keep the first so a
+    // gap still retracts, without queuing millions of empty vectors over air.
+    if !path.is_empty() || fragments.last().is_none_or(|(last, _)| !last.is_empty()) {
+        fragments.push((std::mem::take(path), false));
+    }
+}
 #[derive(Clone, Debug)]
 pub struct ParallelStrategy {
     op: ParallelOp,
@@ -206,7 +275,7 @@ pub struct ParallelStrategy {
     geometry: ParallelGeometry,
 }
 impl ParallelStrategy {
-    pub const DOMAIN_REVISION: u32 = 5;
+    pub const DOMAIN_REVISION: u32 = 10;
     pub fn new(op: ParallelOp, stock: StockToLeave, geometry: ParallelGeometry) -> Self {
         Self {
             op,
@@ -316,7 +385,7 @@ impl Strategy for ParallelStrategy {
         if tool.shank_dia() > tool.diameter + 1e-9 || tool.neck_dia() > tool.diameter + 1e-9 {
             fail!("Parallel does not yet support shafts wider than the cutter");
         }
-        let angle = p.angle.to_radians();
+        let angle = if p.scallop { 0. } else { p.angle.to_radians() };
         let (s, c) = angle.sin_cos();
         let local = |v: V| [c * v[0] + s * v[1], -s * v[0] + c * v[1], v[2]];
         let world = |u: f64, v: f64| [c * u - s * v, s * u + c * v, 0.];
@@ -343,7 +412,9 @@ impl Strategy for ParallelStrategy {
         let step = (r * p.tolerance).sqrt().clamp(0.01, 0.5);
         let rows = ((hi[1] - lo[1]) / p.stepover).ceil() as usize;
         let samples = ((hi[0] - lo[0]) / step).ceil() as usize;
-        if rows > 100_000 || samples > 1_000_000 || rows.saturating_mul(samples) > 5_000_000 {
+        if !p.scallop
+            && (rows > 100_000 || samples > 1_000_000 || rows.saturating_mul(samples) > 5_000_000)
+        {
             fail!(
                 "Parallel exceeds the five-million sample budget; increase stepover or tolerance"
             );
@@ -380,18 +451,25 @@ impl Strategy for ParallelStrategy {
             previous: None,
             passes: 0,
         };
-        for row in 0..=rows {
+        if p.scallop {
+            return scallop::compute(&grid, &selected, &mut linking, op, lo, hi, cancel);
+        }
+        // Bound queued work by both row count and nominal samples. Indexed
+        // collection keeps row order independent of worker scheduling.
+        let batch_rows = (16_384 / (samples + 1)).clamp(1, 32);
+        let sample_row = |row: usize| -> Option<Vec<(Vec<V>, bool)>> {
             if cancel.is_cancelled() {
-                out.cancelled = true;
-                return out;
+                return None;
             }
+            let bottom = self.geometry.heights.bottom;
+            let top = self.geometry.heights.top;
+            let mut fragments = Vec::new();
             let v = lo[1] + (row as f64 * p.stepover).min(hi[1] - lo[1]);
             let mut path: Vec<V> = Vec::new();
             let mut continuous = true;
             for j in 0..=samples {
                 if j % 256 == 0 && cancel.is_cancelled() {
-                    out.cancelled = true;
-                    return out;
+                    return None;
                 }
                 let k = if p.both_ways && row % 2 == 1 {
                     samples - j
@@ -402,12 +480,12 @@ impl Strategy for ParallelStrategy {
                 // Contact-only trimming prevents cutting across openings or
                 // separate selected faces. Every disconnected run retracts.
                 if !selected.contact(q) && selected.height(q, r).is_none() {
-                    linking.emit(&mut out, &mut path, op, false, cancel);
+                    split_row(&mut fragments, &mut path);
                     continuous = false;
                     continue;
                 }
                 let Some(z) = grid.height(q, contact_radius) else {
-                    linking.emit(&mut out, &mut path, op, false, cancel);
+                    split_row(&mut fragments, &mut path);
                     continuous = false;
                     continue;
                 };
@@ -420,9 +498,9 @@ impl Strategy for ParallelStrategy {
                     .iter()
                     .filter_map(|i| flat_height(q, &grid.mesh[*i], contact_radius))
                     .fold(f64::NEG_INFINITY, f64::max);
-                q[2] = q[2].max(wall - r + lift).max(self.geometry.heights.bottom);
-                if q[2] > self.geometry.heights.top + lift {
-                    linking.emit(&mut out, &mut path, op, false, cancel);
+                q[2] = q[2].max(wall - r + lift).max(bottom);
+                if q[2] > top + lift {
+                    split_row(&mut fragments, &mut path);
                     continuous = false;
                     continue;
                 }
@@ -436,20 +514,19 @@ impl Strategy for ParallelStrategy {
                         error,
                         lift,
                         p.tolerance,
-                        self.geometry.heights.bottom,
+                        bottom,
                         0,
                         &mut path,
                         cancel,
                     ) {
                         if cancel.is_cancelled() {
-                            out.cancelled = true;
-                            return out;
+                            return None;
                         }
                         // A vertical contact discontinuity cannot be followed
                         // continuously. Discard the attempted connector and
                         // restart from clearance rather than cutting a shortcut.
                         path.truncate(previous_length);
-                        linking.emit(&mut out, &mut path, op, false, cancel);
+                        split_row(&mut fragments, &mut path);
                         continuous = false;
                         path.push(q);
                     }
@@ -457,9 +534,30 @@ impl Strategy for ParallelStrategy {
                     path.push(q);
                 }
             }
-            linking.emit(&mut out, &mut path, op, continuous, cancel);
-            if out.program.steps().len() > 2_000_000 {
-                fail!("Parallel exceeds the two-million motion budget; increase tolerance or stepover");
+            fragments.push((path, continuous));
+            Some(fragments)
+        };
+        for first in (0..=rows).step_by(batch_rows) {
+            let end = (first + batch_rows).min(rows + 1);
+            let batch: Option<Vec<_>> = (first..end)
+                .into_par_iter()
+                .map(&sample_row)
+                .collect();
+            let Some(batch) = batch else {
+                out.cancelled = true;
+                return out;
+            };
+            for fragments in batch {
+                for (mut path, continuous) in fragments {
+                    if cancel.is_cancelled() {
+                        out.cancelled = true;
+                        return out;
+                    }
+                    linking.emit(&mut out, &mut path, op, continuous, cancel);
+                }
+                if out.program.steps().len() > 2_000_000 {
+                    fail!("Parallel exceeds the two-million motion budget; increase tolerance or stepover");
+                }
             }
         }
         linking.retract(&mut out, op);
@@ -496,8 +594,12 @@ impl PassLinker<'_, '_> {
     /// lift and descent. Bounding the whole XY segment also catches narrow
     /// obstacles between endpoints; sampling alone cannot certify a link.
     fn segment_clear(&self, a: V, b: V, cancel: &CancelToken) -> bool {
+        self.segment_clear_extra(a, b, 0., cancel)
+    }
+
+    fn segment_clear_extra(&self, a: V, b: V, extra: f64, cancel: &CancelToken) -> bool {
         let mid = mul(add(a, b), 0.5);
-        let reach = self.radius + self.error;
+        let reach = self.radius + self.error + extra;
         let half_xy = (a[0] - b[0]).hypot(a[1] - b[1]) * 0.5;
         // Shifting the cutter down by the axial allowance is equivalent to
         // raising the protected surface, preserving the requested floor skin.
@@ -959,6 +1061,849 @@ mod tests {
             [[x0, y0, 0.], [x1, y0, 0.], [x1, y1, 0.]],
             [[x0, y0, 0.], [x1, y1, 0.], [x0, y1, 0.]],
         ]
+    }
+
+    #[test]
+    fn simd_bounds_match_scalar_including_tails_and_grazing_contact() {
+        let bounds: Vec<_> = (0..257)
+            .map(|i| {
+                let x = (i % 17) as f64 * 0.375 - 3.;
+                let y = (i / 17) as f64 * 0.25 - 2.;
+                ([x, y], [x + (i % 3) as f64, y + (i % 5) as f64 * 0.1])
+            })
+            .collect();
+        let packed = pack_bounds(&bounds);
+        for len in [0, 1, 3, 4, 5, 127, 256, 257] {
+            for reverse in [false, true] {
+                for stride in [1, 2, 3, 7] {
+                    for p in [[0.; 3], [-3., -2., 0.], [1e10, -1e10, 0.]] {
+                        for r in [0., 1e-8, 0.375, 1., 1e10] {
+                            let mut actual: Vec<_> = (0..len).step_by(stride).collect();
+                            if reverse {
+                                actual.reverse();
+                            }
+                            let mut expected = actual.clone();
+                            expected.retain(|&i| {
+                                let (lo, hi) = bounds[i];
+                                let dx = (lo[0] - p[0]).max(p[0] - hi[0]).max(0.);
+                                let dy = (lo[1] - p[1]).max(p[1] - hi[1]).max(0.);
+                                dx * dx + dy * dy <= r * r + 1e-10
+                            });
+                            filter_bounds(&mut actual, &packed, p, r);
+                            assert_eq!(actual, expected, "len={len}, p={p:?}, r={r}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual SIMD throughput measurement"]
+    fn bounds_filter_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        let bounds: Vec<_> = (0..8192).map(|i| {
+            let x = (i % 128) as f64 * 0.1;
+            let y = (i / 128) as f64 * 0.1;
+            ([x, y], [x + 0.2, y + 0.2])
+        }).collect();
+        let packed = pack_bounds(&bounds);
+        let source: Vec<_> = (0..bounds.len()).collect();
+        for simd in [false, true] {
+            let start = Instant::now();
+            for i in 0..5000 {
+                let p = black_box([(i % 128) as f64 * 0.1, 3., 0.]);
+                let bounds = black_box(bounds.as_slice());
+                let mut ids = source.clone();
+                if simd {
+                    filter_bounds(&mut ids, black_box(&packed), p, 2.);
+                } else {
+                    ids.retain(|&id| {
+                        let (lo, hi) = bounds[id];
+                        let dx = (lo[0] - p[0]).max(p[0] - hi[0]).max(0.);
+                        let dy = (lo[1] - p[1]).max(p[1] - hi[1]).max(0.);
+                        dx * dx + dy * dy <= 4. + 1e-10
+                    });
+                }
+                black_box(ids);
+            }
+            println!("{}: {:.2} ms", if simd { "SIMD" } else { "scalar" }, start.elapsed().as_secs_f64() * 1000.);
+        }
+    }
+
+    #[test]
+    fn finishing_is_identical_with_one_or_four_workers() {
+        let serial = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let parallel = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        for scallop in [false, true] {
+            for stay_down in [false, true] {
+                let mut operation = op();
+                operation.params.scallop = scallop;
+                operation.params.stay_down = stay_down;
+                operation.params.containment = AdaptiveContainment::Center;
+                let mut geometry = surface();
+                // Separate selections exercise trims, empty fragments and retracts.
+                geometry.selected = rectangle(0., 0., 4., 10.).into_iter()
+                    .chain(rectangle(6., 0., 10., 10.)).collect();
+                let single = serial.install(|| run(operation.clone(), geometry.clone()));
+                let multi = parallel.install(|| run(operation.clone(), geometry.clone()));
+                assert!(!single.has_errors(), "{:?}", single.diagnostics);
+                assert_eq!(single, multi);
+            }
+        }
+    }
+
+    #[test]
+    fn scallop_generates_closed_surface_following_offsets() {
+        let mut operation = op();
+        operation.params.scallop = true;
+        let result = run(operation, surface());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(result.program.validate().is_ok());
+        let cuts: Vec<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert!(cuts.len() > 20);
+        let min_z = cuts.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+        let max_z = cuts.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max_z - min_z > 0.5,
+            "offsets must follow the sloping surface"
+        );
+        assert!(
+            cuts.windows(2)
+                .any(|w| (w[0].x - w[1].x).abs() > 0.01 && (w[0].y - w[1].y).abs() > 0.01),
+            "contours are not parallel scan rows"
+        );
+    }
+
+    #[test]
+    fn scallop_offsets_a_flat_rectangle_inward_at_the_requested_spacing() {
+        let triangles = rectangle(0., 0., 10., 10.).to_vec();
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let result = run(operation, geometry);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let mut minima = Vec::new();
+        let mut current = f64::INFINITY;
+        for step in result.program.steps() {
+            match step {
+                Step::Linear { to, tag, .. }
+                    if matches!(tag.kind, MoveKind::Plunge | MoveKind::Cutting) =>
+                {
+                    current = current.min(to.x)
+                }
+                Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract && current.is_finite() => {
+                    minima.push(current);
+                    current = f64::INFINITY;
+                }
+                _ => {}
+            }
+        }
+        assert!(minima.len() >= 4, "{minima:?}");
+        for (index, x) in minima.iter().take(4).enumerate() {
+            assert!((*x - (index as f64 + 0.5)).abs() < 0.05, "{minima:?}");
+        }
+    }
+
+    #[test]
+    fn scallop_annulus_progresses_from_outer_edge_without_starting_at_the_hole() {
+        let mut triangles = Vec::new();
+        for (x0, y0, x1, y1) in [
+            (0., 0., 20., 6.),
+            (0., 14., 20., 20.),
+            (0., 6., 6., 14.),
+            (14., 6., 20., 14.),
+        ] {
+            triangles.extend(rectangle(x0, y0, x1, y1));
+        }
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::Shortest,
+        ] {
+            let mut operation = op();
+            operation.params.scallop = true;
+            operation.params.scallop_order = order;
+            operation.params.containment = AdaptiveContainment::Center;
+            let result = run(operation, geometry.clone());
+            assert!(!result.has_errors(), "{order:?}: {:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut contours = Vec::<Vec<Point3>>::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        contours.push(vec![*to])
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        contours.last_mut().unwrap().push(*to)
+                    }
+                    _ => {}
+                }
+            }
+            let offsets: Vec<f64> = contours
+                .iter()
+                .map(|points| {
+                    points
+                        .iter()
+                        .map(|p| p.x.min(p.y).min(20. - p.x).min(20. - p.y))
+                        .fold(f64::INFINITY, f64::min)
+                })
+                .collect();
+            assert!(offsets.len() >= 5, "{order:?}: {offsets:?}");
+            assert!(
+                offsets[0] < 1.,
+                "{order:?}: first pass must be at the outer edge: {offsets:?}"
+            );
+            for pair in offsets.windows(2) {
+                assert!(
+                    pair[1] + 0.1 >= pair[0],
+                    "{order:?}: passes moved backwards across the ring: {offsets:?}"
+                );
+                assert!(
+                    pair[1] - pair[0] <= 1.2,
+                    "{order:?}: skipped an intervening pass: {offsets:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scallop_circular_sloped_ring_advances_towards_the_hole() {
+        let mut triangles = Vec::new();
+        for i in 0..96 {
+            let point = |index: usize, radius: f64, z: f64| {
+                let angle = index as f64 * std::f64::consts::TAU / 96.;
+                [radius * angle.cos(), radius * angle.sin(), z]
+            };
+            let outer_a = point(i, 10., 0.);
+            let outer_b = point(i + 1, 10., 0.);
+            let inner_a = point(i, 4., -2.);
+            let inner_b = point(i + 1, 4., -2.);
+            triangles.extend([[outer_a, outer_b, inner_b], [outer_a, inner_b, inner_a]]);
+        }
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -3.,
+            },
+        };
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::Shortest,
+        ] {
+            let mut operation = op();
+            operation.params.scallop = true;
+            operation.params.scallop_order = order;
+            operation.params.containment = AdaptiveContainment::Center;
+            let result = run(operation, geometry.clone());
+            assert!(!result.has_errors(), "{order:?}: {:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut contours = Vec::<Vec<Point3>>::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        contours.push(vec![*to])
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        contours.last_mut().unwrap().push(*to)
+                    }
+                    _ => {}
+                }
+            }
+            let radii: Vec<f64> = contours
+                .iter()
+                .map(|path| path.iter().map(|p| p.x.hypot(p.y)).sum::<f64>() / path.len() as f64)
+                .collect();
+            assert!(radii.len() >= 5, "{order:?}: {radii:?}");
+            assert!(
+                radii[0] > 9.,
+                "{order:?}: first pass should start outside: {radii:?}"
+            );
+            assert!(
+                radii.last().unwrap() < &6.,
+                "{order:?}: final passes should reach the inner edge: {radii:?}"
+            );
+            for pair in radii.windows(2) {
+                assert!(
+                    pair[1] <= pair[0] + 0.4,
+                    "{order:?}: path returned toward the outside: {radii:?}"
+                );
+                assert!(
+                    pair[0] - pair[1] < 1.5,
+                    "{order:?}: path skipped a middle pass: {radii:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scallop_rounded_bore_does_not_finish_with_tiny_disconnected_fragments() {
+        let angular = 96;
+        let radial = 24;
+        let mut selected = Vec::new();
+        let point = |i: usize, j: usize| {
+            let theta = i as f64 * std::f64::consts::TAU / angular as f64;
+            let phi = j as f64 * std::f64::consts::FRAC_PI_2 / radial as f64;
+            let radius = 19. - 4. * phi.sin();
+            [
+                radius * theta.cos(),
+                radius * theta.sin(),
+                16. + 4. * phi.cos(),
+            ]
+        };
+        for i in 0..angular {
+            for j in 0..radial {
+                let a = point(i, j);
+                let b = point(i + 1, j);
+                let c = point(i + 1, j + 1);
+                let d = point(i, j + 1);
+                selected.extend([[a, b, c], [a, c, d]]);
+            }
+        }
+        let geometry = ParallelGeometry {
+            triangles: selected.clone(),
+            selected,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 21.,
+                bottom: 16.,
+            },
+        };
+        let tools = [Tool {
+            kind: ToolKind::BallMill,
+            diameter: 6.,
+            number: 1,
+            length: 20.,
+            ..Default::default()
+        }];
+        let env = JobEnv {
+            heights: Heights::new(30., 25., 21.),
+            tools: &tools,
+            stock: None,
+            spindle: SpindleDir::Cw,
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.stepover = 0.5;
+        operation.params.tolerance = 0.1;
+        operation.params.containment = AdaptiveContainment::Center;
+        operation.params.scallop_smoothing = true;
+        operation.params.scallop_smoothing_tolerance = 0.05;
+        operation.params.scallop_retraction = cam_model::ScallopRetraction::Minimum;
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::Shortest,
+            cam_model::ScallopOrder::InsideOut,
+        ] {
+            operation.params.scallop_order = order;
+            let result =
+                ParallelStrategy::new(operation.clone(), StockToLeave::default(), geometry.clone())
+                    .compute(&env, &CancelToken::new());
+            assert!(!result.has_errors(), "{order:?}: {:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut lengths = Vec::new();
+            let mut last: Option<Point3> = None;
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        lengths.push(0.);
+                        last = Some(*to);
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        let from = last.unwrap();
+                        *lengths.last_mut().unwrap() += (to.x - from.x).hypot(to.y - from.y);
+                        last = Some(*to);
+                    }
+                    Step::Arc {
+                        end,
+                        center,
+                        dir,
+                        tag,
+                        ..
+                    } if tag.kind == MoveKind::Cutting => {
+                        let from = last.unwrap();
+                        *lengths.last_mut().unwrap() += (from.x - center.x)
+                            .hypot(from.y - center.y)
+                            * cam_cldata::arc_sweep(from, *end, *center, *dir);
+                        last = Some(*end);
+                    }
+                    _ => {}
+                }
+            }
+            assert!(lengths.len() >= 5, "{order:?}: {lengths:?}");
+            assert!(
+                lengths.iter().all(|length| *length >= 1.),
+                "{order:?}: isolated fragments at the bore edge: {lengths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scallop_preserves_offsets_in_a_wide_region_next_to_an_eccentric_hole() {
+        let mut triangles = Vec::new();
+        for (x0, y0, x1, y1) in [
+            (0., 0., 20., 6.),
+            (0., 14., 20., 20.),
+            (0., 6., 3., 14.),
+            (9., 6., 20., 14.),
+        ] {
+            triangles.extend(rectangle(x0, y0, x1, y1));
+        }
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let result = run(operation, geometry);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let max_offset = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                    Some(to.x.min(to.y).min(20. - to.x).min(20. - to.y))
+                }
+                _ => None,
+            })
+            .fold(0., f64::max);
+        assert!(
+            max_offset > 4.5,
+            "wide region lost its deeper offsets: {max_offset}"
+        );
+    }
+
+    #[test]
+    fn scallop_fixed_directions_reverse_contour_order_without_changing_cuts() {
+        let triangles = rectangle(0., 0., 10., 10.).to_vec();
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let outside = run(operation.clone(), geometry.clone());
+        operation.params.scallop_order = cam_model::ScallopOrder::InsideOut;
+        let inside = run(operation, geometry);
+        assert!(
+            !outside.has_errors() && !inside.has_errors(),
+            "{:?} {:?}",
+            outside.diagnostics,
+            inside.diagnostics
+        );
+        let contours = |result: &StrategyResult| {
+            let mut all = Vec::<Vec<[f64; 3]>>::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        all.push(vec![[to.x, to.y, to.z]])
+                    }
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        all.last_mut().unwrap().push([to.x, to.y, to.z])
+                    }
+                    _ => {}
+                }
+            }
+            all
+        };
+        let outer_contours = contours(&outside);
+        let mut inner_contours = contours(&inside);
+        assert!(outer_contours.len() >= 4);
+        inner_contours.reverse();
+        assert_eq!(
+            outer_contours, inner_contours,
+            "ordering must preserve the certified cuts"
+        );
+        assert!(inside.program.validate().is_ok());
+    }
+
+    #[test]
+    fn scallop_shortest_order_reduces_repositioning_between_separate_regions() {
+        let mut triangles = rectangle(0., 0., 4., 8.).to_vec();
+        triangles.extend(rectangle(8., 0., 12., 8.));
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let outside = run(operation.clone(), geometry.clone());
+        operation.params.scallop_order = cam_model::ScallopOrder::Shortest;
+        let shortest = run(operation, geometry);
+        assert!(
+            !outside.has_errors() && !shortest.has_errors(),
+            "{:?} {:?}",
+            outside.diagnostics,
+            shortest.diagnostics
+        );
+        let travel = |result: &StrategyResult| {
+            let mut last_retract: Option<Point3> = None;
+            let mut sum = 0.;
+            for step in result.program.steps() {
+                match step {
+                    Step::Rapid { to, tag } if tag.kind == MoveKind::Retract => {
+                        last_retract = Some(*to)
+                    }
+                    Step::Rapid { to, tag } if tag.kind == MoveKind::Link => {
+                        if let Some(from) = last_retract.take() {
+                            sum += (to.x - from.x).hypot(to.y - from.y);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            sum
+        };
+        assert!(
+            travel(&shortest) < travel(&outside),
+            "{} >= {}",
+            travel(&shortest),
+            travel(&outside)
+        );
+        assert!(shortest.program.validate().is_ok());
+        let cutting_count = |result: &StrategyResult| {
+            result.program.steps().iter()
+            .filter(|step| matches!(step, Step::Linear { tag, .. } if tag.kind == MoveKind::Cutting)).count()
+        };
+        assert_eq!(cutting_count(&outside), cutting_count(&shortest));
+        let segments = |result: &StrategyResult| {
+            let mut previous: Option<[u64; 3]> = None;
+            let mut cuts = Vec::new();
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } | Step::Rapid { to, tag } => {
+                        let point = [to.x.to_bits(), to.y.to_bits(), to.z.to_bits()];
+                        if tag.kind == MoveKind::Cutting {
+                            let from = previous.unwrap();
+                            cuts.push(if from < point {
+                                (from, point)
+                            } else {
+                                (point, from)
+                            });
+                        }
+                        previous = Some(point);
+                    }
+                    _ => {}
+                }
+            }
+            cuts.sort_unstable();
+            cuts
+        };
+        assert_eq!(
+            segments(&outside),
+            segments(&shortest),
+            "reordering must preserve every certified cutting segment"
+        );
+    }
+
+    #[test]
+    fn scallop_shortest_order_respects_preferred_entry_positions() {
+        let mut triangles = rectangle(0., 0., 4., 8.).to_vec();
+        triangles.extend(rectangle(8., 0., 12., 8.));
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        operation.params.scallop_start = Some([2., 7.]);
+        let outside = run(operation.clone(), geometry.clone());
+        operation.params.scallop_order = cam_model::ScallopOrder::Shortest;
+        let shortest = run(operation, geometry);
+        assert!(!outside.has_errors() && !shortest.has_errors());
+        let positions = |result: &StrategyResult| {
+            let mut points: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => {
+                        Some([to.x, to.y, to.z])
+                    }
+                    _ => None,
+                })
+                .collect();
+            points.sort_by(|a, b| {
+                a[0].total_cmp(&b[0])
+                    .then(a[1].total_cmp(&b[1]))
+                    .then(a[2].total_cmp(&b[2]))
+            });
+            points
+        };
+        assert_eq!(
+            positions(&outside),
+            positions(&shortest),
+            "ordering must not override a preferred entry"
+        );
+    }
+
+    #[test]
+    fn scallop_retracts_between_disconnected_surface_regions() {
+        let mut triangles = rectangle(0., 0., 4., 8.).to_vec();
+        triangles.extend(rectangle(6., 0., 10., 8.));
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.stay_down = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let result = run(operation, geometry);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(result.program.validate().is_ok());
+        let mut previous = None;
+        for step in result.program.steps() {
+            match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                    if let Some(x) = previous {
+                        assert!(
+                            !(x < 4. && to.x > 6.) && !(x > 6. && to.x < 4.),
+                            "cut crossed the gap"
+                        );
+                    }
+                    previous = Some(to.x);
+                }
+                Step::Rapid { .. } => previous = None,
+                Step::Linear { to, .. } => previous = Some(to.x),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn scallop_checks_the_swept_cutter_against_an_unselected_boss() {
+        let mut geometry = surface();
+        let boss = [
+            [[4., 4., 4.], [6., 4., 4.], [6., 6., 4.]],
+            [[4., 4., 4.], [6., 6., 4.], [4., 6., 4.]],
+        ];
+        geometry.triangles.extend(boss);
+        geometry.heights.top = 5.;
+        let mut operation = op();
+        operation.params.scallop = true;
+        for order in [
+            cam_model::ScallopOrder::OutsideIn,
+            cam_model::ScallopOrder::InsideOut,
+            cam_model::ScallopOrder::Shortest,
+        ] {
+            operation.params.scallop_order = order;
+            operation.params.scallop_retraction = cam_model::ScallopRetraction::Shortest;
+            let result = run(operation.clone(), geometry.clone());
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            assert!(result.program.validate().is_ok());
+            let mut previous: Option<Point3> = None;
+            let mut cuts = 0;
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } => {
+                        if matches!(tag.kind, MoveKind::Cutting | MoveKind::Link) {
+                            let from = previous.unwrap();
+                            for triangle in &boss {
+                                assert!(
+                                    segment_triangle(
+                                        [from.x, from.y, from.z + 1.],
+                                        [to.x, to.y, to.z + 1.],
+                                        triangle
+                                    ) >= 1.0025_f64.powi(2),
+                                    "{order:?} {:?}",
+                                    tag.kind
+                                );
+                            }
+                            if tag.kind == MoveKind::Cutting {
+                                cuts += 1;
+                            }
+                        }
+                        previous = Some(*to);
+                    }
+                    Step::Rapid { to, .. } => previous = Some(*to),
+                    _ => {}
+                }
+            }
+            assert!(cuts > 0);
+        }
+    }
+
+    #[test]
+    fn scallop_preferred_start_rotates_each_closed_contour() {
+        let triangles = rectangle(0., 0., 10., 10.).to_vec();
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.scallop_start = Some([9., 9.]);
+        operation.params.containment = AdaptiveContainment::Center;
+        let result = run(operation, geometry);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let first = result
+            .program
+            .steps()
+            .iter()
+            .find_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(*to),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            first.x > 8. || first.y > 8.,
+            "entry did not move towards requested corner: {first:?}"
+        );
+        assert!(
+            first.x > 7. && first.y > 7.,
+            "entry must be near the requested corner: {first:?}"
+        );
+    }
+
+    #[test]
+    fn scallop_policies_generate_checked_feed_links_or_full_retractions() {
+        let triangles = rectangle(0., 0., 10., 10.).to_vec();
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let full = run(operation.clone(), geometry.clone());
+        assert!(!full.has_errors(), "{:?}", full.diagnostics);
+        let count_links = |result: &StrategyResult| {
+            result
+                .program
+                .steps()
+                .iter()
+                .filter(|s| matches!(s, Step::Linear {tag, ..} if tag.kind == MoveKind::Link))
+                .count()
+        };
+        assert_eq!(count_links(&full), 0);
+        for policy in [
+            cam_model::ScallopRetraction::Minimum,
+            cam_model::ScallopRetraction::Shortest,
+        ] {
+            operation.params.scallop_retraction = policy;
+            let linked = run(operation.clone(), geometry.clone());
+            assert!(!linked.has_errors(), "{:?}", linked.diagnostics);
+            assert!(linked.program.validate().is_ok());
+            assert!(count_links(&linked) > 0, "no links for {policy:?}");
+            assert!(linked.program.steps().iter().filter(|s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract)).count()
+                < full.program.steps().iter().filter(|s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract)).count());
+        }
+        operation.params.scallop_retraction = cam_model::ScallopRetraction::Minimum;
+        operation.params.scallop_safe_distance = 20.;
+        let fallback = run(operation, geometry);
+        assert_eq!(
+            count_links(&fallback),
+            0,
+            "clearance exceeding the safe plane must fall back to full retraction"
+        );
+    }
+
+    #[test]
+    fn scallop_smoothing_reduces_actual_cutting_motions() {
+        let triangles = rectangle(0., 0., 10., 10.).to_vec();
+        let geometry = ParallelGeometry {
+            selected: triangles.clone(),
+            triangles,
+            error_bound: 0.0025,
+            heights: CuttingHeights {
+                top: 1.,
+                bottom: -1.,
+            },
+        };
+        let mut operation = op();
+        operation.params.scallop = true;
+        operation.params.containment = AdaptiveContainment::Center;
+        let raw = run(operation.clone(), geometry.clone());
+        operation.params.scallop_smoothing = true;
+        operation.params.scallop_smoothing_tolerance = 0.05;
+        let smooth = run(operation, geometry);
+        assert!(!smooth.has_errors(), "{:?}", smooth.diagnostics);
+        assert!(smooth.program.validate().is_ok());
+        let cuts = |r: &StrategyResult| {
+            r.program
+                .steps()
+                .iter()
+                .filter(|step| {
+                    matches!(step,
+            Step::Linear { tag, .. } | Step::Arc { tag, .. } if tag.kind == MoveKind::Cutting)
+                })
+                .count()
+        };
+        assert!(
+            cuts(&smooth) * 2 < cuts(&raw),
+            "{} vs {}",
+            cuts(&smooth),
+            cuts(&raw)
+        );
     }
 
     #[test]

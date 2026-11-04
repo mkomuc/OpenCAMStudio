@@ -49,9 +49,12 @@ pub(super) fn compute(
     let Some((low, high, radius_at_contact)) = flank else {
         return error("The selected tool has no usable conical cutting flank".into());
     };
-    let available = high - low;
+    let tip_offset = op.tip_offset;
+    let available = high - low - tip_offset;
     if available <= 1e-6 {
-        return error("The selected cutter has no usable chamfer band height".into());
+        return error(
+            "The selected cutter has no usable chamfer band height after the tip offset".into(),
+        );
     }
     let step = if op.stepdown > 0. {
         op.stepdown.min(available)
@@ -108,15 +111,32 @@ pub(super) fn compute(
             let points = face.at_height(band_bottom);
             // The lowest straight-flank point touches the lower edge of this band.
             // The cutter's tip can sit slightly lower when it has a rounded nose.
-            let z = band_bottom - low;
+            let z = band_bottom - low - tip_offset;
             let axis = |p: [f64; 2]| {
                 Point::new(
-                    p[0] + face.outward[0] * radius_at_contact,
-                    p[1] + face.outward[1] * radius_at_contact,
+                    p[0] + face.outward[0] * (radius_at_contact + tip_offset * tan),
+                    p[1] + face.outward[1] * (radius_at_contact + tip_offset * tan),
                 )
             };
             let start = axis(points[0]);
             let end = axis(points[1]);
+            let length = (end.x - start.x).hypot(end.y - start.y);
+            let tangent = ((end.x - start.x) / length, (end.y - start.y) / length);
+            let outward = (face.outward[0], face.outward[1]);
+            let lead_entry = crate::leads::lead_start_point(start, tangent, outward, op.lead_in);
+            let lead_exit = crate::leads::lead_end_point(end, tangent, outward, op.lead_out);
+            // Every point of each transition must stay on the air side of this band.
+            for (on, off, lead) in [
+                (start, lead_entry, op.lead_in),
+                (end, lead_exit, op.lead_out),
+            ] {
+                if crate::leads::lead_samples(on, off, outward, lead)
+                    .iter()
+                    .any(|p| (p.x - on.x) * outward.0 + (p.y - on.y) * outward.1 < -1e-5)
+                {
+                    return error("The requested lead crosses the modeled chamfer face; adjust the lead geometry".into());
+                }
+            }
             // Enter beyond the face's lower boundary and feed inward. A flat,
             // non-cutting chamfer tip must not plunge vertically into raw stock.
             let mut approach = (band_bottom - face.bottom) * tan + tool.radius() + 0.5;
@@ -136,8 +156,8 @@ pub(super) fn compute(
                     point.y + face.outward[1] * approach,
                 )
             };
-            let entry = air(start);
-            let exit = air(end);
+            let entry = air(lead_entry);
+            let exit = air(lead_exit);
             program.push(Step::Comment(format!(
                 "Chamfer face {} band {}: Z{:.6}",
                 face_index + 1,
@@ -155,19 +175,41 @@ pub(super) fn compute(
                 tag: Tag::new(op.id, MoveKind::Plunge),
             });
             program.push(Step::Linear {
-                to: Point3::new(start.x, start.y, z),
+                to: Point3::new(lead_entry.x, lead_entry.y, z),
                 feed: op.entry_feeds.lead_in(op.feed),
                 tag: Tag::new(op.id, MoveKind::LeadIn),
             });
+            crate::leads::emit_lead(
+                &mut program,
+                lead_entry,
+                start,
+                start,
+                outward,
+                op.lead_in,
+                z,
+                op.entry_feeds.lead_in(op.feed),
+                Tag::new(op.id, MoveKind::LeadIn),
+            );
             program.push(Step::Linear {
                 to: Point3::new(end.x, end.y, z),
                 feed: op.feed,
                 tag: Tag::new(op.id, MoveKind::Cutting),
             });
+            crate::leads::emit_lead(
+                &mut program,
+                end,
+                lead_exit,
+                end,
+                outward,
+                op.lead_out,
+                z,
+                op.entry_feeds.lead_out(op.feed),
+                Tag::new(op.id, MoveKind::LeadOut),
+            );
             program.push(Step::Linear {
                 to: Point3::new(exit.x, exit.y, z),
                 feed: op.entry_feeds.lead_out(op.feed),
-                tag: Tag::new(op.id, MoveKind::LeadIn),
+                tag: Tag::new(op.id, MoveKind::LeadOut),
             });
             program.push(Step::Rapid {
                 to: Point3::new(exit.x, exit.y, env.heights.clearance),

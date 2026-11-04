@@ -21,6 +21,7 @@ repository = "https://github.com/pr0m1th3as/OpenCAMStudio"
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: parse f64 back bit-for-bit, so saved geometry never drifts.
 serde_json = { version = "1", features = ["float_roundtrip"] }
+rayon = "1.12"
 
 # Keep the linker's memory in bounds. A `--features gui` debug build of
 # `opencamstudio` was 435 MiB, of which 335 MiB was DWARF — the code itself is

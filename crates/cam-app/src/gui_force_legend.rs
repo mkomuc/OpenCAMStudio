@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) struct ForceLegend {
     pub maximum: Option<f64>,
+    pub power_w: Option<f64>,
     pub reserved_left: f32,
     pub gizmo_size: Option<f32>,
 }
@@ -12,8 +13,8 @@ fn card_bounds(size: iced::Size, reserved_left: f32, gizmo_size: Option<f32>) ->
         .map(|cube| gizmo_rect(size.width, size.height, cube, GIZMO_MARGIN).0 - 12.)
         .unwrap_or(size.width - 12.)
         .max(0.);
-    let width = 290_f32.min((right - reserved_left - 12.).max(0.));
-    let height = 72_f32.min((size.height - 16.).max(0.));
+    let width = 440_f32.min((right - reserved_left - 12.).max(0.));
+    let height = (if width < 340. { 90_f32 } else { 72_f32 }).min((size.height - 16.).max(0.));
     iced::Rectangle {
         x: (right - width).max(0.),
         y: GIZMO_MARGIN.min((size.height - height).max(0.)),
@@ -45,8 +46,23 @@ impl canvas::Program<Message> for ForceLegend {
             return Vec::new();
         }
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let origin = card.position() + iced::Vector::new(14., 10.);
+        let stacked = card.width < 340.;
+        let origin = card.position()
+            + if stacked {
+                iced::Vector::new(14., 28.)
+            } else {
+                iced::Vector::new(164., 10.)
+            };
         let text_color = Color::from_rgb(0.92, 0.94, 0.97);
+        frame.fill_text(canvas::Text {
+            content: self
+                .power_w
+                .map_or_else(|| "Power: —".into(), |power| format!("Power: {power:.3} W")),
+            position: card.position() + iced::Vector::new(14., if stacked { 8. } else { 30. }),
+            color: text_color,
+            size: 12.0.into(),
+            ..Default::default()
+        });
         frame.fill_text(canvas::Text {
             content: "Cutting force (N)".into(),
             position: origin,
@@ -55,7 +71,7 @@ impl canvas::Program<Message> for ForceLegend {
             ..Default::default()
         });
         let bar = origin + iced::Vector::new(0., 25.);
-        let width = card.width - 28.;
+        let width = card.x + card.width - origin.x - 14.;
         let scale = self.maximum.unwrap_or(1.);
         for i in 0..128 {
             let fraction = i as f64 / 127.;
@@ -126,6 +142,7 @@ mod tests {
         use iced::widget::canvas::Program;
         let legend = ForceLegend {
             maximum: Some(100.),
+            power_w: Some(50.),
             reserved_left: 0.,
             gizmo_size: Some(110.),
         };

@@ -4,6 +4,8 @@ Right-click a setup or operation and choose **Simulate toolpath**. The simulatio
 opens beside the viewport. Use the playback controls to play, pause, change speed,
 seek, or step between operations and motion points. **Close simulation** returns
 to the machining inspector. Display preferences are saved between sessions.
+When simulating one operation, preceding operations establish its starting stock;
+only the selected operation's toolpath is displayed.
 
 The **Display** tab has four collapsible sections:
 

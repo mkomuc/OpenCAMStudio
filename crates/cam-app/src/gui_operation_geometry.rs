@@ -342,8 +342,6 @@ impl App {
                     Field::ChamferWidth
                         | Field::ChamferDepth
                         | Field::ChamferStep
-                        | Field::LeadInSize
-                        | Field::LeadOutSize
                         | Field::LeadOverlap
                 )
             });
@@ -693,7 +691,7 @@ impl App {
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
             OpKind::Bore => "Select cylindrical holes or bosses, or circular drawing loops. Selected features must share diameter and cutting heights.",
             OpKind::Thread => "Select cylindrical bores or bosses, or circular drawing holes. Selected features must share diameter and cutting heights. A verified rounded entrance is supported; only the cylinder is threaded. Choose a thread mill, then review the suggested standard size in Geometry > Thread or enter a custom major diameter and pitch.",
-            OpKind::Parallel => "Select solid bodies or machining faces. Parallel rows follow the surface with a ball nose cutter. Containment uses the selected geometry bounding box in the pass direction.",
+            OpKind::Parallel => "Select solid bodies or machining faces for ball nose finishing. Containment uses the selected geometry bounding box.",
             OpKind::Adaptive => "Select whole solid bodies, individual faces, or both. Body selection includes all of its faces; face selection limits machining to the chosen face footprint.",
             _ => unreachable!(),
         };

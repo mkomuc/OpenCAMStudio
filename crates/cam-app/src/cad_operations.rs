@@ -362,6 +362,7 @@ pub(crate) fn operation_type(operation: &Operation) -> &'static str {
         Operation::Engrave(_) => "Engrave",
         Operation::Carve(_) => "Carve",
         Operation::Adaptive(_) => "3D Adaptive Clearing",
+        Operation::Parallel(o) if o.params.scallop => "3D Scallop",
         Operation::Parallel(_) => "3D Parallel",
     }
 }
@@ -497,6 +498,7 @@ pub(crate) fn create_operation(
             end: None,
             start: None,
             clear: ClearParams {
+                keep_tool_down: false,
                 lift_height: 0.0,
                 stepdown: defaults.stepdown,
                 overlap: 0.5,
@@ -511,7 +513,11 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
-            passes: Default::default(),
+            passes: cam_model::ProfilePasses {
+                lead_end_distance: 0.6,
+                lead_end_distance_enabled: Some(false),
+                ..Default::default()
+            },
             selections: match &binding.recipe {
                 ExtractionRecipe::ProfileEntries { entries } => Some(entries.clone()),
                 _ => None,
@@ -548,9 +554,13 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
             end: None,
             start: None,
-            lead_in: Lead::None,
-            lead_out: Lead::None,
-            lead_overlap: 0.0,
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
+            lead_overlap: if resolved.profiles.first().is_none_or(|p| p.closed) {
+                0.6
+            } else {
+                0.0
+            },
             plunge: Plunge::Straight,
             clearing: Clearing::default(),
         }),
@@ -592,6 +602,10 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
         }),
         OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+            tip_offset: 1.0,
+            lead_in_enabled: Some(true),
+            same_lead_out: false,
+            lead_out_enabled: Some(true),
             closed: resolved.profiles.first().is_none_or(|p| p.closed),
             faces: resolved.chamfers.clone(),
             stepdown: 0.,
@@ -621,9 +635,15 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
             end: None,
             start: None,
-            lead_in: Lead::None,
-            lead_out: Lead::None,
-            lead_overlap: 0.,
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
+            lead_overlap: if resolved.chamfers.is_empty()
+                && resolved.profiles.first().is_none_or(|p| p.closed)
+            {
+                0.6
+            } else {
+                0.0
+            },
         }),
         OpKind::Engrave => Operation::Engrave(EngraveOp {
             id,

@@ -24,7 +24,7 @@ pub use camera::{orientation, top_view, OrbitCamera, Ray, IDENTITY};
 #[cfg(feature = "gpu")]
 pub use gizmo::label_atlas;
 pub use gizmo::{pick_face, unit_cube, GizmoVertex};
-pub use mesh::{mesh_vertices, MeshVertex};
+pub use mesh::{mesh_vertices, stock_mesh_vertices_controlled, MeshVertex};
 pub use path_cone::{path_cone_mesh, PathCone, PATH_IN, PATH_OUT};
 pub use scene::{
     Color, LineStrip, Scene, Vertex, CUT, ENVELOPE, ENVELOPE_OVER, PART, PLUNGE, RAPID,

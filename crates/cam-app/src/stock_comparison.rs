@@ -2,6 +2,7 @@
 //! across stock frames; only the latest requested frame can reach the UI.
 use cam_render::{CadScene, MeshVertex, SurfaceClass};
 use cam_toolpath::CancelToken;
+use rayon::prelude::*;
 use std::{
     collections::HashMap,
     sync::{mpsc, Arc, Mutex},
@@ -161,26 +162,49 @@ impl Worker {
 fn classify_points(
     request: &Request,
     cache: &mut PointCache,
-    mut classify: impl FnMut([f64; 3]) -> Option<SurfaceClass>,
+    classify: impl Fn([f64; 3]) -> Option<SurfaceClass> + Sync,
 ) -> Option<(Vec<Option<SurfaceClass>>, usize)> {
     let mut classes = Vec::with_capacity(request.points.len());
     let mut queries = 0;
-    for point in &request.points {
+    // Bounded batches keep cancellation responsive without a shared cache lock
+    // in the BVH traversal. Duplicate points are queried once within each batch.
+    for points in request.points.chunks(4096) {
         if request.cancel.is_cancelled() {
             return None;
         }
-        let key = point.map(|v| if v == 0. { 0 } else { v.to_bits() });
-        let class = if let Some(class) = cache.get(&key) {
-            *class
-        } else {
-            let class = classify(point.map(f64::from));
-            queries += 1;
-            if cache.len() < CACHE_LIMIT {
-                cache.insert(key, class);
+        let keys: Vec<_> = points.iter()
+            .map(|point| point.map(|v| if v == 0. { 0 } else { v.to_bits() }))
+            .collect();
+        let mut missing = HashMap::new();
+        let mut unique = Vec::new();
+        for &key in &keys {
+            if !cache.contains_key(&key) {
+                missing.entry(key).or_insert_with(|| {
+                    let index = unique.len();
+                    unique.push(key);
+                    index
+                });
             }
-            class
-        };
-        classes.push(class);
+        }
+        let values: Option<Vec<_>> = unique.par_iter().with_min_len(64).map(|key| {
+            if request.cancel.is_cancelled() {
+                return None;
+            }
+            Some(classify(key.map(|bits| f64::from(f32::from_bits(bits)))))
+        }).collect();
+        let values = values?;
+        queries += values.len();
+        if request.cancel.is_cancelled() {
+            return None;
+        }
+        for key in keys {
+            classes.push(cache.get(&key).copied().unwrap_or_else(|| values[missing[&key]]));
+        }
+        for (key, value) in unique.into_iter().zip(values) {
+            if cache.len() < CACHE_LIMIT {
+                cache.insert(key, value);
+            }
+        }
     }
     Some((classes, queries))
 }
@@ -188,6 +212,32 @@ fn classify_points(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parallel_classification_preserves_order_and_deduplicates_batches() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let request = Request {
+            generation: 1,
+            points: (0..20_000).map(|i| [(i % 1000) as f32, 0., 0.]).collect(),
+            tolerance: 0.05,
+            cancel: CancelToken::new(),
+        };
+        let calls = AtomicUsize::new(0);
+        let mut cache = PointCache::new();
+        let (classes, queries) = classify_points(&request, &mut cache, |point| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Some(if point[0] < 500. { SurfaceClass::Gouge } else { SurfaceClass::Excess })
+        }).unwrap();
+        assert_eq!(queries, 1000);
+        assert_eq!(calls.load(Ordering::Relaxed), 1000);
+        for (i, class) in classes.into_iter().enumerate() {
+            assert_eq!(class, Some(if i % 1000 < 500 { SurfaceClass::Gouge } else { SurfaceClass::Excess }));
+        }
+        let cancel = request.cancel.clone();
+        assert!(classify_points(&request, &mut PointCache::new(), |_| {
+            cancel.cancel();
+            Some(SurfaceClass::Gouge)
+        }).is_none());
+    }
     #[test]
     fn duplicated_vertices_and_unchanged_frames_reuse_exact_point_results() {
         let request = Request {

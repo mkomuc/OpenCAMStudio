@@ -1,12 +1,103 @@
 //! Compact stock meshing. Flat interiors become rectangles; only the changing
 //! surface is tessellated. Dual contour vertices recover walls from the actual
 //! cutter sweeps instead of following the edges of square heightfield cells.
-use super::{Heightfield, SurfaceMesh};
+use super::{Heightfield, SurfaceMesh, MESH_TILE_SIZE};
+use rayon::prelude::*;
 
 #[derive(Clone, Copy)]
 struct Corner {
     xy: [f32; 2],
     normal: Option<[f32; 3]>,
+}
+
+/// One mesh per stock tile, rebuilt only when cuts change it or its neighbours.
+/// Revisions belong to heightfield snapshots, so rewinds and disposable partial
+/// motions cannot reuse surfaces from a different state.
+#[derive(Default)]
+pub struct StockMeshCache {
+    grid: Option<(usize, usize, u64)>,
+    tiles: Vec<Option<(u64, SurfaceMesh)>>,
+}
+
+impl StockMeshCache {
+    /// Rebuild changed tiles concurrently. The cancellation callback may be
+    /// polled from multiple worker threads; a cancelled build publishes no mesh.
+    pub fn mesh_controlled(
+        &mut self,
+        field: &Heightfield,
+        floor: f64,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Option<SurfaceMesh> {
+        if cancelled() {
+            return None;
+        }
+        let key = (field.nx, field.ny, floor.to_bits());
+        if self.grid != Some(key) {
+            self.grid = Some(key);
+            self.tiles = vec![None; field.mesh_revisions.len()];
+        }
+        let width = field.nx.div_ceil(MESH_TILE_SIZE);
+        // Tiles read one immutable stock snapshot and own disjoint cache slots.
+        // Assembly below stays in tile order, preserving vertex/provenance indices.
+        self.tiles.par_iter_mut().enumerate().try_for_each(|(index, tile)| {
+            if cancelled() {
+                return None;
+            }
+            let revision = field.mesh_revisions[index];
+            if tile.as_ref().is_some_and(|(saved, _)| *saved == revision) {
+                return Some(());
+            }
+            let x = index % width * MESH_TILE_SIZE;
+            let y = index / width * MESH_TILE_SIZE;
+            let mesh = field.solid_mesh_region_controlled(
+                floor,
+                [x, y],
+                [
+                    (x + MESH_TILE_SIZE).min(field.nx),
+                    (y + MESH_TILE_SIZE).min(field.ny),
+                ],
+                cancelled,
+            )?;
+            *tile = Some((revision, mesh));
+            Some(())
+        })?;
+        let vertices = self
+            .tiles
+            .iter()
+            .flatten()
+            .map(|(_, m)| m.positions.len())
+            .sum();
+        let indices = self
+            .tiles
+            .iter()
+            .flatten()
+            .map(|(_, m)| m.indices.len())
+            .sum();
+        let mut mesh = SurfaceMesh {
+            positions: Vec::with_capacity(vertices),
+            normals: Vec::with_capacity(vertices),
+            machined: Vec::with_capacity(vertices),
+            operations: Vec::with_capacity(vertices),
+            cut_sources: field.surface_tracking.then(|| Vec::with_capacity(vertices)),
+            indices: Vec::with_capacity(indices),
+        };
+        for (_, tile) in self.tiles.iter().flatten() {
+            if cancelled() {
+                return None;
+            }
+            let offset = mesh.positions.len() as u32;
+            mesh.positions.extend_from_slice(&tile.positions);
+            mesh.normals.extend_from_slice(&tile.normals);
+            mesh.machined.extend_from_slice(&tile.machined);
+            mesh.operations.extend_from_slice(&tile.operations);
+            if let (Some(sources), Some(tile_sources)) = (&mut mesh.cut_sources, &tile.cut_sources)
+            {
+                sources.extend_from_slice(tile_sources);
+            }
+            mesh.indices.extend(tile.indices.iter().map(|i| i + offset));
+        }
+        (!cancelled()).then_some(mesh)
+    }
 }
 impl SurfaceMesh {
     fn top_quad(
@@ -27,7 +118,9 @@ impl SurfaceMesh {
                 self.normals.extend(ids.map(|i| n[i]));
                 self.machined.extend([cut; 3]);
                 self.operations.extend([op.filter(|_| cut); 3]);
-                if let Some(sources) = &mut self.cut_sources { sources.extend([None; 3]); }
+                if let Some(sources) = &mut self.cut_sources {
+                    sources.extend([None; 3]);
+                }
                 self.indices.extend([base, base + 1, base + 2]);
             }
         }
@@ -38,32 +131,46 @@ impl SurfaceMesh {
         self.normals.extend(n);
         self.machined.extend([cut; 4]);
         self.operations.extend([op.filter(|_| cut); 4]);
-        if let Some(sources) = &mut self.cut_sources { sources.extend([None; 4]); }
+        if let Some(sources) = &mut self.cut_sources {
+            sources.extend([None; 4]);
+        }
         self.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 }
 impl SurfaceMesh {
     pub(super) fn stamp_source(&mut self, first: usize, field: &Heightfield, cut: u32) {
-        let Some(sources) = &mut self.cut_sources else { return };
-        let Some(sweep) = field.cuts.get(cut as usize) else { return };
+        let Some(sources) = &mut self.cut_sources else {
+            return;
+        };
+        let Some(sweep) = field.cuts.get(cut as usize) else {
+            return;
+        };
         for (index, point) in self.positions.iter().enumerate().skip(first) {
-            if self.machined[index] { sources[index] = sweep.surface_location(*point); }
+            if self.machined[index] {
+                sources[index] = sweep.surface_location(*point);
+            }
         }
     }
 }
 impl Heightfield {
     fn top_cut(&self, x: usize, y: usize, wall_step: f32) -> u32 {
         let cut = self.winners[y * self.nx + x];
-        if cut != u32::MAX || self.operation_at(x, y).is_some() { return cut; }
+        if cut != u32::MAX || self.operation_at(x, y).is_some() {
+            return cut;
+        }
         let z = self.z[y * self.nx + x];
-        (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+        (-1..=1)
+            .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
             .filter_map(|(dx, dy)| {
                 let (nx, ny) = (x as isize + dx, y as isize + dy);
                 let height = self.height(nx, ny)?;
                 let cut = self.winners[ny as usize * self.nx + nx as usize];
-                (height < self.top && (z - height).abs() <= wall_step && cut != u32::MAX).then_some((height, cut))
-            }).min_by(|a, b| a.0.total_cmp(&b.0)).map_or(u32::MAX, |(_, cut)| cut)
+                (height < self.top && (z - height).abs() <= wall_step && cut != u32::MAX)
+                    .then_some((height, cut))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(u32::MAX, |(_, cut)| cut)
     }
     /// Smoothing can lower an uncut cell's displayed edge beside a shallow cut.
     /// Give that fringe the neighbouring cut's owner, just as its height/normal
@@ -285,25 +392,38 @@ impl Heightfield {
         floor: f64,
         cancelled: &dyn Fn() -> bool,
     ) -> Option<SurfaceMesh> {
+        self.solid_mesh_region_controlled(floor, [0, 0], [self.nx, self.ny], cancelled)
+    }
+
+    fn solid_mesh_region_controlled(
+        &self,
+        floor: f64,
+        [x0, y0]: [usize; 2],
+        [x1, y1]: [usize; 2],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<SurfaceMesh> {
+        let width = x1 - x0;
+        let height = y1 - y0;
+        let corner_width = width + 1;
         let f = floor as f32;
         let wall_step = self.res as f32 * 2.5;
-        let mut corners = Vec::with_capacity((self.nx + 1) * (self.ny + 1));
-        for y in 0..=self.ny {
+        let mut corners = Vec::with_capacity(corner_width * (height + 1));
+        for y in y0..=y1 {
             if cancelled() {
                 return None;
             }
-            for x in 0..=self.nx {
+            for x in x0..=x1 {
                 corners.push(self.contour_corner(x, y, wall_step));
             }
         }
-        let mut flat = vec![0u8; self.z.len()];
-        for y in 0..self.ny {
+        let mut flat = vec![0u8; width * height];
+        for y in y0..y1 {
             if cancelled() {
                 return None;
             }
-            for x in 0..self.nx {
+            for x in x0..x1 {
                 let z = self.z[y * self.nx + x];
-                flat[y * self.nx + x] = u8::from(
+                flat[(y - y0) * width + x - x0] = u8::from(
                     !self.detailed_column(x, y)
                         && !(self.surface_tracking && z < self.top)
                         && z > f + 1e-4
@@ -324,29 +444,29 @@ impl Heightfield {
         let down = [[0., 0., -1.]; 4];
         // Greedy rectangles leave a one-cell collar around changing heights.
         // That collar shares all contour vertices with walls and neighbouring tops.
-        for y in 0..self.ny {
+        for y in y0..y1 {
             if cancelled() {
                 return None;
             }
-            for x in 0..self.nx {
-                let id = y * self.nx + x;
+            for x in x0..x1 {
+                let id = (y - y0) * width + x - x0;
                 if flat[id] != 1 {
                     continue;
                 }
-                let z = self.z[id];
+                let z = self.z[y * self.nx + x];
                 let op = self.operation_at(x, y);
                 let mut end_x = x + 1;
-                while end_x < self.nx
-                    && flat[y * self.nx + end_x] == 1
+                while end_x < x1
+                    && flat[(y - y0) * width + end_x - x0] == 1
                     && self.z[y * self.nx + end_x] == z
                     && self.operation_at(end_x, y) == op
                 {
                     end_x += 1;
                 }
                 let mut end_y = y + 1;
-                while end_y < self.ny
+                while end_y < y1
                     && (x..end_x).all(|i| {
-                        flat[end_y * self.nx + i] == 1
+                        flat[(end_y - y0) * width + i - x0] == 1
                             && self.z[end_y * self.nx + i] == z
                             && self.operation_at(i, end_y) == op
                     })
@@ -358,7 +478,7 @@ impl Heightfield {
                 }
                 for j in y..end_y {
                     for i in x..end_x {
-                        flat[j * self.nx + i] = 2;
+                        flat[(j - y0) * width + i - x0] = 2;
                     }
                 }
                 // Mark merged cells separately, without allocating another bitmap.
@@ -389,14 +509,14 @@ impl Heightfield {
             }
         }
         // Boundary cells and slopes retain local detail; merged interiors need no more geometry.
-        for y in 0..self.ny {
+        for y in y0..y1 {
             if cancelled() {
                 return None;
             }
-            for x in 0..self.nx {
+            for x in x0..x1 {
                 if self.detailed_column(x, y) {
                     let xy = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)]
-                        .map(|(i, j)| corners[j * (self.nx + 1) + i].xy);
+                        .map(|(i, j)| corners[(j - y0) * corner_width + i - x0].xy);
                     self.mesh_column(x, y, f, xy, &mut mesh);
                     continue;
                 }
@@ -404,12 +524,12 @@ impl Heightfield {
                 if z <= f + 1e-4 {
                     continue;
                 }
-                let interior = flat[y * self.nx + x] == 2;
+                let interior = flat[(y - y0) * width + x - x0] == 2;
                 if interior && x > 0 && y > 0 && x + 1 < self.nx && y + 1 < self.ny {
                     continue;
                 }
                 let coords = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)];
-                let c = coords.map(|(i, j)| corners[j * (self.nx + 1) + i]);
+                let c = coords.map(|(i, j)| corners[(j - y0) * corner_width + i - x0]);
                 let h = coords.map(|(i, j)| self.corner_surface(i, j, z, wall_step));
                 let p: [[f32; 3]; 4] =
                     std::array::from_fn(|i| [c[i].xy[0], c[i].xy[1], h[i].0.max(f)]);
@@ -501,22 +621,196 @@ mod tests {
     use super::*;
     use crate::ToolProfile;
 
+    fn surface_measures(mesh: &SurfaceMesh) -> (f64, f64) {
+        let mut area = 0.;
+        let mut volume = 0.;
+        for triangle in mesh.indices.as_chunks::<3>().0 {
+            let [a, b, c] = [0, 1, 2].map(|i| mesh.positions[triangle[i] as usize].map(f64::from));
+            let u = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
+            let v = std::array::from_fn::<_, 3, _>(|i| c[i] - a[i]);
+            let cross = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            area += cross.iter().map(|v| v * v).sum::<f64>().sqrt() * 0.5;
+            volume += (0..3).map(|i| a[i] * cross[i]).sum::<f64>() / 6.;
+        }
+        (area, volume)
+    }
+
+    fn check_cached_surface(cache: &mut StockMeshCache, field: &Heightfield, floor: f64) {
+        let actual = cache.mesh_controlled(field, floor, &|| false).unwrap();
+        let fresh = StockMeshCache::default()
+            .mesh_controlled(field, floor, &|| false)
+            .unwrap();
+        assert_eq!(
+            actual, fresh,
+            "cached tiles must match a fresh build, including provenance"
+        );
+        let (area, volume) = surface_measures(&actual);
+        let (expected_area, expected_volume) = surface_measures(&field.to_solid_mesh(floor));
+        assert!(
+            (area - expected_area).abs() < 1e-4,
+            "area: {area} vs {expected_area}"
+        );
+        assert!(
+            (volume - expected_volume).abs() < 1e-4,
+            "volume: {volume} vs {expected_volume}"
+        );
+    }
+
+    #[test]
+    fn tiled_mesh_is_identical_with_one_or_four_workers() {
+        let mut field = Heightfield::new([0., 0.], [48., 48.], 0.5, 0.);
+        field.set_surface_tracking(true);
+        field.set_cut_source(10, (0., 1.));
+        field.cut_segment_profile_controlled(
+            [4., 5., -3.], [40., 43., -2.], &ToolProfile::flat(3.), Some(7), &|| false,
+        );
+        let build = |threads| rayon::ThreadPoolBuilder::new().num_threads(threads)
+            .build().unwrap().install(|| {
+                StockMeshCache::default().mesh_controlled(&field, -6., &|| false).unwrap()
+            });
+        assert_eq!(build(1), build(4));
+    }
+
+    #[test]
+    fn mesh_tiles_reuse_unchanged_regions_and_follow_rewinds_and_replacement_stock() {
+        let mut cache = StockMeshCache::default();
+        let mut field = Heightfield::new([0., 0.], [48., 48.], 0.5, 0.);
+        check_cached_surface(&mut cache, &field, -6.);
+        let untouched = cache
+            .tiles
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .1
+            .positions
+            .as_ptr();
+        field.lower_rect([14., 14.], [18., 18.], -2.);
+        check_cached_surface(&mut cache, &field, -6.);
+        assert_eq!(
+            untouched,
+            cache
+                .tiles
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .1
+                .positions
+                .as_ptr()
+        );
+        let earlier = field.clone();
+        field.cut_segment_profile_controlled(
+            [14., 15.8, -4.],
+            [18., 16.2, -4.],
+            &ToolProfile {
+                radius: 2.,
+                shape: crate::ProfileShape::Ball,
+            },
+            Some(7),
+            &|| false,
+        );
+        check_cached_surface(&mut cache, &field, -6.);
+        check_cached_surface(&mut cache, &earlier, -6.);
+        field = earlier;
+        field.cut_segment_profile_controlled(
+            [15.8, 14., -3.],
+            [16.2, 18., -3.],
+            &ToolProfile::flat(2.),
+            Some(8),
+            &|| false,
+        );
+        check_cached_surface(&mut cache, &field, -6.);
+        check_cached_surface(&mut cache, &field, -8.);
+        let replacement = Heightfield::new([2., 3.], [50., 51.], 0.5, 1.);
+        check_cached_surface(&mut cache, &replacement, -6.);
+    }
+
+    #[test]
+    fn mesh_tiles_preserve_thread_flanks_and_force_sources_across_tile_boundaries() {
+        let mut cache = StockMeshCache::default();
+        let mut field = Heightfield::new([0., 0.], [48., 48.], 0.5, 0.);
+        field.set_surface_tracking(true);
+        check_cached_surface(&mut cache, &field, -6.);
+        let tool = ToolProfile {
+            radius: 3.,
+            shape: crate::ProfileShape::Thread {
+                root_radius: 1.,
+                tooth_height: 1.,
+                pitch: 2.,
+                tooth_count: 2,
+            },
+        };
+        for (step, (a, b)) in [
+            ([14., 15.8, -5.], [18., 16.2, -5.]),
+            ([15.8, 14., -4.5], [16.2, 18., -4.5]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            field.set_cut_source(step, (0., 1.));
+            field.cut_segment_profile_controlled(a, b, &tool, Some(7), &|| false);
+            check_cached_surface(&mut cache, &field, -6.);
+        }
+        field.set_surface_tracking(false);
+        check_cached_surface(&mut cache, &field, -6.);
+    }
+
+    #[test]
+    fn cancelled_mesh_tile_work_cannot_publish_or_contaminate_an_earlier_frame() {
+        let mut cache = StockMeshCache::default();
+        let mut field = Heightfield::new([0., 0.], [48., 48.], 0.5, 0.);
+        check_cached_surface(&mut cache, &field, -6.);
+        let earlier = field.clone();
+        field.lower_rect([0., 0.], [48., 48.], -2.);
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        assert!(cache
+            .mesh_controlled(&field, -6., &|| {
+                checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 150
+            })
+            .is_none());
+        check_cached_surface(&mut cache, &earlier, -6.);
+        check_cached_surface(&mut cache, &field, -6.);
+    }
+
     #[test]
     fn force_surfaces_retain_the_removing_move_after_an_air_pass() {
         let mut field = Heightfield::new([0., 0.], [20., 10.], 0.5, 0.);
         field.set_surface_tracking(true);
         let tool = ToolProfile::flat(2.);
         field.set_cut_source(3, (0., 1.));
-        field.cut_segment_profile_controlled([-4., 5., -2.], [24., 5., -2.], &tool, Some(7), &|| false);
+        field.cut_segment_profile_controlled(
+            [-4., 5., -2.],
+            [24., 5., -2.],
+            &tool,
+            Some(7),
+            &|| false,
+        );
         field.set_cut_source(4, (0., 1.));
-        field.cut_segment_profile_controlled([24., 5., -2.], [-4., 5., -2.], &tool, Some(7), &|| false);
+        field.cut_segment_profile_controlled(
+            [24., 5., -2.],
+            [-4., 5., -2.],
+            &tool,
+            Some(7),
+            &|| false,
+        );
         let mesh = field.to_solid_mesh(-5.);
         let sources = mesh.cut_sources.as_ref().unwrap();
         assert_eq!(sources.len(), mesh.positions.len());
-        assert!(sources.iter().flatten().all(|source| source.step_index == 3));
+        assert!(sources
+            .iter()
+            .flatten()
+            .all(|source| source.step_index == 3));
         assert!(sources.iter().flatten().any(|source| source.fraction > 0.6));
         assert!(sources.iter().flatten().any(|source| source.fraction < 0.3));
-        assert!(sources.iter().zip(&mesh.machined).all(|(source, cut)| *cut || source.is_none()));
+        assert!(sources
+            .iter()
+            .zip(&mesh.machined)
+            .all(|(source, cut)| *cut || source.is_none()));
         // Leading-edge contact at x=10, y=5 occurs at axis x=8.
         let cut = &field.cuts[0];
         assert!((cut.surface_location([10., 5., -2.]).unwrap().fraction - 12. / 28.).abs() < 1e-10);
@@ -528,7 +822,13 @@ mod tests {
         field.set_surface_tracking(true);
         for (depth, step) in [(-2., 10), (-4., 20)] {
             field.set_cut_source(step, (0., 1.));
-            field.cut_segment_profile_controlled([4., 5., depth], [16., 5., depth], &ToolProfile::flat(2.), Some(7), &|| false);
+            field.cut_segment_profile_controlled(
+                [4., 5., depth],
+                [16., 5., depth],
+                &ToolProfile::flat(2.),
+                Some(7),
+                &|| false,
+            );
         }
         let mesh = field.to_solid_mesh(-6.);
         let sources = mesh.cut_sources.as_ref().unwrap();
@@ -536,10 +836,16 @@ mod tests {
         for triangle in mesh.indices.as_chunks::<3>().0 {
             let first = triangle[0] as usize;
             if mesh.machined[first] && mesh.normals[first][2].abs() < 0.1 {
-                let z = triangle.iter().map(|&i| mesh.positions[i as usize][2]).sum::<f32>() / 3.;
+                let z = triangle
+                    .iter()
+                    .map(|&i| mesh.positions[i as usize][2])
+                    .sum::<f32>()
+                    / 3.;
                 let (band, step) = if z > -2. { (0, 10) } else { (1, 20) };
                 bands[band] += 1;
-                assert!(triangle.iter().all(|&i| sources[i as usize].unwrap().step_index == step));
+                assert!(triangle
+                    .iter()
+                    .all(|&i| sources[i as usize].unwrap().step_index == step));
             }
         }
         assert!(bands.iter().all(|&n| n > 0));
@@ -549,10 +855,24 @@ mod tests {
     fn thread_flanks_keep_the_cut_that_exposed_them() {
         let mut field = Heightfield::new([0., 0.], [10., 10.], 0.25, 0.);
         field.set_surface_tracking(true);
-        let tool = ToolProfile { radius: 2., shape: crate::ProfileShape::Thread { root_radius: 1., tooth_height: 1., pitch: 2., tooth_count: 2 } };
+        let tool = ToolProfile {
+            radius: 2.,
+            shape: crate::ProfileShape::Thread {
+                root_radius: 1.,
+                tooth_height: 1.,
+                pitch: 2.,
+                tooth_count: 2,
+            },
+        };
         for step in [10, 20] {
             field.set_cut_source(step, (0., 1.));
-            field.cut_segment_profile_controlled([3., 5., -4.], [7., 5., -4.], &tool, Some(7), &|| false);
+            field.cut_segment_profile_controlled(
+                [3., 5., -4.],
+                [7., 5., -4.],
+                &tool,
+                Some(7),
+                &|| false,
+            );
         }
         let mesh = field.to_solid_mesh(-5.);
         let sources = mesh.cut_sources.as_ref().unwrap();
@@ -563,23 +883,53 @@ mod tests {
     #[test]
     fn surface_tracking_cache_resets_on_rewind_and_mode_changes() {
         use cam_cldata::{MoveKind, Point3, ProgramBuilder};
-        let program = ProgramBuilder::new().feed(600.)
+        let program = ProgramBuilder::new()
+            .feed(600.)
             .rapid(Point3::new(-4., 5., 5.), MoveKind::Link)
             .linear(Point3::new(-4., 5., -2.), MoveKind::Plunge)
             .linear(Point3::new(24., 5., -2.), MoveKind::Cutting)
             .linear(Point3::new(24., 5., -4.), MoveKind::Plunge)
-            .linear(Point3::new(-4., 5., -4.), MoveKind::Cutting).build();
+            .linear(Point3::new(-4., 5., -4.), MoveKind::Cutting)
+            .build();
         let mut cache = crate::SimulationCache::default();
         cache.set_surface_sources(true);
-        let options = crate::SimOptions { resolution: 0.5, tool_radius: 2. };
+        let options = crate::SimOptions {
+            resolution: 0.5,
+            tool_radius: 2.,
+        };
         let run = |cache: &mut crate::SimulationCache, program: &cam_cldata::Program| {
-            cache.simulate_controlled(program, [0., 0., -5.], [20., 10., 0.], &options, &[], &|| false, |_, _| {}).unwrap().field.to_solid_mesh(-5.)
+            cache
+                .simulate_controlled(
+                    program,
+                    [0., 0., -5.],
+                    [20., 10., 0.],
+                    &options,
+                    &[],
+                    &|| false,
+                    |_, _| {},
+                )
+                .unwrap()
+                .field
+                .to_solid_mesh(-5.)
         };
         let full = run(&mut cache, &program);
-        assert!(full.cut_sources.unwrap().iter().flatten().any(|s| s.step_index == 4));
-        let prefix = cam_cldata::Program { steps: program.steps()[..3].to_vec() };
+        assert!(full
+            .cut_sources
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|s| s.step_index == 4));
+        let prefix = cam_cldata::Program {
+            steps: program.steps()[..3].to_vec(),
+        };
         let rewound = run(&mut cache, &prefix);
-        assert!(rewound.cut_sources.as_ref().unwrap().iter().flatten().all(|s| s.step_index < 3));
+        assert!(rewound
+            .cut_sources
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|s| s.step_index < 3));
         let mut fresh = crate::SimulationCache::default();
         fresh.set_surface_sources(true);
         assert_eq!(rewound, run(&mut fresh, &prefix));

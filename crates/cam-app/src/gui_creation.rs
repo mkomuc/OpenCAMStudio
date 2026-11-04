@@ -8,10 +8,14 @@ impl App {
     }
     pub(super) fn wizard_tool(&self) -> Option<cam_model::Tool> {
         if self.cad_pending_kind.is_some() {
-            self.library
-                .tools
-                .iter()
-                .find(|tool| Some(tool.number) == self.cad_tool_pick)
+            self.cad_selected_project_tool
+                .as_ref()
+                .or_else(|| {
+                    self.library
+                        .tools
+                        .iter()
+                        .find(|tool| Some(tool.number) == self.cad_tool_pick)
+                })
                 .cloned()
         } else {
             let number = self.controller.pending_op()?.tool?;
@@ -65,7 +69,8 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
-        self.cutting_force_inputs.remove(&(self.controller.inspection_setup().id, None));
+        self.cutting_force_inputs
+            .remove(&(self.controller.inspection_setup().id, None));
         self.thread_parameters = thread_parameters::ThreadParameters::for_creation(kind);
         self.geometry_editor = None;
         self.creation_geometry_height_defaults = None;
@@ -87,6 +92,7 @@ impl App {
                 .map(|id| self.controller.inspection_setup().stock_to_leave_for(id))
                 .unwrap_or_default(),
         );
+        self.stock_to_leave_initialized = self.stock_to_leave_value().enabled;
         self.height_draft_id = Some(0);
         let settings = cam_model::OperationHeightSettings::default();
         self.height_offsets = cam_model::HeightPlaneKind::ALL

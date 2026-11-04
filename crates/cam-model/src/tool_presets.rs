@@ -37,8 +37,13 @@ impl Material {
         if self.id == 0 || self.name.trim().is_empty() {
             return Err("A material needs a nonzero ID and a name.".into());
         }
-        if self.specific_cutting_force.is_some_and(|v| !v.is_finite() || v <= 0.) {
-            return Err("Specific cutting force must be finite and positive, or unset (N/mm²).".into());
+        if self
+            .specific_cutting_force
+            .is_some_and(|v| !v.is_finite() || v <= 0.)
+        {
+            return Err(
+                "Specific cutting force must be finite and positive, or unset (N/mm²).".into(),
+            );
         }
         Ok(())
     }

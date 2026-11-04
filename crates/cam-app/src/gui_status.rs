@@ -72,7 +72,7 @@ impl StatusMessages {
                 ..Default::default()
             };
             self.0.remove(&target);
-            if let Some(notice) = notices::job_notice(&scoped) {
+            if let Some(notice) = notices::job_notice_with_info(&scoped) {
                 let dependencies = fingerprints
                     .iter()
                     .filter(|(id, _)| {
@@ -145,6 +145,7 @@ impl App {
         }
         let mut lines = Vec::new();
         let mut error = false;
+        let mut entries = Vec::new();
         for source in targets {
             let Some(recorded) = self.status_messages.0.get(&source) else {
                 continue;
@@ -166,8 +167,12 @@ impl App {
                 StatusTarget::Operation(id) => format!("Operation #{id}"),
             };
             lines.push(format!("{label}\n{}", recorded.notice.detail));
+            entries.extend(recorded.notice.entries.iter().cloned().map(|mut entry| {
+                entry.source = Some(label.clone());
+                entry
+            }));
         }
-        if lines.is_empty() {
+        if !entries.iter().any(|entry| entry.severity != Severity::Info) {
             return None;
         }
         let title = match target {
@@ -180,6 +185,7 @@ impl App {
         Some(Notice {
             title,
             detail: lines.join("\n\n"),
+            entries,
             error,
         })
     }
@@ -355,7 +361,9 @@ mod tests {
                 && combined.detail.contains("first warning")
                 && combined.detail.contains("second error")
         );
-        assert!(!combined.detail.contains("ordinary information"));
+        assert!(combined.entries.iter().any(
+            |entry| entry.severity == Severity::Info && entry.message == "ordinary information"
+        ));
 
         let selection = app.controller.selection();
         let _ = app.update(Message::ShowStatus(StatusTarget::Operation(ids[0])));

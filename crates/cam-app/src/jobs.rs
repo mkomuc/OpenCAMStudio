@@ -5,7 +5,7 @@ use crate::RunOutcome;
 use cam_cldata::{Program, SpindleDir};
 use cam_geo::{Polygon, Polyline};
 use cam_model::{Document, Machine};
-use cam_render::{mesh_vertices, MeshVertex, Scene, PART};
+use cam_render::{MeshVertex, Scene, PART};
 use cam_sim::{Collision, SimOptions, SimTool, SimulationCache};
 use cam_toolpath::{
     build_job_cached, CancelToken, Diagnostic, DiagnosticCode, JobCompletion, OperationCache,
@@ -213,7 +213,9 @@ impl JobInputs {
             simulation::StockSimulation::default()
         };
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
-        let mut scene = if job.program.validate().is_ok() {
+        // Playback constructs its display scene separately with timeline clipping and
+        // visibility options. Avoid rebuilding the entire growing prefix here.
+        let mut scene = if self.preview_program.is_none() && job.program.validate().is_ok() {
             Scene::from_program_controlled(&job.program, &|| cancel.is_cancelled())
                 .unwrap_or_default()
         } else {
@@ -244,13 +246,21 @@ impl JobInputs {
                 .to_world_vector(cone.direction.map(f64::from))
                 .map(|n| n as f32);
         }
-        for region in self.regions.iter() {
+        for region in self
+            .regions
+            .iter()
+            .filter(|_| self.preview_program.is_none())
+        {
             if cancel.is_cancelled() {
                 break;
             }
             scene.add_region(region, PART);
         }
-        for path in self.open_paths.iter() {
+        for path in self
+            .open_paths
+            .iter()
+            .filter(|_| self.preview_program.is_none())
+        {
             if cancel.is_cancelled() {
                 break;
             }

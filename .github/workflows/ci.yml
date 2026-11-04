@@ -4,6 +4,11 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -62,6 +67,22 @@ jobs:
       # verified to pass with DISPLAY and WAYLAND_DISPLAY both unset), so this job can.
       - name: Test (gui + gpu)
         run: cargo test -p cam-app --features gui
+
+  portable-compute:
+    name: CPU compute (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Finishing and SIMD correctness
+        run: 'cargo test --locked -p cam-toolpath --lib parallel::'
+      - name: Stock meshing, cancellation and provenance
+        run: cargo test --locked -p cam-sim --lib
 
   licenses:
     name: license check (GPLv3-compat)

@@ -52,7 +52,49 @@ impl Strategy for ChamferStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
-        let op = &self.op;
+        let mut effective = self.op.clone();
+        let entry_enabled = effective
+            .lead_in_enabled
+            .unwrap_or(effective.lead_in != cam_model::Lead::None);
+        if effective.same_lead_out && entry_enabled {
+            effective.lead_out = effective.lead_in;
+        }
+        if !entry_enabled {
+            effective.lead_in = cam_model::Lead::None;
+        }
+        if effective.lead_out_enabled == Some(false) {
+            effective.lead_out = cam_model::Lead::None;
+        }
+        let op = &effective;
+        if !op.tip_offset.is_finite() || op.tip_offset < 0. {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(format!(
+                    "Operation {}: chamfer tip offset must be finite and nonnegative",
+                    op.id
+                ))],
+                ..Default::default()
+            };
+        }
+        for lead in [op.lead_in, op.lead_out] {
+            let valid = match lead {
+                cam_model::Lead::None => true,
+                cam_model::Lead::Linear { length } => length.is_finite() && length > 0.,
+                cam_model::Lead::Arc { radius } => radius.is_finite() && radius > 0.,
+                cam_model::Lead::ArcSweep { radius, angle_deg } => {
+                    radius.is_finite()
+                        && radius > 0.
+                        && angle_deg.is_finite()
+                        && angle_deg > 0.
+                        && angle_deg <= 170.
+                }
+            };
+            if !valid {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(format!("Operation {}: lead size must be positive and finite, and arc sweep must be greater than 0 and at most 170 degrees", op.id))],
+                    ..Default::default()
+                };
+            }
+        }
         if let Err(reason) = op.entry_feeds.validate() {
             return StrategyResult {
                 diagnostics: vec![Diagnostic::error(reason)],
@@ -165,8 +207,15 @@ impl Strategy for ChamferStrategy {
         // partial-width pass, so a multi-pass chamfer is one XY contour cut at a
         // sequence of Z depths.
         let d_min = op.width / tan_a;
-        let tip_depth = op.depth.max(d_min);
+        let tip_depth = op.depth.max(d_min) + op.tip_offset;
         let delta = tip_depth - d_min;
+        if op.side == Side::On && op.tip_offset > 0. {
+            diagnostics.push(Diagnostic::error(format!(
+                "operation {}: chamfer tip offset requires an Inside or Outside side so the tool can shift away from the edge",
+                op.id
+            )));
+            bail!();
+        }
         if op.depth > 0.0 && op.depth < d_min {
             diagnostics.push(Diagnostic::warning(format!(
                 "operation {}: depth {:.3} is above the tip's natural depth {:.3}; using the tip",
@@ -585,6 +634,10 @@ mod tests {
 
     fn op(width: f64) -> ChamferOp {
         ChamferOp {
+            tip_offset: 0.0,
+            lead_in_enabled: None,
+            same_lead_out: false,
+            lead_out_enabled: None,
             closed: true,
             faces: Vec::new(),
             stepdown: 0.,
@@ -628,6 +681,159 @@ mod tests {
             Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(to.z),
             _ => None,
         })
+    }
+
+    #[test]
+    fn chamfer_tip_offset_lowers_and_shifts_profile_path_without_changing_width() {
+        let baseline = op(1.5);
+        let mut offset = baseline.clone();
+        offset.tip_offset = 1.;
+        let first = run(baseline, chamfer_tool(90., 0.));
+        let shifted = run(offset, chamfer_tool(90., 0.));
+        assert!(!first.has_errors() && !shifted.has_errors());
+        assert!((cut_depth(&first.program).unwrap() + 1.5).abs() < 1e-8);
+        assert!((cut_depth(&shifted.program).unwrap() + 2.5).abs() < 1e-8);
+        let min_cut_x = |result: &StrategyResult| {
+            result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(to.x),
+                    Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => Some(end.x),
+                    _ => None,
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        assert!(
+            (min_cut_x(&first) - min_cut_x(&shifted) - 1.).abs() < 1e-5,
+            "a 1 mm tip offset must move the square's cutting path 1 mm outward"
+        );
+    }
+
+    #[test]
+    fn legacy_chamfer_without_tip_offset_preserves_its_depth() {
+        let mut original = op(1.5);
+        original.depth = 2.0;
+        let mut stored = serde_json::to_value(&original).unwrap();
+        stored.as_object_mut().unwrap().remove("tip_offset");
+        let restored: ChamferOp = serde_json::from_value(stored).unwrap();
+        assert_eq!(restored.tip_offset, 0.);
+        let result = run(restored, chamfer_tool(90., 0.));
+        assert!(!result.has_errors());
+        assert!((cut_depth(&result.program).unwrap() + 2.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn tip_offset_requires_a_valid_value_and_an_air_side() {
+        let mut o = op(1.0);
+        o.tip_offset = 1.0;
+        o.side = Side::On;
+        assert!(run(o.clone(), chamfer_tool(90., 0.)).has_errors());
+        o.side = Side::Outside;
+        o.tip_offset = -0.1;
+        assert!(run(o, chamfer_tool(90., 0.)).has_errors());
+    }
+
+    #[test]
+    fn modeled_face_tip_offset_shifts_axis_and_plunge_together() {
+        let mut o = op(1.0);
+        o.faces = vec![cam_model::ChamferFace {
+            upper: [[0., 0.], [20., 0.]],
+            lower: [[0., -1.], [20., -1.]],
+            top: 0.,
+            bottom: -1.,
+            outward: [0., -1.],
+        }];
+        o.depth = 1.;
+        let before = run(o.clone(), chamfer_tool(90., 0.));
+        o.tip_offset = 0.4;
+        let after = run(o, chamfer_tool(90., 0.));
+        assert!(!before.has_errors() && !after.has_errors());
+        let cut = |result: &StrategyResult| {
+            result
+                .program
+                .steps()
+                .iter()
+                .find_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (a, b) = (cut(&before), cut(&after));
+        assert!((a.z - b.z - 0.4).abs() < 1e-8);
+        assert!((a.y - b.y - 0.4).abs() < 1e-8);
+        after.program.validate().unwrap();
+    }
+
+    #[test]
+    fn modeled_face_band_approaches_cut_stock_instead_of_colliding() {
+        let mut operation = op(10.);
+        operation.id = 9;
+        operation.top = 20.;
+        operation.depth = 10.;
+        operation.tip_offset = 1.;
+        operation.stepdown = 2.;
+        operation.lead_in = Lead::Linear { length: 2. };
+        operation.faces = vec![cam_model::ChamferFace {
+            upper: [[0., 0.], [20., 0.]],
+            lower: [[0., -10.], [20., -10.]],
+            top: 20.,
+            bottom: 10.,
+            outward: [0., -1.],
+        }];
+        let tools = [chamfer_tool(90., 0.)];
+        let env = JobEnv {
+            heights: Heights::new(25., 22., 20.),
+            tools: &tools,
+            stock: Some(([-5., -15.], [25., 5.])),
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        let result = ChamferStrategy::new(operation).compute(&env, &CancelToken::new());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let mut program = result.program;
+        program.steps.insert(0, Step::ToolChange { tool: 1 });
+        let simulate = |program: &Program| {
+            cam_sim::simulate(
+                program,
+                [-5., -15., 0.],
+                [25., 5., 20.],
+                &cam_sim::SimOptions {
+                    resolution: 0.5,
+                    tool_radius: 3.,
+                },
+                &[cam_sim::SimTool {
+                    number: 1,
+                    profile: cam_sim::ToolProfile {
+                        radius: 3.,
+                        shape: cam_sim::ProfileShape::Cone {
+                            half_angle_rad: std::f64::consts::FRAC_PI_4,
+                            flat_radius: 0.,
+                        },
+                    },
+                    noncutting_tip_radius: None,
+                }],
+            )
+        };
+        let first_lead = program
+            .steps
+            .iter()
+            .position(
+                |step| matches!(step, Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn),
+            )
+            .unwrap();
+        let approach = simulate(&Program {
+            steps: program.steps[..=first_lead].to_vec(),
+        });
+        assert!(approach.is_clean(), "{:?}", approach.collisions);
+        assert!(
+            approach.removed_volume > 0.,
+            "the approach must remove stock"
+        );
+        let simulation = simulate(&program);
+        assert!(simulation.is_clean(), "{:?}", simulation.collisions);
+        assert!(simulation.removed_volume > 0.);
     }
 
     #[test]
@@ -810,6 +1016,143 @@ mod tests {
             lead_arcs[0].x,
             lead_arcs[0].y
         );
+    }
+
+    #[test]
+    fn chamfer_exit_can_copy_entry_or_be_disabled() {
+        let mut o = op(1.5);
+        o.lead_in = Lead::Arc { radius: 1.0 };
+        o.lead_out = Lead::None;
+        o.same_lead_out = true;
+        let enabled = run(o.clone(), chamfer_tool(90.0, 0.0));
+        assert!(!enabled.has_errors(), "{:?}", enabled.diagnostics);
+        assert!(enabled
+            .program
+            .steps()
+            .iter()
+            .any(|step| matches!(step, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadOut)));
+        o.lead_out_enabled = Some(false);
+        let disabled = run(o, chamfer_tool(90.0, 0.0));
+        assert!(!disabled.has_errors(), "{:?}", disabled.diagnostics);
+        assert!(!disabled.program.steps().iter().any(|step| matches!(step, Step::Arc { tag, .. } | Step::Linear { tag, .. } if tag.kind == MoveKind::LeadOut)));
+    }
+
+    #[test]
+    fn chamfer_entry_can_be_disabled_without_disabling_independent_exit() {
+        let mut o = op(1.5);
+        o.lead_in = Lead::Arc { radius: 0.6 };
+        o.lead_out = Lead::Arc { radius: 1.0 };
+        o.same_lead_out = true;
+        o.lead_in_enabled = Some(false);
+        o.lead_out_enabled = Some(true);
+        let result = run(o, chamfer_tool(90.0, 0.0));
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.steps().iter().any(|step| matches!(step, Step::Arc { tag, .. } | Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn)));
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|step| matches!(step, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadOut)));
+    }
+
+    #[test]
+    fn modeled_face_leads_use_requested_arcs_and_safe_air_approach() {
+        let mut o = op(1.0);
+        o.faces = vec![cam_model::ChamferFace {
+            upper: [[0., 0.], [20., 0.]],
+            lower: [[0., -1.], [20., -1.]],
+            top: 0.,
+            bottom: -1.,
+            outward: [0., -1.],
+        }];
+        o.depth = 1.;
+        o.lead_in = Lead::ArcSweep {
+            radius: 0.6,
+            angle_deg: 60.,
+        };
+        o.lead_out = Lead::Arc { radius: 1.2 };
+        o.same_lead_out = true;
+        let result = run(o.clone(), chamfer_tool(90.0, 0.0));
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        result.program.validate().unwrap();
+        let arcs: Vec<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|s| match s {
+                Step::Arc {
+                    end, center, tag, ..
+                } if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) => {
+                    Some((*end, *center, tag.kind))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arcs.len(), 2);
+        assert_eq!(arcs[0].2, MoveKind::LeadIn);
+        assert_eq!(arcs[1].2, MoveKind::LeadOut);
+        for (end, center, _) in arcs {
+            assert!(((end.x - center.x).hypot(end.y - center.y) - 0.6).abs() < 1e-8);
+        }
+        let plunge = result
+            .program
+            .steps()
+            .iter()
+            .find_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(*to),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            plunge.y < -1.0 - 3.0,
+            "plunge must stay beyond the face and tool radius"
+        );
+
+        let tools = [chamfer_tool(90., 0.)];
+        let env = JobEnv {
+            heights: Heights::new(5., 2., 0.),
+            tools: &tools,
+            stock: Some(([-5., -10.], [25., 5.])),
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        let stock_result = ChamferStrategy::new(o.clone()).compute(&env, &CancelToken::new());
+        assert!(!stock_result.has_errors(), "{:?}", stock_result.diagnostics);
+        stock_result.program.validate().unwrap();
+        let stock_plunge = stock_result
+            .program
+            .steps()
+            .iter()
+            .find_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(*to),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            stock_plunge.y <= -13.5,
+            "plunge must clear the stock by the tool radius and margin"
+        );
+
+        o.lead_in_enabled = Some(false);
+        o.lead_out_enabled = Some(true);
+        let result = run(o, chamfer_tool(90.0, 0.0));
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        // Disabling the optional arc still leaves the required straight feed
+        // from the safe approach point to the face.
+        assert!(!result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadIn)));
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn)));
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::LeadOut)));
     }
 
     #[test]

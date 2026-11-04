@@ -185,7 +185,14 @@ shop_catalog! {
         let settings=crate::settings_path().ok_or("settings directory unavailable")?;
         let directory=settings.parent().ok_or("settings directory unavailable")?;
         std::fs::create_dir_all(directory).map_err(|e|e.to_string())?;
-        c.library.save_to(&directory.join("tools.json")).map_err(|e|e.to_string())?;
+        let path=directory.join("tool-libraries.json");
+        let (mut collection, outcome)=crate::config::load_from::<crate::tool_library::LibraryCollection>(&path);
+        if let crate::config::ConfigLoad::Rejected(why)=outcome { return Err(format!("Cannot save tool libraries: {why}")); }
+        if !matches!(outcome, crate::config::ConfigLoad::Loaded) {
+            collection=crate::tool_library::LibraryCollection::from_legacy(c.library.clone());
+        }
+        collection.libraries.insert(collection.active.clone(), c.library.clone());
+        crate::config::save_to(&collection,&path).map_err(|e|e.to_string())?;
         c.machines.save_to(&directory.join("machines.json")).map_err(|e|e.to_string())?;
         c.settings.save_to(&settings).map_err(|e|e.to_string())?;
         Ok(json!(true))

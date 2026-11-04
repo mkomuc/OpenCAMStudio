@@ -73,6 +73,21 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
 /// roughing end mills; v4 adds optional effective specific cutting force on materials.
 pub const LIBRARY_VERSION: u32 = 4;
 
+/// Approximate effective coefficients, not raw kc1 reference values. See
+/// docs/cutting-forces.md for the assumptions and source data.
+const STARTER_MATERIALS: &[(&str, f64)] = &[
+    ("Pine", 53.),
+    ("Oak", 80.),
+    ("Beech", 65.),
+    ("MDF", 65.),
+    ("Birch plywood", 170.),
+    ("Aluminium 6061-T6", 1700.),
+    ("Aluminium 6082-T6", 1700.),
+    ("Aluminium 5083", 1500.),
+    ("Steel C15 / 1.0401", 3500.),
+    ("Steel S355 / 1.0050", 4350.),
+];
+
 /// A library file with no `library_version` predates the field. Every such file is
 /// the v1 shape — the field was added *because* the format needed a version, not
 /// because the format changed — so reading it as v1 is the truth, not a guess.
@@ -134,6 +149,77 @@ pub enum LibraryLoad {
     Rejected(String),
 }
 
+/// Named libraries kept together so switching never overwrites another library.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LibraryCollection {
+    version: u32,
+    pub active: String,
+    pub libraries: std::collections::BTreeMap<String, ToolLibrary>,
+}
+
+impl crate::config::ConfigFile for LibraryCollection {
+    const FILE_NAME: &'static str = "tool-libraries.json";
+    const VERSION: u32 = 1;
+    const SEED_ON_MISSING: bool = false;
+    const WHAT: &'static str = "tool libraries";
+    fn stated_version(&self) -> u32 {
+        self.version
+    }
+    fn migrate(&mut self, _: u32) {
+        self.version = 1;
+    }
+    fn validate(&self) -> Result<(), String> {
+        if self.libraries.is_empty() || !self.libraries.contains_key(&self.active) {
+            return Err("The active tool library is missing".into());
+        }
+        for (name, library) in &self.libraries {
+            if name.trim().is_empty() || library.library_version > LIBRARY_VERSION {
+                return Err("Invalid library name or unsupported library version".into());
+            }
+            library.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl LibraryCollection {
+    pub(crate) fn from_legacy(library: ToolLibrary) -> Self {
+        let mut libraries = std::collections::BTreeMap::new();
+        let active = if library == ToolLibrary::defaults() {
+            "Default tools"
+        } else {
+            "My tools"
+        };
+        if active != "Default tools" {
+            libraries.insert("Default tools".into(), ToolLibrary::defaults());
+        }
+        libraries.insert(active.into(), library);
+        Self {
+            version: 1,
+            active: active.into(),
+            libraries,
+        }
+    }
+    #[cfg(any(feature = "gui", test))]
+    pub(crate) fn unique_name(&self, base: &str) -> String {
+        let base = if base.trim().is_empty() {
+            "Library"
+        } else {
+            base.trim()
+        };
+        if !self.libraries.contains_key(base) {
+            return base.into();
+        }
+        for n in 2.. {
+            let name = format!("{base} ({n})");
+            if !self.libraries.contains_key(&name) {
+                return name;
+            }
+        }
+        unreachable!()
+    }
+}
+
 /// A reusable set of tool definitions, persisted to the config directory.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolLibrary {
@@ -163,6 +249,38 @@ impl Default for ToolLibrary {
 }
 
 impl ToolLibrary {
+    /// Add missing starter materials without changing existing names, IDs or values.
+    pub fn add_starter_materials(&mut self) -> usize {
+        let mut added = 0;
+        for &(name, kc) in STARTER_MATERIALS {
+            if self
+                .materials
+                .iter()
+                .any(|m| m.name.trim().eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            let highest = self
+                .materials
+                .iter()
+                .map(|m| m.id)
+                .max()
+                .unwrap_or(0)
+                .max(self.material_id_floor);
+            let Some(id) = highest.checked_add(1) else {
+                break;
+            };
+            self.material_id_floor = id;
+            self.materials.push(cam_model::Material {
+                id,
+                name: name.into(),
+                specific_cutting_force: Some(kc),
+            });
+            added += 1;
+        }
+        added
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let mut ids = std::collections::BTreeSet::new();
         for material in &self.materials {
@@ -359,12 +477,14 @@ impl ToolLibrary {
             kind: ToolKind::ThreadMill { pitch: None },
             ..Default::default()
         });
-        Self {
+        let mut library = Self {
             library_version: LIBRARY_VERSION,
             materials: Vec::new(),
             material_id_floor: 0,
             tools,
-        }
+        };
+        library.add_starter_materials();
+        library
     }
 
     /// Load the library from the config directory.
@@ -1366,6 +1486,35 @@ mod preset_file_tests {
     use crate::config::tests::Scratch;
 
     #[test]
+    fn starter_materials_preserve_existing_values_and_stable_ids() {
+        let mut library = ToolLibrary::default();
+        library.materials.push(cam_model::Material {
+            id: 17,
+            name: "pine".into(),
+            specific_cutting_force: Some(123.),
+        });
+        library.material_id_floor = 25;
+        assert_eq!(library.add_starter_materials(), 9);
+        assert_eq!(library.materials[0].specific_cutting_force, Some(123.));
+        assert_eq!(library.materials[1].id, 26);
+        assert_eq!(library.material_id_floor, 34);
+        assert_eq!(library.add_starter_materials(), 0);
+        library.validate().unwrap();
+        let scratch = Scratch::new("starter-materials");
+        let path = scratch.file("tools.json");
+        library.save_to(&path).unwrap();
+        assert_eq!(ToolLibrary::load_from(&path).0, library);
+
+        let seeded = ToolLibrary::defaults();
+        assert_eq!(seeded.materials.len(), 10);
+        assert!(seeded
+            .materials
+            .iter()
+            .all(|m| m.specific_cutting_force.is_some()));
+        seeded.validate().unwrap();
+    }
+
+    #[test]
     fn malformed_presets_are_rejected_without_overwriting_the_library() {
         let scratch = Scratch::new("preset-library");
         let mut library = ToolLibrary::defaults();
@@ -1400,5 +1549,49 @@ mod preset_file_tests {
             std::fs::read_to_string(scratch.file("tools.json.bak")).unwrap(),
             invalid
         );
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+    use crate::config::ConfigFile;
+
+    #[test]
+    fn fresh_install_has_only_the_default_library() {
+        let collection = LibraryCollection::from_legacy(ToolLibrary::defaults());
+        assert_eq!(collection.active, "Default tools");
+        assert_eq!(collection.libraries.len(), 1);
+        assert_eq!(
+            collection.libraries["Default tools"],
+            ToolLibrary::defaults()
+        );
+    }
+
+    #[test]
+    fn legacy_library_and_defaults_remain_distinct_and_round_trip() {
+        let mut legacy = ToolLibrary::defaults();
+        legacy.tools.pop();
+        let mut collection = LibraryCollection::from_legacy(legacy.clone());
+        assert_eq!(collection.active, "My tools");
+        assert_eq!(collection.libraries["My tools"], legacy);
+        assert_eq!(
+            collection.libraries["Default tools"],
+            ToolLibrary::defaults()
+        );
+        let name = collection.unique_name("My tools");
+        collection
+            .libraries
+            .insert(name.clone(), ToolLibrary::default());
+        collection.active = name;
+        let path = crate::config::tests::Scratch::new("libraries");
+        crate::config::save_to(&collection, &path.file("libraries.json")).unwrap();
+        let (loaded, outcome) =
+            crate::config::load_from::<LibraryCollection>(&path.file("libraries.json"));
+        assert_eq!(outcome, crate::config::ConfigLoad::Loaded);
+        assert_eq!(loaded.active, "My tools (2)");
+        assert_eq!(loaded.libraries["My tools"], legacy);
+        assert!(loaded.libraries["My tools (2)"].tools.is_empty());
+        assert!(loaded.validate().is_ok());
     }
 }

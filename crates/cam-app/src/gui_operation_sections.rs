@@ -137,7 +137,11 @@ impl App {
             "Holding tabs" => help_wrap(heading, illustrated_help::HOLDING_TABS, self.tooltips),
             "Finishing passes" => help_wrap(
                 heading,
-                profile_parameters::Toggle::Finishing.help(),
+                if self.geometry_operation_kind() == Some(OpKind::Profile) {
+                    profile_parameters::PROFILE_FINISHING_HELP
+                } else {
+                    profile_parameters::Toggle::Finishing.help()
+                },
                 self.tooltips,
             ),
             "Stock to Leave" => help_wrap(heading, illustrated_help::STOCK_TO_LEAVE, self.tooltips),

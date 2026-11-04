@@ -37,6 +37,38 @@ pub fn mesh_vertices(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<MeshVe
         .collect()
 }
 
+/// Prepare stock vertices in world coordinates in one pass. Keep this bulk
+/// conversion in the optimized renderer, including during development playback.
+/// Setup frames rotate positions and normals; the setup datum is not a translation.
+pub fn stock_mesh_vertices_controlled(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    frame: &cam_model::SetupFrame,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<MeshVertex>> {
+    let rotation = frame.world_from_setup.rotation;
+    let rotate = |v: [f32; 3]| {
+        let [x, y, z] = v.map(f64::from);
+        rotation.map(|row| (row[0] * x + row[1] * y + row[2] * z) as f32)
+    };
+    let count = positions.len().min(normals.len());
+    let mut vertices = Vec::with_capacity(count);
+    for start in (0..count).step_by(1024) {
+        if cancelled() {
+            return None;
+        }
+        let end = (start + 1024).min(count);
+        vertices.extend(positions[start..end].iter().zip(&normals[start..end]).map(
+            |(&position, &normal)| MeshVertex {
+                position: rotate(position),
+                normal: rotate(normal),
+                color: [0.72, 0.66, 0.22, 1.0],
+            },
+        ));
+    }
+    (!cancelled()).then_some(vertices)
+}
+
 /// Back-to-front triangle order in clip depth for the viewport's orthographic camera.
 #[cfg(any(feature = "gpu", test))]
 pub(crate) fn transparent_indices(
@@ -109,5 +141,50 @@ mod tests {
         let pos = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
         let nrm = [[0.0, 0.0, 1.0]];
         assert_eq!(mesh_vertices(&pos, &nrm).len(), 1);
+    }
+
+    #[test]
+    fn stock_vertices_follow_setup_rotation_for_positions_and_normals() {
+        let positions = [[1.25, -2.5, 3.75], [-10., 0., 0.5]];
+        let normals = [[0., 0., 1.], [0.6, 0.8, 0.]];
+        for frame in [
+            cam_model::SetupFrame::default(),
+            cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap(),
+            cam_model::SetupFrame::from_xy([1., 2., 3.], [-2., 1., 0.]).unwrap(),
+        ] {
+            let expected: Vec<_> = mesh_vertices(&positions, &normals)
+                .into_iter()
+                .map(|mut vertex| {
+                    vertex.position = frame
+                        .to_world_vector(vertex.position.map(f64::from))
+                        .map(|v| v as f32);
+                    vertex.normal = frame
+                        .to_world_vector(vertex.normal.map(f64::from))
+                        .map(|v| v as f32);
+                    vertex
+                })
+                .collect();
+            assert_eq!(
+                stock_mesh_vertices_controlled(&positions, &normals, &frame, &|| false).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn stock_vertex_conversion_cancels_without_publishing_partial_geometry() {
+        let points = vec![[1., 2., 3.]; 4096];
+        let checks = std::cell::Cell::new(0);
+        let result = stock_mesh_vertices_controlled(
+            &points,
+            &points,
+            &cam_model::SetupFrame::default(),
+            &|| {
+                checks.set(checks.get() + 1);
+                checks.get() == 2
+            },
+        );
+        assert!(result.is_none());
+        assert_eq!(checks.get(), 2);
     }
 }

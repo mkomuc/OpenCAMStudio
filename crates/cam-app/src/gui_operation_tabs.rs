@@ -81,9 +81,10 @@ pub(super) fn field_tab(field: Field) -> OperationTab {
         | Field::TabSpacing
         | Field::AdaptiveOffset => OperationTab::Geometry,
         Field::BoreDiameter | Field::BoreTaper => OperationTab::Geometry,
-        Field::LiftHeight | Field::BoreSafeDistance | Field::BoreLeadRadius => {
-            OperationTab::Linking
-        }
+        Field::LiftHeight
+        | Field::BoreSafeDistance
+        | Field::BoreLeadRadius
+        | Field::ScallopSafeDistance => OperationTab::Linking,
         Field::Clearance
         | Field::Retract
         | Field::TopOfStock
@@ -132,6 +133,7 @@ pub(super) fn operation_start(op: &Operation) -> Option<[f64; 2]> {
         Operation::Engrave(o) if o.closed => o.start,
         Operation::Carve(o) => o.start,
         Operation::Adaptive(o) => o.params.start,
+        Operation::Parallel(o) if o.params.scallop => o.params.scallop_start,
         _ => None,
     }
 }
@@ -143,6 +145,7 @@ pub(super) fn set_operation_start(op: &mut Operation, enabled: bool) {
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
         Operation::Adaptive(o) => &mut o.params.start,
+        Operation::Parallel(o) if o.params.scallop => &mut o.params.scallop_start,
         _ => return,
     };
     *start = if enabled {
@@ -162,6 +165,7 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
         Operation::Engrave(o) if o.closed => &mut o.start,
         Operation::Carve(o) => &mut o.start,
         Operation::Adaptive(o) => &mut o.params.start,
+        Operation::Parallel(o) if o.params.scallop => &mut o.params.scallop_start,
         _ => return,
     };
     if let Some(point) = start {
@@ -187,11 +191,12 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::CuttingSpeed
         | Field::FeedPerTooth
         | Field::AdaptiveTolerance
+        | Field::ScallopSmoothingTolerance
         | Field::AdaptiveOptimalLoad
         | Field::AdaptiveFineStepdown
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
-        Field::StockLeaveRadial | Field::StockLeaveAxial => value < 0.0,
+        Field::StockLeaveRadial | Field::StockLeaveAxial | Field::ChamferTipOffset => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
         Field::Stepdown
@@ -423,56 +428,21 @@ impl App {
             );
         }
         if tab == OperationTab::Tool {
-            let tool = self
-                .operation_tools
-                .iter()
-                .chain(self.controller.inspection_setup().tools.iter())
-                .find(|tool| tool.number == op.tool());
+            let tool = self.operation_drawing_tool(op);
             list = list.push(
-                text(match tool {
-                    Some(tool) => format!(
-                        "T{} · {} · ⌀ {:.3} mm",
-                        tool.number,
-                        ToolKindPick::of(tool.kind),
-                        tool.diameter
-                    ),
-                    None => format!("T{} · tool missing", op.tool()),
-                })
-                .size(12),
-            );
-            let choices: Vec<ToolChoice> = self
-                .library
-                .tools
-                .iter()
-                .enumerate()
-                .filter(|(_, tool)| {
-                    families_for(AppController::operation_kind(op))
-                        .contains(&ToolKindPick::of(tool.kind))
-                })
-                .map(|(index, tool)| ToolChoice {
-                    index,
-                    number: tool.number,
-                    diameter: tool.diameter,
-                    kind: tool.kind,
-                })
-                .collect();
-            let selected = tool.and_then(|selected| {
-                choices
-                    .iter()
-                    .find(|choice| {
-                        self.library.tools[choice.index].identity() == selected.identity()
-                    })
-                    .copied()
-            });
-            list = list.push(
-                pick_list(choices, selected, |choice| {
-                    Message::OperationToolPicked(choice.index)
-                })
-                .placeholder("Choose cutter")
-                .text_size(12)
-                .padding([7, 9])
-                .style(inspector_picker)
-                .width(Length::Fill),
+                row![
+                    inspector_button(operation_tool_selector::tool_button_label(tool))
+                        .on_press(Message::OpenOperationToolSelector)
+                        .width(Length::Fill),
+                    help_wrap(
+                        inspector_button("i")
+                            .on_press_maybe(tool.cloned().map(Message::ToolInfoOpen)),
+                        "Show cutter dimensions",
+                        self.tooltips,
+                    )
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
             );
             list = list.section("Cutting data").push(help_wrap(
                 self.operation_preset_picker(op),
@@ -609,7 +579,7 @@ impl App {
                 continue; // Grouped beneath their section toggles.
             }
             if let Operation::Chamfer(chamfer) = op {
-                if field == Field::ChamferWidth
+                if matches!(field, Field::ChamferWidth | Field::ChamferTipOffset)
                     || (chamfer.faces.is_empty() && field == Field::Stepdown)
                     || (!chamfer.faces.is_empty()
                         && matches!(
@@ -617,8 +587,6 @@ impl App {
                             Field::ChamferWidth
                                 | Field::ChamferDepth
                                 | Field::ChamferStep
-                                | Field::LeadInSize
-                                | Field::LeadOutSize
                                 | Field::LeadOverlap
                         ))
                 {
@@ -785,8 +753,18 @@ impl App {
                     Message::FaceDirectionChanged,
                 ))
             }
-            Operation::Chamfer(c) if !c.faces.is_empty() => {
+            Operation::Chamfer(c) if !c.faces.is_empty() || self.chamfer_faces_active() => {
                 if tab == OperationTab::Passes {
+                    let field = Field::ChamferTipOffset;
+                    let value = self.fields.get(&field).cloned().unwrap_or_default();
+                    list = list.section("Chamfer").push(field_row_labeled(
+                        field,
+                        self.field_label(field),
+                        self.field_help(field),
+                        &value,
+                        self.tooltips,
+                        self.field_invalid(field),
+                    ));
                     list = list.section("Passes").push(text("Stepdown limits the height of each face band. 0 uses the cutter's usable flank automatically; smaller cutters use more passes.").size(12));
                 }
             }
@@ -804,7 +782,7 @@ impl App {
                 if tab == OperationTab::Passes {
                     let field = Field::ChamferWidth;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.section("Passes").push(field_row_labeled(
+                    list = list.section("Chamfer").push(field_row_labeled(
                         field,
                         self.field_label(field),
                         self.field_help(field),
@@ -812,6 +790,17 @@ impl App {
                         self.tooltips,
                         self.field_invalid(field),
                     ));
+                    let field = Field::ChamferTipOffset;
+                    let value = self.fields.get(&field).cloned().unwrap_or_default();
+                    list = list.push(field_row_labeled(
+                        field,
+                        self.field_label(field),
+                        self.field_help(field),
+                        &value,
+                        self.tooltips,
+                        self.field_invalid(field),
+                    ));
+                    list = list.section("Passes");
                     list = list.push(
                         row![
                             label_help("Gradual", help::CHAMFER_GRADUAL, self.tooltips),
@@ -922,13 +911,47 @@ impl App {
             Operation::Parallel(p) if tab == OperationTab::Passes => {
                 list = list.section("Passes").push(
                     row![
-                        text("Both ways (zigzag)").size(12),
-                        checkbox(p.params.both_ways)
+                        text("Scallop (surface offsets)").size(12),
+                        checkbox(p.params.scallop)
                             .size(15)
-                            .on_toggle(Message::ParallelBothWaysToggled)
+                            .on_toggle(Message::ParallelScallopToggled)
                     ]
                     .spacing(8),
                 );
+                if !p.params.scallop {
+                    list = list.push(
+                        row![
+                            text("Both ways (zigzag)").size(12),
+                            checkbox(p.params.both_ways)
+                                .size(15)
+                                .on_toggle(Message::ParallelBothWaysToggled)
+                        ]
+                        .spacing(8),
+                    );
+                } else {
+                    list = list.push(text("Sampled surface offsets; vertical walls and narrow features may remain unfinished. Inspect the simulation.").size(11).color(palette::GROUP_LABEL));
+                    list = list.push(profile_picker(
+                        "Inside/Outside direction",
+                        "Advance from the outer boundary inward or in reverse. Shortest keeps the outside-in stepover sequence and reduces travel within each level.",
+                        self.tooltips,
+                        p.params.scallop_order,
+                        &[
+                            cam_model::ScallopOrder::OutsideIn,
+                            cam_model::ScallopOrder::InsideOut,
+                            cam_model::ScallopOrder::Shortest,
+                        ][..],
+                        Message::ScallopOrderChanged,
+                    ));
+                    list = list.push(
+                        row![
+                            text("Smoothing").size(12),
+                            checkbox(p.params.scallop_smoothing)
+                                .size(15)
+                                .on_toggle(Message::ScallopSmoothingToggled)
+                        ]
+                        .spacing(8),
+                    );
+                }
             }
             Operation::Parallel(p) if tab == OperationTab::Geometry => {
                 list = list.push(profile_picker(
@@ -1111,7 +1134,9 @@ impl App {
             }
         }
         if tab == OperationTab::Tool {
-            list = list.section("Cutting forces").push(self.cutting_force_panel(op));
+            list = list
+                .section("Cutting forces")
+                .push(self.cutting_force_panel(op));
         }
         let footer = inspector_footer(
             row![
@@ -1564,6 +1589,7 @@ mod tests {
             .id();
         app.begin_operation_draft(id);
         let before = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::FieldChanged(Field::LeadOverlap, "0".into()));
         let _ = app.update(Message::ProfileTabsEnabled(true));
         for (field, value) in [
             (Field::TabWidth, "5"),

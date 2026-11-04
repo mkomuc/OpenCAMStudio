@@ -2204,7 +2204,11 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
-                passes: Default::default(),
+                passes: cam_model::ProfilePasses {
+                    lead_end_distance: 0.6,
+                    lead_end_distance_enabled: Some(false),
+                    ..Default::default()
+                },
                 selections: None,
                 closed,
                 additional_chains: islands
@@ -2242,9 +2246,9 @@ impl AppController {
                 plunge_feed,
                 start,
                 end: None,
-                lead_in: Lead::None,
-                lead_out: Lead::None,
-                lead_overlap: 0.0,
+                lead_in: Lead::Arc { radius: 0.6 },
+                lead_out: Lead::Arc { radius: 0.6 },
+                lead_overlap: if closed { 0.6 } else { 0.0 },
                 plunge: Plunge::Straight,
             }),
             OpKind::Pocket => {
@@ -2267,6 +2271,7 @@ impl AppController {
                     start,
                     end: None,
                     clear: ClearParams {
+                        keep_tool_down: false,
                         lift_height: 0.0,
                         clearing: cam_model::Clearing::default(),
                         stepdown: p.stepdown,
@@ -2329,6 +2334,10 @@ impl AppController {
                 })
             }
             OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+                tip_offset: 1.0,
+                lead_in_enabled: Some(true),
+                same_lead_out: false,
+                lead_out_enabled: Some(true),
                 closed,
                 faces: Vec::new(),
                 stepdown: 0.,
@@ -2351,9 +2360,9 @@ impl AppController {
                 plunge_feed,
                 start,
                 end: None,
-                lead_in: Lead::None,
-                lead_out: Lead::None,
-                lead_overlap: 0.0,
+                lead_in: Lead::Arc { radius: 0.6 },
+                lead_out: Lead::Arc { radius: 0.6 },
+                lead_overlap: if closed { 0.6 } else { 0.0 },
             }),
             OpKind::Bore => {
                 let (center, radius) = fit_circle(chain.points())?;
@@ -2747,7 +2756,11 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
-                    passes: Default::default(),
+                    passes: cam_model::ProfilePasses {
+                        lead_end_distance: 0.6,
+                        lead_end_distance_enabled: Some(false),
+                        ..Default::default()
+                    },
                     selections: None,
                     closed: true,
                     additional_chains: Vec::new(),
@@ -2771,9 +2784,9 @@ impl AppController {
                     plunge_feed: p.plunge_feed,
                     end: None,
                     start: None,
-                    lead_in: Lead::None,
-                    lead_out: Lead::None,
-                    lead_overlap: 0.0,
+                    lead_in: Lead::Arc { radius: 0.6 },
+                    lead_out: Lead::Arc { radius: 0.6 },
+                    lead_overlap: 0.6,
                     plunge: Plunge::Straight,
                 })
             };
@@ -2826,6 +2839,7 @@ impl AppController {
                             end: None,
                             start: None,
                             clear: ClearParams {
+                                keep_tool_down: false,
                                 lift_height: 0.0,
                                 clearing: cam_model::Clearing::default(),
                                 stepdown: p.stepdown,

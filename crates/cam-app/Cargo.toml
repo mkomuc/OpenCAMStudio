@@ -28,6 +28,7 @@ occt = ["cam-kernel/occt", "cam-import/occt"]
 gui = ["dep:iced", "dep:wgpu", "dep:rfd", "cam-render/gpu"]
 
 [dependencies]
+rayon.workspace = true
 cam-geo = { path = "../cam-geo" }
 cam-cldata = { path = "../cam-cldata" }
 cam-model = { path = "../cam-model" }

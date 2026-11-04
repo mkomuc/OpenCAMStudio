@@ -113,6 +113,9 @@ pub struct ToolTablePrefs {
     pub widths: [f32; 8],
     pub order: [usize; 8],
     pub grouped: bool,
+    /// Width and visibility of the library list in the Tools workspace.
+    pub library_sidebar_width: f32,
+    pub library_sidebar_collapsed: bool,
     pub search: String,
     pub filters: [Option<std::collections::BTreeSet<String>>; 8],
     #[serde(flatten)]
@@ -126,6 +129,8 @@ impl Default for ToolTablePrefs {
             widths: [70.0, 220.0, 140.0, 140.0, 120.0, 80.0, 90.0, 130.0],
             order: [0, 1, 2, 3, 4, 5, 6, 7],
             grouped: false,
+            library_sidebar_width: 210.0,
+            library_sidebar_collapsed: false,
             search: String::new(),
             filters: Default::default(),
             extra: Default::default(),
@@ -507,6 +512,11 @@ impl Settings {
         for (width, fallback) in self.tool_table.widths.iter_mut().zip(d.tool_table.widths) {
             *width = clamp(*width, (55.0, 600.0), fallback);
         }
+        self.tool_table.library_sidebar_width = clamp(
+            self.tool_table.library_sidebar_width,
+            (180.0, 480.0),
+            d.tool_table.library_sidebar_width,
+        );
         let mut order = self.tool_table.order;
         order.sort_unstable();
         if order != [0, 1, 2, 3, 4, 5, 6, 7] {
@@ -737,6 +747,8 @@ mod tests {
         settings.tool_table.widths[2] = 235.0;
         settings.tool_table.order.swap(0, 2);
         settings.tool_table.grouped = true;
+        settings.tool_table.library_sidebar_width = 320.0;
+        settings.tool_table.library_sidebar_collapsed = true;
         settings.tool_table.search = "mill".into();
         settings.tool_table.filters[5] = Some(["6.00".to_string()].into_iter().collect());
         settings.save_to(&path).unwrap();
@@ -746,7 +758,9 @@ mod tests {
         let mut invalid = loaded;
         invalid.tool_table.order = [0; 8];
         invalid.tool_table.widths[0] = 9000.0;
+        invalid.tool_table.library_sidebar_width = 9000.0;
         invalid.clamp_all();
+        assert_eq!(invalid.tool_table.library_sidebar_width, 480.0);
         assert_eq!(invalid.tool_table.order, ToolTablePrefs::default().order);
         assert_eq!(invalid.tool_table.widths[0], 600.0);
     }
@@ -813,7 +827,10 @@ mod tests {
             old.simulation.toolpath_mode,
             SimulationToolpathMode::Trailing
         );
-        assert_eq!(old.simulation.toolpath_coloring, SimulationToolpathColoring::MoveType);
+        assert_eq!(
+            old.simulation.toolpath_coloring,
+            SimulationToolpathColoring::MoveType
+        );
         let mut settings = old;
         settings.simulation.tool_display = SimulationToolDisplay::Holder;
         settings.simulation.toolpath_mode = SimulationToolpathMode::Leading;

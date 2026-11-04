@@ -413,7 +413,10 @@ fn face_profile_and_open_chain_replace_each_other_transactionally_and_survive_re
     let binding = app.preview_operation_binding(id, edges.clone()).unwrap();
     assert_eq!(binding.recipe, ExtractionRecipe::ProfileContours);
     assert_eq!(app.document(), &before);
-    let operation = app.operation(id).unwrap().clone();
+    let mut operation = app.operation(id).unwrap().clone();
+    if let Operation::Profile(profile) = &mut operation {
+        profile.lead_overlap = 0.;
+    }
     app.apply_operation_settings_with_geometry(operation, None, vec![], Some(edges))
         .unwrap();
     assert!(
@@ -793,6 +796,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         end: None,
         start: None,
         clear: ClearParams {
+            keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 2.,
             overlap: 0.5,

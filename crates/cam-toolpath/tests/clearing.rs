@@ -207,6 +207,7 @@ fn pocket_doc() -> Document {
         end: None,
         start: None,
         clear: ClearParams {
+            keep_tool_down: false,
             lift_height: 0.0,
             clearing: Clearing::default(),
             stepdown: 2.0,
@@ -794,4 +795,241 @@ fn a_ramped_entry_flies_its_arc_lead_in_as_one_arc() {
         .filter(|s| matches!(s, Step::Arc { tag, .. } if tag.kind == MoveKind::Plunge))
         .count();
     assert!(plunge_arcs >= 1, "the ramp emitted no arcs at all");
+}
+
+#[test]
+fn keep_tool_down_with_finishing_preserves_islands_and_simulates_clean() {
+    use cam_sim::{simulate, SimOptions, SimTool, ToolProfile};
+    let mut baseline = None;
+    for down in [false, true] {
+        let mut doc = pocket_doc();
+        let Operation::Pocket(op) = &mut doc.setups[0].operations[0] else {
+            unreachable!()
+        };
+        op.clear.keep_tool_down = down;
+        op.clear.lead_in = Lead::Arc { radius: 1. };
+        op.clear.lead_out = Lead::Arc { radius: 1. };
+        op.finishing.enabled = true;
+        op.finishing.count = 2;
+        op.finishing.repeat_pass = true;
+        let (program, _) = post(&doc, "keep-tool-down");
+        assert_no_rapid_onto_uncut_stock(&program, TOP);
+        let sim = simulate(
+            &program,
+            [-5., -5., -10.],
+            [65., 45., TOP],
+            &SimOptions {
+                resolution: 0.5,
+                tool_radius: 3.,
+            },
+            &[SimTool {
+                number: 1,
+                profile: ToolProfile::flat(3.),
+                noncutting_tip_radius: None,
+            }],
+        );
+        assert!(sim.is_clean(), "{down}: {:?}", sim.collisions);
+        if let Some(expected) = baseline.as_ref() {
+            let difference = sim.field.compare(expected, 0.01);
+            assert!(difference.residual_volume <= 1., "{difference:?}");
+            assert!(difference.gouge_volume <= 1., "{difference:?}");
+        } else {
+            baseline = Some(sim.field);
+        }
+    }
+}
+
+#[test]
+fn saved_keep_down_paths_with_noncutting_bridges_are_recomputed() {
+    use cam_toolpath::{JobEnv, OperationCache, StrategyResult};
+    for mut doc in [pocket_doc(), roughing_doc()] {
+        for enabled in [false, true] {
+            let op = &mut doc.setups[0].operations[0];
+            match op {
+                Operation::Pocket(p) => p.clear.keep_tool_down = enabled,
+                Operation::Profile(p) => p.passes.keep_tool_down = enabled,
+                _ => unreachable!(),
+            }
+            let env = JobEnv {
+                heights: Heights::new(30., 25., 21.),
+                tools: &[],
+                stock: None,
+                spindle: SpindleDir::Cw,
+            };
+            let token = CancelToken::new();
+            let mut cache = OperationCache::default();
+            cache.compute(op, &env, &token, StrategyResult::default);
+            for revision in [None, Some(0)] {
+                let mut saved = serde_json::to_value(&cache).unwrap();
+                let key = saved["entries"][0]["key"].as_object_mut().unwrap();
+                if let Some(revision) = revision {
+                    key.insert("keep_down_revision".into(), serde_json::json!(revision));
+                } else {
+                    key.remove("keep_down_revision");
+                }
+                let mut reopened: OperationCache = serde_json::from_value(saved).unwrap();
+                reopened.compute(op, &env, &token, StrategyResult::default);
+                assert_eq!(reopened.stats.computed, usize::from(enabled));
+                assert_eq!(reopened.stats.reused, usize::from(!enabled));
+                reopened.compute(op, &env, &token, || panic!("Current path should be reused"));
+                assert_eq!(reopened.stats.reused, 1 + usize::from(!enabled));
+            }
+        }
+    }
+}
+
+#[test]
+fn keep_down_depth_and_finishing_passes_verify_on_raised_synthetic_stock() {
+    use cam_sim::{simulate, SimOptions, SimTool, ToolProfile};
+    for finishing in [false, true] {
+        for mut doc in [pocket_doc(), roughing_doc()] {
+            doc.setups[0].heights = Heights::new(30., 25., 21.);
+            let mut lifted_retracts = 0;
+            for down in [false, true] {
+                let op = &mut doc.setups[0].operations[0];
+                match op {
+                    Operation::Pocket(p) => {
+                        p.boundary = rect(0., 0., 24., 24.);
+                        p.islands.clear();
+                        p.depth = 0.;
+                        p.clear.stepdown = 6.;
+                        p.clear.keep_tool_down = down;
+                        p.clear.lead_in = Lead::Arc { radius: 2. };
+                        p.clear.lead_out = Lead::Arc { radius: 2. };
+                        p.finishing.enabled = finishing;
+                        p.finishing.count = 2;
+                        p.finishing.repeat_pass = true;
+                    }
+                    Operation::Profile(p) => {
+                        p.depth = 1.;
+                        p.passes.floor_allowance = 1.;
+                        p.stepdown = 6.;
+                        p.stepover = 0.;
+                        p.start = Some([30., 10.]);
+                        p.lead_in = Lead::Arc { radius: 2. };
+                        p.lead_out = Lead::Arc { radius: 2. };
+                        p.passes.keep_tool_down = down;
+                        p.passes.finishing = finishing;
+                        p.passes.finish_count = 2;
+                        p.passes.spring_passes = 1;
+                    }
+                    _ => unreachable!(),
+                }
+                let (program, _) = post(&doc, "raised-stock-keep-down");
+                let sim = simulate(
+                    &program,
+                    [-5., -5., -5.],
+                    [65., 55., 21.],
+                    &SimOptions {
+                        resolution: 0.25,
+                        tool_radius: 3.,
+                    },
+                    &[SimTool {
+                        number: 1,
+                        profile: ToolProfile::flat(3.),
+                        noncutting_tip_radius: None,
+                    }],
+                );
+                assert!(
+                    sim.is_clean(),
+                    "finishing {finishing}, down {down}: {:?}",
+                    sim.collisions
+                );
+                // Both fixtures protect this point: the pocket exterior and
+                // the profile interior must remain at the original stock top.
+                assert_eq!(sim.field.sample(30., 20.), 21.);
+                let retracts = program
+                    .steps()
+                    .iter()
+                    .filter(
+                        |s| matches!(s, Step::Rapid { tag, .. } if tag.kind == MoveKind::Retract),
+                    )
+                    .count();
+                if down {
+                    assert!(retracts < lifted_retracts,
+                        "finishing {finishing}: {retracts} retracts with keep-down, {lifted_retracts} without");
+                } else {
+                    lifted_retracts = retracts;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn profile_arc_leads_survive_keep_down_finishing_and_posting() {
+    for angle_deg in [45_f64, 90., 135.] {
+        for side in [Side::Inside, Side::Outside] {
+            for finishing in [false, true] {
+                let mut expected = None;
+                for down in [false, true] {
+                    let mut doc = roughing_doc();
+                    doc.setups[0].heights = Heights::new(30., 25., 21.);
+                    let Operation::Profile(p) = &mut doc.setups[0].operations[0] else {
+                        unreachable!()
+                    };
+                    p.side = side;
+                    p.stepover = 0.;
+                    p.stepdown = 6.;
+                    p.lead_in = Lead::ArcSweep {
+                        radius: 3.,
+                        angle_deg,
+                    };
+                    p.lead_out = Lead::ArcSweep {
+                        radius: 3.,
+                        angle_deg,
+                    };
+                    p.passes.finishing = finishing;
+                    p.passes.keep_tool_down = down;
+                    let (program, nc) = post(&doc, "profile-arc-leads");
+                    program.validate().unwrap();
+                    let leads: Vec<_> = program.steps().iter().filter(|step| matches!(step,
+                    Step::Arc { tag, .. } if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut)))
+                    .cloned().collect();
+                    assert_eq!(leads.len(), if finishing { 16 } else { 8 });
+                    let mut position = None;
+                    for step in program.steps() {
+                        match step {
+                            Step::Rapid { to, .. } | Step::Linear { to, .. } => {
+                                position = Some(*to)
+                            }
+                            Step::Arc {
+                                end,
+                                center,
+                                dir,
+                                tag,
+                                ..
+                            } => {
+                                if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) {
+                                    let from = position.unwrap();
+                                    assert!(
+                                        ((from.x - center.x).hypot(from.y - center.y) - 3.).abs()
+                                            < 1e-8
+                                    );
+                                    assert!(
+                                        (cam_cldata::arc_sweep(from, *end, *center, *dir).abs()
+                                            - angle_deg.to_radians())
+                                        .abs()
+                                            < 1e-8
+                                    );
+                                }
+                                position = Some(*end);
+                            }
+                            _ => {}
+                        }
+                    }
+                    let posted_arcs = nc
+                        .lines()
+                        .filter(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
+                        .count();
+                    assert!(posted_arcs >= leads.len(), "{nc}");
+                    if let Some(original) = &expected {
+                        assert_eq!(&leads, original);
+                    } else {
+                        expected = Some(leads);
+                    }
+                }
+            }
+        }
+    }
 }

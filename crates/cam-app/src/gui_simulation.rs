@@ -3,8 +3,8 @@
 use super::*;
 use crate::jobs::{JobInputs, JobService};
 use crate::settings::{
-    SimulationPrefs, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathMode,
-    SimulationToolpathColoring,
+    SimulationPrefs, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathColoring,
+    SimulationToolpathMode,
 };
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use iced::widget::column;
@@ -198,12 +198,15 @@ pub(super) struct SimulationPlayer {
     source: crate::JobStamp,
     inputs: JobInputs,
     timeline: Timeline,
+    path_operation: Option<u32>,
     jobs: JobService,
     force_jobs: JobService,
     force_trace: Option<forces::ForceTrace>,
     force_error: Option<String>,
     force_material: Option<cam_model::Material>,
     pub preview: crate::RunOutcome,
+    /// Identity of the displayed geometry, retained by the viewport cache.
+    pub(super) display_token: Arc<()>,
     pub position: f64,
     requested: f64,
     rendered: f64,
@@ -276,12 +279,14 @@ impl SimulationPlayer {
             source,
             inputs,
             timeline,
+            path_operation: operation,
             jobs: JobService::default(),
             force_jobs: JobService::default(),
             force_trace: None,
             force_error: None,
             force_material: None,
             preview,
+            display_token: Arc::new(()),
             position,
             requested: position,
             rendered: position,
@@ -315,7 +320,8 @@ impl SimulationPlayer {
         }
         let mut inputs = self.inputs.clone();
         inputs.preview_program = Some(self.timeline.prefix(self.position));
-        inputs.stock_force_surfaces = self.options.stock_coloring == SimulationStockColoring::CuttingForce;
+        inputs.stock_force_surfaces =
+            self.options.stock_coloring == SimulationStockColoring::CuttingForce;
         self.requested = self.position;
         self.jobs.start(
             self.source.revision,
@@ -468,6 +474,7 @@ impl SimulationPlayer {
                 // Retain the earlier stock until verification of the contact
                 // frame finishes; never publish material removed after contact.
                 self.preview.program = self.timeline.prefix(time);
+                self.display_token = Arc::new(());
                 self.request_frame();
                 return;
             }
@@ -479,7 +486,9 @@ impl SimulationPlayer {
             if let Some(step) = self.timeline.steps.get(index).filter(|s| s.end > s.start) {
                 let scale = ((self.requested - step.start) / (step.end - step.start)).clamp(0., 1.);
                 for source in outcome.stock_cut_sources.iter_mut().flatten() {
-                    if source.step_index == index { source.fraction *= scale; }
+                    if source.step_index == index {
+                        source.fraction *= scale;
+                    }
                 }
             }
         }
@@ -528,8 +537,14 @@ impl SimulationPlayer {
         self.stock_position = frame.stock_position;
         self.refresh_display();
     }
+    pub(super) fn collision_active(&self) -> bool {
+        self.collision.is_some()
+    }
     pub fn needs_tick(&self) -> bool {
-        self.playing || self.jobs.needs_poll() || self.force_jobs.needs_poll() || self.comparison.pending()
+        self.playing
+            || self.jobs.needs_poll()
+            || self.force_jobs.needs_poll()
+            || self.comparison.pending()
     }
     /// Follow the rendered frame, including its active tool, when seeking in
     /// either direction. The tool and stock must describe the same instant.
@@ -693,6 +708,59 @@ mod tests {
     use super::*;
     use cam_cldata::{MoveKind, Tag};
     use std::time::Duration;
+
+    #[test]
+    #[ignore = "Set OPENCAM_SIM_PROFILE_PROJECT to a local .ocam project path"]
+    fn profile_local_playback() {
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.model_view = None;
+        app.controller = AppController::new(crate::default_machine());
+        app.controller
+            .open_project(std::env::var("OPENCAM_SIM_PROFILE_PROJECT").unwrap())
+            .unwrap();
+        let started = Instant::now();
+        app.controller.start_run();
+        while app.controller.run_needs_poll() {
+            app.controller.poll_run();
+            assert!(started.elapsed() < Duration::from_secs(180));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        eprintln!(
+            "initial job {:?}, steps {}",
+            started.elapsed(),
+            app.controller.outcome().unwrap().program.steps.len()
+        );
+        let mut player = SimulationPlayer::new_for_operation(&app.controller, None).unwrap();
+        player.options.stop_on_collision = false;
+        assert!(!player.forces_enabled());
+        drain_player(&mut player);
+        for fraction in [0.05, 0.5, 0.95] {
+            player.seek(player.timeline.duration * fraction);
+            drain_player(&mut player);
+            let mut frames = Vec::new();
+            for _ in 0..8 {
+                let started = Instant::now();
+                player.seek(player.position + 0.05);
+                drain_player(&mut player);
+                frames.push(started.elapsed());
+            }
+            frames.sort();
+            eprintln!(
+                "frames at {fraction}: median {:?}, max {:?}, vertices {}",
+                frames[frames.len() / 2],
+                frames.last().unwrap(),
+                player.preview.stock_vertices.len()
+            );
+            app.simulation = Some(player);
+            let started = Instant::now();
+            for _ in 0..20 {
+                std::hint::black_box(app.machining_viewport());
+            }
+            eprintln!("20 viewport builds at {fraction}: {:?}", started.elapsed());
+            player = app.simulation.take().unwrap();
+        }
+    }
 
     fn tag() -> Tag {
         Tag::new(7, MoveKind::Cutting)
@@ -860,12 +928,14 @@ mod tests {
             },
             inputs,
             timeline: Timeline::new(&program, 2000.).unwrap(),
+            path_operation: None,
             jobs: JobService::default(),
             force_jobs: JobService::default(),
             force_trace: None,
             force_error: None,
             force_material: None,
             preview: Default::default(),
+            display_token: Arc::new(()),
             position: 0.,
             requested: 0.,
             rendered: 0.,
@@ -1181,12 +1251,14 @@ mod tests {
             },
             inputs: controller.job_inputs(),
             timeline,
+            path_operation: None,
             jobs: JobService::default(),
             force_jobs: JobService::default(),
             force_trace: None,
             force_error: None,
             force_material: None,
             preview: Default::default(),
+            display_token: Arc::new(()),
             position: 0.,
             requested: 0.,
             rendered: 0.,
@@ -1312,6 +1384,25 @@ mod tests {
         player.options.toolpath_mode = SimulationToolpathMode::Operation;
         player.refresh_display();
         assert!(player.preview.scene.strips.iter().all(|s| s.op == Some(8)));
+    }
+    #[test]
+    fn operation_scoped_simulation_hides_predecessor_paths_in_every_mode() {
+        let mut player = display_player(45.);
+        player.path_operation = Some(8);
+        player.options.show_points = true;
+        for &mode in SimulationToolpathMode::ALL {
+            player.options.toolpath_mode = mode;
+            player.refresh_display();
+            assert!(!player.preview.scene.strips.is_empty(), "{mode}");
+            assert!(
+                player.preview.scene.strips.iter().all(|s| s.op == Some(8)),
+                "{mode}"
+            );
+            assert!(
+                player.preview.scene.path_cones.iter().all(|c| c.op == 8),
+                "{mode}"
+            );
+        }
     }
     #[test]
     fn simulation_filters_keep_motion_classes_and_points_independent() {

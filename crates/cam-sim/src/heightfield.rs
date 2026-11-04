@@ -8,6 +8,7 @@
 
 use crate::{sweep::Sweep, ToolProfile};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "bounded.rs"]
 mod bounded;
 #[path = "stock_transfer.rs"]
@@ -16,6 +17,10 @@ use bounded::RemovedSpan;
 
 #[path = "surface.rs"]
 mod surface;
+pub use surface::StockMeshCache;
+
+const MESH_TILE_SIZE: usize = 32;
+static NEXT_MESH_REVISION: AtomicU64 = AtomicU64::new(1);
 
 /// How the simulated stock compares to a desired target surface — the raw
 /// material of gouge / residual verification.
@@ -117,6 +122,8 @@ pub struct Heightfield {
     removal_tracking: Option<(f64, f64)>,
     surface_tracking: bool,
     cut_source: Option<CutSource>,
+    // Unique across disposable playback copies, rewinds and replacement blanks.
+    mesh_revisions: Vec<u64>,
 }
 
 impl Heightfield {
@@ -142,6 +149,10 @@ impl Heightfield {
             removal_tracking: None,
             surface_tracking: false,
             cut_source: None,
+            mesh_revisions: vec![
+                NEXT_MESH_REVISION.fetch_add(1, Ordering::Relaxed);
+                nx.div_ceil(MESH_TILE_SIZE) * ny.div_ceil(MESH_TILE_SIZE)
+            ],
         }
     }
 
@@ -150,16 +161,38 @@ impl Heightfield {
     }
 
     pub(crate) fn set_surface_tracking(&mut self, enabled: bool) {
+        if self.surface_tracking != enabled {
+            self.invalidate_mesh_region([0, 0], [self.nx - 1, self.ny - 1]);
+        }
         self.surface_tracking = enabled;
         self.cut_source = None;
     }
 
+    fn invalidate_mesh_region(&mut self, min: [usize; 2], max: [usize; 2]) {
+        // Contours and thread flanks read neighbouring columns and corners.
+        let first = min.map(|v| v.saturating_sub(2) / MESH_TILE_SIZE);
+        let last = [
+            (max[0] + 2).min(self.nx - 1) / MESH_TILE_SIZE,
+            (max[1] + 2).min(self.ny - 1) / MESH_TILE_SIZE,
+        ];
+        let width = self.nx.div_ceil(MESH_TILE_SIZE);
+        let revision = NEXT_MESH_REVISION.fetch_add(1, Ordering::Relaxed);
+        for y in first[1]..=last[1] {
+            for x in first[0]..=last[0] {
+                self.mesh_revisions[y * width + x] = revision;
+            }
+        }
+    }
+
     pub(crate) fn set_cut_source(&mut self, step_index: usize, range: (f64, f64)) {
-        self.cut_source = self.surface_tracking.then_some(CutSource { step_index, range });
+        self.cut_source = self
+            .surface_tracking
+            .then_some(CutSource { step_index, range });
     }
 
     pub(crate) fn storage_bytes(&self) -> usize {
         self.z.len() * 12
+            + self.mesh_revisions.len() * std::mem::size_of::<u64>()
             + self.inherited_operations.len() * std::mem::size_of::<Option<u32>>()
             + self.cuts.len() * std::mem::size_of::<Sweep>()
             + self.layers.len() * std::mem::size_of::<CutLayer>()
@@ -243,6 +276,7 @@ impl Heightfield {
                 continue;
             };
             let (ix0, ix1) = self.index_range(lo, hi, 0);
+            let mut changed = false;
             for ix in ix0..=ix1 {
                 let cx = self.center(ix, iy).0;
                 let (t, dist2) = sweep.projection(cx, cy);
@@ -250,11 +284,17 @@ impl Heightfield {
                     let bottom = sweep.bottom(t, dist2) as f32;
                     let index = iy * self.nx + ix;
                     if bottom < self.z[index] {
+                        changed = true;
                         let previous_op = self.operation_at(ix, iy);
                         let previous_cut = self.winners[index];
-                        let different_source = self.surface_tracking && self.cuts.get(previous_cut as usize)
-                            .is_some_and(|previous| previous.source != sweep.source);
-                        if self.z[index] < self.top && (previous_op != operation || different_source) {
+                        let different_source = self.surface_tracking
+                            && self
+                                .cuts
+                                .get(previous_cut as usize)
+                                .is_some_and(|previous| previous.source != sweep.source);
+                        if self.z[index] < self.top
+                            && (previous_op != operation || different_source)
+                        {
                             let layer = self.layers.len() as u32;
                             self.layers.push(CutLayer {
                                 height: self.z[index],
@@ -264,11 +304,18 @@ impl Heightfield {
                             });
                             self.previous_layers[index] = layer;
                         }
-                        self.track_removed_interval(index, f64::from(bottom), f64::from(self.z[index]));
+                        self.track_removed_interval(
+                            index,
+                            f64::from(bottom),
+                            f64::from(self.z[index]),
+                        );
                         self.z[index] = bottom;
                         self.winners[index] = id;
                     }
                 }
+            }
+            if changed {
+                self.invalidate_mesh_region([ix0, iy], [ix1, iy]);
             }
         }
     }
@@ -411,13 +458,22 @@ impl Heightfield {
     /// Account only for material that still exists in this column, including
     /// sparse voids left by thread teeth. Called before changing the column.
     pub(super) fn track_removed_interval(&mut self, index: usize, lower: f64, upper: f64) {
-        let Some((floor, _)) = self.removal_tracking else { return };
+        let Some((floor, _)) = self.removal_tracking else {
+            return;
+        };
         let lower = lower.max(floor);
         let upper = upper.min(f64::from(self.z[index]));
-        if upper <= lower { return; }
-        let void = self.bounded.get(&index).map_or(0., |spans| spans.iter().map(|span| {
-            (upper.min(f64::from(span.upper)) - lower.max(f64::from(span.lower))).max(0.)
-        }).sum::<f64>());
+        if upper <= lower {
+            return;
+        }
+        let void = self.bounded.get(&index).map_or(0., |spans| {
+            spans
+                .iter()
+                .map(|span| {
+                    (upper.min(f64::from(span.upper)) - lower.max(f64::from(span.lower))).max(0.)
+                })
+                .sum::<f64>()
+        });
         let x = index % self.nx;
         let y = index / self.nx;
         let dx = (self.max[0] - self.origin[0] - x as f64 * self.res).clamp(0., self.res);
@@ -432,17 +488,22 @@ impl Heightfield {
         let (ix0, ix1) = self.index_range(min[0], max[0], 0);
         let (iy0, iy1) = self.index_range(min[1], max[1], 1);
         let z = z as f32;
+        let mut changed = false;
         for iy in iy0..=iy1 {
             for ix in ix0..=ix1 {
                 let (cx, cy) = self.center(ix, iy);
                 if cx >= min[0] && cx <= max[0] && cy >= min[1] && cy <= max[1] {
                     let cell = &mut self.z[iy * self.nx + ix];
                     if z < *cell {
+                        changed = true;
                         *cell = z;
                         self.winners[iy * self.nx + ix] = u32::MAX;
                     }
                 }
             }
+        }
+        if changed {
+            self.invalidate_mesh_region([ix0, iy0], [ix1, iy1]);
         }
     }
 

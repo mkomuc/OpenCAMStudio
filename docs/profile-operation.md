@@ -14,7 +14,11 @@ Passes controls axial stepdown, radial finishing passes, finishing feed, spring
 repeats and execution order. Even stepdowns distribute depth evenly; smaller
 bottom increments can apply to roughing too or only to the final wall passes.
 Stock allowances retain material on the wall and floor. Drawing-based radial
-roughing requires one closed outside contour and enclosing stock.
+roughing requires one closed outside contour and enclosing stock. With finishing
+enabled, roughing leaves one finish spacing for each finishing pass; the final
+pass reaches the profile, subject to the wall stock allowance. With radial
+roughing stepover set to zero, a contour roughing pass still leaves this allowance
+before the finishing cuts.
 
 Open chains stay open. Linking offers tangent extensions, linear or arc leads,
 contour ramps, helix/zigzag entry and alternating depth-pass direction. An entry

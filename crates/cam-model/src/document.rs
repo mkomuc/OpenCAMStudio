@@ -94,7 +94,10 @@ use crate::{BoreOp, Tool};
 /// v31: remaining stock inherited from the immediately preceding setup.
 /// v32: operation pattern spacing, directions and execution options.
 /// v33: a distinct roughing end mill tool type.
-pub const SCHEMA_VERSION: u32 = 33;
+/// v34: surface-offset finishing mode.
+/// v35: Scallop entry and retraction preferences.
+/// v36: Scallop pass ordering.
+pub const SCHEMA_VERSION: u32 = 36;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -940,6 +943,9 @@ impl Default for Clearing {
 /// out to*.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClearParams {
+    /// Keep safe links between depth levels and finishing passes at cutting height.
+    #[serde(default)]
+    pub keep_tool_down: bool,
     /// Vertical lift above the cutting level during local linking moves, mm.
     /// Zero keeps transitions at depth; distant links still use clearance.
     #[serde(default)]
@@ -988,6 +994,7 @@ pub struct ClearParams {
 impl Default for ClearParams {
     fn default() -> Self {
         Self {
+            keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 0.0,
             // Half the diameter: the same spacing a pocket's own default overlap gives.
@@ -1615,6 +1622,9 @@ pub struct ChamferOp {
     /// to plunge further with the tip.
     #[serde(default)]
     pub depth: f64,
+    /// Extra axial distance below the cutting depth, in mm.
+    #[serde(default)]
+    pub tip_offset: f64,
     /// Chamfer-width increment per pass, mm. `0` (or `>= width`) cuts the whole
     /// bevel in a single pass; otherwise the bevel is reached in steps so the tool
     /// is not overloaded (protects the tool and cleans the cut on wide bevels/hard
@@ -1667,6 +1677,14 @@ pub struct ChamferOp {
     /// `0.0` (the default) closes exactly at the start, as before.
     #[serde(default)]
     pub lead_overlap: f64,
+    /// Reuse the entry geometry for the exit on edge chamfers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_in_enabled: Option<bool>,
+    #[serde(default)]
+    pub same_lead_out: bool,
+    /// None retains the behavior of the stored lead-out on older projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_out_enabled: Option<bool>,
 }
 
 /// A **V-carve engraving** operation: run a V-bit along a path with its tip *in* the
