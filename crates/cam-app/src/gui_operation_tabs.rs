@@ -1589,6 +1589,7 @@ mod tests {
             .id();
         app.begin_operation_draft(id);
         let before = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::FieldChanged(Field::LeadOverlap, "0".into()));
         let _ = app.update(Message::ProfileTabsEnabled(true));
         for (field, value) in [
             (Field::TabWidth, "5"),
