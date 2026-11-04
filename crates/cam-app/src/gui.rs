@@ -2168,6 +2168,7 @@ struct App {
     output_px: f32,
     /// The preferences panel is open.
     show_prefs: bool,
+    show_stock_palette: bool,
     /// Every machine this installation knows about. The **active** one is mirrored into
     /// the controller (which gates exports against it); this is the set to pick from.
     machines: crate::MachineLibrary,
@@ -2957,11 +2958,12 @@ enum Message {
     /// Snap marker size, as a multiple of the catch aperture.
     SetMarkerScale(f32),
     /// The smallest `pane` may be dragged to, logical px.
-    SetPaneMin(Pane, f32),
     /// Workpiece-origin marker size, as a multiple of the shipped size.
     SetOriginMarker(f32),
     /// Stock surface RGB channel, in the range 0–1.
-    SetStockColor(usize, f32),
+    ToggleStockPalette,
+    SetStockColor([f32; 3]),
+    SetStockTransparency(f32),
     SetSimulationAccuracy(f32),
     /// Put every preference back to its shipped value.
     RestoreDefaults,
@@ -3708,6 +3710,7 @@ impl App {
             inspector_enabled: true,
             show_license: false,
             show_prefs: false,
+            show_stock_palette: false,
             window: iced::Size::new(1280.0, 800.0),
             project_px: settings.panes.project_px,
             inspector_px: settings.panes.inspector_px,
@@ -7462,6 +7465,7 @@ impl App {
             Message::ShowPrefs => self.show_prefs = true,
             Message::ClosePrefs => {
                 self.show_prefs = false;
+                self.show_stock_palette = false;
                 self.remember();
             }
             Message::SetPickbox(v) => {
@@ -7483,25 +7487,17 @@ impl App {
                     player.options.accuracy = self.settings.simulation.accuracy;
                 }
             }
-            Message::SetStockColor(channel, value) => {
-                if let Some(component) = self.settings.view.stock_color.get_mut(channel) {
-                    *component = value.clamp(0.0, 1.0);
+            Message::ToggleStockPalette => self.show_stock_palette = !self.show_stock_palette,
+            Message::SetStockColor(color) => {
+                self.settings.view.stock_color = color;
+                if let Some(player) = &mut self.simulation {
+                    player.configure(&self.settings.simulation, color);
                 }
+                self.show_stock_palette = false;
+                self.remember();
             }
-            Message::SetPaneMin(pane, v) => {
-                let (lo, hi) = crate::PANE_MIN_RANGE;
-                let v = v.clamp(lo, hi);
-                let p = &mut self.settings.panes;
-                match pane {
-                    Pane::Project => p.min_project_px = v,
-                    Pane::Library => p.min_library_px = v,
-                    Pane::Viewport => p.min_viewport_px = v,
-                    Pane::Inspector => p.min_inspector_px = v,
-                    Pane::Output => p.min_output_px = v,
-                }
-                // Live-apply: a minimum only means something once the layout obeys it,
-                // and the point of the control is to *see* the pane stop shrinking.
-                self.apply_fixed_layout();
+            Message::SetStockTransparency(value) => {
+                self.settings.view.stock_transparency = value.clamp(0.0, 1.0);
             }
             Message::RestoreDefaults => {
                 // The only escape from a layout the user cannot otherwise undo, so it
@@ -8795,6 +8791,7 @@ impl App {
                 show_stock: self.show_stock,
                 transparent_stock: self.settings.view.transparent_stock,
                 stock_color: self.settings.view.stock_color,
+                stock_transparency: self.settings.view.stock_transparency,
                 show_gizmo: self.show_gizmo,
                 show_origin: self.show_origin,
                 show_envelope: self.show_envelope,
@@ -10350,7 +10347,7 @@ impl App {
     /// toggles stock/cube/origin/tips and sizes the cube, and the snap buttons arm the
     /// object snaps — duplicating those would create two places to change one thing and
     /// the inevitable question of which is authoritative. What has no home anywhere
-    /// else is the picking tolerances and the pane minimums, so that is what this is.
+    /// else includes picking tolerances and stock appearance.
     ///
     /// **Live-apply, not Apply-on-dirty.** The two-commit-class convention governs edits
     /// to the *model* — the thing that becomes G-code. These are not that, and a
@@ -10422,31 +10419,103 @@ impl App {
         .spacing(6);
 
         let [r, g, b] = self.settings.view.stock_color;
-        let swatch =
-            container(Space::new().width(28).height(22)).style(move |_| container::Style {
+        let swatch = button(Space::new().width(42).height(22))
+            .padding(2)
+            .style(move |_, _| iced::widget::button::Style {
                 background: Some(Background::Color(Color::from_rgb(r, g, b))),
+                border: Border {
+                    color: Color::WHITE,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
                 ..Default::default()
-            });
-        let mut stock = column![row![heading("Stock color"), swatch]
+            })
+            .on_press(Message::ToggleStockPalette);
+        let mut stock = column![
+            row![
+                heading("Stock color"),
+                swatch,
+                text("Click to choose a color").size(11)
+            ]
             .spacing(12)
-            .align_y(Alignment::Center)]
+            .align_y(Alignment::Center),
+            row_for(
+                "Transparency",
+                (0.0, 1.0),
+                self.settings.view.stock_transparency,
+                0.01,
+                format!("{:.0}%", self.settings.view.stock_transparency * 100.0),
+                Message::SetStockTransparency,
+            ),
+            note("Used when transparent stock is enabled.".into()),
+        ]
         .spacing(6);
-        for (channel, label) in ["Red", "Green", "Blue"].into_iter().enumerate() {
-            let value = self.settings.view.stock_color[channel];
-            stock = stock.push(
-                row![
-                    text(label).size(12).width(150),
-                    slider(0.0..=1.0, value, move |v| Message::SetStockColor(
-                        channel, v
-                    ))
-                    .step(1.0 / 255.0_f32)
-                    .on_release(Message::SettingsSettled)
-                    .width(190),
-                    text(format!("{:.0}", value * 255.0)).size(12).width(64),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            );
+        if self.show_stock_palette {
+            // A grid of hue, saturation and brightness choices, plus neutral grays.
+            for level in 0..6 {
+                let mut colors = row![].spacing(3);
+                for hue in 0..12 {
+                    let h = hue as f32 / 2.0;
+                    let c = if level < 3 {
+                        1.0 - level as f32 * 0.25
+                    } else {
+                        1.0
+                    };
+                    let value = if level < 3 {
+                        1.0
+                    } else {
+                        1.0 - (level - 2) as f32 * 0.22
+                    };
+                    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+                    let (rr, gg, bb) = match hue / 2 {
+                        0 => (c, x, 0.0),
+                        1 => (x, c, 0.0),
+                        2 => (0.0, c, x),
+                        3 => (0.0, x, c),
+                        4 => (x, 0.0, c),
+                        _ => (c, 0.0, x),
+                    };
+                    let m = 1.0 - c;
+                    let color = [(rr + m) * value, (gg + m) * value, (bb + m) * value];
+                    colors = colors.push(
+                        button(Space::new().width(26).height(20))
+                            .padding(0)
+                            .style(move |_, _| iced::widget::button::Style {
+                                background: Some(Background::Color(Color::from_rgb(
+                                    color[0], color[1], color[2],
+                                ))),
+                                border: Border {
+                                    color: Color::from_rgb(0.4, 0.4, 0.4),
+                                    width: 1.0,
+                                    radius: 2.0.into(),
+                                },
+                                ..Default::default()
+                            })
+                            .on_press(Message::SetStockColor(color)),
+                    );
+                }
+                stock = stock.push(colors);
+            }
+            let mut grays = row![].spacing(3);
+            for n in 0..12 {
+                let v = n as f32 / 11.0;
+                let color = [v, v, v];
+                grays = grays.push(
+                    button(Space::new().width(26).height(20))
+                        .padding(0)
+                        .style(move |_, _| iced::widget::button::Style {
+                            background: Some(Background::Color(Color::from_rgb(v, v, v))),
+                            border: Border {
+                                color: Color::from_rgb(0.4, 0.4, 0.4),
+                                width: 1.0,
+                                radius: 2.0.into(),
+                            },
+                            ..Default::default()
+                        })
+                        .on_press(Message::SetStockColor(color)),
+                );
+            }
+            stock = stock.push(grays);
         }
 
         let simulation = column![
@@ -10461,55 +10530,6 @@ impl App {
             ),
             note("Higher accuracy resolves finer cuts and uses more time and memory. Rebuilds the simulation when released; also applies to playback.".into()),
         ].spacing(6);
-
-        let p = &self.settings.panes;
-        let pane_row = |pane: Pane, value: f32| -> Element<'_, Message> {
-            // Project / Library / Viewport / Inspector are docked left, centre and
-            // right, so their minimum is a **width**; Output is docked along the
-            // bottom, so its minimum is a **height**. Same number, different axis —
-            // and nothing on screen says so unless the label does.
-            let axis = if pane == Pane::Output {
-                "height"
-            } else {
-                "width"
-            };
-            row![
-                text(format!("{} ({axis})", pane.name()))
-                    .size(12)
-                    .width(Length::Fixed(150.0)),
-                slider(
-                    crate::PANE_MIN_RANGE.0..=crate::PANE_MIN_RANGE.1,
-                    value,
-                    move |v| { Message::SetPaneMin(pane, v) }
-                )
-                .step(5.0_f32)
-                .on_release(Message::SettingsSettled)
-                .width(Length::Fixed(190.0)),
-                text(format!("{value:.0} px"))
-                    .size(12)
-                    .width(Length::Fixed(64.0)),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into()
-        };
-
-        let panes = column![
-            heading("Smallest a pane may be"),
-            note(
-                "Widths for the side panes, height for Output. These are logical pixels, \
-                 so a high-DPI screen with display scaling is already handled. Raise them \
-                 on a large screen; lower them on a small or unscaled one, where the \
-                 shipped values can leave the viewport too narrow to work in."
-                    .to_string()
-            ),
-            pane_row(Pane::Project, p.min_project_px),
-            pane_row(Pane::Library, p.min_library_px),
-            pane_row(Pane::Viewport, p.min_viewport_px),
-            pane_row(Pane::Inspector, p.min_inspector_px),
-            pane_row(Pane::Output, p.min_output_px),
-        ]
-        .spacing(6);
 
         let btn = |label: &'static str, msg: Message| {
             button(
@@ -10552,8 +10572,7 @@ impl App {
                         .spacing(6),
                         snapping,
                         stock,
-                        simulation,
-                        panes
+                        simulation
                     ]
                     .spacing(12)
                 )
@@ -13906,7 +13925,7 @@ impl Viewport {
         let (transparent_stock_vertices, transparent_stock_indices) =
             if prefs.view.transparent_stock {
                 for vertex in &mut mesh_vertices {
-                    vertex.color[3] = 0.25;
+                    vertex.color[3] = 1.0 - prefs.view.stock_transparency;
                 }
                 (
                     std::mem::take(&mut mesh_vertices),

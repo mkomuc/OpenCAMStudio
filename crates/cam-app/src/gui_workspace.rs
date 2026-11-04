@@ -1616,13 +1616,14 @@ mod tests {
 
         app.settings.view.stock_color = [0.8, 0.3, 0.1];
         app.settings.view.transparent_stock = true;
+        app.settings.view.stock_transparency = 0.5;
         let transparent = app.machining_viewport();
         assert!(transparent.mesh_indices.is_empty());
         assert_eq!(transparent.transparent_stock_indices.len(), 36);
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.72, 0.66, 0.22, 0.25]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 0.5]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -1675,9 +1676,9 @@ mod tests {
             .zip(&outcome.stock_operations)
         {
             let expected = if *owner == Some(id) {
-                [0.8, 0.3, 0.1, 0.25]
+                [0.8, 0.3, 0.1, 0.5]
             } else {
-                [0.72, 0.66, 0.22, 0.25]
+                [0.72, 0.66, 0.22, 0.5]
             };
             assert_eq!(vertex.color, expected);
         }

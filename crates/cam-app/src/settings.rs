@@ -145,6 +145,8 @@ pub struct ViewPrefs {
     pub show_stock: bool,
     /// Blend the stock surface so the model or drawing remains visible inside it.
     pub transparent_stock: bool,
+    /// Transparency from 0 (opaque) to 1 (fully transparent).
+    pub stock_transparency: f32,
     /// Stock surface RGB color, with each channel in the range 0–1.
     pub stock_color: [f32; 3],
     pub show_gizmo: bool,
@@ -380,6 +382,7 @@ impl Default for ViewPrefs {
         Self {
             show_stock: false,
             transparent_stock: false,
+            stock_transparency: 0.75,
             stock_color: [0.2, 0.65, 0.3],
             show_gizmo: true,
             show_origin: true,
@@ -526,6 +529,7 @@ impl Settings {
         self.simulation.comparison_tolerance =
             clamp(self.simulation.comparison_tolerance, (0.001, 2.0), 0.05);
         let v = &mut self.view;
+        v.stock_transparency = clamp(v.stock_transparency, (0.0, 1.0), d.view.stock_transparency);
         for (channel, fallback) in v.stock_color.iter_mut().zip(d.view.stock_color) {
             *channel = clamp(*channel, (0.0, 1.0), fallback);
         }
@@ -858,6 +862,19 @@ mod tests {
         settings.simulation.comparison_tolerance = f32::NAN;
         settings.clamp_all();
         assert_eq!(settings.simulation.comparison_tolerance, 0.05);
+    }
+
+    #[test]
+    fn stock_transparency_defaults_clamps_and_round_trips() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.view.stock_transparency, 0.75);
+        settings.view.stock_transparency = 1.5;
+        settings.clamp_all();
+        assert_eq!(settings.view.stock_transparency, 1.0);
+        settings.view.stock_transparency = 0.42;
+        let loaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(loaded.view.stock_transparency, 0.42);
     }
 
     #[test]

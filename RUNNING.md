@@ -388,19 +388,14 @@ that have no other control:
 - **Snap marker size** — how large the engaged snap glyph draws. Unlike the catch
   distance this *is* its own control: it is a visual size, not a tolerance, so a large
   marker with a tight aperture is a reasonable thing to want.
-- **Stock color** — RGB sliders with a live color preview. The chosen color (green
+- **Stock color** — click the color swatch to choose from a visual palette. The chosen color (green
   by default) highlights surfaces machined by the selected toolpaths, including
   transparent stock, and survives a restart. Original stock and surfaces from
   unselected operations remain grey.
 - **Origin marker size** — the workpiece-datum cross-and-ring. It is sized from the
   scene (6% of its extent), so it already stays legible on a 20 mm part and a 500 mm
   one; this scales that, for a louder or quieter datum against a busy backplot.
-- **Smallest a pane may be** — the five per-pane minimums. **Project, Tools, Viewport
-  and Inspector are widths; Output is a height** — they dock to the sides and the
-  bottom respectively, so the same number bounds a different axis. The labels say
-  which. These are **logical** pixels, so a high-DPI screen with display scaling is
-  already handled; raise them on a large screen, lower them on a small or unscaled one
-  where the shipped values can leave the viewport too narrow to work in.
+- **Transparency** — sets how transparent stock appears when transparent stock is enabled.
 The **machine** is not here either, and for a stronger reason. Your machines live in a
 **local library** (`machines.json`), picked from the *Active* row at the top of the
 Machine inspector, with **New** / **Delete** on the **Machinery** ribbon tab.
