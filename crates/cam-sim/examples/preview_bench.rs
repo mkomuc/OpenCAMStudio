@@ -42,9 +42,13 @@ fn main() {
         );
         let start = Instant::now();
         let tiled = StockMeshCache::default()
-            .mesh_controlled(&sim.field, -10., &|| false).unwrap();
-        println!("  parallel tiled mesh: {:.2} ms, {} triangles",
-            start.elapsed().as_secs_f64() * 1000., tiled.indices.len() / 3);
+            .mesh_controlled(&sim.field, -10., &|| false)
+            .unwrap();
+        println!(
+            "  parallel tiled mesh: {:.2} ms, {} triangles",
+            start.elapsed().as_secs_f64() * 1000.,
+            tiled.indices.len() / 3
+        );
         let mut cache = SimulationCache::default();
         let mut mesh_cache = StockMeshCache::default();
         let opts = SimOptions {
