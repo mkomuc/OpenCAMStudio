@@ -123,6 +123,7 @@ fn run(doc: &Document) -> cam_sim::SimResult {
 fn a_pocket_clears_its_floor_without_collisions() {
     let op = PocketOp {
         additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
@@ -200,6 +201,7 @@ fn pocket_target(intended_depth: f64) -> Heightfield {
 fn pocket_op() -> PocketOp {
     PocketOp {
         additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,

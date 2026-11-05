@@ -197,6 +197,7 @@ fn assert_no_rapid_onto_uncut_stock(program: &Program, floor: f64) {
 fn pocket_doc() -> Document {
     let op = PocketOp {
         additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,

@@ -102,10 +102,45 @@ pub fn build_job_cached(
             if reported.insert(op.id()) {
                 progress(op.id());
             }
-            let geometry_fingerprint = geometry
+            let mut geometry_fingerprint = geometry
                 .bindings
                 .get(&op.id())
                 .map(|binding| geometry.binding_fingerprint(binding));
+            if let Operation::Pocket(p) = op {
+                if p.stock_contours.enabled {
+                    let model_dependencies: Vec<_> = geometry
+                        .instances
+                        .iter()
+                        .map(|instance| {
+                            (
+                                instance.id,
+                                instance.asset_id,
+                                instance.body_id,
+                                instance.placement,
+                                geometry
+                                    .asset(instance.asset_id)
+                                    .map(|asset| asset.revision),
+                            )
+                        })
+                        .collect();
+                    geometry_fingerprint = Some(format!(
+                        "{}:model:{model_dependencies:?}",
+                        geometry_fingerprint.unwrap_or_default(),
+                    ));
+                }
+                if let Some(source) = p
+                    .stock_contours
+                    .source
+                    .as_ref()
+                    .filter(|_| p.stock_contours.enabled)
+                {
+                    geometry_fingerprint = Some(format!(
+                        "{}:stock:{}",
+                        geometry_fingerprint.unwrap_or_default(),
+                        geometry.binding_fingerprint(source)
+                    ));
+                }
+            }
             cache.compute_with_dependencies(
                 op,
                 env,
@@ -1380,9 +1415,110 @@ fn compute_with_stock(
                 return stock_allowance_error(op.id, axial, op.depth);
             }
             let mut op = op.clone();
+            if let Some(source) = op
+                .stock_contours
+                .source
+                .as_ref()
+                .filter(|_| op.stock_contours.enabled)
+            {
+                let resolved = if !matches!(
+                    source.recipe,
+                    cam_model::ExtractionRecipe::PocketBoundary
+                        | cam_model::ExtractionRecipe::ProfileSilhouette
+                ) {
+                    Err("Invalid stock contour geometry recipe".to_string())
+                } else {
+                    cam_geometry3d::resolve_binding_advisory(geometry_state, source).and_then(
+                        |input| {
+                            if input.regions.is_empty() {
+                                Err("Selected stock contours have no closed area".to_string())
+                            } else {
+                                Ok(input)
+                            }
+                        },
+                    )
+                };
+                match resolved {
+                    Ok(input) => op.stock_contours.regions = input.regions,
+                    Err(reason) => {
+                        return StrategyResult {
+                            diagnostics: vec![Diagnostic::error(format!(
+                                "Stock contours need reselection: {reason}"
+                            ))
+                            .with_code(crate::DiagnosticCode::GeometryUnresolved)],
+                            ..Default::default()
+                        }
+                    }
+                }
+            }
             op.clear.offset += radial;
             op.depth -= axial;
-            PocketStrategy::new(op).compute(env, cancel)
+            if op.stock_contours.enabled && !geometry_state.instances.is_empty() {
+                let binding = geometry_state.bindings.get(&op.id);
+                let floor = cutting_heights.map_or(-op.depth, |h| h.bottom) + axial;
+                let selected = binding
+                    .filter(|b| b.recipe == cam_model::ExtractionRecipe::PocketFloor)
+                    .map_or(&[][..], |b| b.selected.as_slice());
+                match cam_geometry3d::pocket_stock_shadow(geometry_state, selected, floor, || {
+                    cancel.is_cancelled()
+                }) {
+                    Ok(Some(mut walls)) => {
+                        if selected.is_empty() {
+                            let mut pockets = op.additional_regions.clone();
+                            match cam_geo::Polygon::with_holes(
+                                op.boundary.clone(),
+                                op.islands.clone(),
+                            ) {
+                                Ok(p) => pockets.push(p),
+                                Err(reason) => {
+                                    return StrategyResult {
+                                        diagnostics: vec![Diagnostic::error(reason.to_string())],
+                                        ..Default::default()
+                                    }
+                                }
+                            }
+                            walls = match cam_geo::difference(&walls, &pockets) {
+                                Ok(walls) => walls,
+                                Err(reason) => {
+                                    return StrategyResult {
+                                        diagnostics: vec![Diagnostic::error(reason.to_string())],
+                                        ..Default::default()
+                                    }
+                                }
+                            };
+                        }
+                        return PocketStrategy::new(op)
+                            .with_model_walls(walls)
+                            .compute(env, cancel);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => {
+                        return StrategyResult {
+                            diagnostics: vec![Diagnostic::error(reason)],
+                            cancelled: cancel.is_cancelled(),
+                            ..Default::default()
+                        }
+                    }
+                }
+            }
+            let envelope = if op.stock_contours.enabled && !geometry_state.instances.is_empty() {
+                match pocket_model_envelope(geometry_state) {
+                    Ok(regions) => Some(regions),
+                    Err(reason) => {
+                        return StrategyResult {
+                            diagnostics: vec![Diagnostic::error(reason)],
+                            ..Default::default()
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+            let strategy = PocketStrategy::new(op);
+            match envelope {
+                Some(regions) => strategy.with_model_envelope(regions).compute(env, cancel),
+                None => strategy.compute(env, cancel),
+            }
         }
         Operation::Face(op) => {
             if radial > 0.0 {
@@ -1404,6 +1540,53 @@ fn compute_with_stock(
         Operation::Engrave(op) => EngraveStrategy::new(op.clone()).compute(env, cancel),
         Operation::Carve(op) => CarveStrategy::new(op.clone()).compute(env, cancel),
     }
+}
+
+/// Conservative model bounds keep stock margins from becoming fictitious
+/// pocket walls. Curved/nonrectangular model perimeters may leave extra stock.
+fn pocket_model_envelope(
+    geometry: &cam_model::GeometryState,
+) -> Result<Vec<cam_geo::Polygon>, String> {
+    use cam_geo::{Contour, Point, Polygon};
+    geometry
+        .instances
+        .iter()
+        .map(|instance| {
+            let body = geometry
+                .asset(instance.asset_id)
+                .and_then(|asset| {
+                    asset
+                        .topology
+                        .bodies
+                        .iter()
+                        .find(|b| b.id == instance.body_id)
+                })
+                .ok_or("Pocket model body is missing")?;
+            let mut min = [f64::INFINITY; 2];
+            let mut max = [f64::NEG_INFINITY; 2];
+            for x in [body.bounds[0][0], body.bounds[1][0]] {
+                for y in [body.bounds[0][1], body.bounds[1][1]] {
+                    for z in [body.bounds[0][2], body.bounds[1][2]] {
+                        let p = instance.placement.transform_point([x, y, z]);
+                        if !p.into_iter().all(f64::is_finite) {
+                            return Err("Pocket model bounds must be finite".into());
+                        }
+                        for axis in 0..2 {
+                            min[axis] = min[axis].min(p[axis]);
+                            max[axis] = max[axis].max(p[axis]);
+                        }
+                    }
+                }
+            }
+            Polygon::new(Contour::new(vec![
+                Point::new(min[0], min[1]),
+                Point::new(max[0], min[1]),
+                Point::new(max[0], max[1]),
+                Point::new(min[0], max[1]),
+            ]))
+            .map_err(|e| e.to_string())
+        })
+        .collect()
 }
 
 fn stock_allowance_error(operation_id: u32, axial: f64, depth: f64) -> StrategyResult {
@@ -1674,6 +1857,7 @@ mod tests {
         };
         let pocket = Operation::Pocket(cam_model::PocketOp {
             additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             id: 2,
             tool: 1,

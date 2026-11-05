@@ -15,8 +15,8 @@ mod profile_contours;
 mod profile_entries;
 mod surface_geometry;
 pub use adaptive::{
-    adaptive_heights, resolve_adaptive, validate_adaptive_selection, AdaptiveGeometry,
-    AdaptiveLayer, AdaptiveResolveConfig,
+    adaptive_heights, pocket_stock_shadow, resolve_adaptive, validate_adaptive_selection,
+    AdaptiveGeometry, AdaptiveLayer, AdaptiveResolveConfig,
 };
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;

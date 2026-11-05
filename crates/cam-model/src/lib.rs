@@ -13,7 +13,7 @@ mod cutting_data;
 mod cutting_forces;
 pub use cutting_forces::{CuttingEngagement, CuttingForceEstimate, CuttingLoad};
 mod pocket;
-pub use pocket::PocketFinishing;
+pub use pocket::{PocketFinishing, StockContours};
 mod parallel;
 pub use parallel::*;
 mod bore;

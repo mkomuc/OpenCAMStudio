@@ -254,6 +254,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
 fn pocket() -> Operation {
     Operation::Pocket(PocketOp {
         additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,

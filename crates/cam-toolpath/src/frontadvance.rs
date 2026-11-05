@@ -375,7 +375,7 @@ fn simplify_ring(ring: &[Point], eps: f64) -> Vec<Point> {
 /// `eps` is kept far below the stepover, so the cleared frontier shifts negligibly and
 /// engagement is unaffected — this only caps the vertex count that repeated round
 /// offsets would otherwise balloon.
-fn simplify_polys(polys: &[Polygon], eps: f64) -> Vec<Polygon> {
+pub(crate) fn simplify_polys(polys: &[Polygon], eps: f64) -> Vec<Polygon> {
     polys
         .iter()
         .filter_map(|p| {

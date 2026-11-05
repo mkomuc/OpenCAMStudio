@@ -99,7 +99,8 @@ use crate::{BoreOp, Tool};
 /// v36: Scallop pass ordering.
 /// v37: setup fixture bodies and radial/axial fixture clearances.
 /// v38: multiple pocket regions sharing operation cutting heights.
-pub const SCHEMA_VERSION: u32 = 38;
+/// v39: optional stock contours for pocket and 2D adaptive material footprints.
+pub const SCHEMA_VERSION: u32 = 39;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1041,6 +1042,9 @@ pub struct PocketOp {
     /// All regions use the operation cutting heights and clearing settings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_regions: Vec<cam_geo::Polygon>,
+    /// Optional material footprint for open pockets and 2D adaptive clearing.
+    #[serde(default)]
+    pub stock_contours: crate::StockContours,
     /// Pocket depth below the reference plane (Z=0), as a positive magnitude (mm).
     /// The floor sits at absolute Z `-depth`.
     pub depth: f64,

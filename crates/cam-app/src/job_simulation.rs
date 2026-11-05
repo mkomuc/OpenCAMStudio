@@ -1036,6 +1036,7 @@ mod tests {
             };
             setup.operations = vec![Operation::Pocket(PocketOp {
                 additional_regions: Vec::new(),
+                stock_contours: Default::default(),
                 finishing: Default::default(),
                 id: 1,
                 tool: 1,

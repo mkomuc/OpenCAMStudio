@@ -2261,6 +2261,7 @@ impl AppController {
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Pocket(PocketOp {
                     additional_regions: Vec::new(),
+                    stock_contours: Default::default(),
                     finishing: Default::default(),
                     id: 0,
                     tool,
@@ -2830,6 +2831,7 @@ impl AppController {
                     } else {
                         operations.push(Operation::Pocket(PocketOp {
                             additional_regions: Vec::new(),
+                            stock_contours: Default::default(),
                             finishing: Default::default(),
                             id,
                             tool: 1,

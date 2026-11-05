@@ -25,6 +25,9 @@ A CAM application for CNC toolpath generation, built in Rust.
   concentric otherwise). Pocket operations offer optional finishing passes with
   separate radial stepover and feed, leads, a repeat pass and closure overlap;
   cutter compensation is computed in the toolpath.
+- **Pocket stock contours** — setup-stock or selected closed footprints for
+  open-pocket and 2D adaptive clearing, with cutter runout and protected islands.
+  See [selection and behavior](docs/pocket-stock-contours.md).
 - **3D Adaptive Clearing** — roughing levels with upward fine-step refinement,
   optimal load and tolerance controls, using the independent CAD machining
   tessellation. Select the bodies or faces to machine while retaining other setup

@@ -6310,6 +6310,16 @@ impl App {
                 self.status = "CAD import cancelled.".into();
             }
             Message::GeometryFilterChanged(filter) => {
+                if self.stock_contour_editor() {
+                    if self.cad_filter != filter {
+                        self.controller.set_cad_selection(vec![]);
+                    }
+                    self.cad_filter = filter;
+                    self.cad_filter_explicit = true;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                    return iced::Task::none();
+                }
                 let _ = self.pick_operation_geometry();
                 if self.cad_filter != filter
                     && !matches!(
@@ -11560,6 +11570,19 @@ impl App {
     }
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
+        if self.stock_contour_editor() {
+            let additive = entity.kind != EntityKind::Silhouette
+                && !self
+                    .controller
+                    .cad_selection()
+                    .iter()
+                    .any(|r| r.kind == EntityKind::Silhouette);
+            match self.controller.toggle_cad_selection(entity, additive) {
+                Ok(()) => self.status = "Stock contour selected; close the chain, then OK.".into(),
+                Err(reason) => self.status = reason,
+            }
+            return;
+        }
         if self.profile_entry_cad_pick(entity.clone()) {
             return;
         }
@@ -13706,6 +13729,8 @@ impl std::fmt::Display for CadFilter {
 
 #[derive(Clone)]
 struct Viewport {
+    stock_contour_picking: bool,
+    stock_contour_setup_selected: bool,
     setup_geometry: Arc<SetupPickGeometry>,
     setup_axis: bool,
     operation_position_picking: bool,
@@ -14119,6 +14144,8 @@ impl Viewport {
             Some(([-50., -50., 0.], [50., 50., 0.]))
         };
         Self {
+            stock_contour_picking: false,
+            stock_contour_setup_selected: false,
             setup_geometry: Arc::new(SetupPickGeometry::new(
                 controller,
                 controller.inspection_setup(),
@@ -14254,6 +14281,15 @@ impl Viewport {
         let ray = camera.pick_ray(u, v, aspect);
         if self.cad_silhouette && !self.setup_axis {
             return self.cad_scene.pick_silhouette_candidates(
+                ray,
+                aperture as f64,
+                self.cad_select_through,
+            );
+        }
+        if self.stock_contour_picking && self.cad_filter == EntityKind::Loop {
+            // Stock loops must be planar in setup XY. A cylindrical wall loop
+            // includes its axial seam and must not win over the adjacent rim.
+            return self.cad_scene.pick_pocket_loop_candidates(
                 ray,
                 aperture as f64,
                 self.cad_select_through,
@@ -14556,6 +14592,19 @@ impl shader::Program<Message> for Viewport {
                         None => shader::Action::capture(),
                     });
                 }
+                if matches!(button, Button::Left) && self.stock_contour_picking && self.show_stock {
+                    if matches!(
+                        self.setup_hover_at(pos, bounds).edge,
+                        Some(SetupFeature::Stock(_))
+                    ) {
+                        return Some(
+                            shader::Action::publish(Message::OperationGeometry(
+                                GeometryMessage::ResetStock,
+                            ))
+                            .and_capture(),
+                        );
+                    }
+                }
                 if matches!(button, Button::Left) && self.set_origin {
                     return Some(match self.origin_point_at(pos, bounds) {
                         Some(point) => {
@@ -14802,7 +14851,11 @@ impl shader::Program<Message> for Viewport {
             for (_, edge) in self.setup_geometry.stock_lines() {
                 setup_scene.add_strip(
                     edge.iter().map(|p| p.map(|v| v as f32)).collect(),
-                    [0.45, 0.49, 0.54, 1.],
+                    if self.stock_contour_setup_selected {
+                        PICK_BOUNDARY
+                    } else {
+                        [0.45, 0.49, 0.54, 1.]
+                    },
                 );
             }
         }

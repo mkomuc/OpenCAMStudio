@@ -794,6 +794,13 @@ impl App {
             || self.height_reference_pick.is_some();
         viewport.geometry_pick_active = (self.geometry_additive || self.geometry_auto_pick)
             && self.operation_tab == OperationTab::Geometry;
+        viewport.stock_contour_picking = self.stock_contour_editor();
+        viewport.stock_contour_setup_selected = self.stock_contour_editor()
+            && if self.operation_uses_cad_geometry() {
+                self.controller.cad_selection().is_empty()
+            } else {
+                self.controller.pending_operation_geometry().is_empty()
+            };
         viewport.cad_select_through = self.cad_select_through;
         viewport.controls = self.view;
         viewport.show_gizmo = self.show_gizmo;
@@ -883,6 +890,12 @@ impl App {
         }
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
+        }
+        if self.stock_contour_editor() {
+            viewport.cad_operation_kind = None;
+            viewport.cad_filter_explicit = true;
+            viewport.cad_silhouette =
+                self.cad_filter == CadFilter::Silhouette || self.modifiers.control();
         }
         if pattern_pick.is_some() {
             viewport.cad_operation_kind = None;
