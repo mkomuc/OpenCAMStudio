@@ -227,7 +227,7 @@ impl App {
         let Some(previous) = previous else {
             return;
         };
-        if previous.recipe == binding.recipe {
+        if previous.recipe == binding.recipe && previous.selected == binding.selected {
             return;
         }
         let defaults_for = |recipe: &cam_model::ExtractionRecipe| {
@@ -241,7 +241,10 @@ impl App {
             }
         };
         let old = defaults_for(&previous.recipe);
-        let new = defaults_for(&binding.recipe);
+        // Changing from a floor to its boundary does not turn that boundary
+        // into the top of a pocket with the old depth below it. Match "Use
+        // defaults": cut from stock top down to the selected floor/contour.
+        let new = cam_model::OperationHeightSettings::default();
         if let Some(settings) = &mut self.height_draft {
             for plane in cam_model::HeightPlaneKind::ALL {
                 let definition = old.definition(plane);

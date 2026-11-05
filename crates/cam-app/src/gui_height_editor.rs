@@ -181,7 +181,22 @@ impl App {
             })
             .collect();
         apply_op_fields(&mut op, &parsed);
-        if let Some(binding) = &self.operation_binding_preview {
+        if let Operation::Profile(profile) = &mut op {
+            if profile.selections.is_some() {
+                if let Some(mut binding) =
+                    crate::cad_operations::resolve_profile_entries(&document, profile)?
+                {
+                    if let Some(previous) = document.geometry.bindings.get(&id) {
+                        binding.overrides = previous.overrides.clone();
+                    }
+                    document.geometry.bindings.insert(id, binding);
+                } else {
+                    document.geometry.bindings.remove(&id);
+                }
+            } else if let Some(binding) = &self.operation_binding_preview {
+                document.geometry.bindings.insert(id, binding.clone());
+            }
+        } else if let Some(binding) = &self.operation_binding_preview {
             document.geometry.bindings.insert(id, binding.clone());
         }
         self.edited_height_settings()?.resolve(&document, &op)

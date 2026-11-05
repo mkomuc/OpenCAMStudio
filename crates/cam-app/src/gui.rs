@@ -6527,6 +6527,11 @@ impl App {
                     match self.preview_geometry_draft(id, selected.clone()) {
                         Ok(binding) => {
                             let previous_operation = self.operation_draft.clone();
+                            let geometry_changed = self
+                                .operation_binding_preview
+                                .as_ref()
+                                .or_else(|| self.controller.geometry_state().bindings.get(&id))
+                                .is_some_and(|previous| previous.selected != selected);
                             if let Some(profile) = profile_geometry {
                                 self.edit_operation_draft(|operation| {
                                     if let Operation::Profile(draft) = operation {
@@ -6615,6 +6620,14 @@ impl App {
                             }
                             self.sync_pocket_geometry_height_defaults(&binding);
                             self.sync_chamfer_face_height_defaults(previous_operation.as_ref());
+                            if geometry_changed
+                                && !matches!(
+                                    previous_operation.as_ref(),
+                                    Some(Operation::Pocket(_) | Operation::Chamfer(_))
+                                )
+                            {
+                                self.refresh_geometry_height_defaults(previous_operation.as_ref());
+                            }
                             self.sync_chamfer_geometry_fields();
                             self.operation_binding_preview = Some(binding);
                             self.operation_geometry = Some(selected);

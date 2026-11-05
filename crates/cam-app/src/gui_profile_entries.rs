@@ -289,6 +289,8 @@ impl App {
                 }
                 let mut entries = self.profile_entries();
                 let index = self.geometry_row_selection.unwrap_or(0);
+                let before = self.operation_draft.clone();
+                let removed = index < entries.len();
                 if index < entries.len() {
                     entries.remove(index);
                     self.geometry_row_selection = if entries.is_empty() {
@@ -306,6 +308,9 @@ impl App {
                 self.operation_binding_preview = None;
                 self.profile_side_overrides.clear();
                 self.sync_profile_entry_cache();
+                if removed && !self.creating_operation() {
+                    self.refresh_geometry_height_defaults(before.as_ref());
+                }
             }
             EntryMessage::Pick => self.profile_entry_start_pick(),
             EntryMessage::Confirm => {
@@ -338,6 +343,11 @@ impl App {
                     self.profile_entry_editor = Some(editor);
                     return;
                 }
+                let before = self.operation_draft.clone();
+                let changed = self
+                    .profile_entries()
+                    .get(editor.index)
+                    .is_none_or(|entry| entry.source != editor.draft.source);
                 self.edit_operation_draft(|op| {
                     if let Operation::Profile(p) = op {
                         if let Some(entry) = p
@@ -353,6 +363,9 @@ impl App {
                 self.geometry_additive = false;
                 self.profile_side_overrides.clear();
                 self.sync_profile_entry_cache();
+                if changed && !self.creating_operation() {
+                    self.refresh_geometry_height_defaults(before.as_ref());
+                }
                 self.refresh_operation_fields();
             }
             EntryMessage::Cancel => {
@@ -797,6 +810,28 @@ impl App {
             });
         }
     }
+    pub(super) fn refresh_geometry_height_defaults(&mut self, before: Option<&Operation>) {
+        let Some(before) = before else { return };
+        let old =
+            crate::cad_operations::selection_height_defaults(self.controller.document(), before);
+        let defaults = OperationHeightSettings::default();
+        if let Some(settings) = &mut self.height_draft {
+            for plane in HeightPlaneKind::ALL {
+                let definition = old.definition(plane);
+                if settings.definition(plane) == definition
+                    && self
+                        .height_offsets
+                        .get(&plane)
+                        .and_then(|v| v.parse::<f64>().ok())
+                        == Some(definition.offset)
+                {
+                    *settings.definition_mut(plane) = defaults.definition(plane).clone();
+                    self.height_offsets
+                        .insert(plane, fmt_num(defaults.definition(plane).offset));
+                }
+            }
+        }
+    }
     pub(super) fn set_profile_entry_contour_side(&mut self, index: usize, side: Side) {
         if let Some(entries) = self.active_profile_geometry_entries() {
             if matches!(&self.operation_draft, Some(Operation::Profile(p)) if p.selections.is_none())
@@ -1153,6 +1188,40 @@ mod tests {
         assert!(app.profile_entries().is_empty());
         assert!(app.creation_operation().is_err());
         assert_eq!(app.controller.document(), &before);
+    }
+    #[test]
+    fn removing_profile_geometry_refreshes_default_heights_and_preserves_custom_offsets() {
+        let mut app = app();
+        app.profile_entry_message(EntryMessage::Add(ProfileGeometryKind::Chain));
+        pick(&mut app, LoopRef::outer(0));
+        app.profile_entry_message(EntryMessage::Confirm);
+        let _ = app.update(Message::ConfirmOp);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("operation: {}", app.status)
+        };
+        app.begin_operation_draft(id);
+        let previous = crate::cad_operations::selection_height_defaults(
+            app.controller.document(),
+            app.operation_draft.as_ref().unwrap(),
+        );
+        app.height_offsets = HeightPlaneKind::ALL
+            .into_iter()
+            .map(|plane| (plane, fmt_num(previous.definition(plane).offset)))
+            .collect();
+        app.height_draft = Some(previous);
+        app.height_offsets
+            .insert(HeightPlaneKind::Clearance, "23".into());
+        app.profile_entry_message(EntryMessage::RemoveSelected);
+        assert!(app.editor_selected_geometry().is_empty());
+        assert!(app.operation_geometry_preview().strips.is_empty());
+        assert_eq!(
+            app.height_draft
+                .as_ref()
+                .unwrap()
+                .definition(HeightPlaneKind::Bottom),
+            OperationHeightSettings::default().definition(HeightPlaneKind::Bottom)
+        );
+        assert_eq!(app.height_offsets[&HeightPlaneKind::Clearance], "23");
     }
     #[test]
     fn entry_submenu_side_and_direction_drive_preview_and_survive_save_reopen() {
