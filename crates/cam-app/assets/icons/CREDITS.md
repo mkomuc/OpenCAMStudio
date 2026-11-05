@@ -2,13 +2,14 @@
 
 All icons **in this directory** are **GPL-3.0-only**, matching this project.
 
-> **The application icon is the one exception, and it is deliberate.**
+> **The legacy application icon is an exception, and it is deliberate.**
 > `../opencamstudio.svg` (and the PNGs rendered from it) is **CC BY-SA 4.0
 > International, © Andreas Bertsatos** — not GPL-3.0. It is licensed that way so the
 > mark can be used and attributed on Wikipedia and Wikimedia Commons, whose corpus
 > runs on CC BY-SA 4.0 and where GPL images are second-class. Compatibility is
 > **one-way**: CC BY-SA 4.0 material may be used inside a GPLv3 work, never the
-> reverse, so that file can never be relicensed to match the icons here.
+> reverse, so that file can never be relicensed to match the icons here. The
+> current application icon is in `../app-icon-v2/` and is a separate design.
 >
 > Its letterforms are outlines of **DejaVu Sans Bold**, extracted with `fontTools`.
 > DejaVu is distributed under the Bitstream Vera Fonts Copyright, which permits

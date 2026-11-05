@@ -183,7 +183,7 @@
           Add/Remove Programs control panel requires commenting out or
           removing the following `Icon` and `Property` tags.
         -->
-        <Icon Id='ProductICO' SourceFile='crates/cam-app/assets/opencamstudio.ico'/>
+        <Icon Id='ProductICO' SourceFile='crates/cam-app/assets/app-icon-v2/OpenCAMStudio.ico'/>
         <Property Id='ARPPRODUCTICON' Value='ProductICO' />
         
         <Property Id='ARPHELPLINK' Value='https://github.com/pr0m1th3as/OpenCAMStudio'/>

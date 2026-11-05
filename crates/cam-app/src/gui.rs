@@ -17089,8 +17089,8 @@ mod ribbon_tests {
     }
 
     #[test]
-    fn the_application_icon_carries_its_author_and_licence() {
-        // The app icon is the project's one deliberate departure from GPL-3.0-only
+    fn the_legacy_application_icon_carries_its_author_and_licence() {
+        // The legacy icon is the project's deliberate departure from GPL-3.0-only
         // (CC BY-SA 4.0, so the mark can live on Wikimedia). That exception is only
         // worth anything if the claim actually travels with the file, and the file
         // goes through editors -- Inkscape rewrote it once already -- so pin it.

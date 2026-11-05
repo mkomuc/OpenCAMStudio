@@ -1,11 +1,12 @@
-# Open CAM Studio icon concept
+# Open CAM Studio application icon
 
-Created with the built-in image generation tool. This is a new icon concept;
-the existing application icon and packaging references remain unchanged.
+Created with the built-in image generation tool. This icon is used by the
+platform packages. The older SVG remains in the repository with its licence.
 
 - `open-cam-studio-source.png`: original generated image with transparency.
 - `open-cam-studio-1024.png`: 1024 × 1024 PNG.
 - `OpenCAMStudio.icns`: macOS icon with standard and Retina sizes.
+- `OpenCAMStudio.ico`: Windows icon with sizes from 16 to 256 pixels.
 - `OpenCAMStudio.iconset/`: PNG sizes used to build the macOS icon.
 
 Resized with macOS `sips` and packaged as an ICNS container with PNG entries.
