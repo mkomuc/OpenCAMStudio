@@ -14592,18 +14592,20 @@ impl shader::Program<Message> for Viewport {
                         None => shader::Action::capture(),
                     });
                 }
-                if matches!(button, Button::Left) && self.stock_contour_picking && self.show_stock {
-                    if matches!(
+                if matches!(button, Button::Left)
+                    && self.stock_contour_picking
+                    && self.show_stock
+                    && matches!(
                         self.setup_hover_at(pos, bounds).edge,
                         Some(SetupFeature::Stock(_))
-                    ) {
-                        return Some(
-                            shader::Action::publish(Message::OperationGeometry(
-                                GeometryMessage::ResetStock,
-                            ))
-                            .and_capture(),
-                        );
-                    }
+                    )
+                {
+                    return Some(
+                        shader::Action::publish(Message::OperationGeometry(
+                            GeometryMessage::ResetStock,
+                        ))
+                        .and_capture(),
+                    );
                 }
                 if matches!(button, Button::Left) && self.set_origin {
                     return Some(match self.origin_point_at(pos, bounds) {
