@@ -483,12 +483,14 @@ impl PocketStrategy {
         if levels.len() <= 1 {
             return result;
         }
-        let mut combined = StrategyResult::default();
-        combined.diagnostics = result
-            .diagnostics
-            .into_iter()
-            .filter(|d| !d.message.contains("Clearing motion budget exceeded"))
-            .collect();
+        let mut combined = StrategyResult {
+            diagnostics: result
+                .diagnostics
+                .into_iter()
+                .filter(|d| !d.message.contains("Clearing motion budget exceeded"))
+                .collect(),
+            ..Default::default()
+        };
         let mut previous = env.heights.top_of_stock;
         for (index, &z) in levels.iter().enumerate() {
             let mut child = op.clone();
