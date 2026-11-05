@@ -11,6 +11,7 @@ fn machine() -> Machine {
         name: "test".into(),
         rapid_rate: 1000.0,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10000.0,
         max_feed: 500.0,
         envelope: Envelope::new(
@@ -47,6 +48,35 @@ fn all_reject(program: &Program, machine: &Machine, options: &PostOptions) {
             post.post(program, machine, options).is_err(),
             "{post:?} accepted invalid input"
         );
+    }
+}
+
+#[test]
+fn spindle_minimum_is_enforced_before_and_after_rounding() {
+    let mut m = machine();
+    m.min_spindle_rpm = 1000.2;
+    for (rpm, accepted) in [(1000.1, false), (1000.2, false), (1000.6, true)] {
+        let program = ProgramBuilder::new()
+            .spindle_on(rpm, SpindleDir::Cw)
+            .build();
+        for post in PostKind::ALL {
+            let result = post.post(&program, &m, &PostOptions::default());
+            if accepted {
+                assert!(result.is_ok(), "{post:?}: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(PostError::SpindleBelowMinimum(_))),
+                    "{post:?}: {result:?}"
+                );
+            }
+        }
+    }
+    m.min_spindle_rpm = 1000.0;
+    let program = ProgramBuilder::new()
+        .spindle_on(1000.0, SpindleDir::Cw)
+        .build();
+    for post in PostKind::ALL {
+        assert!(post.post(&program, &m, &PostOptions::default()).is_ok());
     }
 }
 

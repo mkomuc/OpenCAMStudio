@@ -94,7 +94,9 @@ impl<'a> Writer<'a> {
     }
 
     pub(crate) fn check_spindle(&self, rpm: f64) -> Result<(), PostError> {
-        if rpm > self.machine.max_spindle_rpm {
+        if rpm < self.machine.min_spindle_rpm {
+            Err(PostError::SpindleBelowMinimum(rpm))
+        } else if rpm > self.machine.max_spindle_rpm {
             Err(PostError::SpindleOutOfRange(rpm))
         } else {
             Ok(())

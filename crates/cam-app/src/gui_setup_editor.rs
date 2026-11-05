@@ -225,6 +225,7 @@ impl App {
                             .size(12)
                             .color(INSPECTOR_TEXT),
                     );
+                    list = list.push(text("Uses the machine's configured maximum Z relative to the base WCS; verify it for this setup. Z travel alone does not determine this height.").size(11).color(INSPECTOR_MUTED));
                 }
                 list = list.push(text(
                     "Z relative to the base WCS origin. Used before tool changes and re-fixturing; must be at or above all operation clearance planes."

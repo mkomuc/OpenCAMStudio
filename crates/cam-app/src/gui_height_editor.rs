@@ -442,6 +442,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configured_maximum_z_sets_automatic_tool_change_height_without_changing_travel() {
+        let mut machine = crate::default_machine();
+        assert_eq!(machine.envelope.extent().2, 100.0);
+        assert_eq!(machine.envelope.max.z, 50.0);
+        set_machine_z_limits(&mut machine.envelope, 100.0, 100.0);
+        assert_eq!(machine.envelope.extent().2, 100.0);
+        assert_eq!(machine.envelope.min.z, 0.0);
+
+        let mut controller = AppController::new(machine);
+        controller.edit_setup(|setup| setup.origin[2] = 12.0);
+        let setup = controller.inspection_setup();
+        assert_eq!(
+            setup.resolved_tool_change_height(controller.machine().envelope.max.z)
+                - setup.origin[2],
+            100.0
+        );
+    }
+
+    #[test]
     fn tool_change_height_uses_wcs_values_in_the_setup_inspector() {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());

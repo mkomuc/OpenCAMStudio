@@ -32,6 +32,13 @@ tool changes and manual re-fixturing and should be at or above every operation's
 clearance plane. The planner raises lower values to clearance, with a warning
 for differences greater than 0.000001 mm; smaller CAD padding is clamped silently.
 
+The automatic value comes from **Maximum Z from base WCS** in the machine settings,
+not from the Z travel span. For example, 100 mm of travel from −50 to +50 gives a
+maximum of +50 mm. Set the maximum to the highest Z actually reachable relative to
+the base work origin for the setup; changing it preserves the configured Z travel.
+The machine settings do not know the physical placement of the work origin, so
+verify this value for each setup or enter an explicit tool-change height.
+
 The Setup tab combines orientation and datum in **Workpiece coordinate system
 (WCS)**. The Orientation menu offers model orientation, Z/X, Z/Y and X/Y axis
 pairs, plus individual selected axes. Choose straight model or stock edges for

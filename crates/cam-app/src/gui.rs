@@ -1144,7 +1144,11 @@ enum Field {
     MachineTravelX,
     MachineTravelY,
     MachineTravelZ,
+    MachineMaxZ,
     MachineRapidRate,
+    MachineMinSpindleRpm,
+    MachineMaxSpindleRpm,
+    MachineMaxFeed,
     MachineToolChangeSeconds,
     /// Workpiece origin (datum) X / Y / Z, part-space mm.
     OriginX,
@@ -1314,6 +1318,11 @@ enum Field {
     Scallop,
 }
 
+fn set_machine_z_limits(envelope: &mut cam_model::Envelope, travel: f64, max_z: f64) {
+    envelope.max.z = max_z;
+    envelope.min.z = max_z - travel;
+}
+
 impl Field {
     fn label(self) -> &'static str {
         match self {
@@ -1331,7 +1340,11 @@ impl Field {
             Field::MachineTravelX => "X travel (mm)",
             Field::MachineTravelY => "Y travel (mm)",
             Field::MachineTravelZ => "Z travel (mm)",
+            Field::MachineMaxZ => "Maximum Z from base WCS (mm)",
             Field::MachineRapidRate => "Rapid rate (mm/min)",
+            Field::MachineMinSpindleRpm => "Minimum spindle speed (rpm)",
+            Field::MachineMaxSpindleRpm => "Maximum spindle speed (rpm)",
+            Field::MachineMaxFeed => "Maximum cutting feed (mm/min)",
             Field::MachineToolChangeSeconds => "Tool change time (s)",
             Field::OriginX => "Origin X (mm)",
             Field::OriginY => "Origin Y (mm)",
@@ -1506,7 +1519,11 @@ impl Field {
             }
             Field::MachineTravelY => "Working-envelope size in Y (see X travel).",
             Field::MachineTravelZ => "Working-envelope size in Z (see X travel).",
-            Field::MachineRapidRate => "Maximum rapid traverse rate used for time estimates and G0 limits.",
+            Field::MachineMaxZ => "Assumed highest reachable Z relative to the setup's base work origin. Used for automatic tool-change height; measure it for the workholding and setup. Changing it preserves Z travel.",
+            Field::MachineRapidRate => "Rapid traverse rate used for time estimates.",
+            Field::MachineMinSpindleRpm => "Lowest running spindle speed allowed during G-code export. Zero disables the additional minimum.",
+            Field::MachineMaxSpindleRpm => "Highest spindle speed allowed during G-code export.",
+            Field::MachineMaxFeed => "Highest cutting, plunge, or drilling feed allowed during G-code export.",
             Field::MachineToolChangeSeconds => "Estimated seconds spent at each tool change.",
             Field::OriginX => {
                 "Part-space X of the workpiece datum — the (0,0,0) the G-code is written \
@@ -9324,7 +9341,17 @@ impl App {
         }
         let buf = |f: Field| self.fields.get(&f).and_then(|s| s.parse::<f64>().ok());
         match field {
-            Field::MachineRapidRate => value <= 0.0,
+            Field::MachineTravelX | Field::MachineTravelY | Field::MachineTravelZ => value <= 0.0,
+            Field::MachineMaxZ => buf(Field::MachineTravelZ)
+                .is_some_and(|travel| !(value - travel).is_finite() || value - travel >= value),
+            Field::MachineMinSpindleRpm => {
+                value < 0.0 || buf(Field::MachineMaxSpindleRpm).is_some_and(|max| value > max)
+            }
+            Field::MachineRapidRate | Field::MachineMaxSpindleRpm | Field::MachineMaxFeed => {
+                value <= 0.0
+                    || (field == Field::MachineMaxSpindleRpm
+                        && buf(Field::MachineMinSpindleRpm).is_some_and(|min| min > value))
+            }
             Field::MachineToolChangeSeconds => value < 0.0,
             Field::CornerRadius => {
                 matches!((buf(Field::CornerRadius), buf(Field::ToolDiameter)),
@@ -9733,7 +9760,11 @@ impl App {
                 Field::MachineTravelX,
                 Field::MachineTravelY,
                 Field::MachineTravelZ,
+                Field::MachineMaxZ,
                 Field::MachineRapidRate,
+                Field::MachineMinSpindleRpm,
+                Field::MachineMaxSpindleRpm,
+                Field::MachineMaxFeed,
                 Field::MachineToolChangeSeconds,
             ],
             Selection::Origin => vec![
@@ -9820,8 +9851,20 @@ impl App {
                 _ => z,
             });
         }
+        if field == Field::MachineMaxZ {
+            return Some(self.controller.machine().envelope.max.z);
+        }
         if field == Field::MachineRapidRate {
             return Some(self.controller.machine().rapid_rate);
+        }
+        if field == Field::MachineMinSpindleRpm {
+            return Some(self.controller.machine().min_spindle_rpm);
+        }
+        if field == Field::MachineMaxSpindleRpm {
+            return Some(self.controller.machine().max_spindle_rpm);
+        }
+        if field == Field::MachineMaxFeed {
+            return Some(self.controller.machine().max_feed);
         }
         if field == Field::MachineToolChangeSeconds {
             return Some(self.controller.machine().tool_change_seconds);
@@ -10109,8 +10152,8 @@ impl App {
                 }
             }),
             Selection::Machine => self.controller.edit_machine(|m| {
-                // Travel is the working-volume extent; keep the min corner and set
-                // the max to min + travel (clamped positive).
+                // Travel is the working-volume extent. Z is anchored at its
+                // separately editable maximum relative to the base work origin.
                 let e = &mut m.envelope;
                 if let Some(&v) = parsed.get(&Field::MachineTravelX) {
                     e.max.x = e.min.x + v.max(0.0);
@@ -10118,11 +10161,23 @@ impl App {
                 if let Some(&v) = parsed.get(&Field::MachineTravelY) {
                     e.max.y = e.min.y + v.max(0.0);
                 }
-                if let Some(&v) = parsed.get(&Field::MachineTravelZ) {
-                    e.max.z = e.min.z + v.max(0.0);
-                }
+                let z_travel = parsed
+                    .get(&Field::MachineTravelZ)
+                    .copied()
+                    .unwrap_or(e.max.z - e.min.z);
+                let max_z = parsed.get(&Field::MachineMaxZ).copied().unwrap_or(e.max.z);
+                set_machine_z_limits(e, z_travel, max_z);
                 if let Some(&v) = parsed.get(&Field::MachineRapidRate) {
                     m.rapid_rate = v;
+                }
+                if let Some(&v) = parsed.get(&Field::MachineMinSpindleRpm) {
+                    m.min_spindle_rpm = v;
+                }
+                if let Some(&v) = parsed.get(&Field::MachineMaxSpindleRpm) {
+                    m.max_spindle_rpm = v;
+                }
+                if let Some(&v) = parsed.get(&Field::MachineMaxFeed) {
+                    m.max_feed = v;
                 }
                 if let Some(&v) = parsed.get(&Field::MachineToolChangeSeconds) {
                     m.tool_change_seconds = v;
@@ -10178,7 +10233,7 @@ impl App {
             }),
         }
         // The machine library snapshot was synced before numeric fields were applied.
-        // Sync once more now so rapid rate and tool-change time persist with the edit.
+        // Sync once more now so the numeric machine settings persist with the edit.
         if self.controller.selection() == Selection::Machine {
             self.sync_active_machine();
         }
