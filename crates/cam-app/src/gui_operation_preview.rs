@@ -328,6 +328,10 @@ impl App {
                 Operation::Pocket(p) => {
                     outlines.push((p.boundary.points().to_vec(), true));
                     outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
+                    for region in &p.additional_regions {
+                        outlines.push((region.outer().points().to_vec(), true));
+                        outlines.extend(region.holes().iter().map(|c| (c.points().to_vec(), true)));
+                    }
                 }
                 Operation::Carve(p) => {
                     outlines.push((p.boundary.points().to_vec(), true));

@@ -484,6 +484,7 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            additional_regions: resolved.regions.iter().skip(1).cloned().collect(),
             finishing: Default::default(),
             id,
             tool,
@@ -877,6 +878,7 @@ pub(crate) fn resolve_document_checked(
                 ) => {
                     p.boundary = region()?.outer().clone();
                     p.islands = region()?.holes().to_vec();
+                    p.additional_regions = input.regions.iter().skip(1).cloned().collect();
                     p.depth = depth;
                 }
                 (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {

@@ -2260,6 +2260,7 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Pocket(PocketOp {
+                    additional_regions: Vec::new(),
                     finishing: Default::default(),
                     id: 0,
                     tool,
@@ -2828,6 +2829,7 @@ impl AppController {
                         }));
                     } else {
                         operations.push(Operation::Pocket(PocketOp {
+                            additional_regions: Vec::new(),
                             finishing: Default::default(),
                             id,
                             tool: 1,

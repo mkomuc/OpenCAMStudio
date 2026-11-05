@@ -33,6 +33,28 @@ impl Strategy for PocketStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if !op.additional_regions.is_empty() {
+            let mut single = op.clone();
+            single.additional_regions.clear();
+            let mut combined = StrategyResult::default();
+            for region in std::iter::once(None).chain(op.additional_regions.iter().map(Some)) {
+                if let Some(region) = region {
+                    single.boundary = region.outer().clone();
+                    single.islands = region.holes().to_vec();
+                }
+                let result = Self::new(single.clone()).compute(env, cancel);
+                let failed = result.has_errors() || result.cancelled;
+                combined.diagnostics.extend(result.diagnostics);
+                if failed {
+                    combined.program = Program::new();
+                    combined.cancelled = result.cancelled;
+                    return combined;
+                }
+                // Each region finishes with a retract and approaches from clearance.
+                combined.program.extend(result.program);
+            }
+            return combined;
+        }
         if let Err(reason) = op.entry_feeds.validate() {
             return StrategyResult {
                 diagnostics: vec![Diagnostic::error(reason)],
@@ -398,8 +420,77 @@ mod tests {
     }
 
     #[test]
+    fn multiple_regions_match_independent_pockets_with_clearance_between_them() {
+        let mut first = leaded_op(vec![Contour::new(vec![
+            Point::new(16., 16.),
+            Point::new(24., 16.),
+            Point::new(24., 24.),
+            Point::new(16., 24.),
+        ])]);
+        first.clear.keep_tool_down = true;
+        first.finishing.enabled = true;
+        let mut second = first.clone();
+        second.boundary = Contour::new(
+            first
+                .boundary
+                .points()
+                .iter()
+                .map(|p| Point::new(p.x + 60., p.y))
+                .collect(),
+        );
+        second.islands = first
+            .islands
+            .iter()
+            .map(|c| {
+                Contour::new(
+                    c.points()
+                        .iter()
+                        .map(|p| Point::new(p.x + 60., p.y))
+                        .collect(),
+                )
+            })
+            .collect();
+        let ts = tools(4.);
+        let env = JobEnv {
+            heights: Heights::new(5., 2., 0.),
+            tools: &ts,
+            stock: None,
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        let cancel = CancelToken::new();
+        let a = PocketStrategy::new(first.clone()).compute(&env, &cancel);
+        let b = PocketStrategy::new(second.clone()).compute(&env, &cancel);
+        assert!(
+            !a.has_errors() && !b.has_errors(),
+            "{:?} {:?}",
+            a.diagnostics,
+            b.diagnostics
+        );
+        let mut expected = a.program;
+        expected.extend(b.program);
+        first
+            .additional_regions
+            .push(Polygon::with_holes(second.boundary, second.islands).unwrap());
+        let combined = PocketStrategy::new(first.clone()).compute(&env, &cancel);
+        assert!(!combined.has_errors(), "{:?}", combined.diagnostics);
+        assert_eq!(combined.program, expected);
+        // A second pocket too narrow for the cutter must not leave partial output.
+        first.additional_regions = vec![Polygon::new(Contour::new(vec![
+            Point::new(60., 0.),
+            Point::new(61., 0.),
+            Point::new(61., 1.),
+            Point::new(60., 1.),
+        ]))
+        .unwrap()];
+        let failed = PocketStrategy::new(first).compute(&env, &cancel);
+        assert!(failed.has_errors());
+        assert!(failed.program.steps().is_empty());
+    }
+
+    #[test]
     fn keep_tool_down_connects_levels_and_finishing_and_preserves_final_retract() {
         let mut op = PocketOp {
+            additional_regions: Vec::new(),
             id: 0,
             tool: 1,
             boundary: square(24.),
@@ -470,6 +561,7 @@ mod tests {
         // Depth 3 at 1.5 stepdown ⇒ 2 levels. Staying down means one plunge and one
         // retract *per level*, not per ring — and the rings are still all cut.
         let op = PocketOp {
+            additional_regions: Vec::new(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -518,6 +610,7 @@ mod tests {
     #[test]
     fn helix_plunge_pocket_enters_on_helical_arcs() {
         let op = PocketOp {
+            additional_regions: Vec::new(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -581,6 +674,7 @@ mod tests {
     #[test]
     fn tool_too_large_for_pocket_errors() {
         let op = PocketOp {
+            additional_regions: Vec::new(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -641,6 +735,7 @@ mod tests {
         // Finer overlap ⇒ smaller spacing ⇒ more rings ⇒ more cutting moves.
         let run = |overlap: f64| {
             let mut op = PocketOp {
+                additional_regions: Vec::new(),
                 finishing: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
@@ -693,6 +788,7 @@ mod tests {
         // boundary, so the deepest cut into the +X wall is 2 mm shallower.
         let run = |offset: f64| {
             let op = PocketOp {
+                additional_regions: Vec::new(),
                 finishing: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
@@ -761,6 +857,7 @@ mod tests {
 
     fn leaded_op(islands: Vec<Contour>) -> PocketOp {
         PocketOp {
+            additional_regions: Vec::new(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -1220,6 +1317,7 @@ mod tests {
         // the geometric floor. The gate is 1.5·e = 3.0 — see
         // `frontadvance::CERT_ENGAGEMENT_SLACK`.
         let op = PocketOp {
+            additional_regions: Vec::new(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -1371,6 +1469,7 @@ mod tests {
         // arc), never emitted overshooting the boundary. High overlap gives the
         // multiple rings that put the wall ring on the leaded path in the first place.
         let small = PocketOp {
+            additional_regions: Vec::new(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,

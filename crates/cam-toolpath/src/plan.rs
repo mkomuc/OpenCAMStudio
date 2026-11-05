@@ -1673,6 +1673,7 @@ mod tests {
             ])
         };
         let pocket = Operation::Pocket(cam_model::PocketOp {
+            additional_regions: Vec::new(),
             finishing: Default::default(),
             id: 2,
             tool: 1,

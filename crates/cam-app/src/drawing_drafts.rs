@@ -63,6 +63,7 @@ impl AppController {
             (Operation::Pocket(op), Operation::Pocket(new)) => {
                 op.boundary = new.boundary;
                 op.islands = new.islands;
+                op.additional_regions = new.additional_regions;
             }
             (Operation::Drill(op), Operation::Drill(_)) => {
                 op.points = self.selected_centers(selected)?

@@ -42,8 +42,8 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
             "Add Chain. Select an open or closed engraving path. Configure individual edge selection in settings."
         })],
         OpKind::Pocket if cad => vec![
-            (CadFilter::Face, "face", "Add Pocket Floor. Select a planar floor face, preserving its islands."),
-            (CadFilter::Loop, "chain", "Add Chain. Select a closed pocket boundary; set the cutting depth in Heights."),
+            (CadFilter::Face, "face", "Add Pocket Floor. Select planar pocket floors at the same height, preserving their islands."),
+            (CadFilter::Loop, "chain", "Add Chain. Select closed pocket boundaries; set the cutting depth in Heights."),
         ],
         OpKind::Pocket => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary and optional islands.")],
         OpKind::Carve if cad => vec![
@@ -685,7 +685,7 @@ impl App {
             body = body.push(controls);
         }
         let description = match kind {
-            OpKind::Pocket => "Select a planar pocket floor with its islands, a closed boundary loop, or connected edges forming a closed chain. For chains, set the cutting depth in Heights.",
+            OpKind::Pocket => "Select planar pocket floors with their islands, closed boundary loops, or closed edge chains. Multiple pockets share the operation cutting heights. For chains, set the cutting depth in Heights.",
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",

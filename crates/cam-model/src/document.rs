@@ -98,7 +98,8 @@ use crate::{BoreOp, Tool};
 /// v35: Scallop entry and retraction preferences.
 /// v36: Scallop pass ordering.
 /// v37: setup fixture bodies and radial/axial fixture clearances.
-pub const SCHEMA_VERSION: u32 = 37;
+/// v38: multiple pocket regions sharing operation cutting heights.
+pub const SCHEMA_VERSION: u32 = 38;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1036,6 +1037,10 @@ pub struct PocketOp {
     pub boundary: Contour,
     /// Closed islands to leave uncut (holes within the pocket).
     pub islands: Vec<Contour>,
+    /// Additional pockets, each retaining its own boundary and islands.
+    /// All regions use the operation cutting heights and clearing settings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_regions: Vec<cam_geo::Polygon>,
     /// Pocket depth below the reference plane (Z=0), as a positive magnitude (mm).
     /// The floor sits at absolute Z `-depth`.
     pub depth: f64,

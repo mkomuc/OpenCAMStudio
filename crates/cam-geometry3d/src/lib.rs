@@ -5,6 +5,7 @@ mod parallel;
 pub use parallel::{resolve_parallel, ParallelGeometry};
 mod adaptive;
 mod advisory;
+mod pocket_regions;
 pub use advisory::{
     resolve_binding_advisory, resolve_selection_advisory, verify_profile_entry, verify_selection,
 };
@@ -197,6 +198,9 @@ pub fn resolve_binding(
     state: &GeometryState,
     binding: &GeometryBinding,
 ) -> Result<ResolvedInput, String> {
+    if let Some(input) = pocket_regions::resolve(state, binding, false) {
+        return input;
+    }
     if let ExtractionRecipe::ProfileEntries { entries } = &binding.recipe {
         return profile_entries::resolve(state, binding, entries);
     }
@@ -1094,6 +1098,10 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+    if let Some(input) = pocket_regions::resolve(state, binding, false) {
+        let input = input?;
+        return Ok((input.regions, input.holes, input.heights));
+    }
     if matches!(
         binding.recipe,
         ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing

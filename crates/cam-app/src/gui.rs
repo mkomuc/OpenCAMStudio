@@ -6558,11 +6558,14 @@ impl App {
                                     Operation::Pocket(cam_model::PocketOp {
                                         boundary,
                                         islands,
+                                        additional_regions,
                                         ..
                                     }) => {
                                         if let Some(region) = input.regions.first() {
                                             *boundary = region.outer().clone();
                                             *islands = region.holes().to_vec();
+                                            *additional_regions =
+                                                input.regions.iter().skip(1).cloned().collect();
                                         }
                                     }
                                     Operation::Carve(op) => {
