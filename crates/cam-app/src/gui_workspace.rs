@@ -975,47 +975,67 @@ impl App {
                 format!("{} · {}", kind, source)
             })
             .unwrap_or_default();
-        let controls = row![
+        let position_pick = self.operation_position_pick.is_some()
+            && self.operation_preview_active()
+            && self.operation_tab == OperationTab::Linking
+            && self.model_view.is_none()
+            && !self.controller.setups().is_empty();
+        let origin_pick = self.in_origin_pick() && !self.setup_origin_mode().is_box();
+        let axis_pick = self.setup_axis_pick.is_some()
+            || self
+                .pattern_draft
+                .as_ref()
+                .and_then(|draft| draft.picking)
+                .is_some_and(|axis| axis < 2);
+        let drawing_pick = self
+            .controller
+            .pending_op()
+            .is_some_and(|p| op_uses_snaps(p.kind));
+        let mut controls = row![
             toggle("Show stock · F8", self.show_stock, Message::ToggleStock),
             toggle(
                 "Transparent stock",
                 self.settings.view.transparent_stock,
                 Message::ToggleTransparentStock
             ),
-            toggle(
+        ];
+        if origin_pick || position_pick || axis_pick {
+            controls = controls.push(toggle(
                 "Highlight features",
                 self.settings.snapping.highlight_features,
-                Message::ToggleFeatureHighlights
-            ),
-            toggle(
-                "Snap",
-                self.settings.snapping.enabled,
-                Message::ToggleSnapping
-            ),
-            toggle(
-                "Endpoints",
-                self.snaps.contains(&SnapKind::End),
-                Message::ToggleSnap(SnapKind::End)
-            ),
-            toggle(
-                "Midpoints",
-                self.snaps.contains(&SnapKind::Mid),
-                Message::ToggleSnap(SnapKind::Mid)
-            ),
-            toggle(
-                "Quadrants",
-                self.snaps.contains(&SnapKind::Quadrant),
-                Message::ToggleSnap(SnapKind::Quadrant)
-            ),
-            toggle(
-                "Nearest",
-                self.snaps.contains(&SnapKind::Nearest),
-                Message::ToggleSnap(SnapKind::Nearest)
-            ),
-            text(hint).size(12),
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center);
+                Message::ToggleFeatureHighlights,
+            ));
+        }
+        if origin_pick || position_pick || drawing_pick {
+            controls = controls
+                .push(toggle(
+                    "Snap",
+                    self.settings.snapping.enabled,
+                    Message::ToggleSnapping,
+                ))
+                .push(toggle(
+                    "Endpoints",
+                    self.snaps.contains(&SnapKind::End),
+                    Message::ToggleSnap(SnapKind::End),
+                ))
+                .push(toggle(
+                    "Midpoints",
+                    self.snaps.contains(&SnapKind::Mid),
+                    Message::ToggleSnap(SnapKind::Mid),
+                ))
+                .push(toggle(
+                    "Quadrants",
+                    self.snaps.contains(&SnapKind::Quadrant),
+                    Message::ToggleSnap(SnapKind::Quadrant),
+                ))
+                .push(toggle(
+                    "Nearest",
+                    self.snaps.contains(&SnapKind::Nearest),
+                    Message::ToggleSnap(SnapKind::Nearest),
+                ))
+                .push(text(hint).size(12));
+        }
+        let controls = controls.spacing(4).align_y(Alignment::Center);
         container(
             scrollable(controls).direction(scrollable::Direction::Horizontal(
                 scrollable::Scrollbar::default(),
