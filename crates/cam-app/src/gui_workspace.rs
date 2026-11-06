@@ -417,6 +417,7 @@ impl App {
                 });
         let labels = grid_view::GridLabels {
             camera: viewport.camera(),
+            grid_size: viewport.grid_size,
         };
         let height_preview = self.height_preview(viewport.camera(), viewport.browser_overlay_width);
         let viewport_camera = viewport.camera();
@@ -802,6 +803,8 @@ impl App {
                 self.controller.pending_operation_geometry().is_empty()
             };
         viewport.cad_select_through = self.cad_select_through;
+        let (grid_x, grid_y, grid_z) = self.controller.machine().envelope.extent();
+        viewport.grid_size = [grid_x as f32, grid_y as f32, grid_z as f32];
         viewport.controls = self.view;
         viewport.show_gizmo = self.show_gizmo;
         viewport.gizmo_size = self.gizmo_size;

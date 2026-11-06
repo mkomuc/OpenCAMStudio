@@ -13766,6 +13766,7 @@ struct Viewport {
     /// appear to resize the design.
     frame_bounds: Option<([f32; 3], [f32; 3])>,
     controls: ViewControls,
+    grid_size: [f32; 3],
     show_gizmo: bool,
     /// On-screen cube size, logical px (fixed; independent of window size).
     gizmo_size: f32,
@@ -14202,6 +14203,10 @@ impl Viewport {
             bounds,
             frame_bounds,
             controls,
+            grid_size: {
+                let (x, y, z) = controller.machine().envelope.extent();
+                [x as f32, y as f32, z as f32]
+            },
             show_gizmo,
             gizmo_size,
             snap_catch_px: prefs.snapping.pickbox_px * crate::SNAP_CATCH_MULTIPLE,
@@ -14916,7 +14921,7 @@ impl shader::Program<Message> for Viewport {
             cone_vertices: Arc::new(cone_vertices),
             cone_indices: Arc::new(cone_indices),
             grid_vertices: Arc::new(
-                grid_view::GridLayout::new(self.camera(), bounds.size()).vertices(),
+                grid_view::GridLayout::new(self.camera(), bounds.size(), self.grid_size).vertices(),
             ),
             vertices: self.vertices.clone(),
             overlay_vertices: Arc::new(overlays),
