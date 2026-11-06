@@ -107,7 +107,7 @@ impl OperationCache {
         let key = Dependencies {
             pocket_stock_revision: if matches!(op, Operation::Pocket(p) if p.stock_contours.enabled)
             {
-                2
+                crate::PocketStrategy::STOCK_CONTOUR_REVISION
             } else {
                 0
             },

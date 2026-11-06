@@ -19,15 +19,20 @@ pub struct PocketStrategy {
     op: PocketOp,
     model_envelope: Option<Vec<Polygon>>,
     model_walls: Option<Vec<Polygon>>,
+    model_domains: Option<Vec<Polygon>>,
 }
 
 impl PocketStrategy {
+    /// Invalidate paths predating CAD floor hole and stock extension fixes.
+    pub const STOCK_CONTOUR_REVISION: u32 = 3;
+
     /// Build a pocketing strategy for `op`.
     pub fn new(op: PocketOp) -> Self {
         Self {
             op,
             model_envelope: None,
             model_walls: None,
+            model_domains: None,
         }
     }
 
@@ -40,6 +45,12 @@ impl PocketStrategy {
     /// Material above the selected floor, projected independently from CAD.
     pub fn with_model_walls(mut self, regions: Vec<Polygon>) -> Self {
         self.model_walls = Some(regions);
+        self
+    }
+
+    /// Stock extensions bounded by the selected floors' supporting walls.
+    pub fn with_model_domains(mut self, regions: Vec<Polygon>) -> Self {
+        self.model_domains = Some(regions);
         self
     }
 }
@@ -345,6 +356,12 @@ impl PocketStrategy {
                 return Err("Stock contour runout must be finite and positive".into());
             }
             let expanded = offset(&stock, runout, JoinStyle::Round).map_err(|e| e.to_string())?;
+            let expanded = match &self.model_domains {
+                Some(domains) => {
+                    cam_geo::intersection(&expanded, domains).map_err(|e| e.to_string())?
+                }
+                None => expanded,
+            };
             let material = cam_geo::intersection(&stock, &pockets).map_err(|e| e.to_string())?;
             // Keep explicit islands protected even where they cross the setup
             // stock edge. Setup bounds must never truncate a selected island.

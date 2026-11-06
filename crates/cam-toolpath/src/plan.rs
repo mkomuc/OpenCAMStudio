@@ -1463,7 +1463,27 @@ fn compute_with_stock(
                     cancel.is_cancelled()
                 }) {
                     Ok(Some(mut walls)) => {
-                        if selected.is_empty() {
+                        if !selected.is_empty() {
+                            // Face inner loops include descending holes as well as
+                            // rising islands. The complete CAD shadow protects
+                            // actual material above the cut; do not turn every
+                            // floor opening into an additional solid obstacle.
+                            op.islands.clear();
+                            op.additional_regions = match op
+                                .additional_regions
+                                .iter()
+                                .map(|region| cam_geo::Polygon::new(region.outer().clone()))
+                                .collect::<Result<Vec<_>, _>>()
+                            {
+                                Ok(regions) => regions,
+                                Err(reason) => {
+                                    return StrategyResult {
+                                        diagnostics: vec![Diagnostic::error(reason.to_string())],
+                                        ..Default::default()
+                                    }
+                                }
+                            };
+                        } else {
                             let mut pockets = op.additional_regions.clone();
                             match cam_geo::Polygon::with_holes(
                                 op.boundary.clone(),
@@ -1487,9 +1507,51 @@ fn compute_with_stock(
                                 }
                             };
                         }
-                        return PocketStrategy::new(op)
-                            .with_model_walls(walls)
-                            .compute(env, cancel);
+                        let mut strategy = PocketStrategy::new(op.clone()).with_model_walls(walls);
+                        if !selected.is_empty() {
+                            if let Some((min, max)) = env.stock {
+                                let mut bounds = [min, max];
+                                for point in op
+                                    .stock_contours
+                                    .regions
+                                    .iter()
+                                    .flat_map(|p| p.outer().points())
+                                {
+                                    for (axis, value) in [point.x, point.y].into_iter().enumerate()
+                                    {
+                                        bounds[0][axis] = bounds[0][axis].min(value);
+                                        bounds[1][axis] = bounds[1][axis].max(value);
+                                    }
+                                }
+                                let finish = if op.finishing.enabled {
+                                    op.finishing.count as f64 * op.finishing.stepover
+                                } else {
+                                    0.
+                                };
+                                let margin = env.tool(op.tool).map_or(0., |t| t.diameter)
+                                    + op.clear.offset
+                                    + finish;
+                                for axis in 0..2 {
+                                    bounds[0][axis] -= margin;
+                                    bounds[1][axis] += margin;
+                                }
+                                match cam_geometry3d::pocket_stock_domains(
+                                    geometry_state,
+                                    selected,
+                                    floor,
+                                    bounds,
+                                ) {
+                                    Ok(domains) => strategy = strategy.with_model_domains(domains),
+                                    Err(reason) => {
+                                        return StrategyResult {
+                                            diagnostics: vec![Diagnostic::error(reason)],
+                                            ..Default::default()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return strategy.compute(env, cancel);
                     }
                     Ok(None) => {}
                     Err(reason) => {
@@ -1822,6 +1884,230 @@ mod tests {
             (deepest_cut - -1.5).abs() < 1e-9,
             "axial allowance must raise the floor: {deepest_cut}"
         );
+    }
+
+    #[test]
+    fn stock_contours_clear_cad_floor_holes_but_protect_bosses_and_explicit_islands() {
+        use cam_model::*;
+        use std::sync::Arc;
+
+        let square = |x, y, size| {
+            Contour::new(vec![
+                Point::new(x, y),
+                Point::new(x + size, y),
+                Point::new(x + size, y + size),
+                Point::new(x, y + size),
+            ])
+        };
+        let hole = square(6., 6., 12.);
+        let boss = square(24., 24., 8.);
+        let mut geometry = GeometryState::default();
+        let mut mesh = CadMesh::default();
+        let mut faces = Vec::new();
+        // Selected floor and the top of a raised boss. The floor's inner
+        // loops deliberately have identical 2D semantics in the operation.
+        for (id, contour, z) in [(1, square(0., 0., 40.), -2.), (2, boss.clone(), 0.)] {
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices
+                .extend(contour.points().iter().map(|p| [p.x, p.y, z]));
+            mesh.triangles
+                .extend([[base, base + 1, base + 2], [base, base + 2, base + 3]]);
+            mesh.triangle_faces.extend([id, id]);
+            faces.push(CadFace {
+                id,
+                body_id: 1,
+                surface: CadSurface::Plane {
+                    origin: [0., 0., z],
+                    normal: [0., 0., 1.],
+                },
+                loop_ids: vec![],
+                bounds: [[0., 0., z], [40., 40., z]],
+            });
+        }
+        geometry.assets.push(GeometryAsset {
+            id: 1,
+            revision: 1,
+            name: "floor with hole and boss".into(),
+            source_format: CadFormat::Step,
+            source_units: SourceUnits::Millimetres,
+            source_data: Arc::new(vec![]),
+            source_fingerprint: String::new(),
+            import_options: None,
+            import_diagnostics: vec![],
+            backend: "test".into(),
+            topology: Arc::new(TopologySnapshot {
+                bodies: vec![CadBody {
+                    id: 1,
+                    name: "part".into(),
+                    valid_solid: true,
+                    bounds: [[0., 0., -4.], [40., 40., 0.]],
+                }],
+                faces,
+                projection: Some(CadProjectionMesh {
+                    mesh,
+                    chord_tolerance: 0.0025,
+                }),
+                ..Default::default()
+            }),
+        });
+        geometry.instances.push(GeometryInstance {
+            id: 1,
+            asset_id: 1,
+            body_id: 1,
+            name: "part".into(),
+            placement: Default::default(),
+            visible: true,
+        });
+        geometry.bindings.insert(
+            2,
+            GeometryBinding {
+                selected: vec![EntityRef {
+                    asset_id: 1,
+                    revision: 1,
+                    instance_id: 1,
+                    body_id: 1,
+                    kind: EntityKind::Face,
+                    id: 1,
+                }],
+                recipe: ExtractionRecipe::PocketFloor,
+                heights: CuttingHeights {
+                    top: 0.,
+                    bottom: -2.,
+                },
+                overrides: Default::default(),
+                status: ResolutionStatus::Resolved,
+                resolved_fingerprint: None,
+            },
+        );
+        let tools = [Tool {
+            number: 1,
+            diameter: 4.,
+            length: 30.,
+            flute_length: 20.,
+            ..Default::default()
+        }];
+        let env = JobEnv {
+            tools: &tools,
+            heights: Heights::new(10., 5., 0.),
+            stock: Some(([0., 0.], [40., 40.])),
+            spindle: SpindleDir::Cw,
+        };
+        let mut pocket = PocketOp {
+            id: 2,
+            tool: 1,
+            boundary: square(0., 0., 40.),
+            islands: vec![hole.clone(), boss.clone()],
+            additional_regions: vec![],
+            stock_contours: StockContours {
+                enabled: true,
+                ..Default::default()
+            },
+            depth: 2.,
+            spindle_rpm: 1000.,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            start: None,
+            end: None,
+            finishing: Default::default(),
+            clear: ClearParams {
+                keep_tool_down: true,
+                lift_height: 0.,
+                stepdown: 2.,
+                overlap: 0.5,
+                offset: 0.,
+                feed: 300.,
+                plunge_feed: 100.,
+                plunge: Plunge::Straight,
+                lead_in: Lead::None,
+                lead_out: Lead::None,
+                lead_overlap: 0.,
+                clearing: Default::default(),
+            },
+        };
+        let token = CancelToken::new();
+        for engagement in [0., 1.] {
+            pocket.clear.clearing.engagement = engagement;
+            for additional in [false, true] {
+                let mut op = pocket.clone();
+                if additional {
+                    op.additional_regions =
+                        vec![
+                            cam_geo::Polygon::with_holes(op.boundary.clone(), op.islands.clone())
+                                .unwrap(),
+                        ];
+                    op.boundary = square(-20., 0., 15.);
+                    op.islands.clear();
+                }
+                let result = compute_with_stock(
+                    &Operation::Pocket(op),
+                    &env,
+                    &token,
+                    Default::default(),
+                    &geometry,
+                    Some(CuttingHeights {
+                        top: 0.,
+                        bottom: -2.,
+                    }),
+                );
+                assert!(!result.has_errors(), "{:?}", result.diagnostics);
+                result.program.validate().unwrap();
+                assert!(
+                    result.program.steps().iter().any(|s| match s {
+                        Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting =>
+                            (8. ..16.).contains(&to.x) && (8. ..16.).contains(&to.y),
+                        _ => false,
+                    }),
+                    "stock above the descending hole must be cleared"
+                );
+                crate::adaptive_safety::certify_layer(
+                    &result.program,
+                    &[cam_geo::Polygon::new(boss.clone()).unwrap()],
+                    2.,
+                    -2.,
+                    cam_geo::GRID_MM,
+                    &token,
+                )
+                .expect("rising boss must remain protected along every cut and link");
+            }
+        }
+        // Boundary/drawing selections keep their explicitly selected islands.
+        geometry.bindings.clear();
+        let operation = Operation::Pocket(pocket);
+        let result = compute_with_stock(
+            &operation,
+            &env,
+            &token,
+            Default::default(),
+            &geometry,
+            None,
+        );
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        crate::adaptive_safety::certify_layer(
+            &result.program,
+            &[cam_geo::Polygon::new(hole).unwrap()],
+            2.,
+            -2.,
+            cam_geo::GRID_MM,
+            &token,
+        )
+        .expect("explicit islands must remain protected");
+
+        // Reopening a project must discard the old fragment that left a core
+        // above a floor hole, while still reusing newly generated fragments.
+        let mut cache = crate::OperationCache::default();
+        cache.compute(&operation, &env, &token, StrategyResult::default);
+        let mut saved = serde_json::to_value(cache).unwrap();
+        saved["entries"][0]["key"]["pocket_stock_revision"] = 2.into();
+        let mut reopened: crate::OperationCache = serde_json::from_value(saved).unwrap();
+        reopened.compute(&operation, &env, &token, StrategyResult::default);
+        assert_eq!(reopened.stats.computed, 1);
+        assert_eq!(reopened.stats.reused, 0);
+        reopened.compute(&operation, &env, &token, || {
+            panic!("current fragment must be reused")
+        });
+        assert_eq!(reopened.stats.reused, 1);
     }
 
     #[test]

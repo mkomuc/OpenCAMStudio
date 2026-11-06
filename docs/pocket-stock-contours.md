@@ -15,8 +15,14 @@ The stock footprint may be smaller, larger, or a different shape than the setup
 stock. At open pocket edges it limits or extends the machining area. Pocket
 walls and selected islands remain protected. CAD jobs use the independent
 machining projection above the selected floor to preserve rising walls and
-open descending exterior walls, including curved model edges. Legacy models
-without that projection use conservative bounding footprints. Drawing jobs use the setup stock box for
+open descending exterior walls, including curved model edges. Inner loops of a
+selected CAD floor are classified by that projection: rising islands stay
+protected, while holes descending below the floor are cleared with the stock
+above them. Explicit islands in drawing or boundary-chain selections remain
+protected. Straight rising walls that support the selected floor also bound its
+stock extension, so clearing stays on that side of the wall instead of wrapping
+around the model to the opposite side. Legacy models without that projection
+use conservative bounding footprints. Drawing jobs use the setup stock box for
 this distinction. Keep the setup stock box enclosing the model, and select the
 pocket floor and its islands as usual. Selecting stock does not replace the
 pocket geometry or change heights.
