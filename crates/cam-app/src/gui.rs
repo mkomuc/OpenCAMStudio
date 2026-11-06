@@ -2703,10 +2703,9 @@ enum Message {
     SetupToolChangeHeightChanged(String),
     SetupModelPick,
     SetupFixturePick,
-    SetupFixtureSelected(InstanceId),
+    SetupGeometryClear(bool),
     SetupFixtureToggled(InstanceId, bool),
     SetupFixtureClearanceChanged(usize, String),
-    SetupModelSelected(InstanceId),
     SetupModelToggled(u64, bool),
     SetupStockKindChanged(StockEditorKind),
     SetupStockNumberChanged(usize, String),
@@ -3190,6 +3189,21 @@ fn initial_panes() -> pane_grid::State<Pane> {
 }
 
 impl App {
+    fn toggle_setup_body_pick(&mut self, instance: InstanceId) -> iced::Task<Message> {
+        let included = self.setup_draft.as_ref().is_some_and(|draft| {
+            if self.setup_fixture_pick {
+                draft.fixture_instances.contains(&instance)
+            } else {
+                draft.model_instances.contains(&instance)
+            }
+        });
+        self.update(if self.setup_fixture_pick {
+            Message::SetupFixtureToggled(instance, !included)
+        } else {
+            Message::SetupModelToggled(instance, !included)
+        })
+    }
+
     fn begin_setup_draft(&mut self) {
         self.model_view = None;
         self.inspector_active = true;
@@ -3545,12 +3559,8 @@ impl App {
             refs.model_instance = None;
         }
         draft.origin = draft.frame.to_setup_vector(world_origin);
-        if matches!(
-            draft.frame.references.origin,
-            cam_model::FrameOrigin::Explicit(_)
-        ) {
-            draft.frame.references.origin = cam_model::FrameOrigin::Explicit(draft.origin);
-        }
+        draft.frame.references.origin =
+            draft.frame.references.origin.with_coordinates(draft.origin);
         self.resolve_setup_axes();
     }
 
@@ -3566,9 +3576,7 @@ impl App {
             Ok(mut frame) => {
                 let origin = draft.frame.to_world_vector(draft.origin);
                 draft.origin = frame.to_setup_vector(origin);
-                if matches!(frame.references.origin, cam_model::FrameOrigin::Explicit(_)) {
-                    frame.references.origin = cam_model::FrameOrigin::Explicit(draft.origin);
-                }
+                frame.references.origin = frame.references.origin.with_coordinates(draft.origin);
                 draft.frame = frame;
                 self.setup_values.retain(|key, _| *key > 2);
                 self.status = "WCS edge reference updated in the setup draft.".into();
@@ -4911,8 +4919,13 @@ impl App {
                             };
                             frame.references.origin = if mode == SetupOriginMode::Model {
                                 cam_model::FrameOrigin::ModelOrigin
-                            } else {
+                            } else if matches!(
+                                draft.frame.references.origin,
+                                cam_model::FrameOrigin::ModelOrigin
+                            ) {
                                 cam_model::FrameOrigin::Explicit(origin)
+                            } else {
+                                draft.frame.references.origin.with_coordinates(origin)
                             };
                             draft.frame = frame;
                             draft.origin = origin;
@@ -4982,7 +4995,7 @@ impl App {
                     self.cad_hover = None;
                     self.cad_candidates.clear();
                     self.status = if picking {
-                        "Click bodies in the view to add them to this setup. Click Done when finished."
+                        "Click bodies to select or deselect setup models. Click the selection button when finished."
                     } else { "Setup body selection finished." }.into();
                 }
             }
@@ -4995,20 +5008,22 @@ impl App {
                     self.cad_hover = None;
                     self.cad_candidates.clear();
                     self.status = if picking {
-                        "Click bodies in the view to use as fixtures. Click Done when finished."
+                        "Click bodies to select or deselect fixtures. Click the selection button when finished."
                     } else {
                         "Fixture selection finished."
                     }
                     .into();
                 }
             }
-            Message::SetupFixtureSelected(instance) => {
-                if self
-                    .setup_draft
-                    .as_ref()
-                    .is_some_and(|draft| draft.fixture_instances.contains(&instance))
-                {
-                    self.setup_fixture_selection = Some(instance);
+            Message::SetupGeometryClear(fixture) => {
+                if let Some(draft) = &mut self.setup_draft {
+                    if fixture {
+                        draft.fixture_instances.clear();
+                        self.setup_fixture_selection = None;
+                    } else {
+                        draft.model_instances.clear();
+                        self.setup_model_selection = None;
+                    }
                 }
             }
             Message::SetupFixtureToggled(instance, included) => {
@@ -5056,15 +5071,6 @@ impl App {
                             }
                         }
                     }
-                }
-            }
-            Message::SetupModelSelected(instance) => {
-                if self
-                    .setup_draft
-                    .as_ref()
-                    .is_some_and(|draft| draft.model_instances.contains(&instance))
-                {
-                    self.setup_model_selection = Some(instance);
                 }
             }
             Message::SetupModelToggled(instance, included) => {
@@ -5144,7 +5150,7 @@ impl App {
                             }
                         }
                         cam_model::Stock::RelativeBox { offsets } => {
-                            if index < 4 {
+                            if index < 6 {
                                 offsets[index / 3][index % 3] = v;
                             }
                         }
@@ -6364,11 +6370,7 @@ impl App {
                 }
                 if self.setup_model_pick {
                     if let Some(candidate) = candidates.first() {
-                        return self.update(if self.setup_fixture_pick {
-                            Message::SetupFixtureToggled(candidate.entity.instance_id, true)
-                        } else {
-                            Message::SetupModelToggled(candidate.entity.instance_id, true)
-                        });
+                        return self.toggle_setup_body_pick(candidate.entity.instance_id);
                     }
                     return iced::Task::none();
                 }
@@ -6440,11 +6442,7 @@ impl App {
                     return iced::Task::none();
                 }
                 if self.setup_model_pick {
-                    return self.update(if self.setup_fixture_pick {
-                        Message::SetupFixtureToggled(entity.instance_id, true)
-                    } else {
-                        Message::SetupModelToggled(entity.instance_id, true)
-                    });
+                    return self.toggle_setup_body_pick(entity.instance_id);
                 }
                 if self.height_reference_pick.is_some() {
                     self.height_geometry_selected(entity);
@@ -6903,10 +6901,14 @@ impl App {
                 self.snap_hover = None;
                 self.hover_loop = None;
                 if self.setting_origin {
+                    let mode = self.setup_origin_mode();
                     if let Some(draft) = &mut self.setup_draft {
                         draft.origin = p;
-                        draft.frame.references.origin =
-                            cam_model::FrameOrigin::Explicit(draft.origin);
+                        draft.frame.references.origin = match mode {
+                            SetupOriginMode::StockBox => cam_model::FrameOrigin::StockBoxPoint(p),
+                            SetupOriginMode::ModelBox => cam_model::FrameOrigin::ModelBoxPoint(p),
+                            _ => cam_model::FrameOrigin::SelectedPoint(p),
+                        };
                     }
                     self.setting_origin = false;
                     self.status = format!(
@@ -6917,7 +6919,7 @@ impl App {
                     let origin = [first[0], p[1], (first[2] + p[2]) / 2.0];
                     if let Some(draft) = &mut self.setup_draft {
                         draft.origin = origin;
-                        draft.frame.references.origin = cam_model::FrameOrigin::Explicit(origin);
+                        draft.frame.references.origin = cam_model::FrameOrigin::TwoPoints(origin);
                     }
                     self.setting_origin_2pt = false;
                     self.status = format!(
@@ -16135,7 +16137,7 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::SetupFixturePick);
         assert!(app.setup_fixture_pick && app.setup_model_pick);
         assert_eq!(app.machining_viewport().cad_filter, EntityKind::Body);
-        for instance in [1, 2, 2] {
+        for instance in [1, 2, 2, 2] {
             send(
                 &mut app,
                 Message::CadPicked(vec![PickCandidate {
@@ -16228,11 +16230,50 @@ mod multi_setup_draft_tests {
             .unwrap()
             .fixture_instances
             .push(999);
-        send(&mut app, Message::SetupFixtureSelected(999));
-        assert_eq!(app.setup_fixture_selection, Some(999));
+
         let _ = app.setup_editor();
         send(&mut app, Message::SetupFixtureToggled(999, false));
         assert_eq!(app.setup_draft.as_ref().unwrap().fixture_instances, vec![2]);
+    }
+
+    #[test]
+    fn relative_stock_defaults_to_one_and_all_sides_are_editable() {
+        let mut app = model_list_app();
+        let _ = app.update(Message::SetupStockKindChanged(StockEditorKind::FixedBox));
+        let _ = app.update(Message::SetupStockKindChanged(StockEditorKind::RelativeBox));
+        assert_eq!(
+            app.setup_draft.as_ref().unwrap().stock,
+            cam_model::Stock::RelativeBox {
+                offsets: [[1.0; 3]; 2]
+            }
+        );
+        for index in 0..6 {
+            let _ = app.update(Message::SetupStockNumberChanged(
+                index,
+                (index + 2).to_string(),
+            ));
+        }
+        assert_eq!(
+            app.setup_draft.as_ref().unwrap().stock,
+            cam_model::Stock::RelativeBox {
+                offsets: [[2., 3., 4.], [5., 6., 7.]]
+            }
+        );
+    }
+
+    #[test]
+    fn setup_geometry_clear_removes_only_the_chosen_role_in_the_draft() {
+        let mut app = model_list_app();
+        send(&mut app, Message::SetupModelToggled(1, true));
+        send(&mut app, Message::SetupFixtureToggled(2, true));
+        let committed = app.controller.document().clone();
+        send(&mut app, Message::SetupGeometryClear(true));
+        let draft = app.setup_draft.as_ref().unwrap();
+        assert_eq!(draft.model_instances, vec![1]);
+        assert!(draft.fixture_instances.is_empty());
+        send(&mut app, Message::SetupGeometryClear(false));
+        assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
+        assert_eq!(app.controller.document(), &committed);
     }
 
     #[test]
@@ -16243,7 +16284,7 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::SetupModelPick);
         assert!(app.setup_model_pick);
         assert_eq!(app.machining_viewport().cad_filter, EntityKind::Body);
-        for instance in [1, 3, 2, 2] {
+        for instance in [1, 3, 2, 2, 2] {
             send(
                 &mut app,
                 Message::CadPicked(vec![PickCandidate {
@@ -16275,7 +16316,7 @@ mod multi_setup_draft_tests {
             app.setup_draft_dirty(),
             "Escape finishes picking without losing draft edits"
         );
-        send(&mut app, Message::SetupModelSelected(2));
+
         send(&mut app, Message::SetupModelToggled(2, false));
         assert_eq!(
             app.setup_draft.as_ref().unwrap().model_instances,
@@ -16283,7 +16324,7 @@ mod multi_setup_draft_tests {
         );
         send(&mut app, Message::SetupCancel);
         assert_eq!(app.controller.document(), &before);
-        assert!(app.setup_model_selection.is_none());
+
         assert!(!app.setup_draft_dirty());
     }
 
@@ -16292,7 +16333,7 @@ mod multi_setup_draft_tests {
         let mut app = model_list_app();
         send(&mut app, Message::SetupModelToggled(1, true));
         send(&mut app, Message::SetupModelToggled(99, true));
-        send(&mut app, Message::SetupModelSelected(99));
+
         assert_eq!(app.setup_draft.as_ref().unwrap().model_instances, vec![1]);
         let (min, max) = app
             .controller
@@ -16303,7 +16344,7 @@ mod multi_setup_draft_tests {
         app.begin_setup_draft();
         send(&mut app, Message::SetupModelToggled(1, false));
         assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
-        assert!(app.setup_model_selection.is_none());
+
         send(&mut app, Message::SetupCommit);
         assert!(app.controller.inspection_setup().model_instances.is_empty());
         assert!(app.controller.undo());

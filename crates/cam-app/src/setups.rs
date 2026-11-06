@@ -100,7 +100,7 @@ impl AppController {
         setup.operation_heights.clear();
         setup.height_settings.clear();
         setup.stock_to_leave.clear();
-        setup.stock = default_stock(self.defaults.top_of_stock, self.defaults.depth);
+        setup.stock = default_stock();
         setup.extra_origins.clear();
         let id = setup.id;
         self.edit_document(move |doc| doc.setups.push(setup));
