@@ -255,6 +255,107 @@ pub struct AdaptiveResolveConfig {
     pub tolerance: f64,
 }
 
+/// Solid shadow above a 2D pocket floor, omitting the selected floor surfaces.
+/// This retains rising walls and other setup bodies while leaving descending
+/// exterior walls open, independently of the model's rectangular bounds.
+/// Legacy analytic fixtures without a machining projection return `None`.
+pub fn pocket_stock_shadow(
+    state: &GeometryState,
+    selected: &[EntityRef],
+    floor: f64,
+    cancelled: impl Fn() -> bool,
+) -> Result<Option<Vec<Polygon>>, String> {
+    if !floor.is_finite() {
+        return Err("Pocket floor must be finite".into());
+    }
+    let mut projected = Vec::new();
+    let mut error: f64 = 0.;
+    for instance in &state.instances {
+        let asset = state
+            .asset(instance.asset_id)
+            .ok_or("Pocket model asset is missing")?;
+        asset.topology.validate_cached()?;
+        if asset.topology.projection.is_none() {
+            return Ok(None);
+        }
+        let projection = checked_projection(&asset.topology)?;
+        error = error.max(projection.chord_tolerance);
+        let body_faces: BTreeSet<_> = asset
+            .topology
+            .faces
+            .iter()
+            .filter(|f| f.body_id == instance.body_id)
+            .map(|f| f.id)
+            .collect();
+        let covered: BTreeSet<_> = projection
+            .mesh
+            .triangle_faces
+            .iter()
+            .copied()
+            .filter(|id| body_faces.contains(id))
+            .collect();
+        if covered != body_faces
+            || body_faces.is_empty()
+            || projection.mesh.triangles.len() != projection.mesh.triangle_faces.len()
+        {
+            return Err("Pocket stock contours require a complete CAD machining projection; reimport the model".into());
+        }
+        let omitted: BTreeSet<_> = selected
+            .iter()
+            .filter(|r| {
+                r.kind == EntityKind::Face
+                    && r.instance_id == instance.id
+                    && r.asset_id == instance.asset_id
+                    && r.body_id == instance.body_id
+            })
+            .map(|r| r.id)
+            .collect();
+        for (indices, face) in projection
+            .mesh
+            .triangles
+            .iter()
+            .zip(&projection.mesh.triangle_faces)
+        {
+            if cancelled() {
+                return Err("Pocket stock geometry resolution cancelled".into());
+            }
+            if !body_faces.contains(face) {
+                continue;
+            }
+            let mut triangle = [[0.; 3]; 3];
+            for (i, index) in indices.iter().enumerate() {
+                triangle[i] = instance.placement.transform_point(
+                    *projection
+                        .mesh
+                        .vertices
+                        .get(*index as usize)
+                        .ok_or("Invalid pocket projection vertex")?,
+                );
+                if !triangle[i].into_iter().all(f64::is_finite) {
+                    return Err("Pocket projection vertices must be finite".into());
+                }
+            }
+            if omitted.contains(face) && triangle.iter().all(|p| (p[2] - floor).abs() <= T) {
+                continue;
+            }
+            let points = clip_above(triangle, floor - projection.chord_tolerance);
+            let contour =
+                Contour::new(points.into_iter().map(|p| Point::new(p[0], p[1])).collect());
+            if contour.area() > cam_geo::GRID_MM.powi(2) {
+                projected.push(Polygon::new(contour).map_err(|e| e.to_string())?);
+            }
+        }
+    }
+    let regions = cam_geo::union(&projected, &[]).map_err(|e| e.to_string())?;
+    let guarded = cam_geo::offset(
+        &regions,
+        error + 2. * cam_geo::GRID_MM,
+        cam_geo::JoinStyle::Round,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(Some(guarded))
+}
+
 /// Resolve a CAD solid into top-down tool-tip levels. Each level protects the
 /// complete projected shadow above the cutter tip, so a higher boss or an
 /// overhang remains an obstacle even when it is outside the nominal stepdown.
@@ -999,6 +1100,48 @@ mod tests {
                 pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
             ],
         )
+    }
+
+    #[test]
+    fn pocket_stock_shadow_opens_the_selected_floor_and_preserves_bosses_and_other_floors() {
+        let (state, binding) = state(false);
+        let mut floor = binding.selected[0].clone();
+        floor.kind = EntityKind::Face;
+        floor.id = 1;
+        let walls = pocket_stock_shadow(&state, &[floor.clone()], 5., || false)
+            .unwrap()
+            .unwrap();
+        assert!(walls.iter().any(|p| p.contains(Point::new(5., 5.))));
+        assert!(walls.iter().all(|p| !p.contains(Point::new(0.5, 0.5))));
+        let unselected = pocket_stock_shadow(&state, &[], 5., || false)
+            .unwrap()
+            .unwrap();
+        assert!(unselected.iter().any(|p| p.contains(Point::new(0.5, 0.5))));
+        let below = pocket_stock_shadow(&state, &[floor], 4., || false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            below.iter().any(|p| p.contains(Point::new(0.5, 0.5))),
+            "a deeper override cannot omit a higher floor"
+        );
+    }
+
+    #[test]
+    fn pocket_stock_shadow_checks_the_machining_projection_and_cancellation() {
+        let (mut state, _) = state(false);
+        assert!(pocket_stock_shadow(&state, &[], 5., || true).is_err());
+        let topology = Arc::make_mut(&mut state.assets[0].topology);
+        topology.mesh.vertices = vec![[1000.; 3]];
+        let walls = pocket_stock_shadow(&state, &[], 5., || false)
+            .unwrap()
+            .unwrap();
+        assert!(walls.iter().all(|p| bounds(p).1[0] < 11.));
+        let projection = Arc::make_mut(&mut state.assets[0].topology)
+            .projection
+            .as_mut()
+            .unwrap();
+        projection.mesh.triangle_faces.pop();
+        assert!(pocket_stock_shadow(&state, &[], 5., || false).is_err());
     }
 
     #[test]

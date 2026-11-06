@@ -454,6 +454,30 @@ fn control_compensation_brackets_linear_leads_and_rejects_missing_engagement() {
 }
 
 #[test]
+fn open_profiles_require_computed_compensation() {
+    let mut op = profile();
+    op.closed = false;
+    op.chain = Contour::new(vec![Point::new(0., 0.), Point::new(20., 0.)]);
+    op.lead_in = Lead::Linear { length: 3. };
+    op.lead_out = op.lead_in;
+    let computed = run(op.clone());
+    assert!(!computed.has_errors(), "{:?}", computed.diagnostics);
+    assert!(!computed.program.is_empty());
+
+    op.comp = Comp::Control;
+    let control = run(op);
+    assert!(control.has_errors());
+    assert!(control.program.is_empty());
+    assert!(
+        control.diagnostics.iter().any(|d| d
+            .message
+            .contains("Open profiles require computed compensation")),
+        "{:?}",
+        control.diagnostics
+    );
+}
+
+#[test]
 fn open_leads_extensions_ramp_and_alternating_levels_preserve_endpoints() {
     let mut op = profile();
     op.closed = false;

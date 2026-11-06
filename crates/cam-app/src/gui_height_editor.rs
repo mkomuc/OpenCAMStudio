@@ -181,7 +181,22 @@ impl App {
             })
             .collect();
         apply_op_fields(&mut op, &parsed);
-        if let Some(binding) = &self.operation_binding_preview {
+        if let Operation::Profile(profile) = &mut op {
+            if profile.selections.is_some() {
+                if let Some(mut binding) =
+                    crate::cad_operations::resolve_profile_entries(&document, profile)?
+                {
+                    if let Some(previous) = document.geometry.bindings.get(&id) {
+                        binding.overrides = previous.overrides.clone();
+                    }
+                    document.geometry.bindings.insert(id, binding);
+                } else {
+                    document.geometry.bindings.remove(&id);
+                }
+            } else if let Some(binding) = &self.operation_binding_preview {
+                document.geometry.bindings.insert(id, binding.clone());
+            }
+        } else if let Some(binding) = &self.operation_binding_preview {
             document.geometry.bindings.insert(id, binding.clone());
         }
         self.edited_height_settings()?.resolve(&document, &op)
@@ -440,6 +455,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_maximum_z_sets_automatic_tool_change_height_without_changing_travel() {
+        let mut machine = crate::default_machine();
+        assert_eq!(machine.envelope.extent().2, 100.0);
+        assert_eq!(machine.envelope.max.z, 50.0);
+        set_machine_z_limits(&mut machine.envelope, 100.0, 100.0);
+        assert_eq!(machine.envelope.extent().2, 100.0);
+        assert_eq!(machine.envelope.min.z, 0.0);
+
+        let mut controller = AppController::new(machine);
+        controller.edit_setup(|setup| setup.origin[2] = 12.0);
+        let setup = controller.inspection_setup();
+        assert_eq!(
+            setup.resolved_tool_change_height(controller.machine().envelope.max.z)
+                - setup.origin[2],
+            100.0
+        );
+    }
 
     #[test]
     fn tool_change_height_uses_wcs_values_in_the_setup_inspector() {

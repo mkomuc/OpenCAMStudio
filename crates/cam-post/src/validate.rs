@@ -36,6 +36,9 @@ fn rates(program: &Program, machine: &Machine) -> Result<(), PostError> {
             }
         }
         if let Step::Spindle { rpm, .. } = step {
+            if *rpm < machine.min_spindle_rpm {
+                return Err(PostError::SpindleBelowMinimum(*rpm));
+            }
             if *rpm > machine.max_spindle_rpm {
                 return Err(PostError::SpindleOutOfRange(*rpm));
             }

@@ -82,7 +82,7 @@ jobs:
           cp target/release/opencamstudio $APP/usr/bin/
           cp target/release/opencamstudio-mcp $APP/usr/bin/
           python .github/scripts/package-occt.py stage "$APP"
-          cp crates/cam-app/assets/opencamstudio-256.png \
+          cp crates/cam-app/assets/app-icon-v2/OpenCAMStudio.iconset/icon_256x256.png \
              $APP/usr/share/icons/hicolor/256x256/apps/opencamstudio.png
           cat > $APP/usr/share/applications/opencamstudio.desktop <<'DESKTOP'
           [Desktop Entry]
@@ -99,8 +99,8 @@ jobs:
           DESKTOP
           # appimagetool wants the desktop file and icon at the AppDir root too.
           cp $APP/usr/share/applications/opencamstudio.desktop $APP/
-          cp crates/cam-app/assets/opencamstudio-256.png $APP/opencamstudio.png
-          cp crates/cam-app/assets/opencamstudio-256.png $APP/.DirIcon
+          cp crates/cam-app/assets/app-icon-v2/OpenCAMStudio.iconset/icon_256x256.png $APP/opencamstudio.png
+          cp crates/cam-app/assets/app-icon-v2/OpenCAMStudio.iconset/icon_256x256.png $APP/.DirIcon
           cat > $APP/AppRun <<'APPRUN'
           #!/bin/sh
           HERE=$(dirname "$(readlink -f "$0")")
@@ -185,16 +185,8 @@ jobs:
           cp target/aarch64-apple-darwin/release/opencamstudio "$APP/Contents/MacOS/"
           cp target/aarch64-apple-darwin/release/opencamstudio-mcp "$APP/Contents/MacOS/"
           python .github/scripts/package-occt.py stage "$APP"
-          # .icns from the committed 1024 PNG. sips and iconutil are part of macOS, so
-          # this needs no rasteriser and no third-party tool.
-          ICONSET=opencamstudio.iconset
-          mkdir -p $ICONSET
-          SRC=crates/cam-app/assets/opencamstudio-1024.png
-          for s in 16 32 128 256 512; do
-            sips -z $s $s     "$SRC" --out "$ICONSET/icon_${s}x${s}.png"    >/dev/null
-            sips -z $((s*2)) $((s*2)) "$SRC" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
-          done
-          iconutil -c icns $ICONSET -o "$APP/Contents/Resources/opencamstudio.icns"
+          # Use the same committed icon as local macOS builds.
+          cp crates/cam-app/assets/app-icon-v2/OpenCAMStudio.icns "$APP/Contents/Resources/opencamstudio.icns"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -64,6 +64,8 @@ fn setup(operations: Vec<Operation>) -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "verify".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
@@ -120,6 +122,8 @@ fn run(doc: &Document) -> cam_sim::SimResult {
 #[test]
 fn a_pocket_clears_its_floor_without_collisions() {
     let op = PocketOp {
+        additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
@@ -196,6 +200,8 @@ fn pocket_target(intended_depth: f64) -> Heightfield {
 
 fn pocket_op() -> PocketOp {
     PocketOp {
+        additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
@@ -321,6 +327,8 @@ fn a_bad_setup_that_rapids_low_is_caught() {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "unsafe".into(),
         heights: Heights::new(-1.0, -1.0, 0.0), // clearance below stock top!

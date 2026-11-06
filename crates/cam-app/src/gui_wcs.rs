@@ -98,15 +98,17 @@ impl App {
     }
     pub(super) fn setup_origin_mode(&self) -> SetupOriginMode {
         self.setup_origin_mode.unwrap_or_else(|| {
-            if self.setup_draft.as_ref().is_some_and(|draft| {
-                matches!(
-                    draft.frame.references.origin,
-                    cam_model::FrameOrigin::ModelOrigin
-                )
-            }) {
-                SetupOriginMode::Model
-            } else {
-                SetupOriginMode::Coordinates
+            match self
+                .setup_draft
+                .as_ref()
+                .map(|draft| &draft.frame.references.origin)
+            {
+                Some(cam_model::FrameOrigin::ModelOrigin) => SetupOriginMode::Model,
+                Some(cam_model::FrameOrigin::SelectedPoint(_)) => SetupOriginMode::Point,
+                Some(cam_model::FrameOrigin::StockBoxPoint(_)) => SetupOriginMode::StockBox,
+                Some(cam_model::FrameOrigin::ModelBoxPoint(_)) => SetupOriginMode::ModelBox,
+                Some(cam_model::FrameOrigin::TwoPoints(_)) => SetupOriginMode::TwoPoints,
+                _ => SetupOriginMode::Coordinates,
             }
         })
     }
@@ -129,12 +131,7 @@ impl App {
                 let origin_reference = draft.frame.references.origin.clone();
                 draft.frame = cam_model::SetupFrame::default();
                 draft.origin = world_origin;
-                draft.frame.references.origin =
-                    if matches!(origin_reference, cam_model::FrameOrigin::Explicit(_)) {
-                        cam_model::FrameOrigin::Explicit(draft.origin)
-                    } else {
-                        origin_reference
-                    };
+                draft.frame.references.origin = origin_reference.with_coordinates(draft.origin);
                 self.clear_setup_origin_buffers();
             }
             return;
@@ -313,8 +310,26 @@ impl App {
                 | SetupOriginMode::TwoPoints
         ) {
             let picking = self.in_origin_pick();
+            let has_point = matches!(
+                (origin, &draft.frame.references.origin),
+                (
+                    SetupOriginMode::Point,
+                    cam_model::FrameOrigin::SelectedPoint(_)
+                ) | (
+                    SetupOriginMode::StockBox,
+                    cam_model::FrameOrigin::StockBoxPoint(_)
+                ) | (
+                    SetupOriginMode::ModelBox,
+                    cam_model::FrameOrigin::ModelBoxPoint(_)
+                ) | (
+                    SetupOriginMode::TwoPoints,
+                    cam_model::FrameOrigin::TwoPoints(_)
+                )
+            );
             let label = if picking {
                 "Cancel point pick"
+            } else if has_point {
+                "Point"
             } else {
                 match origin {
                     SetupOriginMode::StockBox | SetupOriginMode::ModelBox => "Point on box",
@@ -817,6 +832,38 @@ mod tests {
         close(app.setup_draft.as_ref().unwrap().origin, [0.; 3]);
         assert!(!app.setup_values.contains_key(&0));
         assert_eq!(app.controller.inspection_setup(), &committed);
+    }
+
+    #[test]
+    fn picked_origin_source_survives_reopening_and_serialization() {
+        for mode in [
+            SetupOriginMode::Point,
+            SetupOriginMode::StockBox,
+            SetupOriginMode::ModelBox,
+            SetupOriginMode::TwoPoints,
+        ] {
+            let mut app = app();
+            let _ = app.update(Message::SetupOriginModeChanged(mode));
+            if mode == SetupOriginMode::TwoPoints {
+                let _ = app.update(Message::ToggleSetOrigin2pt);
+                let _ = app.update(Message::OriginPointPicked([1., 2., 3.]));
+            } else {
+                let _ = app.update(Message::ToggleSetOrigin);
+            }
+            let _ = app.update(Message::OriginPointPicked([4., 5., 6.]));
+            let _ = app.update(Message::SetupOrientationChanged(SetupOrientation::Model));
+            let _ = app.update(Message::SetupCommit);
+            let saved = app.controller.inspection_setup().clone();
+            let json = serde_json::to_string(&saved).unwrap();
+            let restored: cam_model::Setup = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                restored.frame.references.origin,
+                saved.frame.references.origin
+            );
+            app.begin_setup_draft();
+            assert_eq!(app.setup_origin_mode(), mode);
+            assert_eq!(app.setup_draft.as_ref().unwrap().origin, saved.origin);
+        }
     }
 
     #[test]

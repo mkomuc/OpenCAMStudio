@@ -9,6 +9,8 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Dependencies {
     #[serde(default)]
+    pocket_stock_revision: u32,
+    #[serde(default)]
     adaptive_domain_revision: u32,
     #[serde(default)]
     profile_lead_revision: u32,
@@ -103,6 +105,12 @@ impl OperationCache {
             axial,
         };
         let key = Dependencies {
+            pocket_stock_revision: if matches!(op, Operation::Pocket(p) if p.stock_contours.enabled)
+            {
+                crate::PocketStrategy::STOCK_CONTOUR_REVISION
+            } else {
+                0
+            },
             // Recompute persisted profiles generated before automatic lead placement.
             profile_lead_revision: u32::from(matches!(op, Operation::Profile(_))),
             // Recompute persisted profiles created before the roughing allowance fix.

@@ -220,7 +220,6 @@ impl App {
                 if action == ToolpathAction::Simulate {
                     self.pending_simulation = Some(stamp.clone());
                     self.show_stock = true;
-                    self.set_pane_visible(Pane::Output, true);
                 }
                 if action == ToolpathAction::ProcessingTime {
                     self.pending_processing_time =
@@ -319,6 +318,42 @@ impl App {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn simulation_preserves_output_pane_visibility() {
+        for visible in [false, true] {
+            let (mut app, _) = App::new();
+            app.controller
+                .open_dxf(SAMPLE_DXF, "simulation.dxf")
+                .unwrap();
+            app.end_setup_draft();
+            app.controller
+                .add_operation(Operation::Drill(cam_model::DrillOp {
+                    id: 0,
+                    tool: 1,
+                    points: vec![[10., 10.]],
+                    depth: 2.,
+                    start_offset: 0.,
+                    peck: None,
+                    dwell: None,
+                    spindle_rpm: 1000.,
+                    tool_preset: None,
+                    cooling: Default::default(),
+                    entry_feeds: Default::default(),
+                    work_offset: 1,
+                    feed: 100.,
+                }));
+            app.controller.select(Selection::Setup);
+            app.refresh_fields();
+            app.set_pane_visible(Pane::Output, visible);
+            let setup = app.controller.inspection_setup().id;
+
+            let _ = app.toolpath_command(TreeNode::Setup(setup), ToolpathAction::Simulate);
+
+            assert!(app.pending_simulation.is_some(), "{}", app.status);
+            assert_eq!(app.pane_handle(Pane::Output).is_some(), visible);
+        }
+    }
 
     #[test]
     fn opening_saved_paths_reuses_them_and_legacy_projects_wait_for_a_user_run() {

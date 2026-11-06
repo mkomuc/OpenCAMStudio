@@ -17,12 +17,41 @@ use crate::{CancelToken, Diagnostic, JobEnv, Strategy, StrategyResult};
 #[derive(Clone, Debug)]
 pub struct PocketStrategy {
     op: PocketOp,
+    model_envelope: Option<Vec<Polygon>>,
+    model_walls: Option<Vec<Polygon>>,
+    model_domains: Option<Vec<Polygon>>,
 }
 
 impl PocketStrategy {
+    /// Invalidate paths predating CAD floor hole and stock extension fixes.
+    pub const STOCK_CONTOUR_REVISION: u32 = 3;
+
     /// Build a pocketing strategy for `op`.
     pub fn new(op: PocketOp) -> Self {
-        Self { op }
+        Self {
+            op,
+            model_envelope: None,
+            model_walls: None,
+            model_domains: None,
+        }
+    }
+
+    /// Conservative setup-model footprints, independent of the stock margins.
+    pub fn with_model_envelope(mut self, regions: Vec<Polygon>) -> Self {
+        self.model_envelope = Some(regions);
+        self
+    }
+
+    /// Material above the selected floor, projected independently from CAD.
+    pub fn with_model_walls(mut self, regions: Vec<Polygon>) -> Self {
+        self.model_walls = Some(regions);
+        self
+    }
+
+    /// Stock extensions bounded by the selected floors' supporting walls.
+    pub fn with_model_domains(mut self, regions: Vec<Polygon>) -> Self {
+        self.model_domains = Some(regions);
+        self
     }
 }
 
@@ -33,6 +62,31 @@ impl Strategy for PocketStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if op.stock_contours.enabled {
+            return self.compute_stock_contours(env, cancel);
+        }
+        if !op.additional_regions.is_empty() {
+            let mut single = op.clone();
+            single.additional_regions.clear();
+            let mut combined = StrategyResult::default();
+            for region in std::iter::once(None).chain(op.additional_regions.iter().map(Some)) {
+                if let Some(region) = region {
+                    single.boundary = region.outer().clone();
+                    single.islands = region.holes().to_vec();
+                }
+                let result = Self::new(single.clone()).compute(env, cancel);
+                let failed = result.has_errors() || result.cancelled;
+                combined.diagnostics.extend(result.diagnostics);
+                if failed {
+                    combined.program = Program::new();
+                    combined.cancelled = result.cancelled;
+                    return combined;
+                }
+                // Each region finishes with a retract and approaches from clearance.
+                combined.program.extend(result.program);
+            }
+            return combined;
+        }
         if let Err(reason) = op.entry_feeds.validate() {
             return StrategyResult {
                 diagnostics: vec![Diagnostic::error(reason)],
@@ -223,6 +277,279 @@ impl Strategy for PocketStrategy {
     }
 }
 
+impl PocketStrategy {
+    fn compute_stock_contours(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        let resolve = || -> Result<(Vec<Polygon>, Vec<Polygon>), String> {
+            let op = &self.op;
+            op.finishing.validate()?;
+            if !op.clear.offset.is_finite() || op.clear.offset < 0. {
+                return Err("Pocket wall allowance must be finite and nonnegative".into());
+            }
+            let tool = env
+                .tool(op.tool)
+                .ok_or("Stock contours need a valid cutter")?;
+            let (min, max) = env
+                .stock
+                .ok_or("Stock contours require setup stock bounds")?;
+            if !min.into_iter().chain(max).all(f64::is_finite)
+                || min[0] >= max[0]
+                || min[1] >= max[1]
+            {
+                return Err("Stock contours require valid setup stock bounds".into());
+            }
+            let setup = Polygon::new(cam_geo::Contour::new(vec![
+                cam_geo::Point::new(min[0], min[1]),
+                cam_geo::Point::new(max[0], min[1]),
+                cam_geo::Point::new(max[0], max[1]),
+                cam_geo::Point::new(min[0], max[1]),
+            ]))
+            .map_err(|e| e.to_string())?;
+            let mut pockets = vec![Polygon::with_holes(op.boundary.clone(), op.islands.clone())
+                .map_err(|e| e.to_string())?];
+            pockets.extend(op.additional_regions.clone());
+            for region in pockets.iter().chain(&op.stock_contours.regions) {
+                for contour in std::iter::once(region.outer()).chain(region.holes()) {
+                    if !contour.is_valid()
+                        || contour.area() <= cam_geo::GRID_MM.powi(2)
+                        || contour
+                            .points()
+                            .iter()
+                            .any(|p| !p.x.is_finite() || !p.y.is_finite())
+                    {
+                        return Err("Pocket and stock contours must be finite closed areas".into());
+                    }
+                }
+            }
+            // Material outside the selected pocket floors remains a real wall.
+            // Where a floor reaches the model envelope edge there is no enclosing
+            // wall; the selected stock footprint can limit or extend that edge.
+            let envelope = self
+                .model_envelope
+                .as_deref()
+                .unwrap_or(std::slice::from_ref(&setup));
+            let walls = match &self.model_walls {
+                Some(walls) => walls.clone(),
+                None => cam_geo::difference(envelope, &pockets).map_err(|e| e.to_string())?,
+            };
+            let stock = if op.stock_contours.regions.is_empty() {
+                vec![setup]
+            } else {
+                op.stock_contours
+                    .regions
+                    .iter()
+                    .map(|p| {
+                        Polygon::with_holes(p.outer().clone(), p.holes().to_vec())
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            // Clearing insets by radius + allowance. Reserve another radius
+            // outside the material for edge coverage and entry/exit runout.
+            // Wall compensation still applies to the unexpanded model walls.
+            let finish = if op.finishing.enabled {
+                op.finishing.count as f64 * op.finishing.stepover
+            } else {
+                0.
+            };
+            let runout = tool.diameter + op.clear.offset + finish;
+            if !runout.is_finite() || runout <= 0. {
+                return Err("Stock contour runout must be finite and positive".into());
+            }
+            let expanded = offset(&stock, runout, JoinStyle::Round).map_err(|e| e.to_string())?;
+            let expanded = match &self.model_domains {
+                Some(domains) => {
+                    cam_geo::intersection(&expanded, domains).map_err(|e| e.to_string())?
+                }
+                None => expanded,
+            };
+            let material = cam_geo::intersection(&stock, &pockets).map_err(|e| e.to_string())?;
+            // Keep explicit islands protected even where they cross the setup
+            // stock edge. Setup bounds must never truncate a selected island.
+            let mut protected = walls;
+            for pocket in &pockets {
+                for island in pocket.holes() {
+                    protected.push(Polygon::new(island.clone()).map_err(|e| e.to_string())?);
+                }
+            }
+            // Reserve the frontier's simplification tolerance and offset-grid
+            // rounding before certifying the emitted arcs and links.
+            let guarded = offset(
+                &protected,
+                crate::frontadvance::SIMPLIFY_EPS + 4. * cam_geo::GRID_MM,
+                JoinStyle::Round,
+            )
+            .map_err(|e| e.to_string())?;
+            // Projection seams can leave thousands of nearly collinear points.
+            // Simplify only an outward-padded obstacle envelope, and retain the
+            // exact envelope if the simplified result fails containment.
+            let simplified = crate::frontadvance::simplify_polys(&guarded, 0.01);
+            let simplified = offset(&simplified, 0.01 + 2. * cam_geo::GRID_MM, JoinStyle::Round)
+                .map_err(|e| e.to_string())?;
+            let guarded = if cam_geo::difference(&guarded, &simplified)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+            {
+                simplified
+            } else {
+                guarded
+            };
+            let regions = cam_geo::difference(&expanded, &guarded).map_err(|e| e.to_string())?;
+            // A closed pocket must not create a disconnected air-machining
+            // region around the outside of the setup stock box.
+            let regions = regions
+                .into_iter()
+                .filter_map(|region| {
+                    match cam_geo::intersection(std::slice::from_ref(&region), &material) {
+                        Ok(overlap) if overlap.is_empty() => None,
+                        Ok(_) => Some(Ok(region)),
+                        Err(e) => Some(Err(e.to_string())),
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((regions, protected))
+        };
+        let (regions, protected) = match resolve() {
+            Ok(regions) => regions,
+            Err(reason) => {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(format!(
+                        "operation {}: {reason}",
+                        self.op.id
+                    ))],
+                    ..Default::default()
+                }
+            }
+        };
+        let Some(first) = regions.first() else {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::warning(
+                    "Stock contours leave no machining area",
+                )],
+                ..Default::default()
+            };
+        };
+        let mut op = self.op.clone();
+        op.stock_contours.enabled = false;
+        op.boundary = first.outer().clone();
+        op.islands = first.holes().to_vec();
+        op.additional_regions = regions.into_iter().skip(1).collect();
+        let radius = env.tool(op.tool).unwrap().radius() + op.clear.offset;
+        let safe = |result: &StrategyResult| {
+            let verdict = crate::adaptive_safety::certify_layer(
+                &result.program,
+                &protected,
+                radius,
+                -op.depth,
+                env.heights.top_of_stock + cam_geo::GRID_MM,
+                cancel,
+            );
+            verdict.is_ok()
+        };
+        let result = Self::compute_stock_levels(&op, env, cancel);
+        if result.has_errors() || result.cancelled || safe(&result) {
+            return result;
+        }
+        if cancel.is_cancelled() {
+            return StrategyResult {
+                cancelled: true,
+                ..Default::default()
+            };
+        }
+        // Open-stock domains introduce corners at the transition to real
+        // walls. Never ship a frontier or link that crosses their cutter envelope.
+        if op.clear.clearing.engagement > 0. {
+            op.clear.clearing.engagement = 0.;
+            let mut fallback = Self::compute_stock_levels(&op, env, cancel);
+            if fallback.has_errors() || fallback.cancelled {
+                return fallback;
+            }
+            if safe(&fallback) {
+                fallback.diagnostics.push(Diagnostic::warning(
+                    "Stock contour adaptive path failed the swept-cutter check; using concentric clearing. Corner engagement can exceed the requested load."
+                ));
+                return fallback;
+            }
+        }
+        if cancel.is_cancelled() {
+            return StrategyResult {
+                cancelled: true,
+                ..Default::default()
+            };
+        }
+        StrategyResult {
+            diagnostics: vec![Diagnostic::error(
+                "Stock contour path intersects a protected wall or island",
+            )],
+            ..Default::default()
+        }
+    }
+
+    // Dense CAD contours can exceed the conservative all-level estimate even
+    // when the emitted, arc-fitted program is small. Bound each level first,
+    // then enforce the actual total move limit before retaining its fragment.
+    fn compute_stock_levels(op: &PocketOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        let result = Self::new(op.clone()).compute(env, cancel);
+        if !result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Clearing motion budget exceeded"))
+        {
+            return result;
+        }
+        let levels = depth_levels(env.heights.top_of_stock, -op.depth, op.clear.stepdown);
+        if levels.len() <= 1 {
+            return result;
+        }
+        let mut combined = StrategyResult {
+            diagnostics: result
+                .diagnostics
+                .into_iter()
+                .filter(|d| !d.message.contains("Clearing motion budget exceeded"))
+                .collect(),
+            ..Default::default()
+        };
+        let mut previous = env.heights.top_of_stock;
+        for (index, &z) in levels.iter().enumerate() {
+            let mut child = op.clone();
+            child.depth = -z;
+            child.clear.stepdown = previous - z + cam_geo::GRID_MM;
+            if op.finishing.enabled && op.finishing.finish_only_final && index + 1 < levels.len() {
+                child.finishing.enabled = false;
+                child.clear.offset += op.finishing.count as f64 * op.finishing.stepover;
+                child.clear.lead_in = cam_model::Lead::None;
+                child.clear.lead_out = cam_model::Lead::None;
+            }
+            let local = JobEnv {
+                heights: cam_model::Heights::new(
+                    env.heights.clearance,
+                    env.heights.retract,
+                    previous,
+                ),
+                tools: env.tools,
+                stock: env.stock,
+                spindle: env.spindle,
+            };
+            let level = Self::new(child).compute(&local, cancel);
+            if level.has_errors() || level.cancelled {
+                return level;
+            }
+            if combined.program.len().saturating_add(level.program.len())
+                > cam_model::MAX_PROFILE_MOVES
+            {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(
+                        "Pocket stock contour motion budget exceeded",
+                    )],
+                    ..Default::default()
+                };
+            }
+            combined.program.extend(level.program);
+            previous = z;
+        }
+        combined
+    }
+}
+
 /// Finish each cleared depth, or only the final depth when selected. Each disconnected loop
 /// approaches from clearance, so links cannot cut through an island or another lobe.
 #[allow(clippy::too_many_arguments)]
@@ -398,8 +725,78 @@ mod tests {
     }
 
     #[test]
+    fn multiple_regions_match_independent_pockets_with_clearance_between_them() {
+        let mut first = leaded_op(vec![Contour::new(vec![
+            Point::new(16., 16.),
+            Point::new(24., 16.),
+            Point::new(24., 24.),
+            Point::new(16., 24.),
+        ])]);
+        first.clear.keep_tool_down = true;
+        first.finishing.enabled = true;
+        let mut second = first.clone();
+        second.boundary = Contour::new(
+            first
+                .boundary
+                .points()
+                .iter()
+                .map(|p| Point::new(p.x + 60., p.y))
+                .collect(),
+        );
+        second.islands = first
+            .islands
+            .iter()
+            .map(|c| {
+                Contour::new(
+                    c.points()
+                        .iter()
+                        .map(|p| Point::new(p.x + 60., p.y))
+                        .collect(),
+                )
+            })
+            .collect();
+        let ts = tools(4.);
+        let env = JobEnv {
+            heights: Heights::new(5., 2., 0.),
+            tools: &ts,
+            stock: None,
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        let cancel = CancelToken::new();
+        let a = PocketStrategy::new(first.clone()).compute(&env, &cancel);
+        let b = PocketStrategy::new(second.clone()).compute(&env, &cancel);
+        assert!(
+            !a.has_errors() && !b.has_errors(),
+            "{:?} {:?}",
+            a.diagnostics,
+            b.diagnostics
+        );
+        let mut expected = a.program;
+        expected.extend(b.program);
+        first
+            .additional_regions
+            .push(Polygon::with_holes(second.boundary, second.islands).unwrap());
+        let combined = PocketStrategy::new(first.clone()).compute(&env, &cancel);
+        assert!(!combined.has_errors(), "{:?}", combined.diagnostics);
+        assert_eq!(combined.program, expected);
+        // A second pocket too narrow for the cutter must not leave partial output.
+        first.additional_regions = vec![Polygon::new(Contour::new(vec![
+            Point::new(60., 0.),
+            Point::new(61., 0.),
+            Point::new(61., 1.),
+            Point::new(60., 1.),
+        ]))
+        .unwrap()];
+        let failed = PocketStrategy::new(first).compute(&env, &cancel);
+        assert!(failed.has_errors());
+        assert!(failed.program.steps().is_empty());
+    }
+
+    #[test]
     fn keep_tool_down_connects_levels_and_finishing_and_preserves_final_retract() {
         let mut op = PocketOp {
+            additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             id: 0,
             tool: 1,
             boundary: square(24.),
@@ -470,6 +867,8 @@ mod tests {
         // Depth 3 at 1.5 stepdown ⇒ 2 levels. Staying down means one plunge and one
         // retract *per level*, not per ring — and the rings are still all cut.
         let op = PocketOp {
+            additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -518,6 +917,8 @@ mod tests {
     #[test]
     fn helix_plunge_pocket_enters_on_helical_arcs() {
         let op = PocketOp {
+            additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -581,6 +982,8 @@ mod tests {
     #[test]
     fn tool_too_large_for_pocket_errors() {
         let op = PocketOp {
+            additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -641,6 +1044,8 @@ mod tests {
         // Finer overlap ⇒ smaller spacing ⇒ more rings ⇒ more cutting moves.
         let run = |overlap: f64| {
             let mut op = PocketOp {
+                additional_regions: Vec::new(),
+                stock_contours: Default::default(),
                 finishing: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
@@ -693,6 +1098,8 @@ mod tests {
         // boundary, so the deepest cut into the +X wall is 2 mm shallower.
         let run = |offset: f64| {
             let op = PocketOp {
+                additional_regions: Vec::new(),
+                stock_contours: Default::default(),
                 finishing: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
@@ -761,6 +1168,8 @@ mod tests {
 
     fn leaded_op(islands: Vec<Contour>) -> PocketOp {
         PocketOp {
+            additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -802,6 +1211,227 @@ mod tests {
             },
             &CancelToken::new(),
         )
+    }
+
+    fn stock_result(mut op: PocketOp, stock: Option<Polygon>) -> StrategyResult {
+        op.stock_contours.enabled = true;
+        op.stock_contours.regions = stock.into_iter().collect();
+        op.clear.lead_in = Lead::None;
+        op.clear.lead_out = Lead::None;
+        let ts = tools(8.);
+        PocketStrategy::new(op).compute(
+            &JobEnv {
+                heights: Heights::new(5., 2., 0.),
+                tools: &ts,
+                stock: Some(([0., 0.], [40., 40.])),
+                spindle: cam_cldata::SpindleDir::Cw,
+            },
+            &CancelToken::new(),
+        )
+    }
+
+    fn cutting_points(result: &StrategyResult) -> Vec<Point> {
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        result.program.validate().unwrap();
+        result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                    Some(Point::new(to.x, to.y))
+                }
+                Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => {
+                    Some(Point::new(end.x, end.y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stock_contours_use_setup_box_and_permit_runout_without_cutting_islands() {
+        let island = Contour::new(vec![
+            Point::new(16., 16.),
+            Point::new(24., 16.),
+            Point::new(24., 24.),
+            Point::new(16., 24.),
+        ]);
+        for engagement in [0., 2.] {
+            let mut op = leaded_op(vec![island.clone()]);
+            op.clear.clearing.engagement = engagement;
+            op.clear.keep_tool_down = true;
+            let result = stock_result(op, None);
+            crate::adaptive_safety::certify_layer(
+                &result.program,
+                &[Polygon::new(island.clone()).unwrap()],
+                4. - 0.01,
+                -1.5,
+                cam_geo::GRID_MM,
+                &CancelToken::new(),
+            )
+            .expect("every swept cut, entry, arc and stay-down link must clear the island");
+            let points = cutting_points(&result);
+            assert!(
+                points.iter().any(|p| p.x < -0.1),
+                "open stock edge needs runout"
+            );
+            for p in points {
+                let dx = (16. - p.x).max(0.).max(p.x - 24.);
+                let dy = (16. - p.y).max(0.).max(p.y - 24.);
+                assert!(dx.hypot(dy) >= 4. - 0.01, "cutter gouges island: {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn stock_contours_can_limit_or_extend_material_and_accept_nonrectangular_areas() {
+        let bounds = |region| {
+            let points = cutting_points(&stock_result(leaded_op(vec![]), Some(region)));
+            assert!(!points.is_empty());
+            (
+                points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+                points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
+            )
+        };
+        let small = Polygon::new(square(20.)).unwrap();
+        let large = Polygon::new(square(50.)).unwrap();
+        let a = bounds(small);
+        let b = bounds(large);
+        assert!(a.1 < 25. && b.1 > 50., "{a:?}, {b:?}");
+        let triangle = Polygon::new(Contour::new(vec![
+            Point::new(0., 0.),
+            Point::new(30., 0.),
+            Point::new(0., 30.),
+        ]))
+        .unwrap();
+        let points = cutting_points(&stock_result(leaded_op(vec![]), Some(triangle)));
+        assert!(points
+            .iter()
+            .all(|p| p.x + p.y <= 30. + 4. * 2_f64.sqrt() + 0.02));
+    }
+
+    #[test]
+    fn stock_contours_preserve_closed_pocket_walls_and_legacy_defaults() {
+        let mut op = leaded_op(vec![]);
+        op.boundary = Contour::new(vec![
+            Point::new(10., 10.),
+            Point::new(30., 10.),
+            Point::new(30., 30.),
+            Point::new(10., 30.),
+        ]);
+        let points = cutting_points(&stock_result(op.clone(), None));
+        assert!(points
+            .iter()
+            .all(|p| (14. - 0.01..=26. + 0.01).contains(&p.x)
+                && (14. - 0.01..=26. + 0.01).contains(&p.y)));
+        let mut value = serde_json::to_value(&op).unwrap();
+        value.as_object_mut().unwrap().remove("stock_contours");
+        let legacy: PocketOp = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.stock_contours, Default::default());
+        op.stock_contours.enabled = true;
+        op.stock_contours.regions = vec![Polygon::new(square(50.)).unwrap()];
+        assert_eq!(
+            serde_json::from_str::<PocketOp>(&serde_json::to_string(&op).unwrap()).unwrap(),
+            op
+        );
+    }
+
+    #[test]
+    fn stock_contours_clear_stock_margins_outside_the_model() {
+        let mut op = leaded_op(vec![]);
+        op.stock_contours.enabled = true;
+        op.clear.lead_in = Lead::None;
+        op.clear.lead_out = Lead::None;
+        let ts = tools(8.);
+        let result = PocketStrategy::new(op)
+            .with_model_envelope(vec![Polygon::new(square(40.)).unwrap()])
+            .compute(
+                &JobEnv {
+                    heights: Heights::new(5., 2., 0.),
+                    tools: &ts,
+                    stock: Some(([-5., -5.], [45., 45.])),
+                    spindle: cam_cldata::SpindleDir::Cw,
+                },
+                &CancelToken::new(),
+            );
+        let points = cutting_points(&result);
+        assert!(points.iter().any(|p| p.x < -5.));
+        assert!(points.iter().any(|p| p.x > 45.));
+    }
+
+    #[test]
+    fn stock_contours_many_levels_bound_each_depth_and_retain_the_complete_cutting_interval() {
+        let mut op = leaded_op(vec![]);
+        op.boundary = Contour::new(
+            (0..8)
+                .map(|i| {
+                    let a = std::f64::consts::TAU * i as f64 / 8.;
+                    Point::new(40. * a.cos(), 40. * a.sin())
+                })
+                .collect(),
+        );
+        op.depth = 3000.;
+        op.clear.stepdown = 1.;
+        op.clear.lead_in = Lead::None;
+        op.clear.lead_out = Lead::None;
+        let ts = tools(8.);
+        let env = JobEnv {
+            heights: Heights::new(5., 2., 0.),
+            tools: &ts,
+            stock: None,
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+        let estimated = PocketStrategy::new(op.clone()).compute(&env, &CancelToken::new());
+        assert!(estimated
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Clearing motion budget exceeded")));
+        let result = PocketStrategy::compute_stock_levels(&op, &env, &CancelToken::new());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        result.program.validate().unwrap();
+        assert!(result.program.len() < cam_model::MAX_PROFILE_MOVES);
+        let levels: std::collections::BTreeSet<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|s| match s {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+                    Some(to.z.to_bits())
+                }
+                Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => {
+                    Some(end.z.to_bits())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(levels.len(), 3000);
+        assert!(levels.contains(&(-3000_f64).to_bits()));
+    }
+
+    #[test]
+    fn stock_contours_reject_invalid_or_missing_stock_without_motion() {
+        let mut op = leaded_op(vec![]);
+        op.stock_contours.enabled = true;
+        let missing = finishing_result(op.clone());
+        assert!(missing.has_errors() && missing.program.is_empty());
+        op.stock_contours.regions = vec![Polygon::new(Contour::new(vec![
+            Point::new(0., 0.),
+            Point::new(f64::NAN, 0.),
+            Point::new(0., 20.),
+        ]))
+        .unwrap()];
+        let ts = tools(8.);
+        let result = PocketStrategy::new(op).compute(
+            &JobEnv {
+                heights: Heights::new(5., 2., 0.),
+                tools: &ts,
+                stock: Some(([0., 0.], [40., 40.])),
+                spindle: cam_cldata::SpindleDir::Cw,
+            },
+            &CancelToken::new(),
+        );
+        assert!(result.has_errors() && result.program.is_empty());
     }
 
     fn finish_length(result: &StrategyResult) -> f64 {
@@ -1220,6 +1850,8 @@ mod tests {
         // the geometric floor. The gate is 1.5·e = 3.0 — see
         // `frontadvance::CERT_ENGAGEMENT_SLACK`.
         let op = PocketOp {
+            additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -1371,6 +2003,8 @@ mod tests {
         // arc), never emitted overshooting the boundary. High overlap gives the
         // multiple rings that put the wall ring on the leaded path in the first place.
         let small = PocketOp {
+            additional_regions: Vec::new(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,

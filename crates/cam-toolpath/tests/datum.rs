@@ -21,6 +21,7 @@ fn machine() -> Machine {
         name: "test".into(),
         rapid_rate: 2000.0,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: Envelope::new(
@@ -420,6 +421,8 @@ fn doc(ops: Vec<Operation>) -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "datum".into(),
         heights: Heights::new(5.0, 2.0, 0.0),

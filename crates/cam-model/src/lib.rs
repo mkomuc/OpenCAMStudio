@@ -13,7 +13,7 @@ mod cutting_data;
 mod cutting_forces;
 pub use cutting_forces::{CuttingEngagement, CuttingForceEstimate, CuttingLoad};
 mod pocket;
-pub use pocket::PocketFinishing;
+pub use pocket::{PocketFinishing, StockContours};
 mod parallel;
 pub use parallel::*;
 mod bore;
@@ -21,6 +21,8 @@ pub use bore::{BoreOp, BoreOrder};
 mod thread_standards;
 pub use thread_standards::*;
 mod document;
+mod fixtures;
+pub use fixtures::{FixtureClearance, FixtureEnvelope};
 mod profile_selection;
 pub use profile_selection::*;
 mod profile_parameters;
@@ -146,6 +148,8 @@ pub struct Machine {
     pub rapid_rate: f64,
     /// Seconds spent on each tool change, used by processing-time estimates.
     pub tool_change_seconds: f64,
+    /// Minimum running spindle speed, rpm. Zero means no additional minimum.
+    pub min_spindle_rpm: f64,
     /// Maximum spindle speed, rpm.
     pub max_spindle_rpm: f64,
     /// Maximum cutting feed, mm/min.
@@ -168,6 +172,8 @@ struct MachineRepr {
     rapid_rate: f64,
     #[serde(default)]
     tool_change_seconds: f64,
+    #[serde(default)]
+    min_spindle_rpm: f64,
     max_spindle_rpm: f64,
     max_feed: f64,
     envelope: Envelope,
@@ -181,6 +187,7 @@ impl From<MachineRepr> for Machine {
             name: r.name,
             rapid_rate: r.rapid_rate,
             tool_change_seconds: r.tool_change_seconds,
+            min_spindle_rpm: r.min_spindle_rpm,
             max_spindle_rpm: r.max_spindle_rpm,
             max_feed: r.max_feed,
             envelope: r.envelope,
@@ -196,6 +203,7 @@ impl From<Machine> for MachineRepr {
             name: m.name,
             rapid_rate: m.rapid_rate,
             tool_change_seconds: m.tool_change_seconds,
+            min_spindle_rpm: m.min_spindle_rpm,
             max_spindle_rpm: m.max_spindle_rpm,
             max_feed: m.max_feed,
             envelope: m.envelope,
@@ -206,9 +214,9 @@ impl From<Machine> for MachineRepr {
 }
 
 impl Machine {
-    /// Whether `rpm` is within the spindle's range `(0, max_spindle_rpm]`.
+    /// Whether `rpm` is positive and within the spindle's configured range.
     pub fn spindle_ok(&self, rpm: f64) -> bool {
-        rpm > 0.0 && rpm <= self.max_spindle_rpm
+        rpm > 0.0 && rpm >= self.min_spindle_rpm && rpm <= self.max_spindle_rpm
     }
 
     /// Whether `feed` is within `(0, max_feed]`.
@@ -604,6 +612,7 @@ mod tests {
             name: "test-3018".into(),
             rapid_rate: 2000.0,
             tool_change_seconds: 0.0,
+            min_spindle_rpm: 0.0,
             max_spindle_rpm: 10_000.0,
             max_feed: 800.0,
             envelope: Envelope::new(Point3::new(0.0, 0.0, -50.0), Point3::new(300.0, 180.0, 0.0)),
@@ -617,8 +626,10 @@ mod tests {
         let json = r#"{"name":"legacy","rapid_rate":2000.0,"max_spindle_rpm":10000.0,"max_feed":800.0,"envelope":{"min":[0.0,0.0,-50.0],"max":[300.0,180.0,0.0]},"safe_z":5.0,"tool_change_pos":null}"#;
         let machine: Machine = serde_json::from_str(json).unwrap();
         assert_eq!(machine.tool_change_seconds, 0.0);
+        assert_eq!(machine.min_spindle_rpm, 0.0);
         let mut configured = machine;
         configured.tool_change_seconds = 15.0;
+        configured.min_spindle_rpm = 1000.0;
         let restored: Machine =
             serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
         assert_eq!(restored, configured);

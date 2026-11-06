@@ -73,35 +73,8 @@ cp "$ROOT/target/$TARGET/release/opencamstudio-mcp" "$APP/Contents/MacOS/opencam
 
 python3 .github/scripts/package-occt.py stage "$APP"
 
-ICON_TMP="$(mktemp -d "${TMPDIR:-/tmp}/opencamstudio-icon.XXXXXX")"
-trap 'rm -rf "$ICON_TMP"' EXIT
-sips -z 16 16 "$ROOT/crates/cam-app/assets/opencamstudio-32.png" \
-  --out "$ICON_TMP/opencamstudio-16.png" >/dev/null
-sips -z 48 48 "$ROOT/crates/cam-app/assets/opencamstudio-64.png" \
-  --out "$ICON_TMP/opencamstudio-48.png" >/dev/null
-python3 - "$ROOT/crates/cam-app/assets" "$ICON_TMP/opencamstudio-48.png" \
-  "$APP/Contents/Resources/opencamstudio.icns" <<'PY'
-import struct
-import sys
-from pathlib import Path
-
-assets, icon48, output = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-images = [
-    ('icp4', icon48.parent / 'opencamstudio-16.png'),
-    ('icp5', assets / 'opencamstudio-32.png'),
-    ('icp6', icon48),
-    ('ic07', assets / 'opencamstudio-128.png'),
-    ('ic08', assets / 'opencamstudio-256.png'),
-    ('ic09', assets / 'opencamstudio-512.png'),
-    ('ic10', assets / 'opencamstudio-1024.png'),
-]
-chunks = []
-for kind, image in images:
-    data = image.read_bytes()
-    chunks.append(kind.encode('ascii') + struct.pack('>I', len(data) + 8) + data)
-body = b''.join(chunks)
-output.write_bytes(b'icns' + struct.pack('>I', len(body) + 8) + body)
-PY
+cp "$ROOT/crates/cam-app/assets/app-icon-v2/OpenCAMStudio.icns" \
+  "$APP/Contents/Resources/opencamstudio.icns"
 file "$APP/Contents/Resources/opencamstudio.icns" | grep -q 'Mac OS X icon'
 
 VERSION="$(cargo metadata --no-deps --format-version 1 \

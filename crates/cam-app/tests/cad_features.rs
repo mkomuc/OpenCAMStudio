@@ -782,6 +782,8 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         ])
     };
     planar.add_operation(Operation::Pocket(PocketOp {
+        additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         id,
         tool: 1,
@@ -1351,7 +1353,7 @@ fn cad_selection_keeps_mixed_features_and_only_rejects_stale_references() {
     assert!(app
         .cad_operation_eligibility(OpKind::Pocket)
         .unwrap_err()
-        .contains("one region"));
+        .contains("planar"));
     assert!(app
         .create_cad_operation(OpKind::Pocket, app.cad_selection().to_vec())
         .is_err());
@@ -1440,7 +1442,7 @@ fn persisted_mixed_geometry_cannot_generate_or_export_using_cached_contours() {
     assert!(outcome
         .diagnostics
         .iter()
-        .any(|d| d.message.contains("one region")));
+        .any(|d| d.message.contains("planar")));
     assert!(cuts(&outcome.program).is_empty());
     assert!(matches!(reopened.export_nc(), Err(ExportError::HasErrors)));
 }
@@ -2248,4 +2250,292 @@ fn parallel_creation_uses_setup_cad_and_survives_reopening() {
         matches!(reopened.operation(id),Some(Operation::Parallel(p))if p.params.angle==37. && p.params.stepover==0.7 && p.params.lift_height==2. && p.params.stay_down && !p.params.both_ways)
     );
     assert_eq!(app.document(), reopened.document());
+}
+
+/// Built entirely from analytic topology: no imported CAD or saved project fixture.
+fn two_pockets() -> (GeometryState, Vec<EntityRef>) {
+    let mut f = Fixture::new();
+    f.t.bodies[0].bounds[1][0] = 40.;
+    let mut floors = Vec::new();
+    for x in [0., 20.] {
+        floors.push(reference(
+            f.face(
+                vec![
+                    square(x + 2., x + 18., 2., 18., -3.),
+                    square(x + 8., x + 12., 8., 12., -3.),
+                ],
+                [0., 0., 1.],
+            ),
+            EntityKind::Face,
+        ));
+        f.walls(x + 2., x + 18., 2., 18., -3., 0.);
+        f.walls(x + 8., x + 12., 8., 12., -3., 0.);
+        f.face(vec![square(x + 8., x + 12., 8., 12., 0.)], [0., 0., 1.]);
+    }
+    f.face(
+        vec![
+            square(0., 40., 0., 20., 0.),
+            square(2., 18., 2., 18., 0.),
+            square(22., 38., 2., 18., 0.),
+        ],
+        [0., 0., 1.],
+    );
+    f.walls(0., 40., 0., 20., -5., 0.);
+    f.face(vec![square(0., 40., 0., 20., -5.)], [0., 0., -1.]);
+    (f.state(), floors)
+}
+
+#[test]
+fn multiple_pocket_floors_keep_islands_and_output_after_save_and_reselection() {
+    let (state, floors) = two_pockets();
+    state.validate().unwrap();
+    let binding =
+        cam_geometry3d::resolve_selection(&state, &floors, ExtractionRecipe::PocketFloor, 0.)
+            .unwrap();
+    assert!(
+        cam_geometry3d::verify_selection(&state, &floors, ExtractionRecipe::PocketFloor, 0.)
+            .is_none()
+    );
+    let input = cam_geometry3d::resolve_binding(&state, &binding).unwrap();
+    assert_eq!(input.regions.len(), 2);
+    assert!(input
+        .regions
+        .iter()
+        .all(|r| r.holes().len() == 1 && (r.area() - 240.).abs() < 1e-6));
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let id = app
+        .create_cad_operation(OpKind::Pocket, floors.clone())
+        .unwrap();
+    let Some(Operation::Pocket(op)) = app.operation(id) else {
+        panic!("pocket")
+    };
+    assert_eq!(op.additional_regions, input.regions[1..]);
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let before = result.program.clone();
+    let cut_points: Vec<_> = cuts(&before)
+        .iter()
+        .filter_map(|s| match s {
+            cam_cldata::Step::Linear { to, .. } | cam_cldata::Step::Arc { end: to, .. } => {
+                Some(*to)
+            }
+            _ => None,
+        })
+        .collect();
+    for region in &input.regions {
+        assert!(cut_points
+            .iter()
+            .any(|p| region.contains(Point::new(p.x, p.y))));
+        assert!(cut_points
+            .iter()
+            .all(|p| !cam_geo::Polygon::new(region.holes()[0].clone())
+                .unwrap()
+                .contains(Point::new(p.x, p.y))));
+    }
+    let path = std::env::temp_dir().join(format!("multi-pocket-{}.ocam", std::process::id()));
+    app.save_project(&path).unwrap();
+    let mut reopened = controller();
+    reopened.open_project(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(app.document(), reopened.document());
+    assert_eq!(before, reopened.run(&CancelToken::new()).program);
+    app.edit_cad_geometry(id, vec![floors[0].clone()]).unwrap();
+    assert!(
+        matches!(app.operation(id), Some(Operation::Pocket(op)) if op.additional_regions.is_empty())
+    );
+    assert!(app.undo());
+    assert_eq!(before, app.run(&CancelToken::new()).program);
+}
+
+#[test]
+fn multiple_pocket_boundary_loops_and_disconnected_edge_chains_resolve_all_regions() {
+    let (state, floors) = two_pockets();
+    let topology = &state.assets[0].topology;
+    let loops: Vec<_> = floors
+        .iter()
+        .map(|r| {
+            let face = topology.faces.iter().find(|f| f.id == r.id).unwrap();
+            reference(face.loop_ids[0], EntityKind::Loop)
+        })
+        .collect();
+    let mut edges: Vec<_> = loops
+        .iter()
+        .flat_map(|r| {
+            topology
+                .loops
+                .iter()
+                .find(|l| l.id == r.id)
+                .unwrap()
+                .edge_uses
+                .iter()
+                .map(|e| reference(e.edge_id, EntityKind::Edge))
+        })
+        .collect();
+    edges.reverse();
+    for selected in [loops, edges] {
+        let binding = cam_geometry3d::resolve_selection_advisory(
+            &state,
+            &selected,
+            ExtractionRecipe::PocketBoundary,
+            0.,
+        )
+        .unwrap();
+        let input = cam_geometry3d::resolve_binding_advisory(&state, &binding).unwrap();
+        assert_eq!(input.regions.len(), 2);
+        assert_eq!(
+            input.heights,
+            CuttingHeights {
+                top: -3.,
+                bottom: -4.
+            }
+        );
+        let mut app = controller();
+        app.add_cad_asset(state.assets[0].clone(), state.instances.clone())
+            .unwrap();
+        select_all_models(&mut app);
+        let id = app.create_cad_operation(OpKind::Pocket, selected).unwrap();
+        assert!(
+            matches!(app.operation(id), Some(Operation::Pocket(op)) if op.additional_regions.len() == 1)
+        );
+        let result = app.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn multiple_pockets_do_not_drop_invalid_duplicate_or_different_height_features() {
+    let (mut state, floors) = two_pockets();
+    let mut selected = floors.clone();
+    selected[1].revision += 1;
+    assert!(cam_geometry3d::resolve_selection_advisory(
+        &state,
+        &selected,
+        ExtractionRecipe::PocketFloor,
+        0.
+    )
+    .unwrap_err()
+    .contains("stale"));
+    selected[1] = selected[0].clone();
+    assert!(cam_geometry3d::resolve_selection_advisory(
+        &state,
+        &selected,
+        ExtractionRecipe::PocketFloor,
+        0.
+    )
+    .unwrap_err()
+    .contains("more than once"));
+    // An unusable second face must fail the complete selection.
+    let topology = std::sync::Arc::make_mut(&mut state.assets[0].topology);
+    let face = topology
+        .faces
+        .iter()
+        .find(|face| face.id == floors[1].id)
+        .unwrap();
+    let wire = topology
+        .loops
+        .iter()
+        .find(|wire| wire.id == face.loop_ids[0])
+        .unwrap();
+    let edge_id = wire.edge_uses[0].edge_id;
+    topology
+        .edges
+        .iter_mut()
+        .find(|edge| edge.id == edge_id)
+        .unwrap()
+        .curve = CadCurve::Unsupported {
+        description: "unusable selected boundary".into(),
+    };
+    assert!(cam_geometry3d::resolve_selection_advisory(
+        &state,
+        &floors,
+        ExtractionRecipe::PocketFloor,
+        0.
+    )
+    .is_err());
+    let mut f = Fixture::new();
+    let a = f.face(vec![square(1., 8., 1., 8., -2.)], [0., 0., 1.]);
+    let b = f.face(vec![square(11., 18., 1., 8., -3.)], [0., 0., 1.]);
+    assert!(cam_geometry3d::resolve_selection_advisory(
+        &f.state(),
+        &[
+            reference(a, EntityKind::Face),
+            reference(b, EntityKind::Face)
+        ],
+        ExtractionRecipe::PocketFloor,
+        0.
+    )
+    .unwrap_err()
+    .contains("different floor heights"));
+}
+
+#[test]
+fn multiple_pockets_track_each_instances_placement_and_reject_incomplete_chains() {
+    let (mut state, floors) = two_pockets();
+    let mut instance = state.instances[0].clone();
+    instance.id = 2;
+    instance.placement.translation = [60., 0., 0.];
+    state.instances.push(instance);
+    let refs = vec![
+        floors[0].clone(),
+        EntityRef {
+            instance_id: 2,
+            ..floors[0].clone()
+        },
+    ];
+    let mut binding = cam_geometry3d::resolve_selection_advisory(
+        &state,
+        &refs,
+        ExtractionRecipe::PocketFloor,
+        0.,
+    )
+    .unwrap();
+    binding.overrides.bottom = Some(-2.);
+    let before = cam_geometry3d::resolve_binding_advisory(&state, &binding).unwrap();
+    assert_eq!(before.regions.len(), 2);
+    assert_eq!(before.heights.bottom, -2.);
+    assert!(before.regions[1].contains(Point::new(63., 3.)));
+    state.instances[1].placement.translation[0] += 10.;
+    let moved = cam_geometry3d::resolve_binding_advisory(&state, &binding).unwrap();
+    assert_ne!(before.fingerprint, moved.fingerprint);
+    assert!(moved.regions[1].contains(Point::new(73., 3.)));
+    state.instances[1].placement.translation[2] = 1.;
+    assert!(cam_geometry3d::resolve_binding_advisory(&state, &binding)
+        .unwrap_err()
+        .contains("different floor heights"));
+    let topology = &state.assets[0].topology;
+    let mut edges: Vec<_> = floors
+        .iter()
+        .flat_map(|r| {
+            let face = topology.faces.iter().find(|f| f.id == r.id).unwrap();
+            topology
+                .loops
+                .iter()
+                .find(|l| l.id == face.loop_ids[0])
+                .unwrap()
+                .edge_uses
+                .iter()
+                .map(|e| reference(e.edge_id, EntityKind::Edge))
+        })
+        .collect();
+    edges.pop();
+    assert!(cam_geometry3d::resolve_selection_advisory(
+        &state,
+        &edges,
+        ExtractionRecipe::PocketBoundary,
+        0.
+    )
+    .is_err());
 }

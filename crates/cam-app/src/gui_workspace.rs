@@ -333,7 +333,10 @@ impl App {
                     Some(TreeNode::Asset(id)) => instance.asset_id == *id,
                     Some(TreeNode::Model(id)) => instance.id == *id,
                     Some(_) => true,
-                    None => setup.model_instances.contains(&instance.id),
+                    None => {
+                        setup.model_instances.contains(&instance.id)
+                            || setup.fixture_instances.contains(&instance.id)
+                    }
                 }
             };
             if !in_scope || self.hidden_assets.contains(&instance.asset_id) {
@@ -414,6 +417,7 @@ impl App {
                 });
         let labels = grid_view::GridLabels {
             camera: viewport.camera(),
+            grid_size: viewport.grid_size,
         };
         let height_preview = self.height_preview(viewport.camera(), viewport.browser_overlay_width);
         let viewport_camera = viewport.camera();
@@ -532,6 +536,13 @@ impl App {
                     .geometry_state()
                     .instances
                     .iter()
+                    .filter(|i| {
+                        !self
+                            .controller
+                            .inspection_setup()
+                            .fixture_instances
+                            .contains(&i.id)
+                    })
                     .map(|i| i.id),
             );
         }
@@ -735,6 +746,7 @@ impl App {
                 let selected: Vec<_> = draft
                     .model_instances
                     .iter()
+                    .chain(&draft.fixture_instances)
                     .filter_map(|id| {
                         let instance = geometry.instance(*id)?;
                         let asset = geometry.asset(instance.asset_id)?;
@@ -783,7 +795,16 @@ impl App {
             || self.height_reference_pick.is_some();
         viewport.geometry_pick_active = (self.geometry_additive || self.geometry_auto_pick)
             && self.operation_tab == OperationTab::Geometry;
+        viewport.stock_contour_picking = self.stock_contour_editor();
+        viewport.stock_contour_setup_selected = self.stock_contour_editor()
+            && if self.operation_uses_cad_geometry() {
+                self.controller.cad_selection().is_empty()
+            } else {
+                self.controller.pending_operation_geometry().is_empty()
+            };
         viewport.cad_select_through = self.cad_select_through;
+        let (grid_x, grid_y, grid_z) = self.controller.machine().envelope.extent();
+        viewport.grid_size = [grid_x as f32, grid_y as f32, grid_z as f32];
         viewport.controls = self.view;
         viewport.show_gizmo = self.show_gizmo;
         viewport.gizmo_size = self.gizmo_size;
@@ -873,6 +894,12 @@ impl App {
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
         }
+        if self.stock_contour_editor() {
+            viewport.cad_operation_kind = None;
+            viewport.cad_filter_explicit = true;
+            viewport.cad_silhouette =
+                self.cad_filter == CadFilter::Silhouette || self.modifiers.control();
+        }
         if pattern_pick.is_some() {
             viewport.cad_operation_kind = None;
             viewport.cad_filter = EntityKind::Edge;
@@ -951,47 +978,67 @@ impl App {
                 format!("{} · {}", kind, source)
             })
             .unwrap_or_default();
-        let controls = row![
+        let position_pick = self.operation_position_pick.is_some()
+            && self.operation_preview_active()
+            && self.operation_tab == OperationTab::Linking
+            && self.model_view.is_none()
+            && !self.controller.setups().is_empty();
+        let origin_pick = self.in_origin_pick() && !self.setup_origin_mode().is_box();
+        let axis_pick = self.setup_axis_pick.is_some()
+            || self
+                .pattern_draft
+                .as_ref()
+                .and_then(|draft| draft.picking)
+                .is_some_and(|axis| axis < 2);
+        let drawing_pick = self
+            .controller
+            .pending_op()
+            .is_some_and(|p| op_uses_snaps(p.kind));
+        let mut controls = row![
             toggle("Show stock · F8", self.show_stock, Message::ToggleStock),
             toggle(
                 "Transparent stock",
                 self.settings.view.transparent_stock,
                 Message::ToggleTransparentStock
             ),
-            toggle(
+        ];
+        if origin_pick || position_pick || axis_pick {
+            controls = controls.push(toggle(
                 "Highlight features",
                 self.settings.snapping.highlight_features,
-                Message::ToggleFeatureHighlights
-            ),
-            toggle(
-                "Snap",
-                self.settings.snapping.enabled,
-                Message::ToggleSnapping
-            ),
-            toggle(
-                "Endpoints",
-                self.snaps.contains(&SnapKind::End),
-                Message::ToggleSnap(SnapKind::End)
-            ),
-            toggle(
-                "Midpoints",
-                self.snaps.contains(&SnapKind::Mid),
-                Message::ToggleSnap(SnapKind::Mid)
-            ),
-            toggle(
-                "Quadrants",
-                self.snaps.contains(&SnapKind::Quadrant),
-                Message::ToggleSnap(SnapKind::Quadrant)
-            ),
-            toggle(
-                "Nearest",
-                self.snaps.contains(&SnapKind::Nearest),
-                Message::ToggleSnap(SnapKind::Nearest)
-            ),
-            text(hint).size(12),
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center);
+                Message::ToggleFeatureHighlights,
+            ));
+        }
+        if origin_pick || position_pick || drawing_pick {
+            controls = controls
+                .push(toggle(
+                    "Snap",
+                    self.settings.snapping.enabled,
+                    Message::ToggleSnapping,
+                ))
+                .push(toggle(
+                    "Endpoints",
+                    self.snaps.contains(&SnapKind::End),
+                    Message::ToggleSnap(SnapKind::End),
+                ))
+                .push(toggle(
+                    "Midpoints",
+                    self.snaps.contains(&SnapKind::Mid),
+                    Message::ToggleSnap(SnapKind::Mid),
+                ))
+                .push(toggle(
+                    "Quadrants",
+                    self.snaps.contains(&SnapKind::Quadrant),
+                    Message::ToggleSnap(SnapKind::Quadrant),
+                ))
+                .push(toggle(
+                    "Nearest",
+                    self.snaps.contains(&SnapKind::Nearest),
+                    Message::ToggleSnap(SnapKind::Nearest),
+                ))
+                .push(text(hint).size(12));
+        }
+        let controls = controls.spacing(4).align_y(Alignment::Center);
         container(
             scrollable(controls).direction(scrollable::Direction::Horizontal(
                 scrollable::Scrollbar::default(),
@@ -1616,13 +1663,14 @@ mod tests {
 
         app.settings.view.stock_color = [0.8, 0.3, 0.1];
         app.settings.view.transparent_stock = true;
+        app.settings.view.stock_transparency = 0.5;
         let transparent = app.machining_viewport();
         assert!(transparent.mesh_indices.is_empty());
         assert_eq!(transparent.transparent_stock_indices.len(), 36);
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.72, 0.66, 0.22, 0.25]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 0.5]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -1675,9 +1723,9 @@ mod tests {
             .zip(&outcome.stock_operations)
         {
             let expected = if *owner == Some(id) {
-                [0.8, 0.3, 0.1, 0.25]
+                [0.8, 0.3, 0.1, 0.5]
             } else {
-                [0.72, 0.66, 0.22, 0.25]
+                [0.72, 0.66, 0.22, 0.5]
             };
             assert_eq!(vertex.color, expected);
         }

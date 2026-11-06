@@ -484,6 +484,8 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            additional_regions: resolved.regions.iter().skip(1).cloned().collect(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             id,
             tool,
@@ -877,6 +879,7 @@ pub(crate) fn resolve_document_checked(
                 ) => {
                     p.boundary = region()?.outer().clone();
                     p.islands = region()?.holes().to_vec();
+                    p.additional_regions = input.regions.iter().skip(1).cloned().collect();
                     p.depth = depth;
                 }
                 (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {
@@ -1082,6 +1085,24 @@ pub(crate) fn resolve_document_checked(
         resolved_operation.map_err(|message| error(message).for_op(id))?;
     }
     resolved.setup_mut().operations = operations;
+    // Keep fixture placements for the planner's independent safety checks, after
+    // resolving machining references against model bodies only.
+    document
+        .setup()
+        .validate_fixtures(&document.geometry)
+        .map_err(error)?;
+    if !document.setup().fixture_instances.is_empty() {
+        let setup_geometry = document
+            .geometry
+            .geometry_in_setup(&document.setup().frame)
+            .map_err(error)?;
+        resolved.geometry.instances.extend(
+            setup_geometry
+                .instances
+                .into_iter()
+                .filter(|instance| document.setup().fixture_instances.contains(&instance.id)),
+        );
+    }
     Ok(resolved)
 }
 
@@ -1215,6 +1236,110 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
     binding.heights = input.heights;
     binding.resolved_fingerprint = None;
     Ok(())
+}
+
+#[cfg(test)]
+mod pocket_stock_tests {
+    use super::*;
+    use crate::{default_machine, AppController};
+    use cam_cldata::{MoveKind, SpindleDir, Step};
+    use cam_toolpath::{CancelToken, JobCompletion};
+
+    #[test]
+    #[ignore = "supplied testfile2.ocam regression; set OCAM_STOCK_PROJECT"]
+    fn supplied_floor_holes_are_cleared_to_the_stock_contour() {
+        let path = std::env::var("OCAM_STOCK_PROJECT").unwrap();
+        let mut app = AppController::new(default_machine());
+        app.open_project(Path::new(&path)).unwrap();
+        let (min, max) = app.stock_box();
+        // The saved project selects the right floor; the screenshot selects
+        // the corresponding left floor in the same flipped setup.
+        for (face, center) in [(34, 75.), (32, -75.)] {
+            let mut selected = app.geometry_state().bindings[&0].selected.clone();
+            selected[0].id = face;
+            app.edit_cad_geometry(0, selected).unwrap();
+            let document = resolve_document(app.document()).unwrap();
+            assert!(
+                matches!(&document.setup().operations[0], Operation::Pocket(p)
+                if p.stock_contours.enabled && p.islands.len() == 1)
+            );
+            let started = std::time::Instant::now();
+            let result = cam_toolpath::build_job(
+                &document,
+                1000.,
+                SpindleDir::Cw,
+                Some(([min[0], min[1]], [max[0], max[1]])),
+                200.,
+                &CancelToken::new(),
+            );
+            eprintln!(
+                "Face {face}: {} moves in {:?}",
+                result.program.len(),
+                started.elapsed()
+            );
+            assert_eq!(
+                result.completion,
+                JobCompletion::Complete,
+                "{:?}",
+                result.diagnostics
+            );
+            result.program.validate().unwrap();
+            let mut previous: Option<cam_cldata::Point3> = None;
+            let mut crosses_hole = false;
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } => {
+                        if let Some(a) = previous.filter(|_| tag.kind == MoveKind::Cutting) {
+                            let dx = to.x - a.x;
+                            let dy = to.y - a.y;
+                            let length_sq = dx * dx + dy * dy;
+                            if length_sq > 0. {
+                                let t =
+                                    (((center - a.x) * dx - a.y * dy) / length_sq).clamp(0., 1.);
+                                crosses_hole |= (a.x + t * dx - center).hypot(a.y + t * dy) < 3.;
+                            }
+                        }
+                        previous = Some(*to);
+                    }
+                    Step::Rapid { to, .. } => previous = Some(*to),
+                    Step::Arc { end, .. } => previous = Some(*end),
+                    _ => {}
+                }
+            }
+            let cuts: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => Some(*end),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                crosses_hole,
+                "stock above the 20 mm through-hole must be machined"
+            );
+            assert!(cuts.iter().any(|p| p.y > max[1]));
+            assert!(cuts.iter().any(|p| p.y < min[1]));
+            assert!(
+                cuts.iter().any(|p| if center > 0. {
+                    p.x > max[0]
+                } else {
+                    p.x < min[0]
+                }),
+                "the open floor must extend to the stock edges with runout"
+            );
+            assert!(
+                cuts.iter().all(|p| if center > 0. {
+                    p.x >= 53. - 0.01
+                } else {
+                    p.x <= -53. + 0.01
+                }),
+                "the rising wall at X +/-50 must remain protected"
+            );
+        }
+    }
 }
 
 /// Keep displayed linked heights synchronized with placement and stock edits.

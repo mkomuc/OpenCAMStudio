@@ -454,6 +454,36 @@ impl App {
             list = list.push(self.creation_geometry_controls());
         }
         if tab == OperationTab::Geometry {
+            if let Operation::Pocket(pocket) = op {
+                list = list.optional_section(
+                    "Stock contours",
+                    pocket.stock_contours.enabled,
+                    Some(|value| Message::OperationGeometry(GeometryMessage::StockContours(value))),
+                );
+                if pocket.stock_contours.enabled {
+                    list = list.push(
+                        text(if pocket.stock_contours.regions.is_empty() {
+                            "Calculated from setup stock".into()
+                        } else {
+                            format!(
+                                "{} selected stock contour(s)",
+                                pocket.stock_contours.regions.len()
+                            )
+                        })
+                        .size(12),
+                    );
+                    list = list.push(
+                        row![
+                            inspector_button("Select…")
+                                .on_press(Message::OperationGeometry(GeometryMessage::SelectStock)),
+                            inspector_button("Use setup stock")
+                                .on_press(Message::OperationGeometry(GeometryMessage::ResetStock)),
+                        ]
+                        .spacing(6),
+                    );
+                    list = list.push(text("Material boundary; the tool can approach from outside. Leave unchecked for closed pockets.").size(11).color(INSPECTOR_MUTED));
+                }
+            }
             if let Operation::Adaptive(adaptive) = op {
                 list = list
                     .section("Geometry")
@@ -1790,21 +1820,140 @@ mod tests {
         assert!(!operation_fields(&operation).contains(&Field::Engagement));
     }
     fn linked_face_app() -> (App, u32) {
+        linked_face_app_at_heights(-1., -5., -1.)
+    }
+
+    #[test]
+    fn stock_contours_cad_edges_keep_the_floor_binding_and_reject_incomplete_chains() {
+        let (mut app, face_id) = linked_face_app();
+        let reference = app.controller.geometry_state().bindings[&face_id].selected[0].clone();
+        let id = app
+            .controller
+            .create_cad_operation(OpKind::Pocket, vec![reference.clone()])
+            .unwrap();
+        app.begin_operation_draft(id);
+        let before = app.controller.operation(id).unwrap().clone();
+        let floor_binding = app.controller.geometry_state().bindings[&id].clone();
+        let height_settings = app.height_draft.clone();
+        let message = |m| Message::OperationGeometry(m);
+        let _ = app.update(message(GeometryMessage::StockContours(true)));
+        let _ = app.update(message(GeometryMessage::SelectStock));
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Loop);
+        assert!(
+            app.machining_viewport().cad_operation_kind.is_none(),
+            "stock loops must bypass pocket-floor picking"
+        );
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Silhouette));
+        assert!(
+            app.machining_viewport().cad_silhouette,
+            "stock selection must allow silhouettes"
+        );
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Edge));
+        let mut edge = reference;
+        edge.kind = EntityKind::Edge;
+        edge.id = 20;
+        let _ = app.update(Message::CadSelect(edge.clone()));
+        let _ = app.update(message(GeometryMessage::Confirm));
+        assert!(
+            app.stock_contour_editor(),
+            "one edge must not become a stock area"
+        );
+        for edge_id in 21..24 {
+            edge.id = edge_id;
+            let _ = app.update(Message::CadSelect(edge.clone()));
+        }
+        let _ = app.update(message(GeometryMessage::Confirm));
+        assert!(!app.stock_contour_editor(), "{}", app.status);
+        assert_eq!(app.height_draft, height_settings);
+        assert_eq!(app.controller.geometry_state().bindings[&id], floor_binding);
+        assert_eq!(app.controller.operation(id), Some(&before));
+        let Some(Operation::Pocket(p)) = app.operation_draft.as_ref() else {
+            panic!("pocket")
+        };
+        assert_eq!(p.stock_contours.source.as_ref().unwrap().selected.len(), 4);
+        assert_eq!(p.stock_contours.regions.len(), 1);
+        let _ = app.update(Message::Apply);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Pocket(p))
+            if p.stock_contours.source.is_some())
+        );
+
+        // The stock source can belong to an independent CAD instance. Its
+        // placement must participate in path reuse, independently of the floor.
+        let mut doc = app.controller.document().clone();
+        doc.setup_mut().operations.retain(|op| op.id() == id);
+        let mut instance = doc.geometry.instances[0].clone();
+        instance.id = 2;
+        doc.geometry.instances.push(instance);
+        doc.setup_mut().model_instances.push(2);
+        let Operation::Pocket(p) = &mut doc.setup_mut().operations[0] else {
+            panic!("pocket")
+        };
+        for r in &mut p.stock_contours.source.as_mut().unwrap().selected {
+            r.instance_id = 2;
+        }
+        let mut cache = cam_toolpath::OperationCache::default();
+        let token = cam_toolpath::CancelToken::new();
+        let mut run = |doc: &cam_model::Document| {
+            let resolved = crate::cad_operations::resolve_document(doc).unwrap();
+            cam_toolpath::build_job_cached(
+                cam_toolpath::PlanRequest {
+                    document: &resolved,
+                    spindle_rpm: 1000.,
+                    dir: cam_cldata::SpindleDir::Cw,
+                    stock: Some(([0., 0.], [10., 10.])),
+                    tool_change_height: 50.,
+                },
+                &token,
+                &mut cache,
+                |_| {},
+            )
+        };
+        let first = run(&doc);
+        assert_eq!(
+            first.completion,
+            cam_toolpath::JobCompletion::Complete,
+            "{:?}",
+            first.diagnostics
+        );
+        let again = run(&doc);
+        assert_eq!(first.program, again.program);
+        doc.geometry.instances[1].placement.translation[0] = 2.;
+        let moved = run(&doc);
+        assert_eq!(
+            moved.completion,
+            cam_toolpath::JobCompletion::Complete,
+            "{:?}",
+            moved.diagnostics
+        );
+        assert_ne!(moved.program, first.program);
+        doc.geometry.instances.pop();
+        let stale = run(&doc);
+        assert_eq!(stale.completion, cam_toolpath::JobCompletion::Failed);
+        assert!(stale
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Stock contours need reselection")));
+        assert_eq!(cache.stats.computed, 1);
+        assert_eq!(cache.stats.reused, 0);
+    }
+
+    fn linked_face_app_at_heights(floor_z: f64, model_bottom: f64, model_top: f64) -> (App, u32) {
         use cam_model::*;
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         let points = [
-            [0.0, 0.0, -1.0],
-            [10.0, 0.0, -1.0],
-            [10.0, 10.0, -1.0],
-            [0.0, 10.0, -1.0],
+            [0.0, 0.0, floor_z],
+            [10.0, 0.0, floor_z],
+            [10.0, 10.0, floor_z],
+            [0.0, 10.0, floor_z],
         ];
         let mut topology = TopologySnapshot {
             bodies: vec![CadBody {
                 id: 1,
                 name: "Analytic test plate".into(),
                 valid_solid: true,
-                bounds: [[0.0, 0.0, -5.0], [10.0, 10.0, -1.0]],
+                bounds: [[0.0, 0.0, model_bottom], [10.0, 10.0, model_top]],
             }],
             vertices: points
                 .iter()
@@ -1847,7 +1996,7 @@ mod tests {
                     normal: [0.0, 0.0, 1.0],
                 },
                 loop_ids: vec![3],
-                bounds: [[0.0, 0.0, -1.0], [10.0, 10.0, -1.0]],
+                bounds: [[0.0, 0.0, floor_z], [10.0, 10.0, floor_z]],
             }],
             ..Default::default()
         };
@@ -2528,6 +2677,19 @@ mod tests {
     }
 
     #[test]
+    fn removing_last_cad_geometry_hides_saved_operation_preview() {
+        let (mut app, id) = linked_face_app();
+        app.setup_draft = None;
+        app.begin_operation_draft(id);
+        assert!(!app.operation_geometry_preview().strips.is_empty());
+        let _ = app.update(Message::GeometryRowSelected(0));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        assert!(app.controller.cad_selection().is_empty());
+        assert!(app.editor_selected_geometry().is_empty());
+        assert!(app.operation_geometry_preview().strips.is_empty());
+    }
+
+    #[test]
     fn select_replaces_a_single_face_instead_of_appending_an_invalid_second_target() {
         let (mut app, id) = linked_face_app();
         let original = app.controller.geometry_state().bindings[&id].selected[0].clone();
@@ -2750,7 +2912,89 @@ mod tests {
     }
 
     #[test]
-    fn pocket_geometry_switches_between_floor_and_chain_height_defaults() {
+    fn pocket_floor_replaced_with_loop_uses_default_heights() {
+        // A floor and its boundary lie at Z25, beneath a model top at Z75
+        // and stock top at Z76. Reusing the old pocket depth below the loop
+        // would incorrectly put the bottom below the model.
+        let (mut app, face_id) = linked_face_app_at_heights(25., 0., 75.);
+        app.setup_draft = None;
+        let source = app.controller.geometry_state().bindings[&face_id].selected[0].clone();
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let _ = app.update(Message::CadSelect(source.clone()));
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("pocket operation: {}", app.status)
+        };
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        assert!(app.controller.cad_selection().is_empty());
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Loop));
+        let _ = app.update(Message::CadSelect(EntityRef {
+            kind: EntityKind::Loop,
+            id: 5,
+            ..source
+        }));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        let heights = app.resolve_height_editor(id).unwrap();
+        assert!((heights.top - 76.).abs() < 1e-5, "{heights:?}");
+        assert!((heights.bottom - 25.).abs() < 1e-5, "{heights:?}");
+        assert!((heights.feed.unwrap() - 81.).abs() < 1e-5, "{heights:?}");
+        assert!((heights.retract - 81.).abs() < 1e-5, "{heights:?}");
+        assert!((heights.clearance - 91.).abs() < 1e-5, "{heights:?}");
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::Apply);
+        let saved = app.controller.inspection_setup().height_settings[&id]
+            .resolve(
+                app.controller.document(),
+                app.controller.operation(id).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(saved, heights);
+        let _ = app.update(Message::HeightDefaults);
+        assert_eq!(app.resolve_height_editor(id).unwrap(), heights);
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn pocket_geometry_replacement_preserves_custom_height_offsets_and_cancel() {
+        use cam_model::HeightPlaneKind as P;
+        let (mut app, face_id) = linked_face_app_at_heights(25., 0., 75.);
+        app.setup_draft = None;
+        let source = app.controller.geometry_state().bindings[&face_id].selected[0].clone();
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let _ = app.update(Message::CadSelect(source.clone()));
+        let _ = app.update(Message::ConfirmOp);
+        assert!(!app.creating_operation(), "{}", app.status);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("pocket operation: {}", app.status)
+        };
+        let before = app.controller.document().clone();
+        let baseline = app.resolve_height_editor(id).unwrap();
+        let _ = app.update(Message::HeightOffsetChanged(P::Top, "2".into()));
+        let _ = app.update(Message::HeightOffsetChanged(P::Bottom, "-1.5".into()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Loop));
+        let _ = app.update(Message::CadSelect(EntityRef {
+            kind: EntityKind::Loop,
+            id: 5,
+            ..source
+        }));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        let heights = app.resolve_height_editor(id).unwrap();
+        assert_eq!(heights.top, 78.);
+        assert_eq!(heights.bottom, 23.5);
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.resolve_height_editor(id).unwrap(), baseline);
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn pocket_geometry_replacements_keep_stock_top_and_selected_bottom() {
         use cam_model::{HeightPlaneKind as P, HeightReference as R};
         let (mut app, _) = linked_face_app();
         let _ = app.update(Message::BeginOp(OpKind::Pocket));
@@ -2782,7 +3026,7 @@ mod tests {
         let _ = app.update(Message::ConfirmOp);
         assert!(!app.creating_operation(), "{}", app.status);
         let before = app.controller.document().clone();
-        for (filter, entity, top, bottom) in [
+        for (filter, entity) in [
             (
                 CadFilter::Loop,
                 EntityRef {
@@ -2790,10 +3034,8 @@ mod tests {
                     id: 5,
                     ..source.clone()
                 },
-                R::SelectedContours,
-                R::Plane(P::Top),
             ),
-            (CadFilter::Face, source, R::StockTop, R::SelectedContours),
+            (CadFilter::Face, source),
         ] {
             let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(filter)));
             let _ = app.update(Message::CadSelect(entity));
@@ -2805,7 +3047,7 @@ mod tests {
                     .unwrap()
                     .definition(P::Top)
                     .reference,
-                top
+                R::StockTop
             );
             assert_eq!(
                 app.height_draft
@@ -2813,7 +3055,7 @@ mod tests {
                     .unwrap()
                     .definition(P::Bottom)
                     .reference,
-                bottom
+                R::SelectedContours
             );
             assert_eq!(app.controller.document(), &before);
         }

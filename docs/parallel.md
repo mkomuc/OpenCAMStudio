@@ -89,7 +89,7 @@ tolerance when assessing total deviation. With smoothing off, all certified samp
 points are emitted. Small segments seen in the display therefore also appear in
 the output toolpath; the display is not generating extra machining moves.
 
-Projects use schema 36; earlier projects migrate without changing their operations.
+Projects use schema 37; earlier projects migrate without changing their operations.
 The operation is also available through MCP as kind `Parallel`; the `scallop`
 parameter selects sampled surface offsets. Its `scallop_order` parameter accepts
 `outside_in`, `inside_out`, or `shortest`.

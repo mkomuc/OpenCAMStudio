@@ -252,6 +252,11 @@ impl App {
         let Some(op) = operation else {
             return scene;
         };
+        // The saved binding and cached operation contours still describe the old
+        // selection while the geometry picker is open.
+        if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
+            return scene;
+        }
         let frame = &self.controller.inspection_setup().frame;
         let mut outlines = Vec::new();
         let mut centers = Vec::new();
@@ -328,6 +333,10 @@ impl App {
                 Operation::Pocket(p) => {
                     outlines.push((p.boundary.points().to_vec(), true));
                     outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
+                    for region in &p.additional_regions {
+                        outlines.push((region.outer().points().to_vec(), true));
+                        outlines.extend(region.holes().iter().map(|c| (c.points().to_vec(), true)));
+                    }
                 }
                 Operation::Carve(p) => {
                     outlines.push((p.boundary.points().to_vec(), true));

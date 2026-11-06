@@ -31,6 +31,7 @@ fn machine() -> Machine {
         name: "test".into(),
         rapid_rate: 2000.0,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: Envelope::new(
@@ -252,6 +253,8 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
 
 fn pocket() -> Operation {
     Operation::Pocket(PocketOp {
+        additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
@@ -333,6 +336,8 @@ fn doc(ops: Vec<Operation>) -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "descent".into(),
         heights: heights(),

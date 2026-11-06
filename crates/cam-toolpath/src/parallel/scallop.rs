@@ -693,31 +693,35 @@ pub(super) fn compute(
     let mut points = vec![None; nx * ny];
     // Each sample is independent; retain f64 contact math and indexed storage.
     // The distance propagation and motion ordering below remain deterministic.
-    points.par_iter_mut().enumerate().with_min_len(64).for_each(|(index, point)| {
-        if cancel.is_cancelled() {
-            return;
-        }
-        let x = index % nx;
-        let y = index / nx;
-        let mut q = [lo[0] + x as f64 * dx, lo[1] + y as f64 * dy, 0.];
-        if !selected.contact(q) {
-            return;
-        }
-        let Some(z) = grid.height(q, reach) else {
-            return;
-        };
-        let wall = grid
-            .indices(q, reach)
-            .iter()
-            .filter_map(|i| flat_height(q, &grid.mesh[*i], reach))
-            .fold(f64::NEG_INFINITY, f64::max);
-        q[2] = (z + margin)
-            .max(wall - linker.radius + margin)
-            .max(linker.bottom);
-        if q[2] <= linker.top + margin && q[2] < linker.clearance {
-            *point = Some(q);
-        }
-    });
+    points
+        .par_iter_mut()
+        .enumerate()
+        .with_min_len(64)
+        .for_each(|(index, point)| {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let x = index % nx;
+            let y = index / nx;
+            let mut q = [lo[0] + x as f64 * dx, lo[1] + y as f64 * dy, 0.];
+            if !selected.contact(q) {
+                return;
+            }
+            let Some(z) = grid.height(q, reach) else {
+                return;
+            };
+            let wall = grid
+                .indices(q, reach)
+                .iter()
+                .filter_map(|i| flat_height(q, &grid.mesh[*i], reach))
+                .fold(f64::NEG_INFINITY, f64::max);
+            q[2] = (z + margin)
+                .max(wall - linker.radius + margin)
+                .max(linker.bottom);
+            if q[2] <= linker.top + margin && q[2] < linker.clearance {
+                *point = Some(q);
+            }
+        });
     if cancel.is_cancelled() {
         out.cancelled = true;
         return out;

@@ -6,6 +6,7 @@ fn machine() -> Machine {
         name: "test".into(),
         rapid_rate: 1000.0,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10000.0,
         max_feed: 500.0,
         envelope: Envelope::new(
@@ -20,12 +21,15 @@ fn machine() -> Machine {
 #[test]
 fn machine_numeric_limits_are_finite_and_positive() {
     machine().validate().unwrap();
-    let cases: [fn(&mut Machine); 11] = [
+    let cases: [fn(&mut Machine); 14] = [
         |m| m.tool_change_seconds = -0.01,
         |m| m.tool_change_seconds = f64::INFINITY,
         |m| m.rapid_rate = 0.0,
         |m| m.max_feed = -1.0,
         |m| m.max_spindle_rpm = f64::NAN,
+        |m| m.min_spindle_rpm = -1.0,
+        |m| m.min_spindle_rpm = f64::NAN,
+        |m| m.min_spindle_rpm = m.max_spindle_rpm + 1.0,
         |m| m.envelope.min.x = f64::INFINITY,
         |m| m.envelope.max.y = m.envelope.min.y,
         |m| m.envelope.max.z = m.envelope.min.z - 1.0,

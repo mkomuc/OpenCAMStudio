@@ -134,7 +134,9 @@ impl App {
 
     fn tree_body_selected(&self, id: InstanceId) -> bool {
         self.model_view == Some(TreeNode::Model(id))
-            || (self.setup_draft.is_some() && self.setup_model_selection == Some(id))
+            || (self.setup_draft.is_some()
+                && (self.setup_model_selection == Some(id)
+                    || self.setup_fixture_selection == Some(id)))
             || self
                 .controller
                 .cad_selection()

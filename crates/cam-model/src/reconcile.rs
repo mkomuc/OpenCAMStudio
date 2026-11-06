@@ -427,6 +427,8 @@ mod tests {
             material: String::new(),
             material_id: None,
             model_instances: Vec::new(),
+            fixture_instances: Vec::new(),
+            fixture_clearance: Default::default(),
             program_name: String::new(),
             name: "s".into(),
             heights: heights(),

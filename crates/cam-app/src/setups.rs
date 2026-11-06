@@ -94,12 +94,13 @@ impl AppController {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        setup.fixture_instances.clear();
         setup.operations.clear();
         setup.patterns.clear();
         setup.operation_heights.clear();
         setup.height_settings.clear();
         setup.stock_to_leave.clear();
-        setup.stock = default_stock(self.defaults.top_of_stock, self.defaults.depth);
+        setup.stock = default_stock();
         setup.extra_origins.clear();
         let id = setup.id;
         self.edit_document(move |doc| doc.setups.push(setup));
@@ -1112,6 +1113,7 @@ impl AppController {
             return Err("Enter a setup name".into());
         }
         self.validate_setup_frame(&setup)?;
+        setup.validate_fixtures(self.geometry_state())?;
         if !setup.origin.iter().all(|v| v.is_finite()) {
             return Err("Origin must contain finite coordinates".into());
         }

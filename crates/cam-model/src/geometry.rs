@@ -366,6 +366,23 @@ pub enum FrameOrigin {
     #[default]
     ModelOrigin,
     Explicit([f64; 3]),
+    SelectedPoint([f64; 3]),
+    StockBoxPoint([f64; 3]),
+    ModelBoxPoint([f64; 3]),
+    TwoPoints([f64; 3]),
+}
+impl FrameOrigin {
+    /// Update coordinates after a frame change while retaining their source.
+    pub fn with_coordinates(&self, coordinates: [f64; 3]) -> Self {
+        match self {
+            Self::ModelOrigin => Self::ModelOrigin,
+            Self::Explicit(_) => Self::Explicit(coordinates),
+            Self::SelectedPoint(_) => Self::SelectedPoint(coordinates),
+            Self::StockBoxPoint(_) => Self::StockBoxPoint(coordinates),
+            Self::ModelBoxPoint(_) => Self::ModelBoxPoint(coordinates),
+            Self::TwoPoints(_) => Self::TwoPoints(coordinates),
+        }
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FrameReferences {

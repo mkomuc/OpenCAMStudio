@@ -20,6 +20,62 @@ pub(super) struct StockSimulation {
     pub collisions: Vec<Collision>,
 }
 impl JobInputs {
+    pub(super) fn fixture_collisions(
+        &self,
+        program: &Program,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Collision>, Diagnostic> {
+        let setup = self.document.setup();
+        let error = |reason| Diagnostic::error(reason).for_setup(setup.id);
+        setup
+            .validate_fixtures(&self.document.geometry)
+            .map_err(error)?;
+        if setup.fixture_instances.is_empty() {
+            return Ok(Vec::new());
+        }
+        let geometry = self
+            .document
+            .geometry
+            .geometry_in_setup(&setup.frame)
+            .map_err(error)?;
+        self.fixture_collisions_against(program, &geometry, cancel)
+    }
+
+    /// Predecessor snapshots have already been rotated for planning. Accept their
+    /// geometry explicitly so inherited-stock verification never rotates it twice.
+    fn fixture_collisions_against(
+        &self,
+        program: &Program,
+        geometry: &cam_model::GeometryState,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Collision>, Diagnostic> {
+        let setup = self.document.setup();
+        let check = || -> Result<_, String> {
+            let fixtures = setup.fixture_envelopes(geometry)?;
+            cam_toolpath::verify_fixture_clearance(program, &setup.tools, &fixtures, cancel)
+        };
+        check()
+            .map(|contacts| {
+                contacts
+                    .into_iter()
+                    .map(|contact| Collision {
+                        kind: cam_sim::CollisionKind::Fixture,
+                        at: contact.at,
+                        message: format!(
+                            "Tool or shank enters the clearance envelope of fixture {}",
+                            contact.fixture_name
+                        ),
+                        op_id: Some(contact.tag.op_id),
+                        pattern_id: contact.tag.pattern_id,
+                        instance_index: contact.tag.instance_index,
+                        step_index: Some(contact.step_index),
+                        fraction: contact.fraction,
+                    })
+                    .collect()
+            })
+            .map_err(|reason| Diagnostic::error(reason).for_setup(setup.id))
+    }
+
     pub(super) fn analyze_stock_removal(
         &self,
         cancel: &CancelToken,
@@ -69,7 +125,8 @@ impl JobInputs {
                 }
             })
             .collect();
-        cam_sim::analyze_removal_controlled(
+        let fixture_contacts = self.fixture_collisions(program, cancel)?;
+        let mut samples = cam_sim::analyze_removal_controlled(
             program,
             self.min,
             self.max,
@@ -82,7 +139,18 @@ impl JobInputs {
             &|| cancel.is_cancelled(),
             |done, total| progress.set(JobPhase::Verification, done, total, None),
         )
-        .map_err(Diagnostic::error)
+        .map_err(Diagnostic::error)?;
+        if let Some(first) = fixture_contacts
+            .iter()
+            .filter_map(|c| c.step_index.map(|i| (i, c.fraction)))
+            .min_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))
+        {
+            for sample in &mut samples {
+                sample.collision |= sample.step_index > first.0
+                    || (sample.step_index == first.0 && sample.end_fraction >= first.1);
+            }
+        }
+        Ok(samples)
     }
 
     pub(crate) fn stock_resolution(&self, program: &Program) -> f64 {
@@ -525,7 +593,7 @@ impl JobInputs {
                 ),
                 None => None,
             };
-            let result = source
+            let mut result = source
                 .simulate_field(
                     &mut job.program,
                     res,
@@ -535,6 +603,11 @@ impl JobInputs {
                     &mut SimulationCache::default(),
                 )
                 .ok_or_else(|| failure("Stock simulation cancelled".into()))?;
+            result.collisions.extend(source.fixture_collisions_against(
+                &job.program,
+                &source.document.geometry,
+                cancel,
+            )?);
             if !result.collisions.is_empty() {
                 return Err(failure(format!(
                     "Cannot use stock from {}: resolve its simulation collisions first",
@@ -598,6 +671,285 @@ mod tests {
             }));
         });
         app
+    }
+
+    fn add_fixture(app: &mut AppController, bounds: [[f64; 3]; 2]) -> u64 {
+        use cam_model::*;
+        app.add_cad_asset(
+            GeometryAsset {
+                id: 1,
+                revision: 1,
+                name: "Vise".into(),
+                source_format: CadFormat::Step,
+                source_data: Vec::new().into(),
+                source_units: SourceUnits::Millimetres,
+                backend: "analytic fixture".into(),
+                import_options: None,
+                import_diagnostics: vec![],
+                source_fingerprint: String::new(),
+                topology: TopologySnapshot {
+                    bodies: vec![CadBody {
+                        id: 1,
+                        name: "Jaw".into(),
+                        valid_solid: true,
+                        bounds,
+                    }],
+                    ..Default::default()
+                }
+                .into(),
+            },
+            vec![GeometryInstance {
+                id: 1,
+                asset_id: 1,
+                body_id: 1,
+                name: "Jaw".into(),
+                placement: Default::default(),
+                visible: true,
+            }],
+        )
+        .unwrap();
+        let id = app.geometry_state().instances.last().unwrap().id;
+        let mut setup = app.inspection_setup().clone();
+        setup.fixture_instances = vec![id];
+        setup.fixture_clearance = FixtureClearance {
+            radial: 0.5,
+            axial: 2.0,
+        };
+        app.apply_setup_settings(setup).unwrap();
+        id
+    }
+
+    #[test]
+    fn fixtures_raise_travel_planes_without_becoming_stock_and_survive_project_history() {
+        let mut app = drilled_blank();
+        let id = add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        assert_eq!(app.setup_model_bounds(), ([0.; 3], [0.; 3]));
+        assert!(app.setup_geometry_state().unwrap().instances.is_empty());
+        let result = app.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(result.collisions.is_empty());
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, cam_cldata::Step::Drill(c) if c.retract >= 17.)));
+        assert!(app.export_nc().is_ok());
+        let path = std::env::temp_dir().join(format!("fixture-setup-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reopened.inspection_setup().fixture_instances, vec![id]);
+        assert_eq!(
+            reopened.inspection_setup().fixture_clearance,
+            app.inspection_setup().fixture_clearance
+        );
+        let copy = reopened
+            .duplicate_setup(reopened.active_setup_id())
+            .unwrap();
+        assert_eq!(reopened.inspection_setup().id, copy);
+        assert_eq!(reopened.inspection_setup().fixture_instances, vec![id]);
+        reopened.add_setup();
+        assert!(reopened.inspection_setup().fixture_instances.is_empty());
+    }
+
+    #[test]
+    fn fixtures_block_generation_and_export_and_changes_invalidate_dependencies() {
+        let mut app = drilled_blank();
+        let id = add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        let before = app.current_toolpath_fingerprints();
+        let mut setup = app.inspection_setup().clone();
+        setup.fixture_clearance.radial = 1.;
+        app.apply_setup_settings(setup).unwrap();
+        let after = app.current_toolpath_fingerprints();
+        assert_ne!(before, after);
+        app.place_cad_instance(
+            id,
+            cam_model::RigidTransform {
+                translation: [-15., 0., 0.],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(after, app.current_toolpath_fingerprints());
+        let result = app.run(&CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("fixture Jaw")));
+        assert!(result
+            .collisions
+            .iter()
+            .any(|c| c.kind == cam_sim::CollisionKind::Fixture && c.op_id == Some(1)));
+        assert!(app.export_nc().is_err());
+        assert!(app.undo());
+        assert_eq!(
+            app.run(&CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
+    }
+
+    #[test]
+    fn fixture_playback_checks_no_stock_and_uses_setup_axes() {
+        use cam_cldata::{MoveKind, Point3, Step, Tag};
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        app.edit_setup(|s| {
+            s.frame = cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()
+        });
+        let mut inputs = app.job_inputs();
+        inputs.min = [0.; 3];
+        inputs.max = [0.; 3];
+        let tag = Tag::new(1, MoveKind::Cutting);
+        inputs.preview_program = Some(Program {
+            steps: vec![
+                Step::Rapid {
+                    to: Point3::new(5., -15., 0.),
+                    tag,
+                },
+                Step::Linear {
+                    to: Point3::new(5., -25., 0.),
+                    feed: 100.,
+                    tag,
+                },
+            ],
+        });
+        let result = inputs.execute(
+            &CancelToken::new(),
+            &mut OperationCache::default(),
+            &Progress::default(),
+            &mut StockSimulationCache::default(),
+        );
+        assert_eq!(result.completion, JobCompletion::Complete);
+        assert!(result.stock_vertices.is_empty());
+        assert_eq!(result.collisions.len(), 1);
+        assert_eq!(result.collisions[0].kind, cam_sim::CollisionKind::Fixture);
+        assert_eq!(result.collisions[0].step_index, Some(1));
+        assert!(result.collisions[0].fraction > 0. && result.collisions[0].fraction < 1.);
+    }
+
+    #[test]
+    fn inherited_stock_respects_rotated_predecessor_fixtures() {
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[-6., -6., -3.], [-4., -4., 15.]]);
+        app.edit_setup(|s| {
+            s.frame = cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()
+        });
+        inherited_setup(&mut app);
+        let result = app.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(result.collisions.is_empty());
+    }
+
+    #[test]
+    fn radial_and_axial_fixture_clearances_are_applied_independently() {
+        use cam_cldata::{MoveKind, Point3, Step, Tag};
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[8., 4., 0.], [9., 6., 1.]]);
+        let program = Program {
+            steps: vec![Step::Rapid {
+                to: Point3::new(5., 5., 2.),
+                tag: Tag::new(1, MoveKind::Link),
+            }],
+        };
+        for (radial, axial, expected) in [(0., 2., 0), (3.1, 0., 0), (3.1, 2., 1)] {
+            app.edit_setup(|s| s.fixture_clearance = cam_model::FixtureClearance { radial, axial });
+            assert_eq!(
+                app.job_inputs()
+                    .fixture_collisions(&program, &CancelToken::new())
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_contacts_taint_force_samples_from_contact_onward() {
+        use cam_cldata::{MoveKind, Point3, Step, Tag};
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[5., 4., -2.], [6., 6., 1.]]);
+        let mut inputs = app.job_inputs();
+        let tag = Tag::new(1, MoveKind::Cutting);
+        inputs.preview_program = Some(Program {
+            steps: vec![
+                Step::Rapid {
+                    to: Point3::new(0., 5., -1.),
+                    tag,
+                },
+                Step::Linear {
+                    to: Point3::new(10., 5., -1.),
+                    feed: 100.,
+                    tag,
+                },
+            ],
+        });
+        let samples = inputs
+            .analyze_stock_removal(
+                &CancelToken::new(),
+                &mut OperationCache::default(),
+                &Progress::default(),
+            )
+            .unwrap();
+        assert!(samples.first().is_some_and(|s| !s.collision));
+        assert!(samples.last().is_some_and(|s| s.collision));
+    }
+
+    #[test]
+    fn legacy_setup_defaults_to_no_fixtures_with_five_mm_clearances() {
+        let app = drilled_blank();
+        let mut value = serde_json::to_value(app.document()).unwrap();
+        let setup = value["setups"][0].as_object_mut().unwrap();
+        setup.remove("fixture_instances");
+        setup.remove("fixture_clearance");
+        value["schema_version"] = serde_json::json!(36);
+        cam_model::migrate::document(&mut value, 36).unwrap();
+        let restored: cam_model::Document = serde_json::from_value(value).unwrap();
+        assert!(restored.setup().fixture_instances.is_empty());
+        assert_eq!(
+            restored.setup().fixture_clearance,
+            cam_model::FixtureClearance {
+                radial: 5.,
+                axial: 5.
+            }
+        );
+    }
+
+    #[test]
+    fn fixture_settings_reject_invalid_values_missing_bodies_and_dual_roles() {
+        let mut app = drilled_blank();
+        let id = add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        let before = app.document().clone();
+        for value in [-1., f64::NAN, f64::INFINITY] {
+            let mut draft = app.inspection_setup().clone();
+            draft.fixture_clearance.axial = value;
+            assert!(app.apply_setup_settings(draft).is_err());
+            assert_eq!(app.document(), &before);
+        }
+        let mut draft = app.inspection_setup().clone();
+        draft.model_instances.push(id);
+        assert!(app.apply_setup_settings(draft).is_err());
+        let mut draft = app.inspection_setup().clone();
+        draft.fixture_instances.push(999);
+        assert!(app.apply_setup_settings(draft).is_err());
+        assert!(app.remove_cad_asset(app.geometry_state().instance(id).unwrap().asset_id));
+        let result = app.run(&CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Fixture body")));
     }
 
     fn inherited_setup(app: &mut AppController) -> u64 {
@@ -683,6 +1035,8 @@ mod tests {
                 thickness: 17.,
             };
             setup.operations = vec![Operation::Pocket(PocketOp {
+                additional_regions: Vec::new(),
+                stock_contours: Default::default(),
                 finishing: Default::default(),
                 id: 1,
                 tool: 1,

@@ -5,17 +5,20 @@ mod parallel;
 pub use parallel::{resolve_parallel, ParallelGeometry};
 mod adaptive;
 mod advisory;
+mod pocket_regions;
+mod pocket_stock;
 pub use advisory::{
     resolve_binding_advisory, resolve_selection_advisory, verify_profile_entry, verify_selection,
 };
+pub use pocket_stock::pocket_stock_domains;
 mod bore_entry;
 mod chamfer_faces;
 mod profile_contours;
 mod profile_entries;
 mod surface_geometry;
 pub use adaptive::{
-    adaptive_heights, resolve_adaptive, validate_adaptive_selection, AdaptiveGeometry,
-    AdaptiveLayer, AdaptiveResolveConfig,
+    adaptive_heights, pocket_stock_shadow, resolve_adaptive, validate_adaptive_selection,
+    AdaptiveGeometry, AdaptiveLayer, AdaptiveResolveConfig,
 };
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
@@ -197,6 +200,9 @@ pub fn resolve_binding(
     state: &GeometryState,
     binding: &GeometryBinding,
 ) -> Result<ResolvedInput, String> {
+    if let Some(input) = pocket_regions::resolve(state, binding, false) {
+        return input;
+    }
     if let ExtractionRecipe::ProfileEntries { entries } = &binding.recipe {
         return profile_entries::resolve(state, binding, entries);
     }
@@ -1094,6 +1100,10 @@ fn derive(
     binding: &GeometryBinding,
     stock_top: f64,
 ) -> Result<(Vec<Polygon>, Vec<ResolvedHole>, CuttingHeights), String> {
+    if let Some(input) = pocket_regions::resolve(state, binding, false) {
+        let input = input?;
+        return Ok((input.regions, input.holes, input.heights));
+    }
     if matches!(
         binding.recipe,
         ExtractionRecipe::AdaptiveClearing | ExtractionRecipe::ParallelFinishing
@@ -1785,6 +1795,107 @@ mod tests {
         f.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
         (f.state(), reference(floor, EntityKind::Face))
     }
+    #[test]
+    fn pocket_stock_domains_extend_open_edges_but_continue_rising_walls() {
+        let mut f = Fixture::new();
+        let floor = f.face(
+            vec![square(2., 18., 2., 18., -3.), square(8., 12., 8., 12., -3.)],
+            [0., 0., 1.],
+        );
+        f.face(
+            vec![vec![
+                [2., 2., -3.],
+                [2., 18., -3.],
+                [2., 18., 0.],
+                [2., 2., 0.],
+            ]],
+            [-1., 0., 0.],
+        );
+        f.face(
+            vec![vec![
+                [18., 2., -3.],
+                [18., 18., -3.],
+                [18., 18., -5.],
+                [18., 2., -5.],
+            ]],
+            [1., 0., 0.],
+        );
+        // An inner raised island is protected by the shadow, never used to
+        // restrict which side of the outer walls contains the floor.
+        f.walls(8., 12., 8., 12., -3., 0.);
+        let mut state = f.state();
+        let reference = reference(floor, EntityKind::Face);
+        let domains = pocket_stock_domains(
+            &state,
+            std::slice::from_ref(&reference),
+            -3.,
+            [[-10., -10.], [30., 30.]],
+        )
+        .unwrap();
+        assert_eq!(domains.len(), 1);
+        assert!((domains[0].area() - 28. * 40.).abs() < T);
+        assert!(
+            !domains[0].contains(Point::new(1., 25.)),
+            "no wraparound behind the rising wall"
+        );
+        assert!(
+            domains[0].contains(Point::new(25., 25.)),
+            "descending and open edges extend to stock"
+        );
+        assert!(
+            domains[0].contains(Point::new(10., 10.)),
+            "inner loops do not clip the domain"
+        );
+
+        state.instances[0].placement = RigidTransform {
+            rotation: [[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]],
+            translation: [100., 50., 10.],
+        };
+        let domains =
+            pocket_stock_domains(&state, &[reference], 7., [[70., 40.], [110., 80.]]).unwrap();
+        assert!((domains[0].area() - 28. * 40.).abs() < T);
+        assert!(!domains[0].contains(Point::new(75., 51.)));
+        assert!(domains[0].contains(Point::new(75., 75.)));
+    }
+
+    #[test]
+    fn pocket_stock_domains_do_not_clip_across_concave_floors() {
+        let mut f = Fixture::new();
+        let floor = f.face(
+            vec![vec![
+                [2., 2., -3.],
+                [18., 2., -3.],
+                [18., 8., -3.],
+                [8., 8., -3.],
+                [8., 18., -3.],
+                [2., 18., -3.],
+            ]],
+            [0., 0., 1.],
+        );
+        f.face(
+            vec![vec![
+                [8., 8., -3.],
+                [8., 18., -3.],
+                [8., 18., 0.],
+                [8., 8., 0.],
+            ]],
+            [1., 0., 0.],
+        );
+        let state = f.state();
+        let domains = pocket_stock_domains(
+            &state,
+            &[reference(floor, EntityKind::Face)],
+            -3.,
+            [[-10., -10.], [30., 30.]],
+        )
+        .unwrap();
+        assert_eq!(domains[0].area(), 1600.);
+        assert!(
+            domains[0].contains(Point::new(15., 5.)),
+            "the concave floor extends to both sides of this wall"
+        );
+    }
+
     #[test]
     fn pocket_island_boundary_and_translated_heights_are_exact() {
         let (mut state, r) = pocket();

@@ -281,3 +281,6 @@ pub trait Strategy {
     /// `cancel` at loop boundaries so long jobs stop promptly.
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult;
 }
+
+mod fixtures;
+pub use fixtures::{verify_fixture_clearance, FixtureContact, FIXTURE_ROUTING_REVISION};

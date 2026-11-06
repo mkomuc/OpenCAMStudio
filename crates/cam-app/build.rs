@@ -18,7 +18,7 @@
 //! to emit a resource section while cross-compiling away from Windows.
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/opencamstudio.ico");
+    println!("cargo:rerun-if-changed=assets/app-icon-v2/OpenCAMStudio.ico");
     emit_git_provenance();
     #[cfg(windows)]
     embed_windows_resources();
@@ -68,7 +68,7 @@ fn embed_windows_resources() {
         return; // on Windows, but cross-compiling elsewhere
     }
     let mut res = winresource::WindowsResource::new();
-    res.set_icon("assets/opencamstudio.ico");
+    res.set_icon("assets/app-icon-v2/OpenCAMStudio.ico");
     // The spaced display name, matching the window title, the .desktop entry and the
     // macOS bundle. Identifiers stay concatenated; this is a string a human reads.
     res.set("ProductName", "Open CAM Studio");

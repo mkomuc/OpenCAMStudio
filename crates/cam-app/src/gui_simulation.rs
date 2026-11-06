@@ -454,7 +454,7 @@ impl SimulationPlayer {
             .iter()
             .filter_map(|collision| {
                 let index = collision.step_index?;
-                if !collision.kind.is_stock_collision()
+                if !collision.kind.stops_playback()
                     || self.acknowledged_step.is_some_and(|ack| index <= ack)
                 {
                     return None;

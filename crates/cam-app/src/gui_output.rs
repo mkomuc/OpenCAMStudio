@@ -74,6 +74,11 @@ impl App {
     }
 
     pub(super) fn log_geometry_validation(&mut self) {
+        if self.stock_contour_editor() {
+            // Stock uses its own footprint resolver, not the pocket-floor recipe.
+            self.output_last_geometry_error = None;
+            return;
+        }
         use cam_model::{ExtractionRecipe, ProfileGeometrySource};
         let kind = self.geometry_operation_kind().or(self.cad_pending_kind);
         let geometry = crate::cad_operations::geometry_for_setup(self.controller.document());

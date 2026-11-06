@@ -1,6 +1,18 @@
 //! Optional radial finishing for a pocket's outer walls and islands.
 use serde::{Deserialize, Serialize};
 
+/// Optional stock footprint for 2D pocket/adaptive clearing. An empty selection
+/// uses the setup stock box. These contours describe material, not containment
+/// of the cutter centre: entries and edge runout may lie outside them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StockContours {
+    pub enabled: bool,
+    pub regions: Vec<cam_geo::Polygon>,
+    /// CAD sources are re-resolved when planning; drawing contours are snapshots.
+    pub source: Option<crate::GeometryBinding>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PocketFinishing {

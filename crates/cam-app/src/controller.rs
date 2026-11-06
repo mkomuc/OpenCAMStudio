@@ -181,6 +181,8 @@ pub enum ExportError {
     RapidThroughStock(usize),
     /// Non-cutting feeds or cutter tips contact remaining stock.
     NonCuttingThroughStock(usize),
+    /// Tool or shank contacts a fixture clearance envelope.
+    FixtureCollision(usize),
     /// The post rejected the program.
     Post(PostError),
 }
@@ -216,6 +218,7 @@ impl std::fmt::Display for ExportError {
                 f,
                 "{n} non-cutting move(s) or cutter tips contact remaining stock — a crash hazard, so the export is blocked."
             ),
+            ExportError::FixtureCollision(n) => write!(f, "{n} fixture clearance collision(s). Move the fixture or change the toolpath before exporting."),
             ExportError::Post(e) => write!(f, "{e}."),
         }
     }
@@ -2257,6 +2260,8 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Pocket(PocketOp {
+                    additional_regions: Vec::new(),
+                    stock_contours: Default::default(),
                     finishing: Default::default(),
                     id: 0,
                     tool,
@@ -2825,6 +2830,8 @@ impl AppController {
                         }));
                     } else {
                         operations.push(Operation::Pocket(PocketOp {
+                            additional_regions: Vec::new(),
+                            stock_contours: Default::default(),
                             finishing: Default::default(),
                             id,
                             tool: 1,
@@ -2865,10 +2872,12 @@ impl AppController {
             material: String::new(),
             material_id: None,
             model_instances: Vec::new(),
+            fixture_instances: Vec::new(),
+            fixture_clearance: Default::default(),
             program_name: String::new(),
             name: self.program_name(),
             heights: Heights::new(p.clearance, p.retract, p.top_of_stock),
-            stock: self.stock(p.top_of_stock, p.depth),
+            stock: default_stock(),
             tools,
             operations,
             patterns: Vec::new(),
@@ -2880,14 +2889,6 @@ impl AppController {
             stock_to_leave: Default::default(),
             tool_change_height: None,
         })
-    }
-
-    /// New stock follows all model bounds. Planar drawings retain their initial
-    /// cutting depth below Z0 and the configured allowance above it.
-    fn stock(&self, top: f64, depth: f64) -> Stock {
-        Stock::RelativeBox {
-            offsets: [[0.0, 0.0, depth.max(0.0)], [0.0, 0.0, top.max(0.0)]],
-        }
     }
 
     /// The current stock resolved to a concrete box `(min, max)` (mm), fitting the
@@ -3312,11 +3313,10 @@ fn set_origin_index_value(setup: &mut Setup, from: u32, to: u32) {
     }
 }
 
-/// New setups grow with the model and remain non-degenerate before import.
-/// Keep room above the model for facing and below a drawing for its default cut.
-fn default_stock(top: f64, depth: f64) -> Stock {
+/// New relative stock extends one millimetre beyond each model face.
+fn default_stock() -> Stock {
     Stock::RelativeBox {
-        offsets: [[1.0, 1.0, depth.max(1.0)], [1.0, 1.0, top.max(1.0)]],
+        offsets: [[1.0; 3]; 2],
     }
 }
 
@@ -3329,10 +3329,12 @@ fn default_setup(p: &JobParams) -> Setup {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "Untitled".to_string(),
         heights: Heights::new(p.clearance, p.retract, p.top_of_stock),
-        stock: default_stock(p.top_of_stock, p.depth),
+        stock: default_stock(),
         tools: vec![Tool {
             number: 1,
             diameter: p.tool_diameter,
@@ -3425,6 +3427,7 @@ mod tests {
             name: "test".into(),
             rapid_rate: 2000.0,
             tool_change_seconds: 0.0,
+            min_spindle_rpm: 0.0,
             max_spindle_rpm: 10_000.0,
             max_feed: 800.0,
             envelope: Envelope::new(
@@ -3952,10 +3955,7 @@ mod tests {
         let mut app = AppController::new(machine());
         assert!(app.setups().is_empty());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert_eq!(app.document().setup().stock, default_stock());
         app.edit_stock(|stock| {
             *stock = Stock::FixedBox {
                 size: [100.0; 3],
@@ -3967,19 +3967,13 @@ mod tests {
         assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
         assert!(matches!(app.setups()[0].stock, Stock::FixedBox { .. }));
         app.add_setup();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert_eq!(app.document().setup().stock, default_stock());
         app.activate_setup(copy).unwrap();
         assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
         app.new_project();
         assert!(app.setups().is_empty());
         app.add_setup();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert_eq!(app.document().setup().stock, default_stock());
     }
 
     #[test]
@@ -3989,12 +3983,10 @@ mod tests {
         let (min3, max3) = app.setup_model_bounds();
         let (bmin, bmax) = ([min3[0], min3[1]], [max3[0], max3[1]]);
 
-        // Default stock snugly fits the part in XY (no offset) and hangs from the
-        // top down to the deepest cut.
+        // Default stock extends one millimetre beyond each model face.
         let (min, max) = app.stock_box();
-        assert_eq!([min[0], min[1]], bmin, "no XY offset by default");
-        assert_eq!([max[0], max[1]], bmax);
-        assert!(max[2] > min[2], "non-degenerate Z");
+        assert_eq!(min, min3.map(|v| v - 1.0));
+        assert_eq!(max, max3.map(|v| v + 1.0));
 
         // Grow it: 3 mm in X, 5 mm in Y, 25 mm thick from a top of 0.
         app.edit_stock(|s| {
@@ -4012,7 +4004,7 @@ mod tests {
         // Editing stock is one undoable step.
         assert!(app.undo());
         let (min, _) = app.stock_box();
-        assert_eq!([min[0], min[1]], bmin, "undo restores the snug fit");
+        assert_eq!([min[0], min[1]], [bmin[0] - 1.0, bmin[1] - 1.0]);
     }
 
     #[test]
