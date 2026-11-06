@@ -10832,6 +10832,15 @@ impl App {
             ),
         ]
         .spacing(6);
+        #[cfg(feature = "occt")]
+        let credits = credits.push(body(
+            "STEP/IGES import uses Open CASCADE Technology (OCCT), \
+             Copyright © Open CASCADE SAS and contributors. OCCT is licensed under \
+             LGPL 2.1 with the Open CASCADE exception. The licence and exception are \
+             included in the package's licences directory and are available at \
+             https://occt3d.com/dev/doc/overview/html/occt_public_license.html."
+                .to_string(),
+        ));
 
         let card = container(
             column![
