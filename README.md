@@ -39,6 +39,11 @@ A CAM application for CNC toolpath generation, built in Rust.
 - **Stock to Leave** — shared radial and axial finishing allowances for Profile,
   Pocket, 3D Adaptive Clearing and 3D Parallel; axial allowance for Face. Disabled settings
   preserve existing toolpaths.
+- **Fourth-axis wrap milling** — cylindrical Profile, Pocket and 2D adaptive
+  toolpaths with CAD cylinder/boundary selection, continuous A/B motion, rotary
+  backplot/playback and inverse-time LinuxCNC/Fanuc/Haas output. Cylindrical
+  stock-removal and collision simulation remain unavailable; see
+  [workflow and limits](docs/rotary-wrap.md).
 - **V-carving** — the boundary outlines an *area*, not a path: the tool never
   touches it, its flanks land on it, and the depth follows from the shape's own
   width. Built on **inward offset rings, not a medial axis** — the ring at inward

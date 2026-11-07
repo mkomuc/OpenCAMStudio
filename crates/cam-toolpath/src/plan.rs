@@ -191,6 +191,9 @@ fn build_job_with_compute(
             }
         }
     };
+    if !fixtures.is_empty() && setup.operations.iter().any(|op|doc.operation_is_included(setup.id,op.id()) && op.rotary_wrap().is_some()) {
+        return JobResult {completion:JobCompletion::Failed,diagnostics:vec![Diagnostic::error("Rotary fixture verification is not available; use a separate setup without fixture envelopes for wrapped operations").for_setup(setup.id)],..Default::default()};
+    }
     let fixture_top = fixtures
         .iter()
         .map(|f| f.max[2] + 0.01)
@@ -264,6 +267,20 @@ fn build_job_with_compute(
             completion: JobCompletion::Failed,
         };
     }
+    let mut rotary_axes=std::collections::HashMap::new();
+    for operation in setup.operations.iter().filter(|op|doc.operation_is_included(setup.id,op.id())) {
+        if let Some(wrap)=operation.rotary_wrap() {
+            let reason=wrap.validate().err().or_else(|| {
+                let entry=(wrap.axis,match wrap.axis {cam_model::RotaryAxis::A=>[wrap.center[1],wrap.center[2]],cam_model::RotaryAxis::B=>[wrap.center[0],wrap.center[2]]});
+                rotary_axes.insert(operation.work_offset(),entry).and_then(|old| {
+                    (old.0!=entry.0 || old.1.iter().zip(entry.1).any(|(a,b)|(a-b).abs()>1e-6)).then(||"Wrapped operations on one datum must share one rotary axis and centre".to_string())
+                })
+            });
+            if let Some(reason)=reason {
+                return JobResult{completion:JobCompletion::Failed,diagnostics:vec![Diagnostic::error(reason).for_op(operation.id()).for_setup(setup.id)],..Default::default()};
+            }
+        }
+    }
 
     // Every use of this value assumes it is *above* the work: `lift_to_tool_change`
     // is named for what it is supposed to do, and the cross that follows travels at
@@ -297,7 +314,7 @@ fn build_job_with_compute(
             max_clearance - origin_z
         )));
     }
-    let tool_change_height = tool_change_height.max(max_clearance).max(fixture_top);
+    let mut tool_change_height = tool_change_height.max(max_clearance).max(fixture_top);
 
     program.push(Step::Comment(setup.name.clone()));
 
@@ -333,6 +350,7 @@ fn build_job_with_compute(
             break;
         }
         env.heights = setup.heights_for(operation.id());
+        if let Some(wrap)=operation.rotary_wrap(){env.heights.top_of_stock=wrap.surface_z;}
         let stock_to_leave = setup.stock_to_leave_for(operation.id());
         let configured = setup
             .height_settings
@@ -417,6 +435,8 @@ fn build_job_with_compute(
                 },
                 false,
             )
+        } else if operation.rotary_wrap().is_some() {
+            compute_at_heights(operation,&env,doc.operation_base_cutting_heights(operation),cancel,ComputeContext {stock_to_leave,compute:&mut compute,geometry:&doc.geometry},false)
         } else {
             compute(operation, &env, cancel, stock_to_leave, &doc.geometry, None)
         };
@@ -645,6 +665,29 @@ fn build_job_with_compute(
         );
         completion = JobCompletion::Failed;
         planned.clear();
+    }
+
+    // Expand patterns in the unwrapped plane, then wrap each derived instance.
+    for pl in &mut planned {
+        let Some(wrap) = setup.operations.iter().find(|op|op.id()==pl.op_id).and_then(Operation::rotary_wrap) else { continue; };
+        if pl.clearance <= wrap.surface_z {
+            pl.fragment=Program::new();
+            diagnostics.push(Diagnostic::error("Wrapped clearance must be above the unwrapped cylinder surface").for_op(pl.op_id));
+            completion=JobCompletion::Failed;
+            continue;
+        }
+        match crate::wrap_program(&pl.fragment,wrap,cancel) {
+            Ok(fragment) => {
+                pl.fragment=fragment;
+                pl.clearance=wrap.center[2]+wrap.effective_radius()+pl.clearance-wrap.surface_z;
+                tool_change_height=tool_change_height.max(pl.clearance);
+            }
+            Err(reason) => {
+                pl.fragment=Program::new();
+                diagnostics.push(Diagnostic::error(reason).for_op(pl.op_id).for_setup(setup.id));
+                completion=if cancel.is_cancelled(){JobCompletion::Cancelled}else{JobCompletion::Failed};
+            }
+        }
     }
 
     // Group the operations by origin, in the setup's origin order, so each datum's
@@ -1197,6 +1240,20 @@ fn emit_instance(
         st.current_rpm = Some(pl.rpm);
     }
     st.spindle_started = true;
+    // Ordinary machining resumes at rotary zero, with the cutter lifted before
+    // indexing. Retain the full turn count rather than choosing a shortest path.
+    if !pl.fragment.has_rotary_motion() && !datum_changing {
+        if let Some(Step::Rotary {angle,axis,center,..})=program.steps().iter().rev().find(|s|matches!(s,Step::Rotary{..}|Step::Datum(_))) {
+            let (angle,axis,center)=(*angle,*axis,*center);
+            if angle.abs()>1e-9 {
+                lift_to_tool_change(program,tool_change_height.max(clearance),pl.op_id);
+                if let Some(to)=last_position(program) {
+                    let length=angle.to_radians().abs()*(to.z-center.z).abs();
+                    program.push(Step::Rotary{to,angle:0.,axis,center,feed:None,length,tag:pl.tag(MoveKind::Traverse)});
+                }
+            }
+        }
+    }
     // Resolve the requested state for this operation's cutting fragment. Cooling belongs
     // to the cut, so it is switched off again at the end of each fragment.
     let coolant = match pl.cooling {
@@ -1248,6 +1305,16 @@ fn emit_instance(
     }
     program.push(Step::Coolant(coolant));
     for step in pl.fragment.steps() {
+        if let Step::Rotary {to,angle,axis,center,feed:None,length,tag}=step {
+            if *length==0. {
+                let previous_angle=program.steps().iter().rev().find_map(|s|match s {Step::Rotary {angle,..}=>Some(*angle),Step::Datum(_)=>Some(0.),_=>None}).unwrap_or(0.);
+                let previous=last_position(program).unwrap_or(*to);
+                let rotation=(*angle-previous_angle).to_radians()*((previous.z+to.z)*0.5-center.z).abs();
+                let length=(to.x-previous.x).hypot(to.y-previous.y).hypot(to.z-previous.z).hypot(rotation);
+                program.push(Step::Rotary{to:*to,angle:*angle,axis:*axis,center:*center,feed:None,length,tag:*tag});
+                continue;
+            }
+        }
         // Compound Carve operations switch cutters inside their strategy fragment.
         // Keep lubrication off while the tool is being changed.
         if matches!(step, Step::ToolChange { .. }) && coolant != Coolant::Off {
@@ -1311,7 +1378,7 @@ fn lift_to_tool_change(program: &mut Program, z: f64, op_id: u32) {
 /// far. A drill cycle ends above its last hole, at that cycle's retract plane.
 fn last_position(program: &Program) -> Option<Point3> {
     program.steps().iter().rev().find_map(|s| match s {
-        Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+        Step::Rotary {to,..} | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
         Step::Arc { end, .. } => Some(*end),
         Step::Drill(c) => c.points.last().map(|[x, y]| Point3::new(*x, *y, c.retract)),
         _ => None,
@@ -1322,7 +1389,7 @@ fn last_position(program: &Program) -> Option<Point3> {
 /// the tool-change cross-and-descend at the next operation before handing off.
 fn first_position(program: &Program) -> Option<Point3> {
     program.steps().iter().find_map(|s| match s {
-        Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+        Step::Rotary {to,..} | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
         Step::Arc { end, .. } => Some(*end),
         Step::Drill(c) => c
             .points
@@ -1531,10 +1598,8 @@ fn compute_with_stock(
                                 let margin = env.tool(op.tool).map_or(0., |t| t.diameter)
                                     + op.clear.offset
                                     + finish;
-                                for axis in 0..2 {
-                                    bounds[0][axis] -= margin;
-                                    bounds[1][axis] += margin;
-                                }
+                                for value in &mut bounds[0] { *value-=margin; }
+                                for value in &mut bounds[1] { *value+=margin; }
                                 match cam_geometry3d::pocket_stock_domains(
                                     geometry_state,
                                     selected,
@@ -1677,6 +1742,7 @@ mod tests {
 
     fn profile_operation() -> Operation {
         Operation::Profile(cam_model::ProfileOp {
+            wrap: None,
             passes: Default::default(),
             selections: None,
             closed: true,
@@ -1993,6 +2059,7 @@ mod tests {
             spindle: SpindleDir::Cw,
         };
         let mut pocket = PocketOp {
+            wrap: None,
             id: 2,
             tool: 1,
             boundary: square(0., 0., 40.),
@@ -2142,6 +2209,7 @@ mod tests {
             ])
         };
         let pocket = Operation::Pocket(cam_model::PocketOp {
+            wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
             finishing: Default::default(),

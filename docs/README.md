@@ -6,6 +6,7 @@ For installation and a feature overview, start with the [project README](../READ
 - [CAD import and selection](cad-import.md): drawings, STEP/IGES, linked geometry and model replacement.
 - [Choosing an operation](operation-compatibility.md): supported geometry, cutters and machining limits.
 - [Profile milling](profile-operation.md): cutting sides, passes, leads, tabs and compensation.
+- [Fourth-axis wrap milling](rotary-wrap.md): cylindrical Profile, Pocket and 2D adaptive toolpaths, A/B output and verification limits.
 - [Bore milling](bore-operation.md): finishing accessible holes and bosses.
 - [3D Adaptive Clearing](3d-adaptive-clearing.md): roughing controls, boundaries and stock allowances.
 - [Entry and exit positions](lead-positions.md): preferred approach and departure points.

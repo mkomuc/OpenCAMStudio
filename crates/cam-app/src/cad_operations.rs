@@ -484,6 +484,7 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            wrap: None,
             additional_regions: resolved.regions.iter().skip(1).cloned().collect(),
             stock_contours: Default::default(),
             finishing: Default::default(),
@@ -515,6 +516,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            wrap: None,
             passes: cam_model::ProfilePasses {
                 lead_end_distance: 0.6,
                 lead_end_distance_enabled: Some(false),
@@ -783,6 +785,42 @@ pub(crate) fn resolve_document(document: &Document) -> Result<Document, String> 
     resolve_document_checked(document, &|| false).map_err(|diagnostic| diagnostic.message)
 }
 
+pub(crate) fn resolve_wrapped_operation(geometry:&GeometryState, operation:&mut Operation)->Result<(),String> {
+    let Some(mut wrap)=operation.rotary_wrap().cloned() else {return Ok(());};
+    wrap.validate()?;
+    if let Some(cylinder)=wrap.cylinder.clone() {
+        wrap=cam_geometry3d::wrap_cylinder(geometry,&cylinder,wrap)?;
+    }
+    wrap.boundary_z=cam_geometry3d::wrapped_boundary_height(geometry,&wrap)?;
+    if !wrap.geometry.is_empty() {
+        let contours=cam_geometry3d::unwrap_boundaries(geometry,&wrap)?;
+        match operation {
+            Operation::Profile(profile)=>{
+                let mut contours=contours.into_iter();
+                let first=contours.next().ok_or("Empty wrapped contour")?;
+                profile.chain=first.chain; profile.closed=first.closed;
+                profile.additional_chains=contours.collect();
+                profile.selections=None;
+            }
+            Operation::Pocket(pocket)=>{
+                let mut regions=cam_geometry3d::wrapped_regions(&contours)?.into_iter();
+                let first=regions.next().ok_or("Empty wrapped pocket")?;
+                pocket.boundary=first.outer().clone();pocket.islands=first.holes().to_vec();
+                pocket.additional_regions=regions.collect();
+            }
+            _=>return Err("Rotary wrapping supports Profile and Pocket operations".into()),
+        }
+    }
+    if matches!(operation,Operation::Profile(profile) if profile.comp!=Comp::Computed) {
+        return Err("Wrapped contours require computed cutter compensation".into());
+    }
+    if matches!(operation,Operation::Pocket(pocket) if pocket.stock_contours.enabled) {
+        return Err("Disable Stock Contours for a wrapped pocket; define its boundary in the unwrapped plane".into());
+    }
+    operation.set_rotary_wrap(Some(wrap));
+    Ok(())
+}
+
 /// Typed source ownership is preserved when resolution runs in a worker.
 pub(crate) fn resolve_document_checked(
     document: &Document,
@@ -805,6 +843,7 @@ pub(crate) fn resolve_document_checked(
         if !document.operation_is_included(document.setup().id, operation.id()) {
             continue;
         }
+        if operation.rotary_wrap().is_some() {continue;}
         if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
             let heights = settings.resolve(document, operation).map_err(|reason| {
                 error(format!("Operation {}: {reason}", operation.id())).for_op(operation.id())
@@ -829,6 +868,17 @@ pub(crate) fn resolve_document_checked(
         }
         let id = operation.id();
         let resolved_operation: Result<(), String> = (|| {
+            if operation.rotary_wrap().is_some() {
+                resolve_wrapped_operation(&resolved.geometry,operation)?;
+                resolved.geometry.bindings.remove(&id);
+                resolved.cad_linked_operations.remove(&id);
+                if let Some(settings)=resolved.setup().height_settings.get(&id).cloned() {
+                    let mut settings=settings;settings.resolved=None;
+                    let heights=settings.resolve(&resolved,operation)?;
+                    resolved.setup_mut().height_settings.get_mut(&id).unwrap().resolved=Some(heights);
+                }
+                return Ok(());
+            }
             let Some(binding) = document.geometry.bindings.get(&id) else {
                 if document.cad_linked_operations.contains(&id) {
                     return Err(format!(
@@ -1238,6 +1288,35 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
     Ok(())
 }
 
+/// Keep displayed linked heights synchronized with placement and stock edits.
+/// Replacement/removal requests remain unresolved until explicit reselection.
+pub(crate) fn refresh_binding_heights(document: &mut Document) {
+    let updates: Vec<_> = document.geometry.bindings.iter().filter_map(|(&id,binding)| {
+        if matches!(&binding.status,ResolutionStatus::NeedsReselection{reason} if !reason.starts_with("Geometry changed:")) {return None;}
+        let mut base=binding.clone();base.overrides=GeometryOverrides::default();
+        let mut context=document.clone();
+        let owner=document.setups.iter().find(|s|s.operations.iter().any(|o|o.id()==id))?;
+        context.active_setup_id=owner.id;
+        if matches!(base.recipe,ExtractionRecipe::FaceRegion) {base.heights.top=stock_top(&context);}
+        Some((id,geometry_for_setup(&context).and_then(|geometry|cam_geometry3d::resolve_binding_advisory(&geometry,&base)).map(|input|input.heights)))
+    }).collect();
+    for (id, result) in updates {
+        let binding = document.geometry.bindings.get_mut(&id).unwrap();
+        binding.resolved_fingerprint = None;
+        match result {
+            Ok(heights) => {
+                binding.heights = heights;
+                binding.status = ResolutionStatus::Resolved;
+            }
+            Err(reason) => {
+                binding.status = ResolutionStatus::NeedsReselection {
+                    reason: format!("Geometry changed: {reason}"),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod pocket_stock_tests {
     use super::*;
@@ -1338,35 +1417,6 @@ mod pocket_stock_tests {
                 }),
                 "the rising wall at X +/-50 must remain protected"
             );
-        }
-    }
-}
-
-/// Keep displayed linked heights synchronized with placement and stock edits.
-/// Replacement/removal requests remain unresolved until explicit reselection.
-pub(crate) fn refresh_binding_heights(document: &mut Document) {
-    let updates: Vec<_> = document.geometry.bindings.iter().filter_map(|(&id,binding)| {
-        if matches!(&binding.status,ResolutionStatus::NeedsReselection{reason} if !reason.starts_with("Geometry changed:")) {return None;}
-        let mut base=binding.clone();base.overrides=GeometryOverrides::default();
-        let mut context=document.clone();
-        let owner=document.setups.iter().find(|s|s.operations.iter().any(|o|o.id()==id))?;
-        context.active_setup_id=owner.id;
-        if matches!(base.recipe,ExtractionRecipe::FaceRegion) {base.heights.top=stock_top(&context);}
-        Some((id,geometry_for_setup(&context).and_then(|geometry|cam_geometry3d::resolve_binding_advisory(&geometry,&base)).map(|input|input.heights)))
-    }).collect();
-    for (id, result) in updates {
-        let binding = document.geometry.bindings.get_mut(&id).unwrap();
-        binding.resolved_fingerprint = None;
-        match result {
-            Ok(heights) => {
-                binding.heights = heights;
-                binding.status = ResolutionStatus::Resolved;
-            }
-            Err(reason) => {
-                binding.status = ResolutionStatus::NeedsReselection {
-                    reason: format!("Geometry changed: {reason}"),
-                }
-            }
         }
     }
 }

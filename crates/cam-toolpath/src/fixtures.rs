@@ -102,6 +102,7 @@ pub fn verify_fixture_clearance(
     if fixtures.is_empty() {
         return Ok(Vec::new());
     }
+    if program.has_rotary_motion() {return Err("Fixture clearance verification is unavailable for rotary motion".into());}
     program.validate().map_err(|e| e.to_string())?;
     if fixtures.iter().any(|f| {
         (0..3).any(|i| !f.min[i].is_finite() || !f.max[i].is_finite() || f.min[i] > f.max[i])

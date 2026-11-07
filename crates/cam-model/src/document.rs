@@ -100,7 +100,7 @@ use crate::{BoreOp, Tool};
 /// v37: setup fixture bodies and radial/axial fixture clearances.
 /// v38: multiple pocket regions sharing operation cutting heights.
 /// v39: optional stock contours for pocket and 2D adaptive material footprints.
-pub const SCHEMA_VERSION: u32 = 39;
+pub const SCHEMA_VERSION: u32 = 40;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -711,6 +711,9 @@ fn profile_closed_default() -> bool {
 /// A profile operation may contain several independently retracted contours.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    /// Optional simultaneous fourth-axis cylindrical wrap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<crate::RotaryWrap>,
     /// Additional pass controls. Defaults preserve existing saved cuts.
     #[serde(default)]
     pub passes: crate::ProfilePasses,
@@ -1030,6 +1033,9 @@ pub struct CarveClearing {
 /// stepdown passes, down to a depth.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PocketOp {
+    /// Optional simultaneous fourth-axis cylindrical wrap (including 2D adaptive clearing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<crate::RotaryWrap>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -2755,6 +2761,7 @@ mod tests {
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            wrap: None,
             passes: Default::default(),
             selections: None,
             closed: true,

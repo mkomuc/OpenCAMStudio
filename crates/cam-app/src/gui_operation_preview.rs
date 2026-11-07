@@ -188,6 +188,9 @@ impl App {
     }
 
     pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
+        if let Some(wrap)=self.operation_draft.as_ref().and_then(Operation::rotary_wrap) {
+            return wrap.geometry.iter().chain(wrap.cylinder.iter()).cloned().collect();
+        }
         if let Some(draft) = &self.pattern_draft {
             return draft
                 .highlighted
@@ -249,9 +252,14 @@ impl App {
                 .cloned();
             (operation, binding)
         };
-        let Some(op) = operation else {
+        let Some(mut op) = operation else {
             return scene;
         };
+        if op.rotary_wrap().is_some() {
+            if let Ok(geometry)=crate::cad_operations::geometry_for_setup(self.controller.document()) {
+                if crate::cad_operations::resolve_wrapped_operation(&geometry,&mut op).is_err(){return scene;}
+            }
+        }
         // The saved binding and cached operation contours still describe the old
         // selection while the geometry picker is open.
         if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
@@ -353,6 +361,25 @@ impl App {
                 Operation::Thread(p) => centers.extend(p.points.iter().copied()),
                 Operation::Profile(_) | Operation::Adaptive(_) | Operation::Parallel(_) => {}
             }
+        }
+        if let Some(wrap)=op.rotary_wrap() {
+            let mut program=cam_cldata::Program::new();
+            let tag=cam_cldata::Tag::new(op.id(),cam_cldata::MoveKind::Cutting);
+            for (mut points,closed) in outlines {
+                if closed {if let Some(first)=points.first().copied(){points.push(first);}}
+                for (i,point) in points.iter().enumerate() {
+                    let to=cam_cldata::Point3::new(point.x,point.y,wrap.surface_z);
+                    program.push(if i==0 {cam_cldata::Step::Rapid{to,tag}}else{cam_cldata::Step::Linear{to,feed:1.,tag}});
+                }
+            }
+            if let Ok(wrapped)=cam_toolpath::wrap_program(&program,wrap,&cam_toolpath::CancelToken::new()) {
+                scene=Scene::from_program(&wrapped);
+                for strip in &mut scene.strips {
+                    strip.color=PICK_BOUNDARY;strip.width=3.;
+                    for point in &mut strip.points {*point=frame.to_world_vector(point.map(f64::from)).map(|n|n as f32);}
+                }
+            }
+            return scene;
         }
         for (points, closed) in outlines {
             let mut world: Vec<_> = points

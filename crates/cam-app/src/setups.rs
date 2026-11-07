@@ -906,6 +906,15 @@ impl AppController {
             }
         }
         let heights = document.setup().heights_for(id);
+        if operation.rotary_wrap().is_some() {
+            let geometry=crate::cad_operations::geometry_for_setup(&document)?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut operation)?;
+            document.geometry.bindings.remove(&id);
+            document.cad_linked_operations.remove(&id);
+            let saved=document.setup_mut().operations.iter_mut().find(|op|op.id()==id).ok_or("Operation missing")?;
+            *saved=operation;
+            return Ok(document);
+        }
         let geometry = geometry
             .filter(|_| !matches!(&operation,Operation::Profile(p) if p.selections.is_some()));
         if let Some(selected) = &geometry {

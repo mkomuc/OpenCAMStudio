@@ -65,6 +65,7 @@ impl OperationTab {
 /// on Tool; operation_fields determines availability independently of the tab.
 pub(super) fn field_tab(field: Field) -> OperationTab {
     match field {
+        Field::Wrap(_) => OperationTab::MultiAxis,
         Field::SpindleRpm
         | Field::CuttingSpeed
         | Field::FeedPerTooth
@@ -177,6 +178,7 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
 /// used for automatic/full-depth settings. Cross-field geometry gates remain in
 /// the job resolver; an inspector never relaxes those gates.
 pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) -> bool {
+    if let Field::Wrap(number)=field {return number.invalid(value);}
     if !value.is_finite() {
         return true;
     }
@@ -421,11 +423,7 @@ impl App {
             },
         );
         if tab == OperationTab::MultiAxis {
-            list = list.push(
-                text("Multi-axis machining controls are not available yet.")
-                    .size(12)
-                    .color(INSPECTOR_MUTED),
-            );
+            list = list.push(self.rotary_controls(op));
         }
         if tab == OperationTab::Tool {
             let tool = self.operation_drawing_tool(op);

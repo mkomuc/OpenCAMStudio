@@ -181,6 +181,11 @@ impl App {
             })
             .collect();
         apply_op_fields(&mut op, &parsed);
+        if op.rotary_wrap().is_some() {
+            let geometry=crate::cad_operations::geometry_for_setup(&document)?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut op)?;
+            return self.edited_height_settings()?.resolve(&document,&op);
+        }
         if let Operation::Profile(profile) = &mut op {
             if profile.selections.is_some() {
                 if let Some(mut binding) =

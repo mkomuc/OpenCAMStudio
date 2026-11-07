@@ -220,6 +220,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -253,6 +254,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
 
 fn pocket() -> Operation {
     Operation::Pocket(PocketOp {
+        wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
         finishing: Default::default(),

@@ -2,6 +2,8 @@
 //! silhouettes use a separate CAD projection tessellation with an explicit
 //! allowance. Display meshes never enter machining derivation.
 mod parallel;
+mod rotary;
+pub use rotary::{wrap_cylinder, unwrap_boundaries, wrapped_regions, wrapped_boundary_height};
 pub use parallel::{resolve_parallel, ParallelGeometry};
 mod adaptive;
 mod advisory;
@@ -3203,4 +3205,6 @@ mod tests {
             .unwrap_err()
             .contains("stale"));
     }
+    mod rotary_tests { include!("rotary_tests.rs"); }
+
 }

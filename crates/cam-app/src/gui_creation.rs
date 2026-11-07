@@ -69,6 +69,8 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.rotary_pick=None;
+        self.rotary_heights=None;
         self.cutting_force_inputs
             .remove(&(self.controller.inspection_setup().id, None));
         self.thread_parameters = thread_parameters::ThreadParameters::for_creation(kind);
@@ -219,6 +221,14 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
+        if draft.rotary_wrap().is_some_and(|wrap|!wrap.geometry.is_empty()) {
+            let geometry=crate::cad_operations::geometry_for_setup(self.controller.document())?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut draft)?;
+            return Ok((draft,None));
+        }
+        if self.cad_pending_kind.is_some() && draft.rotary_wrap().is_some() {
+            return Err("Select CAD machining boundaries on the Multi-axis tab".into());
+        }
         if let Operation::Profile(profile) = &mut draft {
             if profile.selections.is_none() {
                 profile.selections = self.active_profile_geometry_entries();

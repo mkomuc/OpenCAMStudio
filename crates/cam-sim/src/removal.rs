@@ -32,6 +32,7 @@ pub fn analyze_removal_controlled(
     cancelled: &dyn Fn() -> bool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<Vec<RemovalSample>, String> {
+    if program.has_rotary_motion() {return Err("Rotary material-removal analysis is not supported by the fixed-axis heightfield simulator".into());}
     if !options.resolution.is_finite()
         || options.resolution <= 0.
         || !min.into_iter().chain(max).all(f64::is_finite)

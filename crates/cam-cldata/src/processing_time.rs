@@ -54,6 +54,19 @@ impl Program {
         let mut current: Option<Point3> = None;
         for step in self.steps() {
             match step {
+                Step::Rotary { to, length, feed, tag, .. } => {
+                    if let Some(feed) = feed {
+                        out.feed_distance_mm += length;
+                        let seconds = length / (feed * override_scale) * 60.;
+                        out.feed_seconds += seconds;
+                        match tag.kind {
+                            MoveKind::LeadIn => out.ramp_helix_seconds += seconds,
+                            MoveKind::Plunge => out.plunge_seconds += seconds,
+                            _ => {}
+                        }
+                    } else { out.rapid_distance_mm += length; }
+                    current = Some(*to);
+                }
                 Step::Rapid { to, .. } => {
                     if let Some(from) = current {
                         out.rapid_distance_mm += dist(from, *to);

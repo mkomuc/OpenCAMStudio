@@ -67,6 +67,8 @@ mod operation_metadata;
 mod operation_sections;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
+#[path = "gui_rotary.rs"]
+mod rotary_view;
 #[path = "gui_operation_tool_selector.rs"]
 mod operation_tool_selector;
 #[path = "gui_pattern_editor.rs"]
@@ -1123,6 +1125,7 @@ fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
 /// An editable inspector field, keyed independently of which node owns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Field {
+    Wrap(rotary_view::Number),
     LiftHeight,
     OperationTop,
     StartX,
@@ -1325,7 +1328,9 @@ fn set_machine_z_limits(envelope: &mut cam_model::Envelope, travel: f64, max_z: 
 
 impl Field {
     fn label(self) -> &'static str {
+        if let Self::Wrap(number)=self {return number.label();}
         match self {
+            Self::Wrap(_) => unreachable!(),
             Field::OperationTop => "Cutting top Z (mm)",
             Field::StartX => "Start X (mm)",
             Field::StartY => "Start Y (mm)",
@@ -1454,6 +1459,7 @@ impl Field {
     /// shown as a hover tooltip on its label in the inspector.
     fn help(self) -> &'static str {
         match self {
+            Field::Wrap(_) => "Cylindrical wrap in millimetres. Radius plus offset defines the development circumference. Surface Z is the flat drawing's radial reference; the seam sets rotary zero. Cylinder selection derives radius and axis centre from CAD.",
             Field::LiftHeight => "Distance above the cutting level for local linking moves, in millimetres. 0 keeps transitions at depth. Lifts are limited to clearance; distant links still retract fully.",
             Field::BoreDiameter => "Finished feature diameter at the top height.",
             Field::BoreTaper => "Positive narrows downward; negative widens downward. Undercuts are rejected.",
@@ -2118,6 +2124,8 @@ struct App {
     operation_draft: Option<Operation>,
     stock_to_leave_draft: Option<cam_model::StockToLeave>,
     stock_to_leave_initialized: bool,
+    rotary_pick: Option<rotary_view::Pick>,
+    rotary_heights: Option<(cam_model::OperationHeightSettings,BTreeMap<cam_model::HeightPlaneKind,String>)>,
     creation_edited_fields: BTreeSet<Field>,
     thread_parameters: thread_parameters::ThreadParameters,
     creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
@@ -2648,6 +2656,7 @@ enum BoreOption {
 
 #[derive(Debug, Clone)]
 enum Message {
+    Rotary(rotary_view::Action),
     PollMcp,
     TraverseFocus(bool),
     OutputAction(iced::widget::text_editor::Action),
@@ -3335,6 +3344,8 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.rotary_pick=None;
+        self.rotary_heights=None;
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
         self.profile_contour_selection = 0;
@@ -3691,6 +3702,8 @@ impl App {
             operation_draft: None,
             stock_to_leave_draft: None,
             stock_to_leave_initialized: false,
+            rotary_pick: None,
+            rotary_heights: None,
             creation_edited_fields: BTreeSet::new(),
             thread_parameters: Default::default(),
             creation_geometry_height_defaults: None,
@@ -4730,6 +4743,7 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::Rotary(action) => self.rotary_action(action),
             Message::StockToLeaveToggled(enabled) => {
                 let mut stock = self.stock_to_leave_with_fields();
                 if enabled
@@ -5919,6 +5933,7 @@ impl App {
                 }
             }
             Message::CancelOperationDraft => {
+                self.rotary_pick=None;
                 self.drawing_editing_op = None;
                 self.controller.cancel_operation();
                 if let Selection::Operation(id) = self.controller.selection() {
@@ -6480,6 +6495,7 @@ impl App {
                 }
             }
             Message::CadEscape => {
+                if self.rotary_pick.take().is_some() {self.status="Rotary geometry selection finished.".into();return iced::Task::none();}
                 if self
                     .pattern_draft
                     .as_mut()
@@ -7052,6 +7068,7 @@ impl App {
                 }
             }
             Message::CancelOp => {
+                self.rotary_pick=None;
                 self.cad_selected_project_tool = None;
                 self.cutting_force_inputs
                     .remove(&(self.controller.inspection_setup().id, None));
@@ -9475,6 +9492,12 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
+        if let Some(op)=self.operation_draft.as_ref().filter(|op|op.rotary_wrap().is_some()) {
+            let mut op=op.clone();
+            let values=self.fields.iter().filter_map(|(f,v)|v.parse::<f64>().ok().map(|v|(*f,v))).collect();
+            apply_op_fields(&mut op,&values);
+            if op.rotary_wrap().is_some_and(|wrap|wrap.validate().is_err()) {return true;}
+        }
         if self.profile_parameter_error().is_some() {
             return true;
         }
@@ -11581,6 +11604,7 @@ impl App {
     }
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
+        if self.rotary_cad_pick(&entity) {return;}
         if self.stock_contour_editor() {
             let additive = entity.kind != EntityKind::Silhouette
                 && !self
@@ -12758,6 +12782,7 @@ fn op_kind(op: &Operation) -> &'static str {
 
 /// Read an operation's value for a given field, if the op has it.
 fn op_field(op: &Operation, field: Field) -> Option<f64> {
+    if let Field::Wrap(number)=field {return op.rotary_wrap().map(|w|number.get(w));}
     match (op, field) {
         (Operation::Pocket(o), Field::LiftHeight) => Some(o.clear.lift_height),
         (Operation::Adaptive(o), Field::LiftHeight) => Some(o.params.lift_height),
@@ -12907,6 +12932,13 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
 
 /// Write the parsed inspector fields onto an operation.
 fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
+    if let Some(mut wrap)=op.rotary_wrap().cloned() {
+        for (field,value) in parsed {if let Field::Wrap(number)=field {
+            if number.cylinder_dimension() && (number.get(&wrap)-value).abs()>1e-9 {wrap.cylinder=None;}
+            number.set(&mut wrap,*value);
+        }}
+        op.set_rotary_wrap(Some(wrap));
+    }
     let get = |f: Field| parsed.get(&f).copied();
     if let Some(value) = get(Field::LiftHeight) {
         match op {
@@ -15681,6 +15713,38 @@ mod multi_setup_draft_tests {
         let id = app.controller.inspection_setup().operations[0].id();
         app.begin_operation_draft(id);
         (app, id)
+    }
+
+    #[test]
+    fn rotary_wrap_editor_stages_numbers_and_commits_all_tabs_in_one_undo_step() {
+        let (mut app,id)=stock_profile_app();
+        let before=app.controller.document().clone();
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        let field=Field::Wrap(rotary_view::Number::Radius);
+        assert!(app.inspector_fields().contains(&field));
+        send(&mut app,Message::FieldChanged(field,"40".into()));
+        assert!(app.controller.operation(id).unwrap().rotary_wrap().is_none());
+        assert!(!app.any_field_invalid(),"{}",app.status);
+        send(&mut app,Message::Apply);
+        assert_eq!(app.controller.operation(id).unwrap().rotary_wrap().unwrap().radius,40.,"{}",app.status);
+        assert!(app.controller.undo());
+        assert_eq!(*app.controller.document(),before);
+        app.begin_operation_draft(id);
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app,Message::CancelOperationDraft);
+        assert_eq!(*app.controller.document(),before);
+    }
+
+    #[test]
+    fn rotary_wrap_creation_requires_real_boundaries_and_rejects_invalid_offset() {
+        let (mut app,_)=stock_profile_app();
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app,Message::FieldChanged(Field::Wrap(rotary_view::Number::Offset),"-25".into()));
+        assert!(app.any_field_invalid());
+        app.cad_pending_kind=Some(OpKind::Pocket);
+        app.seed_creation_editor(OpKind::Pocket);
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        assert!(!app.creation_ready());
     }
 
     #[test]

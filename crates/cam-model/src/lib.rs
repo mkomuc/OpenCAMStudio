@@ -10,6 +10,8 @@
 //! by `scripts/check_architecture.py`.
 
 mod cutting_data;
+mod rotary;
+pub use rotary::{RotaryAxis, RotaryWrap};
 mod cutting_forces;
 pub use cutting_forces::{CuttingEngagement, CuttingForceEstimate, CuttingLoad};
 mod pocket;

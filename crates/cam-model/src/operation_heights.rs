@@ -265,11 +265,11 @@ impl OperationHeightSettings {
         }
         let (model_min, model_max) = document.height_model_bounds();
         let resolved = ResolvedOperationHeights {
-            stock_top: document
+            stock_top: operation.rotary_wrap().map(|wrap|wrap.surface_z).unwrap_or_else(||document
                 .setup()
                 .stock
                 .resolve_bounds(model_min, model_max)
-                .1[2],
+                .1[2]),
             clearance: values[0].unwrap(),
             retract: values[1].unwrap(),
             feed: values[2],
@@ -327,6 +327,15 @@ impl OperationHeightSettings {
     ) -> Result<f64, String> {
         use HeightReference::*;
         let setup = doc.setup();
+        if let Some(wrap)=op.rotary_wrap() {
+            match reference {
+                StockTop|ModelTop=>return Ok(wrap.surface_z),
+                Origin=>return Ok(0.),
+                SelectedContours=>return Ok(wrap.boundary_z.unwrap_or_else(||doc.operation_base_cutting_heights(op).bottom)),
+                ModelBottom|StockBottom|Selection|FixtureTop|FixtureBottom=>return Err("Wrapped heights use the developed plane; choose a height plane, Origin, or Stock/Model top with a radial offset".into()),
+                _=>{}
+            }
+        }
         let (model_min, model_max) = doc.height_model_bounds();
         let (stock_min, stock_max) = doc.stock_bounds_for(setup);
         Ok(match reference {
@@ -513,6 +522,10 @@ impl Document {
     /// A chamfer's zero depth means its natural cutter depth, rather than a zero
     /// cutting interval. All other strategies store their target interval directly.
     pub fn operation_base_cutting_heights(&self, op: &Operation) -> CuttingHeights {
+        if let Some(wrap)=op.rotary_wrap() {
+            let depth=match op {Operation::Profile(p)=>p.depth,Operation::Pocket(p)=>p.depth,_=>unreachable!()};
+            return CuttingHeights {top:wrap.surface_z,bottom:wrap.surface_z-depth};
+        }
         if matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)) {
             if let Some(binding) = self.geometry.bindings.get(&op.id()) {
                 return binding.effective_heights();

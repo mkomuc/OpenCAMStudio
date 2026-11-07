@@ -17,6 +17,8 @@
 //!   `cdylib` plugin ABI later is cheap.
 
 mod parallel;
+mod rotary;
+pub use rotary::wrap_program;
 pub use parallel::ParallelStrategy;
 mod bore;
 pub use bore::BoreStrategy;

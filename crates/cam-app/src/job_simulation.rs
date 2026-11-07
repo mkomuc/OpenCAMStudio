@@ -89,6 +89,9 @@ impl JobInputs {
             .preview_program
             .as_ref()
             .ok_or_else(|| Diagnostic::error("Force analysis requires a simulation program."))?;
+        if program.has_rotary_motion() || self.document.setup().operations.iter().any(|op|op.rotary_wrap().is_some()) {
+            return Err(Diagnostic::error("Cutting-force analysis requires material-removal simulation, which is not available for rotary wraps."));
+        }
         let resolution = self
             .preview_resolution
             .unwrap_or_else(|| self.stock_resolution(program));
@@ -566,6 +569,9 @@ impl JobInputs {
                 cache,
                 |id| progress.set(JobPhase::Generation, 0, setup.operations.len(), Some(id)),
             );
+            if job.program.has_rotary_motion() {
+                return Err(Diagnostic::error("Previous-setup stock cannot inherit a rotary wrap: cylindrical material-removal simulation is unavailable."));
+            }
             if job.completion != JobCompletion::Complete {
                 let detail = job
                     .diagnostics
@@ -1035,6 +1041,7 @@ mod tests {
                 thickness: 17.,
             };
             setup.operations = vec![Operation::Pocket(PocketOp {
+                wrap: None,
                 additional_regions: Vec::new(),
                 stock_contours: Default::default(),
                 finishing: Default::default(),

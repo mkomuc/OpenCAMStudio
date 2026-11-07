@@ -10,8 +10,9 @@ material-removal simulation and controller-specific G-code export. Machine setti
 describe physical limits; the selected post determines the controller dialect.
 
 Drawing-based work covers 2.5D milling. STEP/IGES workflows add linked feature
-selection and conservative three-axis roughing. Freeform finishing, simultaneous
-multi-axis machining, turning and third-party plugins remain future work.
+selection and three-axis roughing/finishing. Cylindrical Profile/Pocket wrapping
+adds simultaneous fourth-axis motion and posting; cylindrical stock verification,
+general multi-axis surfacing, turning and third-party plugins remain future work.
 
 Start with the [user guides](docs/README.md) for workflows and current limits,
 or the [release notes](docs/release-notes/v0.1.0.md) for release history.

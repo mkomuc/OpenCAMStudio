@@ -196,6 +196,7 @@ fn assert_no_rapid_onto_uncut_stock(program: &Program, floor: f64) {
 /// A 60×40 pocket with a 10×10 island, cleared in two levels by a ⌀6 end mill.
 fn pocket_doc() -> Document {
     let op = PocketOp {
+        wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
         finishing: Default::default(),
@@ -232,6 +233,7 @@ fn pocket_doc() -> Document {
 /// An outside profile with radial roughing — the *other* caller of the clearing engine.
 fn roughing_doc() -> Document {
     let op = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,

@@ -894,6 +894,11 @@ impl App {
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
         }
+        if self.rotary_pick.is_some() {
+            viewport.cad_operation_kind=Some(OpKind::Engrave);
+            viewport.cad_filter_explicit=true;
+            viewport.cad_silhouette=false;
+        }
         if self.stock_contour_editor() {
             viewport.cad_operation_kind = None;
             viewport.cad_filter_explicit = true;

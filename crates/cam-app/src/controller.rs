@@ -2207,6 +2207,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                wrap: None,
                 passes: cam_model::ProfilePasses {
                     lead_end_distance: 0.6,
                     lead_end_distance_enabled: Some(false),
@@ -2260,6 +2261,7 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Pocket(PocketOp {
+                    wrap: None,
                     additional_regions: Vec::new(),
                     stock_contours: Default::default(),
                     finishing: Default::default(),
@@ -2761,6 +2763,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    wrap: None,
                     passes: cam_model::ProfilePasses {
                         lead_end_distance: 0.6,
                         lead_end_distance_enabled: Some(false),
@@ -2830,6 +2833,7 @@ impl AppController {
                         }));
                     } else {
                         operations.push(Operation::Pocket(PocketOp {
+                            wrap: None,
                             additional_regions: Vec::new(),
                             stock_contours: Default::default(),
                             finishing: Default::default(),

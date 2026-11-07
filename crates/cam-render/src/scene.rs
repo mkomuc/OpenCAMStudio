@@ -216,6 +216,9 @@ impl Scene {
         if cancelled() {
             return None;
         }
+        if program.has_rotary_motion() {
+            return Self::from_program_controlled(&program.rotary_backplot(),cancelled);
+        }
         let mut scene = Scene::new();
         let mut cur: Option<Point3> = None;
         let mut previous_cone_role = None;

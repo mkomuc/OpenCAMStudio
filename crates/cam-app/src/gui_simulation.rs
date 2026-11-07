@@ -18,6 +18,7 @@ mod forces;
 struct TimedStep {
     step: Step,
     from: Option<Point3>,
+    rotary_from: f64,
     start: f64,
     end: f64,
 }
@@ -106,9 +107,16 @@ impl Timeline {
         let mut steps = Vec::with_capacity(expanded.len());
         let mut position = None;
         let mut duration = 0.;
+        let mut rotary_angle=0.;
         for step in expanded {
             let from = position;
+            let rotary_from=rotary_angle;
             let seconds = match &step {
+                Step::Rotary {to,angle,length,feed,..}=>{
+                    position=Some(*to);rotary_angle = *angle;
+                    length/feed.unwrap_or(rapid_rate).max(1e-6)*60.
+                }
+                Step::Datum(_)=>{position=None;rotary_angle=0.;0.}
                 Step::Rapid { to, .. } => {
                     position = Some(*to);
                     from.map_or(0., |a| distance(a, *to) / rapid_rate.max(1.) * 60.)
@@ -140,6 +148,7 @@ impl Timeline {
             steps.push(TimedStep {
                 step,
                 from,
+                rotary_from,
                 start,
                 end: duration,
             });
@@ -157,6 +166,11 @@ impl Timeline {
                 let mut step = timed.step.clone();
                 if let Some(a) = timed.from {
                     match &mut step {
+                        Step::Rotary {to,angle,length,..}=>{
+                            *to=Point3::new(a.x+(to.x-a.x)*t,a.y+(to.y-a.y)*t,a.z+(to.z-a.z)*t);
+                            *angle=timed.rotary_from+(*angle-timed.rotary_from)*t;
+                            *length*=t;
+                        }
                         Step::Rapid { to, .. } | Step::Linear { to, .. } => {
                             *to = Point3::new(
                                 a.x + (to.x - a.x) * t,
@@ -243,7 +257,7 @@ impl SimulationPlayer {
             .and_then(|id| {
                 timeline.steps.iter().find_map(|step| {
                     let tag = match &step.step {
-                        Step::Rapid { tag, .. }
+                        Step::Rotary {tag,..} | Step::Rapid { tag, .. }
                         | Step::Linear { tag, .. }
                         | Step::Arc { tag, .. } => Some(tag),
                         _ => None,
@@ -351,7 +365,7 @@ impl SimulationPlayer {
             .filter(|step| {
                 matches!(
                     &step.step,
-                    Step::Rapid { .. } | Step::Linear { .. } | Step::Arc { .. }
+                    Step::Rotary {..} | Step::Rapid { .. } | Step::Linear { .. } | Step::Arc { .. }
                 )
             })
             .map(|step| if forward { step.end } else { step.start })
@@ -374,7 +388,7 @@ impl SimulationPlayer {
         let mut operations: Vec<(u32, f64)> = Vec::new();
         for step in &self.timeline.steps {
             let op_id = match &step.step {
-                Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
+                Step::Rotary {tag,..} | Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
                     Some(tag.op_id)
                 }
                 _ => None,
@@ -554,7 +568,7 @@ impl SimulationPlayer {
         }
         let program = &self.preview.program;
         let tip = program.steps.iter().rev().find_map(|step| match step {
-            Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+            Step::Rotary {to,..} | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
             Step::Arc { end, .. } => Some(*end),
             _ => None,
         });
@@ -563,6 +577,9 @@ impl SimulationPlayer {
             _ => None,
         });
         let setup = self.inputs.document.setup();
+        let rotary=program.steps.iter().rev().take_while(|s|!matches!(s,Step::Datum(_))).find_map(|s|match s {
+            Step::Rotary {axis,center,angle,..}=>Some((*axis,*center,*angle)),_=>None,
+        });
         let tool = setup.tools.iter().find(|tool| Some(tool.number) == number);
         let (Some(tip), Some(tool)) = (tip, tool) else {
             return (vec![], vec![]);
@@ -616,17 +633,20 @@ impl SimulationPlayer {
             if self.options.transparent_tool {
                 vertex.color[3] = 0.3;
             }
-            vertex.position = setup
-                .frame
-                .to_world_vector([
+            let mut point=Point3::new(
                     tip.x + vertex.position[0] as f64,
                     tip.y + vertex.position[1] as f64,
                     tip.z + vertex.position[2] as f64,
-                ])
-                .map(|v| v as f32);
+                );
+            let mut normal=Point3::new(vertex.normal[0] as f64,vertex.normal[1] as f64,vertex.normal[2] as f64);
+            if let Some((axis,center,angle))=rotary {
+                point=axis.material_point(point,center,angle);
+                normal=axis.material_point(normal,Point3::new(0.,0.,0.),angle);
+            }
+            vertex.position=setup.frame.to_world_vector([point.x,point.y,point.z]).map(|v|v as f32);
             vertex.normal = setup
                 .frame
-                .to_world_vector(vertex.normal.map(f64::from))
+                .to_world_vector([normal.x,normal.y,normal.z])
                 .map(|v| v as f32);
         }
         (vertices, indices)
@@ -1740,4 +1760,23 @@ mod tests {
         assert!(player.preview.stock_machined.iter().all(|v| !v));
         assert_ne!(player.preview.stock_vertices, cut);
     }
+    #[test]
+    fn rotary_playback_interpolates_the_angle_and_material_path_duration() {
+        let tag=cam_cldata::Tag::new(0,cam_cldata::MoveKind::Cutting);
+        let to=Point3::new(0.,0.,20.);
+        let length=10.*std::f64::consts::PI;
+        let program=Program {steps:vec![
+            Step::Rapid{to,tag},
+            Step::Rotary{to,angle:0.,axis:cam_cldata::RotaryAxis::A,center:Point3::new(0.,0.,0.),feed:None,length:0.,tag},
+            Step::Rotary{to,angle:90.,axis:cam_cldata::RotaryAxis::A,center:Point3::new(0.,0.,0.),feed:Some(60.),length,tag},
+        ]};
+        let timeline=Timeline::new(&program,1000.).unwrap();
+        assert!((timeline.duration-length).abs()<1e-9);
+        let prefix=timeline.prefix(length*0.5);
+        assert!(matches!(prefix.steps.last(),Some(Step::Rotary{angle,length:d,..}) if (*angle-45.).abs()<1e-9 && (*d-length*0.5).abs()<1e-9));
+        let material=prefix.rotary_backplot();
+        let Step::Linear{to,..}=material.steps.last().unwrap() else {panic!()};
+        assert!((to.y-10.*2_f64.sqrt()).abs()<1e-9 && (to.z-to.y).abs()<1e-9);
+    }
+
 }
