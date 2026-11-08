@@ -178,29 +178,154 @@ impl App {
                     cam_model::Stock::FixedBox { .. } => StockEditorKind::FixedBox,
                     cam_model::Stock::RelativeBox { .. } => StockEditorKind::RelativeBox,
                     cam_model::Stock::BoundingBox { .. } => StockEditorKind::LegacyBox,
+                    cam_model::Stock::FromSolid { .. } => StockEditorKind::FromSolid,
+                    cam_model::Stock::FixedRound { tube: false, .. } => StockEditorKind::FixedCylinder,
+                    cam_model::Stock::FixedRound { tube: true, .. } => StockEditorKind::FixedTube,
+                    cam_model::Stock::RelativeRound { tube: false, .. } => StockEditorKind::RelativeCylinder,
+                    cam_model::Stock::RelativeRound { tube: true, .. } => StockEditorKind::RelativeTube,
                     cam_model::Stock::PreviousSetup => StockEditorKind::PreviousSetup,
                 };
+                let kind_row = |entry: StockEditorKind| {
+                    row![
+                        iced::widget::svg(iced::widget::svg::Handle::from_memory(entry.icon()))
+                            .width(22)
+                            .height(22),
+                        text(entry.to_string()).size(12).width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                };
                 list = list.push(
-                    pick_list(
-                        if self
-                            .controller
-                            .setups()
-                            .first()
-                            .is_some_and(|s| s.id != draft.id)
-                        {
-                            &StockEditorKind::ALL[..]
-                        } else {
-                            &StockEditorKind::ALL[..3]
-                        },
-                        Some(kind),
-                        Message::SetupStockKindChanged,
+                    button(
+                        row![
+                            kind_row(kind).width(Length::Fill),
+                            text(if self.stock_kind_open { "▴" } else { "▾" }).size(12)
+                        ]
+                        .align_y(Alignment::Center),
                     )
-                    .text_size(12)
-                    .padding([7, 9])
-                    .style(inspector_picker)
-                    .width(Length::Fill),
+                    .padding([6, 9])
+                    .width(Length::Fill)
+                    .style(move |theme, status| inspector_tab(theme, status, false))
+                    .on_press(Message::SetupStockKindToggle),
                 );
+                if self.stock_kind_open {
+                    let count = if self
+                        .controller
+                        .setups()
+                        .first()
+                        .is_some_and(|s| s.id != draft.id)
+                    {
+                        StockEditorKind::ALL.len()
+                    } else {
+                        StockEditorKind::ALL.len() - 1
+                    };
+                    for entry in StockEditorKind::ALL[..count].iter().copied() {
+                        list = list.push(
+                            button(kind_row(entry))
+                                .padding([5, 9])
+                                .width(Length::Fill)
+                                .style(move |theme, status| {
+                                    inspector_tab(theme, status, entry == kind)
+                                })
+                                .on_press(Message::SetupStockKindChanged(entry)),
+                        );
+                    }
+                }
+                if let cam_model::Stock::FixedRound { axis, .. }
+                | cam_model::Stock::RelativeRound { axis, .. } = draft.stock
+                {
+                    let picking = self.setup_axis_pick == Some(3);
+                    list = list.push(
+                        checkbox(axis.is_some() || picking)
+                            .label("Select axis")
+                            .text_size(12)
+                            .on_toggle(|on| {
+                                if on {
+                                    Message::SetupAxisPick(3)
+                                } else {
+                                    Message::SetupStockAxisClear
+                                }
+                            }),
+                    );
+                    if axis.is_some() || picking {
+                        let label = if picking {
+                            "Select an axis…".to_string()
+                        } else {
+                            match axis.unwrap() {
+                                cam_model::StockAxis::Edge(edge) => {
+                                    format!("Edge {}", edge.edge_id)
+                                }
+                                cam_model::StockAxis::Origin { origin_axis } => {
+                                    format!("Origin {}", ["X", "Y", "Z"][origin_axis.index()])
+                                }
+                            }
+                        };
+                        list = list.push(
+                            row![
+                                text("Axis").size(12).color(INSPECTOR_TEXT).width(80),
+                                inspector_button(label)
+                                    .width(Length::Fill)
+                                    .style(move |theme, status| inspector_tab(
+                                        theme, status, picking
+                                    ))
+                                    .on_press(Message::SetupAxisPick(3)),
+                                inspector_button("×").on_press(Message::SetupStockAxisClear),
+                            ]
+                            .spacing(8)
+                            .align_y(Alignment::Center),
+                        );
+                        if picking {
+                            list = list.push(
+                                text(
+                                    "Choose an origin axis or select a straight edge in the view.",
+                                )
+                                .size(11)
+                                .color(INSPECTOR_MUTED),
+                            );
+                            list = list.push(
+                                row![
+                                    inspector_button("Origin X")
+                                        .on_press(Message::SetupStockOriginAxis(0))
+                                        .width(Length::Fill),
+                                    inspector_button("Origin Y")
+                                        .on_press(Message::SetupStockOriginAxis(1))
+                                        .width(Length::Fill),
+                                    inspector_button("Origin Z")
+                                        .on_press(Message::SetupStockOriginAxis(2))
+                                        .width(Length::Fill),
+                                ]
+                                .spacing(4),
+                            );
+                        }
+                        if picking && self.cad_candidates.len() > 1 {
+                            list = list.push(
+                                text("Overlapping edge candidates")
+                                    .size(11)
+                                    .color(INSPECTOR_MUTED),
+                            );
+                            for candidate in &self.cad_candidates {
+                                list = list.push(
+                                    inspector_button(format!(
+                                        "Edge {} · instance {}{}",
+                                        candidate.entity.id,
+                                        candidate.entity.instance_id,
+                                        if candidate.occluded { " · behind" } else { "" }
+                                    ))
+                                    .on_press(Message::CadSelect(candidate.entity.clone())),
+                                );
+                            }
+                        }
+                    }
+                }
                 match draft.stock {
+                    cam_model::Stock::FromSolid { instance } => {
+                        let choices: Vec<_> = self.controller.geometry_state().instances.iter().filter(|i| {
+                            self.controller.geometry_state().asset(i.asset_id).and_then(|a| a.topology.bodies.iter().find(|b| b.id == i.body_id)).is_some_and(|b| b.valid_solid)
+                        }).map(|i| StockSolidChoice { id: i.id, name: i.name.clone() }).collect();
+                        let selected = choices.iter().find(|c| Some(c.id) == instance).cloned();
+                        list = list.push(text("Stock solid").size(12).color(INSPECTOR_TEXT));
+                        list = list.push(pick_list(choices, selected, Message::SetupStockSolidChanged).placeholder("Select a solid").text_size(12).padding([7, 9]).style(inspector_picker).width(Length::Fill));
+                    }
                     cam_model::Stock::PreviousSetup => {
                         let previous = self
                             .controller
@@ -266,6 +391,22 @@ impl App {
                             }
                         }
                     }
+                    cam_model::Stock::FixedRound { diameter, inner_diameter, length, position, tube, .. } => {
+                        list = list.push(inspector_section("Size and placement"));
+                        for (label, index, number, unit) in [("Outer diameter", 0, diameter, "mm"), ("Inner diameter", 1, inner_diameter, "mm"), ("Length", 2, length, "mm"), ("Model position (0–1)", 3, position, "")] {
+                            if index == 1 && !tube { continue; }
+                            let value = self.setup_value(20 + index, fmt_num(number));
+                            list = list.push(inspector_value(label, &value, unit, move |v| Message::SetupStockNumberChanged(index, v)));
+                        }
+                    }
+                    cam_model::Stock::RelativeRound { radial, inner_diameter, bottom, top, tube, .. } => {
+                        list = list.push(inspector_section("Stock allowance"));
+                        for (label, index, number) in [("Radial allowance", 0, radial), ("Inner diameter", 1, inner_diameter), ("Bottom allowance", 2, bottom), ("Top allowance", 3, top)] {
+                            if index == 1 && !tube { continue; }
+                            let value = self.setup_value(20 + index, fmt_num(number));
+                            list = list.push(inspector_value(label, &value, "mm", move |v| Message::SetupStockNumberChanged(index, v)));
+                        }
+                    }
                     cam_model::Stock::BoundingBox {
                         x_offset,
                         y_offset,
@@ -285,6 +426,9 @@ impl App {
                             }));
                         }
                     }
+                }
+                if matches!(draft.stock, cam_model::Stock::FixedRound { tube: true, .. } | cam_model::Stock::RelativeRound { tube: true, .. } | cam_model::Stock::FromSolid { .. }) {
+                    list = list.push(text("Check that the selected stock encloses the model; bounding boxes do not verify internal cavities.").size(11).color(INSPECTOR_MUTED));
                 }
                 let (model_min, model_max) = self.controller.pending_setup_model_bounds(draft);
                 let dimensions = std::array::from_fn::<_, 3, _>(|i| model_max[i] - model_min[i]);

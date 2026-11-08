@@ -15,6 +15,7 @@ mod test_fixture;
 mod config;
 mod controller;
 mod geometry_verification;
+mod stock_shape;
 mod import_jobs;
 mod jobs;
 pub use jobs::{JobPhase, JobProgress, JobStamp};

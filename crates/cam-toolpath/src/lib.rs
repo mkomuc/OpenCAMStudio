@@ -19,6 +19,8 @@
 mod parallel;
 mod rotary;
 pub use rotary::wrap_program;
+pub use rotary::ROTARY_WRAP_REVISION;
+pub use rotary::index_program;
 pub use parallel::ParallelStrategy;
 mod bore;
 pub use bore::BoreStrategy;

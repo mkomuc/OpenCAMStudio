@@ -359,6 +359,10 @@ impl App {
     pub(super) fn pick_operation_geometry(&mut self) -> iced::Task<Message> {
         self.profile_tab_picking = false;
         self.geometry_additive = true;
+        if self.wrapped_pocket_geometry_editor() {
+            self.status = "Select geometry in the viewport, then use OK to stage it.".into();
+            return iced::Task::none();
+        }
         if self.creating_operation()
             || self.cad_editing_op.is_some()
             || self.drawing_editing_op.is_some()
@@ -379,6 +383,43 @@ impl App {
     }
 
     pub(super) fn remove_operation_geometry(&mut self, index: Option<usize>) {
+        if self.wrapped_pocket_geometry_editor() {
+            let mut selected = self.controller.cad_selection().to_vec();
+            if let Some(index) = index {
+                if index < selected.len() {
+                    selected.remove(index);
+                }
+            } else {
+                selected.clear();
+            }
+            self.controller.set_cad_selection(selected);
+            self.geometry_row_selection = None;
+            self.cad_candidates.clear();
+            return;
+        }
+        if self.operation_uses_cad_geometry()
+            && matches!(self.operation_draft.as_ref(), Some(Operation::Pocket(p)) if p.wrap.is_some())
+        {
+            let mut wrap = self
+                .operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .clone();
+            if let Some(index) = index {
+                if index < wrap.geometry.len() {
+                    wrap.geometry.remove(index);
+                }
+            } else {
+                wrap.geometry.clear();
+            }
+            self.controller.set_cad_selection(wrap.geometry.clone());
+            self.edit_operation_draft(|op| op.set_rotary_wrap(Some(wrap)));
+            self.geometry_row_selection = None;
+            self.cad_candidates.clear();
+            return;
+        }
         if self.cad_pending_kind.is_none()
             && self.cad_editing_op.is_none()
             && self.controller.pending_op().is_none()

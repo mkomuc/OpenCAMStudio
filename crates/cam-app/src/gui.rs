@@ -713,8 +713,19 @@ impl std::fmt::Display for SetupEditorTab {
 enum StockEditorKind {
     FixedBox,
     RelativeBox,
+    FixedCylinder,
+    RelativeCylinder,
+    FixedTube,
+    RelativeTube,
+    FromSolid,
     LegacyBox,
     PreviousSetup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StockSolidChoice { id: u64, name: String }
+impl std::fmt::Display for StockSolidChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.name) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -754,19 +765,33 @@ impl std::fmt::Display for BoxAnchor {
 }
 
 impl StockEditorKind {
-    const ALL: [Self; 4] = [
-        Self::RelativeBox,
-        Self::FixedBox,
-        Self::LegacyBox,
-        Self::PreviousSetup,
-    ];
+    const ALL: [Self; 8] = [Self::FixedBox, Self::RelativeBox, Self::FixedCylinder, Self::RelativeCylinder, Self::FixedTube, Self::RelativeTube, Self::FromSolid, Self::PreviousSetup];
+}
+
+impl StockEditorKind {
+    fn icon(self) -> &'static [u8] {
+        match self {
+            Self::FixedBox => include_bytes!("../assets/icons/stock/fixed_box.svg"),
+            Self::RelativeBox | Self::LegacyBox => include_bytes!("../assets/icons/stock/relative_box.svg"),
+            Self::FixedCylinder => include_bytes!("../assets/icons/stock/fixed_cylinder.svg"),
+            Self::RelativeCylinder => include_bytes!("../assets/icons/stock/relative_cylinder.svg"),
+            Self::FixedTube => include_bytes!("../assets/icons/stock/fixed_tube.svg"),
+            Self::RelativeTube => include_bytes!("../assets/icons/stock/relative_tube.svg"),
+            Self::FromSolid | Self::PreviousSetup => include_bytes!("../assets/icons/stock/solid.svg"),
+        }
+    }
 }
 
 impl std::fmt::Display for StockEditorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::FixedBox => "Fixed-size box",
-            Self::RelativeBox => "Relative to model bounds",
+            Self::FixedBox => "Fixed size box",
+            Self::RelativeBox => "Relative size box",
+            Self::FixedCylinder => "Fixed size cylinder",
+            Self::RelativeCylinder => "Relative size cylinder",
+            Self::FixedTube => "Fixed size tube",
+            Self::RelativeTube => "Relative size tube",
+            Self::FromSolid => "From solid",
             Self::LegacyBox => "Legacy box (existing project)",
             Self::PreviousSetup => "From previous setup",
         })
@@ -2125,7 +2150,9 @@ struct App {
     stock_to_leave_draft: Option<cam_model::StockToLeave>,
     stock_to_leave_initialized: bool,
     rotary_pick: Option<rotary_view::Pick>,
-    rotary_heights: Option<(cam_model::OperationHeightSettings,BTreeMap<cam_model::HeightPlaneKind,String>)>,
+    rotary_wrap_draft: Option<cam_model::RotaryWrap>,
+    rotary_index_draft: Option<cam_model::RotaryIndex>,
+    rotary_index_values: [String; 4],
     creation_edited_fields: BTreeSet<Field>,
     thread_parameters: thread_parameters::ThreadParameters,
     creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
@@ -2163,6 +2190,7 @@ struct App {
     /// Tools selected by an operation draft but not yet published to the setup.
     operation_tools: Vec<cam_model::Tool>,
     setup_tab: SetupEditorTab,
+    stock_kind_open: bool,
     /// An armed edge-reference field. Viewport picks are routed here until cleared.
     setup_axis_pick: Option<usize>,
     setup_orientation: Option<SetupOrientation>,
@@ -2717,7 +2745,11 @@ enum Message {
     SetupFixtureClearanceChanged(usize, String),
     SetupModelToggled(u64, bool),
     SetupStockKindChanged(StockEditorKind),
+    SetupStockKindToggle,
     SetupStockNumberChanged(usize, String),
+    SetupStockSolidChanged(StockSolidChoice),
+    SetupStockAxisClear,
+    SetupStockOriginAxis(usize),
     SetupStockPositionChanged(usize, BoxAnchor),
     SetupAxisPick(usize),
     BeginPattern(bool),
@@ -3219,6 +3251,7 @@ impl App {
         self.inspector_enabled = true;
         self.cancel_setup_picks();
         self.setup_tab = SetupEditorTab::Setup;
+        self.stock_kind_open = false;
         self.setup_orientation = None;
         self.setup_origin_mode = None;
         self.setup_draft = self.controller.document().active_setup().cloned();
@@ -3345,7 +3378,9 @@ impl App {
 
     fn begin_operation_draft(&mut self, id: u32) {
         self.rotary_pick=None;
-        self.rotary_heights=None;
+        self.rotary_wrap_draft=None;
+        self.rotary_index_draft=self.controller.document().rotary_indexes.get(&id).cloned();
+        self.seed_rotary_index_values();
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
         self.profile_contour_selection = 0;
@@ -3432,6 +3467,7 @@ impl App {
         let Selection::Operation(id) = self.controller.selection() else {
             return false;
         };
+        if self.rotary_index_draft.as_ref()!=self.controller.document().rotary_indexes.get(&id) {return true;}
         if self.height_rules_dirty() {
             return true;
         }
@@ -3491,6 +3527,31 @@ impl App {
                 self.fields.insert(field, value);
             }
         }
+    }
+
+    fn set_round_stock_axis(&mut self, entity: EntityRef) -> bool {
+        let Some(draft) = &self.setup_draft else {
+            return false;
+        };
+        if entity.kind != EntityKind::Edge {
+            self.status = "Select a straight model edge or an origin axis for the stock.".into();
+            return false;
+        }
+        let mut candidate = draft.clone();
+        match &mut candidate.stock {
+            cam_model::Stock::FixedRound { axis, .. }
+            | cam_model::Stock::RelativeRound { axis, .. } => {
+                *axis = Some(cam_model::StockAxis::Edge(cam_model::StockAxisReference::from(&entity)))
+            }
+            _ => return false,
+        }
+        if let Err(error) = self.controller.document().round_stock_geometry(&candidate) {
+            self.status = error;
+            return false;
+        }
+        self.setup_draft = Some(candidate);
+        self.status = format!("Stock axis set from edge {}.", entity.id);
+        true
     }
 
     fn set_setup_axis_reference(&mut self, axis: usize, entity: Option<EntityRef>) {
@@ -3703,7 +3764,9 @@ impl App {
             stock_to_leave_draft: None,
             stock_to_leave_initialized: false,
             rotary_pick: None,
-            rotary_heights: None,
+            rotary_wrap_draft: None,
+            rotary_index_draft: None,
+            rotary_index_values: Default::default(),
             creation_edited_fields: BTreeSet::new(),
             thread_parameters: Default::default(),
             creation_geometry_height_defaults: None,
@@ -3740,6 +3803,7 @@ impl App {
             pattern_menu_y: None,
             operation_tools: Vec::new(),
             setup_tab: SetupEditorTab::Setup,
+            stock_kind_open: false,
             setup_axis_pick: None,
             setup_orientation: None,
             setup_origin_mode: None,
@@ -5117,8 +5181,19 @@ impl App {
                     }
                 }
             }
+            Message::SetupStockKindToggle => self.stock_kind_open = !self.stock_kind_open,
             Message::SetupStockKindChanged(kind) => {
+                self.stock_kind_open = false;
+                if self.setup_axis_pick == Some(3) {
+                    self.setup_axis_pick = None;
+                    self.cad_candidates.clear();
+                }
                 if let Some(draft) = &mut self.setup_draft {
+                    let stock_axis = match draft.stock {
+                        cam_model::Stock::FixedRound { axis, .. }
+                        | cam_model::Stock::RelativeRound { axis, .. } => axis,
+                        _ => None,
+                    };
                     let stock = match kind {
                         StockEditorKind::PreviousSetup => cam_model::Stock::PreviousSetup,
                         StockEditorKind::FixedBox => match draft.stock {
@@ -5134,13 +5209,72 @@ impl App {
                                 offsets: [[1.0; 3]; 2],
                             },
                         },
+                        StockEditorKind::FromSolid => match draft.stock {
+                            cam_model::Stock::FromSolid { .. } => draft.stock,
+                            _ => cam_model::Stock::FromSolid { instance: None },
+                        },
+                        StockEditorKind::FixedCylinder | StockEditorKind::FixedTube => {
+                            let tube = kind == StockEditorKind::FixedTube;
+                            if let cam_model::Stock::FixedRound { tube: existing, .. } = draft.stock
+                            {
+                                if existing == tube {
+                                    return iced::Task::none();
+                                }
+                            }
+                            let mut oriented = draft.clone();
+                            let round = self
+                                .controller
+                                .document()
+                                .round_stock_geometry(draft)
+                                .ok()
+                                .flatten();
+                            if let Some((frame, _, _)) = &round {
+                                oriented.frame = frame.clone();
+                            }
+                            let (min, max) = self.controller.pending_setup_model_bounds(&oriented);
+                            let diameter = round
+                                .as_ref()
+                                .map(|(_, lo, hi)| hi[0] - lo[0])
+                                .unwrap_or_else(|| {
+                                    (max[0] - min[0]).hypot(max[1] - min[1]).max(1.) + 2.
+                                });
+                            let length = round
+                                .as_ref()
+                                .map(|(_, lo, hi)| hi[2] - lo[2])
+                                .unwrap_or_else(|| (max[2] - min[2]).max(1.) + 2.);
+                            cam_model::Stock::FixedRound {
+                                diameter,
+                                inner_diameter: if tube { diameter / 2. } else { 0. },
+                                length,
+                                position: 0.5,
+                                tube,
+                                axis: stock_axis,
+                            }
+                        }
+                        StockEditorKind::RelativeCylinder | StockEditorKind::RelativeTube => {
+                            let tube = kind == StockEditorKind::RelativeTube;
+                            if let cam_model::Stock::RelativeRound { tube: existing, .. } =
+                                draft.stock
+                            {
+                                if existing == tube {
+                                    return iced::Task::none();
+                                }
+                            }
+                            cam_model::Stock::RelativeRound {
+                                radial: 1.,
+                                inner_diameter: if tube { 1. } else { 0. },
+                                bottom: 1.,
+                                top: 1.,
+                                tube,
+                                axis: stock_axis,
+                            }
+                        }
                         StockEditorKind::LegacyBox => match draft.stock {
                             cam_model::Stock::BoundingBox { .. } => draft.stock,
                             _ => draft.stock,
                         },
                     };
-                    let changed =
-                        std::mem::discriminant(&draft.stock) != std::mem::discriminant(&stock);
+                    let changed = draft.stock != stock;
                     draft.stock = stock;
                     if changed {
                         self.setup_values
@@ -5148,11 +5282,42 @@ impl App {
                     }
                 }
             }
+            Message::SetupStockOriginAxis(index) => {
+                if let (Some(draft), Some(origin_axis)) = (
+                    &mut self.setup_draft,
+                    cam_model::StockOriginAxis::from_index(index),
+                ) {
+                    match &mut draft.stock {
+                        cam_model::Stock::FixedRound { axis, .. }
+                        | cam_model::Stock::RelativeRound { axis, .. } => {
+                            *axis = Some(cam_model::StockAxis::Origin { origin_axis });
+                            self.status =
+                                format!("Stock axis set to origin {}.", ["X", "Y", "Z"][index]);
+                        }
+                        _ => {}
+                    }
+                }
+                self.setup_axis_pick = None;
+                self.cad_candidates.clear();
+            }
+            Message::SetupStockAxisClear => {
+                if let Some(draft) = &mut self.setup_draft {
+                    match &mut draft.stock {
+                        cam_model::Stock::FixedRound { axis, .. } | cam_model::Stock::RelativeRound { axis, .. } => *axis = None,
+                        _ => {}
+                    }
+                }
+                if self.setup_axis_pick == Some(3) { self.setup_axis_pick = None; }
+                self.cad_candidates.clear();
+            }
+            Message::SetupStockSolidChanged(choice) => {
+                if let Some(draft) = &mut self.setup_draft { draft.stock = cam_model::Stock::FromSolid { instance: Some(choice.id) }; }
+            }
             Message::SetupStockNumberChanged(index, value) => {
                 self.setup_values.insert(20 + index, value.clone());
                 if let (Some(draft), Ok(v)) = (&mut self.setup_draft, value.parse::<f64>()) {
                     match &mut draft.stock {
-                        cam_model::Stock::PreviousSetup => {}
+                        cam_model::Stock::PreviousSetup | cam_model::Stock::FromSolid { .. } => {}
                         cam_model::Stock::FixedBox {
                             size,
                             model_position,
@@ -5168,6 +5333,8 @@ impl App {
                                 offsets[index / 3][index % 3] = v;
                             }
                         }
+                        cam_model::Stock::FixedRound { diameter, inner_diameter, length, position, .. } => match index { 0 => *diameter = v, 1 => *inner_diameter = v, 2 => *length = v, 3 => *position = v, _ => {} },
+                        cam_model::Stock::RelativeRound { radial, inner_diameter, bottom, top, .. } => match index { 0 => *radial = v, 1 => *inner_diameter = v, 2 => *bottom = v, 3 => *top = v, _ => {} },
                         cam_model::Stock::BoundingBox {
                             x_offset,
                             y_offset,
@@ -5201,10 +5368,11 @@ impl App {
                 self.setup_axis_pick = Some(axis);
                 self.cad_candidates.clear();
                 self.cad_filter = CadFilter::Edge;
-                self.status = format!(
-                    "Select a straight model or stock edge for {}.",
-                    ["X", "Y", "Z"][axis]
-                );
+                self.status = if axis == 3 {
+                    "Select a straight model edge or an origin axis for the stock.".into()
+                } else {
+                    format!("Select a straight model or stock edge for {}.", ["X", "Y", "Z"][axis])
+                };
             }
             Message::PatternTabChanged(tab) => self.pattern_tab = tab,
             Message::BeginPattern(circular) => {
@@ -5539,6 +5707,9 @@ impl App {
             }
             Message::SetupAxisFlip(axis, flipped) => self.set_setup_axis_flip(axis, flipped),
             Message::SetupAxisToggle(axis) => {
+                if self.setup_axis_pick == Some(3) {
+                    return self.update(Message::SetupStockOriginAxis(axis));
+                }
                 if let Some(draft) = &self.setup_draft {
                     if axis < 3 {
                         let refs = &draft.frame.references;
@@ -6396,9 +6567,8 @@ impl App {
                     return iced::Task::none();
                 }
                 if let (Some(axis), [candidate]) = (self.setup_axis_pick, candidates.as_slice()) {
-                    self.set_setup_axis_reference(axis, Some(candidate.entity.clone()));
-                    self.setup_axis_pick = None;
-                    self.cad_candidates.clear();
+                    let selected = if axis == 3 { self.set_round_stock_axis(candidate.entity.clone()) } else { self.set_setup_axis_reference(axis, Some(candidate.entity.clone())); true };
+                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
                 } else if self.setup_axis_pick.is_some() && candidates.len() > 1 {
                     self.cad_candidates = candidates.clone();
                     self.status = "Choose the intended overlapping edge in the right panel.".into();
@@ -6464,9 +6634,8 @@ impl App {
                     return iced::Task::none();
                 }
                 if let Some(axis) = self.setup_axis_pick {
-                    self.set_setup_axis_reference(axis, Some(entity));
-                    self.setup_axis_pick = None;
-                    self.cad_candidates.clear();
+                    let selected = if axis == 3 { self.set_round_stock_axis(entity) } else { self.set_setup_axis_reference(axis, Some(entity)); true };
+                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
                 } else {
                     self.select_cad_entity(entity);
                 }
@@ -7091,13 +7260,15 @@ impl App {
             Message::ConfirmOp => {
                 if self.creating_operation() {
                     let result = self.creation_operation().and_then(|(operation, binding)| {
+                        self.validate_rotary_index_draft()?;
                         let settings = self.edited_height_settings()?;
-                        self.controller.commit_operation_creation(
+                        self.controller.commit_operation_creation_with_index(
                             operation,
                             binding,
                             settings,
                             self.operation_tools.clone(),
                             self.stock_to_leave_with_fields(),
+                            self.rotary_index_draft.clone(),
                         )
                     });
                     match result {
@@ -7365,7 +7536,10 @@ impl App {
                     return iced::Task::none();
                 }
                 if let Some(axis) = self.setup_axis_pick.take() {
-                    self.set_setup_stock_axis(axis, direction);
+                    if axis == 3 {
+                        self.setup_axis_pick = Some(3);
+                        self.status = "Select a straight model edge or an origin axis for the stock.".into();
+                    } else { self.set_setup_stock_axis(axis, direction); }
                 }
                 self.setup_hover = SetupHover::default();
                 self.cad_candidates.clear();
@@ -10137,6 +10311,7 @@ impl App {
                 None
             };
             let used_tools = operation.tools();
+            if let Err(reason)=self.validate_rotary_index_draft() {self.report_error(reason);return;}
             let tools = self
                 .operation_tools
                 .iter()
@@ -10152,25 +10327,27 @@ impl App {
                     .contains_key(&id)
             {
                 match self.edited_height_settings() {
-                    Ok(settings) => self.controller.apply_operation_height_settings_and_stock(
+                    Ok(settings) => self.controller.apply_operation_height_settings_and_stock_and_index(
                         operation,
                         overrides,
                         tools,
                         self.operation_geometry.clone(),
                         settings,
                         self.stock_to_leave_with_fields(),
+                        self.rotary_index_draft.clone(),
                     ),
                     Err(reason) => Err(reason),
                 }
             } else {
                 self.controller
-                    .apply_operation_settings_with_heights_and_stock(
+                    .apply_operation_settings_with_heights_and_stock_and_index(
                         operation,
                         overrides,
                         tools,
                         self.operation_geometry.clone(),
                         Some(heights),
                         self.stock_to_leave_with_fields(),
+                        self.rotary_index_draft.clone(),
                     )
             };
             match result {
@@ -11604,7 +11781,39 @@ impl App {
     }
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
-        if self.rotary_cad_pick(&entity) {return;}
+        if self.rotary_cad_pick(&entity) {
+            return;
+        }
+        let wrapped_pocket = matches!(self.operation_draft.as_ref(), Some(Operation::Pocket(p)) if p.wrap.is_some());
+        if wrapped_pocket
+            && self.operation_tab == OperationTab::Geometry
+            && self.geometry_editor.is_none()
+            && (self.geometry_auto_pick || self.cad_pending_kind.is_some())
+        {
+            let filter = match entity.kind {
+                EntityKind::Face => Some(CadFilter::Face),
+                EntityKind::Loop => Some(CadFilter::Loop),
+                EntityKind::Edge => Some(CadFilter::Edge),
+                _ => None,
+            };
+            if let Some(filter) = filter {
+                self.operation_geometry_message(GeometryMessage::Add(filter));
+            }
+        }
+        if self.wrapped_pocket_geometry_editor() {
+            let additive = (self.geometry_additive && entity.kind == EntityKind::Edge)
+                || (self.modifiers.command() && !self.modifiers.control())
+                || self.modifiers.shift();
+            match self.controller.toggle_cad_selection(entity, additive) {
+                Ok(()) => {
+                    self.geometry_row_selection = None;
+                    self.status =
+                        "Select geometry in the viewport, then use OK to stage it.".into();
+                }
+                Err(error) => self.report_error(error),
+            }
+            return;
+        }
         if self.stock_contour_editor() {
             let additive = entity.kind != EntityKind::Silhouette
                 && !self
@@ -13776,6 +13985,7 @@ struct Viewport {
     stock_contour_setup_selected: bool,
     setup_geometry: Arc<SetupPickGeometry>,
     setup_axis: bool,
+    stock_axis_model_only: bool,
     operation_position_picking: bool,
     operation_position_color: [f32; 4],
     setup_hover: SetupHover,
@@ -13792,6 +14002,7 @@ struct Viewport {
     mesh_indices: Arc<Vec<u32>>,
     transparent_stock_vertices: Arc<Vec<MeshVertex>>,
     transparent_stock_indices: Arc<Vec<u32>>,
+    transparent_stock_convex: bool,
     show_stock: bool,
     cad_edges: Arc<Vec<Vertex>>,
     cad_scene: Arc<CadScene>,
@@ -13861,6 +14072,7 @@ impl Viewport {
         editor_geometry: Option<&[EntityRef]>,
         silhouette_bottom: Option<f64>,
         cached_cad_scene: Option<Arc<CadScene>>,
+        stock_draft: Option<&cam_model::Setup>,
     ) -> Self {
         let cad_hover = cad_hover.filter(|reference| {
             preview.is_none()
@@ -14132,8 +14344,9 @@ impl Viewport {
                 })
             })
         };
-        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_outcome) {
-            (true, Some(outcome))
+        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_draft, stock_outcome) {
+            (true, Some(draft), _) => workspace_view::uncut_stock_mesh_for_setup(controller, draft),
+            (true, None, Some(outcome))
                 if outcome.completion == JobCompletion::Complete
                     || !outcome.stock_indices.is_empty() =>
             {
@@ -14142,9 +14355,22 @@ impl Viewport {
                     outcome.stock_indices.clone(),
                 )
             }
-            (true, _) => workspace_view::uncut_stock_mesh(controller),
+            (true, None, _) => workspace_view::uncut_stock_mesh(controller),
             _ => (Vec::new(), Vec::new()),
         };
+        // The initial box or solid cylinder is convex. Its front and rear
+        // triangles need separate ordering when stock is translucent; a
+        // simulated or hollow blank can be non-convex and uses depth sorting.
+        let transparent_stock_convex = preview.is_none()
+            && (stock_draft.is_some() || stock_outcome.is_none())
+            && matches!(
+                stock_draft.unwrap_or_else(|| controller.inspection_setup()).stock,
+                cam_model::Stock::BoundingBox { .. }
+                    | cam_model::Stock::FixedBox { .. }
+                    | cam_model::Stock::RelativeBox { .. }
+                    | cam_model::Stock::FixedRound { tube: false, .. }
+                    | cam_model::Stock::RelativeRound { tube: false, .. }
+            );
         let [r, g, b] = prefs.view.stock_color;
         for (index, vertex) in mesh_vertices.iter_mut().enumerate() {
             if preview.is_none()
@@ -14167,10 +14393,13 @@ impl Viewport {
             } else {
                 (Vec::new(), Vec::new())
             };
-        // A nominal CAD bore would cover grooves cut into its wall. During
-        // stock playback keep the model's reference edges, and draw its solid
-        // faces when stock is hidden.
-        if preview.is_none() || !show_stock {
+        // Opaque stock views retain only CAD reference edges to avoid hiding
+        // gouges or fighting coincident cut faces. Transparent stock needs the
+        // solid model behind it for comparison.
+        if !show_stock
+            || prefs.view.transparent_stock
+            || (mesh_indices.is_empty() && transparent_stock_indices.is_empty())
+        {
             let (cad_vertices, cad_indices) = cad_scene.mesh(&cad_selected, cad_hover);
             let offset = mesh_vertices.len() as u32;
             mesh_vertices.extend(cad_vertices);
@@ -14181,7 +14410,7 @@ impl Viewport {
         // geometry is loaded.
         let frame_bounds = if controller.has_geometry() {
             union_bounds(
-                workspace_view::stock_world_bounds(controller),
+                stock_draft.and_then(|setup| workspace_view::stock_world_bounds_for_setup(controller, setup)).or_else(|| workspace_view::stock_world_bounds(controller)),
                 cad_scene.bounds(),
             )
         } else {
@@ -14196,6 +14425,7 @@ impl Viewport {
                 cad_hidden,
             )),
             setup_axis: false,
+            stock_axis_model_only: false,
             operation_position_picking: false,
             operation_position_color: operation_positions::PositionKind::Entry.color(),
             setup_hover: SetupHover::default(),
@@ -14234,6 +14464,7 @@ impl Viewport {
             mesh_indices: Arc::new(mesh_indices),
             transparent_stock_vertices: Arc::new(transparent_stock_vertices),
             transparent_stock_indices: Arc::new(transparent_stock_indices),
+            transparent_stock_convex,
             show_stock,
             cad_edges,
             cad_scene,
@@ -14271,6 +14502,7 @@ impl Viewport {
             pos,
             &self.setup_snaps,
             self.setup_axis,
+            self.stock_axis_model_only,
             &self.cad_scene,
             self.cad_select_through,
             0.5 * self.snap_catch_px,
@@ -14972,6 +15204,7 @@ impl shader::Program<Message> for Viewport {
             mesh_indices: self.mesh_indices.clone(),
             transparent_stock_vertices: self.transparent_stock_vertices.clone(),
             transparent_stock_indices: self.transparent_stock_indices.clone(),
+            transparent_stock_convex: self.transparent_stock_convex,
             cad_edges: self.cad_edges.clone(),
             view_proj: self.camera().view_proj(aspect),
             view_rotation: self.camera().orient,
@@ -15090,6 +15323,7 @@ struct ScenePrimitive {
     mesh_indices: Arc<Vec<u32>>,
     transparent_stock_vertices: Arc<Vec<MeshVertex>>,
     transparent_stock_indices: Arc<Vec<u32>>,
+    transparent_stock_convex: bool,
     cad_edges: Arc<Vec<Vertex>>,
     view_proj: [[f32; 4]; 4],
     /// World-to-view rotation for camera-fixed illumination of the part and cube.
@@ -15154,8 +15388,15 @@ impl shader::Primitive for ScenePrimitive {
                 &p.transparent_stock_indices,
                 &self.transparent_stock_indices,
             )
+                || p.transparent_stock_convex != self.transparent_stock_convex
         }) {
-            pipeline.transparent_stock.upload_transparent(
+            let upload = if self.transparent_stock_convex {
+                cam_render::MeshRenderer::upload_transparent_convex
+            } else {
+                cam_render::MeshRenderer::upload_transparent
+            };
+            upload(
+                &mut pipeline.transparent_stock,
                 device,
                 &self.transparent_stock_vertices,
                 &self.transparent_stock_indices,
@@ -15164,7 +15405,13 @@ impl shader::Primitive for ScenePrimitive {
         } else if !self.transparent_stock_indices.is_empty()
             && previous.is_some_and(|p| p.view_proj != self.view_proj)
         {
-            pipeline.transparent_stock.resort_transparent(
+            let resort = if self.transparent_stock_convex {
+                cam_render::MeshRenderer::resort_transparent_convex
+            } else {
+                cam_render::MeshRenderer::resort_transparent
+            };
+            resort(
+                &mut pipeline.transparent_stock,
                 device,
                 &self.transparent_stock_vertices,
                 &self.transparent_stock_indices,
@@ -15718,21 +15965,41 @@ mod multi_setup_draft_tests {
     #[test]
     fn rotary_wrap_editor_stages_numbers_and_commits_all_tabs_in_one_undo_step() {
         let (mut app,id)=stock_profile_app();
+        // The proposed radius plus offset must fit inside a physical blank.
+        app.controller.edit_stock(|stock| *stock = cam_model::Stock::FixedRound {
+            diameter: 200., inner_diameter: 0., length: 60., position: 0.5,
+            tube: false,
+            axis: Some(cam_model::StockAxis::Origin { origin_axis: cam_model::StockOriginAxis::X }),
+        });
         let before=app.controller.document().clone();
         send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        let field=Field::Wrap(rotary_view::Number::Radius);
+        let field=Field::Wrap(rotary_view::Number::Offset);
         assert!(app.inspector_fields().contains(&field));
         send(&mut app,Message::FieldChanged(field,"40".into()));
         assert!(app.controller.operation(id).unwrap().rotary_wrap().is_none());
         assert!(!app.any_field_invalid(),"{}",app.status);
         send(&mut app,Message::Apply);
-        assert_eq!(app.controller.operation(id).unwrap().rotary_wrap().unwrap().radius,40.,"{}",app.status);
+        assert_eq!(app.controller.operation(id).unwrap().rotary_wrap().unwrap().offset,40.,"{}",app.status);
         assert!(app.controller.undo());
         assert_eq!(*app.controller.document(),before);
         app.begin_operation_draft(id);
         send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
         send(&mut app,Message::CancelOperationDraft);
         assert_eq!(*app.controller.document(),before);
+    }
+
+    #[test]
+    fn rotary_mode_switch_preserves_wrap_and_existing_tab_settings() {
+        let (mut app,_)=stock_profile_app();
+        let heights=app.height_draft.clone();
+        let offsets=app.height_offsets.clone();
+        app.edit_operation_draft(|op|op.set_rotary_wrap(Some(cam_model::RotaryWrap{radius:100.,unwrap_geometry:false,..Default::default()})));
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(false)));
+        assert!(app.operation_draft.as_ref().unwrap().rotary_wrap().is_none());
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        let wrap=app.operation_draft.as_ref().unwrap().rotary_wrap().unwrap();
+        assert_eq!(wrap.radius,100.);assert!(!wrap.unwrap_geometry);
+        assert_eq!(app.height_draft,heights);assert_eq!(app.height_offsets,offsets);
     }
 
     #[test]

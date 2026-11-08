@@ -106,6 +106,14 @@ pub fn build_job_cached(
                 .bindings
                 .get(&op.id())
                 .map(|binding| geometry.binding_fingerprint(binding));
+            if let Some(wrap) = op.rotary_wrap() {
+                geometry_fingerprint = Some(format!(
+                    "{}:wrap:{}:periodic:{}",
+                    geometry_fingerprint.unwrap_or_default(),
+                    crate::ROTARY_WRAP_REVISION,
+                    wrap.periodic
+                ));
+            }
             if let Operation::Pocket(p) = op {
                 if p.stock_contours.enabled {
                     let model_dependencies: Vec<_> = geometry
@@ -191,9 +199,6 @@ fn build_job_with_compute(
             }
         }
     };
-    if !fixtures.is_empty() && setup.operations.iter().any(|op|doc.operation_is_included(setup.id,op.id()) && op.rotary_wrap().is_some()) {
-        return JobResult {completion:JobCompletion::Failed,diagnostics:vec![Diagnostic::error("Rotary fixture verification is not available; use a separate setup without fixture envelopes for wrapped operations").for_setup(setup.id)],..Default::default()};
-    }
     let fixture_top = fixtures
         .iter()
         .map(|f| f.max[2] + 0.01)
@@ -269,11 +274,18 @@ fn build_job_with_compute(
     }
     let mut rotary_axes=std::collections::HashMap::new();
     for operation in setup.operations.iter().filter(|op|doc.operation_is_included(setup.id,op.id())) {
+        if let Some(index)=doc.rotary_indexes.get(&operation.id()) {
+            let reason=index.validate().err().or_else(||operation.rotary_wrap().is_some().then(||"An operation cannot be both indexed and wrapped".to_string())).or_else(|| {
+                let entry=(index.axis,match index.axis {cam_model::RotaryAxis::A=>[index.center[1],index.center[2]],cam_model::RotaryAxis::B=>[index.center[0],index.center[2]]});
+                rotary_axes.insert(0,entry).and_then(|old| (old.0!=entry.0 || old.1.iter().zip(entry.1).any(|(a,b)|(a-b).abs()>1e-6)).then(||"Indexed and wrapped operations must share one rotary axis and centre".to_string()))
+            });
+            if let Some(reason)=reason {return JobResult{completion:JobCompletion::Failed,diagnostics:vec![Diagnostic::error(reason).for_op(operation.id())],..Default::default()};}
+        }
         if let Some(wrap)=operation.rotary_wrap() {
             let reason=wrap.validate().err().or_else(|| {
                 let entry=(wrap.axis,match wrap.axis {cam_model::RotaryAxis::A=>[wrap.center[1],wrap.center[2]],cam_model::RotaryAxis::B=>[wrap.center[0],wrap.center[2]]});
-                rotary_axes.insert(operation.work_offset(),entry).and_then(|old| {
-                    (old.0!=entry.0 || old.1.iter().zip(entry.1).any(|(a,b)|(a-b).abs()>1e-6)).then(||"Wrapped operations on one datum must share one rotary axis and centre".to_string())
+                rotary_axes.insert(0,entry).and_then(|old| {
+                    (old.0!=entry.0 || old.1.iter().zip(entry.1).any(|(a,b)|(a-b).abs()>1e-6)).then(||"Wrapped operations in a setup must share one physical rotary axis and centre".to_string())
                 })
             });
             if let Some(reason)=reason {
@@ -349,6 +361,8 @@ fn build_job_with_compute(
             completion = JobCompletion::Cancelled;
             break;
         }
+        let indexed_geometry=doc.rotary_indexes.get(&operation.id()).map(|index|index.geometry(&doc.geometry));
+        let operation_geometry=indexed_geometry.as_ref().unwrap_or(&doc.geometry);
         env.heights = setup.heights_for(operation.id());
         if let Some(wrap)=operation.rotary_wrap(){env.heights.top_of_stock=wrap.surface_z;}
         let stock_to_leave = setup.stock_to_leave_for(operation.id());
@@ -376,7 +390,7 @@ fn build_job_with_compute(
                 ..Default::default()
             }
         } else if doc.cad_linked_operations.contains(&operation.id())
-            && !doc.geometry.bindings.contains_key(&operation.id())
+            && !operation_geometry.bindings.contains_key(&operation.id())
         {
             StrategyResult {
                 diagnostics: vec![Diagnostic::error(
@@ -384,7 +398,7 @@ fn build_job_with_compute(
                 ).with_code(crate::DiagnosticCode::GeometryUnresolved)],
                 ..Default::default()
             }
-        } else if let Some(binding) = doc.geometry.bindings.get(&operation.id()) {
+        } else if let Some(binding) = operation_geometry.bindings.get(&operation.id()) {
             match &binding.status {
                 cam_model::ResolutionStatus::NeedsReselection { reason } => StrategyResult {
                     diagnostics: vec![Diagnostic::error(format!("Needs reselection: {reason}"))
@@ -395,9 +409,9 @@ fn build_job_with_compute(
                     if !binding
                         .selected
                         .iter()
-                        .all(|r| doc.geometry.entity_exists(r))
+                        .all(|r| operation_geometry.entity_exists(r))
                         || binding.resolved_fingerprint.as_ref()
-                            != Some(&doc.geometry.binding_fingerprint(binding))
+                            != Some(&operation_geometry.binding_fingerprint(binding))
                     {
                         StrategyResult {
                             diagnostics: vec![Diagnostic::error("Linked CAD geometry has no matching resolved snapshot; resolve it before planning").with_code(crate::DiagnosticCode::GeometryUnresolved)],
@@ -415,7 +429,7 @@ fn build_job_with_compute(
                             ComputeContext {
                                 stock_to_leave,
                                 compute: &mut compute,
-                                geometry: &doc.geometry,
+                                geometry: operation_geometry,
                             },
                             true,
                         )
@@ -431,14 +445,14 @@ fn build_job_with_compute(
                 ComputeContext {
                     stock_to_leave,
                     compute: &mut compute,
-                    geometry: &doc.geometry,
+                    geometry: operation_geometry,
                 },
                 false,
             )
         } else if operation.rotary_wrap().is_some() {
             compute_at_heights(operation,&env,doc.operation_base_cutting_heights(operation),cancel,ComputeContext {stock_to_leave,compute:&mut compute,geometry:&doc.geometry},false)
         } else {
-            compute(operation, &env, cancel, stock_to_leave, &doc.geometry, None)
+            compute(operation, &env, cancel, stock_to_leave, operation_geometry, None)
         };
         if let Some(Ok(heights)) = configured {
             if let Some(feed_z) = heights.feed {
@@ -669,6 +683,13 @@ fn build_job_with_compute(
 
     // Expand patterns in the unwrapped plane, then wrap each derived instance.
     for pl in &mut planned {
+        if let Some(index)=doc.rotary_indexes.get(&pl.op_id) {
+            match crate::index_program(&pl.fragment,index,cancel) {
+                Ok(fragment)=>pl.fragment=fragment,
+                Err(reason)=> {pl.fragment=Program::new();diagnostics.push(Diagnostic::error(reason).for_op(pl.op_id));completion=if cancel.is_cancelled(){JobCompletion::Cancelled}else{JobCompletion::Failed};}
+            }
+            continue;
+        }
         let Some(wrap) = setup.operations.iter().find(|op|op.id()==pl.op_id).and_then(Operation::rotary_wrap) else { continue; };
         if pl.clearance <= wrap.surface_z {
             pl.fragment=Program::new();
@@ -740,7 +761,7 @@ fn build_job_with_compute(
     if cancel.is_cancelled() {
         completion = JobCompletion::Cancelled;
     }
-    if !fixtures.is_empty() && completion != JobCompletion::Cancelled && program.validate().is_ok()
+    if !fixtures.is_empty() && !program.has_rotary_motion() && completion != JobCompletion::Cancelled && program.validate().is_ok()
     {
         let profiles = setup
             .operations
@@ -1240,10 +1261,25 @@ fn emit_instance(
         st.current_rpm = Some(pl.rpm);
     }
     st.spindle_started = true;
+    // Index at tool-change clearance before crossing to the next operation.
+    // All cutting blocks of an indexed fragment carry the same absolute angle.
+    if let Some(Step::Rotary{angle,axis,center,..})=pl.fragment.steps().iter().find(|s|matches!(s,Step::Rotary{..})) {
+        let previous_angle=program.steps().iter().rev().find_map(|s|if let Step::Rotary{angle,..}=s{Some(*angle)}else{None}).unwrap_or(0.);
+        if (*angle-previous_angle).abs()>1e-9 {
+            lift_to_tool_change(program,tool_change_height.max(clearance),pl.op_id);
+            if last_position(program).is_none() {
+                if let Some(start)=first_position(&pl.fragment) {program.push(Step::Rapid{to:Point3::new(start.x,start.y,tool_change_height.max(clearance)),tag:pl.tag(MoveKind::Traverse)});}
+            }
+            if let Some(to)=last_position(program) {
+                let length=(*angle-previous_angle).to_radians().abs()*(to.z-center.z).abs();
+                program.push(Step::Rotary{to,angle:*angle,axis:*axis,center:*center,feed:None,length,tag:pl.tag(MoveKind::Traverse)});
+            }
+        }
+    }
     // Ordinary machining resumes at rotary zero, with the cutter lifted before
     // indexing. Retain the full turn count rather than choosing a shortest path.
-    if !pl.fragment.has_rotary_motion() && !datum_changing {
-        if let Some(Step::Rotary {angle,axis,center,..})=program.steps().iter().rev().find(|s|matches!(s,Step::Rotary{..}|Step::Datum(_))) {
+    if !pl.fragment.has_rotary_motion() {
+        if let Some(Step::Rotary {angle,axis,center,..})=program.steps().iter().rev().find(|s|matches!(s,Step::Rotary{..})) {
             let (angle,axis,center)=(*angle,*axis,*center);
             if angle.abs()>1e-9 {
                 lift_to_tool_change(program,tool_change_height.max(clearance),pl.op_id);
@@ -1307,7 +1343,7 @@ fn emit_instance(
     for step in pl.fragment.steps() {
         if let Step::Rotary {to,angle,axis,center,feed:None,length,tag}=step {
             if *length==0. {
-                let previous_angle=program.steps().iter().rev().find_map(|s|match s {Step::Rotary {angle,..}=>Some(*angle),Step::Datum(_)=>Some(0.),_=>None}).unwrap_or(0.);
+                let previous_angle=program.steps().iter().rev().find_map(|s|match s {Step::Rotary {angle,..}=>Some(*angle),_=>None}).unwrap_or(0.);
                 let previous=last_position(program).unwrap_or(*to);
                 let rotation=(*angle-previous_angle).to_radians()*((previous.z+to.z)*0.5-center.z).abs();
                 let length=(to.x-previous.x).hypot(to.y-previous.y).hypot(to.z-previous.z).hypot(rotation);

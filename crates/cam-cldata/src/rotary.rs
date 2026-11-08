@@ -34,7 +34,17 @@ impl Program {
         let mut angle = 0.;
         let mut frame = None;
         let mut result = Self::new();
+        let mut current = None;
         for step in &self.steps {
+            let previous = current;
+            match step {
+                Step::Rotary { to, .. } | Step::Rapid { to, .. } | Step::Linear { to, .. } => {
+                    current = Some(*to)
+                }
+                Step::Arc { end, .. } => current = Some(*end),
+                Step::Datum(_) => current = None,
+                _ => {}
+            }
             match step {
                 Step::Rotary {
                     to,
@@ -64,9 +74,48 @@ impl Program {
                         tag: *tag,
                     });
                 }
+                Step::Linear { to, feed, tag } if frame.is_some() => {
+                    let (axis, center) = frame.unwrap();
+                    result.push(Step::Linear {
+                        to: axis.material_point(*to, center, angle),
+                        feed: *feed,
+                        tag: *tag,
+                    });
+                }
+                Step::Arc {
+                    end,
+                    center,
+                    dir,
+                    feed,
+                    tag,
+                } if frame.is_some() && angle.abs() > 1e-12 => {
+                    if let Some(start) = previous {
+                        let (axis, origin) = frame.unwrap();
+                        let sweep = crate::arc_sweep(start, *end, *center, *dir);
+                        let n = (sweep / 5_f64.to_radians()).ceil().max(1.) as usize;
+                        let r = (start.x - center.x).hypot(start.y - center.y);
+                        let a = (start.y - center.y).atan2(start.x - center.x);
+                        let sign = if *dir == crate::ArcDir::Cw { -1. } else { 1. };
+                        for i in 1..=n {
+                            let t = i as f64 / n as f64;
+                            let p = if i == n {
+                                *end
+                            } else {
+                                Point3::new(
+                                    center.x + r * (a + sign * sweep * t).cos(),
+                                    center.y + r * (a + sign * sweep * t).sin(),
+                                    start.z + (end.z - start.z) * t,
+                                )
+                            };
+                            result.push(Step::Linear {
+                                to: axis.material_point(p, origin, angle),
+                                feed: *feed,
+                                tag: *tag,
+                            });
+                        }
+                    }
+                }
                 Step::Datum(_) => {
-                    frame = None;
-                    angle = 0.;
                     result.push(step.clone());
                 }
                 _ => result.push(step.clone()),

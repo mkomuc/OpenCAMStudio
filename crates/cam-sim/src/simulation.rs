@@ -248,7 +248,8 @@ impl SimulationCache {
         self.surface_sources = enabled;
     }
     /// The same result and collision checks as a fresh simulation. Cancelled work
-    /// cannot become a checkpoint or a published result.
+    /// cannot become a checkpoint or a published result. Rotary programs return
+    /// `None`; use `RotarySimulationCache` with finite tool dimensions for them.
     #[allow(clippy::too_many_arguments)] // Matches the stateless public API plus the cache receiver.
     pub fn simulate_controlled(
         &mut self,
@@ -302,7 +303,7 @@ impl SimulationCache {
         cancelled: &dyn Fn() -> bool,
         mut progress: impl FnMut(usize, usize),
     ) -> Option<SimResult> {
-        if cancelled() {
+        if cancelled() || program.has_rotary_motion() {
             return None;
         }
         let config = Config {
@@ -398,7 +399,8 @@ impl SimulationCache {
     }
 }
 
-/// Cancellable simulation. A stopped traversal has no complete result.
+/// Cancellable fixed-axis simulation. A stopped traversal or a rotary program
+/// has no result; use `RotarySimulationCache` for fourth-axis verification.
 pub fn simulate_controlled(
     program: &Program,
     min: [f64; 3],
@@ -408,7 +410,7 @@ pub fn simulate_controlled(
     cancelled: &dyn Fn() -> bool,
     progress: impl FnMut(usize, usize),
 ) -> Option<SimResult> {
-    if cancelled() {
+    if cancelled() || program.has_rotary_motion() {
         return None;
     }
     let config = Config {

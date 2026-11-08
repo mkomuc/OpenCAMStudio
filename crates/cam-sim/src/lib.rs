@@ -8,16 +8,21 @@
 //!
 //! The core is headless and unit-tested. Rendering the resulting heightfield in
 //! the viewport is a separate concern (as with `cam-render`).
+//! [`CylindricalStock`] initializes analytic round/tube blanks;
+//! [`RotarySimulationCache`] verifies indexed and simultaneous A/B motion using
+//! finite cutter, neck and shank dimensions in a stationary material frame.
 
 mod collision;
 mod heightfield;
 mod simulation;
 mod sweep;
+mod rotary_simulation;
+pub use rotary_simulation::{analyze_rotary_removal_controlled, RotarySimulationCache, RotaryTool};
 pub use simulation::{
     analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache,
 };
 
-pub use heightfield::{Heightfield, StockMeshCache, SurfaceDiff, SurfaceLocation, SurfaceMesh};
+pub use heightfield::{CylindricalStock, Heightfield, StockMeshCache, SurfaceDiff, SurfaceLocation, SurfaceMesh};
 
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use cam_geo::{Arc, Point};
@@ -262,7 +267,8 @@ pub fn simulate(
     options: &SimOptions,
     tools: &[SimTool],
 ) -> SimResult {
-    simulate_controlled(program, min, max, options, tools, &|| false, |_, _| {}).unwrap()
+    simulate_controlled(program, min, max, options, tools, &|| false, |_, _| {})
+        .expect("Fixed-axis simulation cannot verify rotary motion; use RotarySimulationCache")
 }
 
 /// Verify a simulated `field` against a desired `target` surface: if the tool cut

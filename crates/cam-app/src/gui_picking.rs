@@ -369,6 +369,7 @@ impl SetupPickGeometry {
         cursor: iced::Point,
         enabled: &[SnapKind],
         axis: bool,
+        model_axis_only: bool,
         scene: &CadScene,
         through: bool,
         aperture: f32,
@@ -433,6 +434,9 @@ impl SetupPickGeometry {
         }
         let mut edge_best: Option<(f32, f32, SetupFeature)> = None;
         for edge in &self.edges {
+            if model_axis_only && !matches!(edge.source, SetupFeature::Model(_)) {
+                continue;
+            }
             if axis && !edge.straight {
                 continue;
             }

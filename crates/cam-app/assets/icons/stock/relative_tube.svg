@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>Relative size tube</title>
+  <path d="M5 10h21a4.5 6 0 0 1 0 12H5" fill="none" stroke="#4cc9f0" stroke-width="2.4" stroke-linejoin="round"/>
+  <path d="M8 13h17a2.2 3 0 0 1 0 6H8Z" fill="#e0e0e0"/>
+  <ellipse cx="5" cy="16" rx="3" ry="6" fill="#383838" stroke="#4cc9f0" stroke-width="2.4"/>
+</svg>

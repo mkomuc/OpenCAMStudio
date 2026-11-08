@@ -17,11 +17,14 @@ impl App {
         let work_offset = self
             .current_operation(id)
             .map_or(self.controller.active_origin(), Operation::work_offset);
-        let value = value
+        let value = if let Some(wrap)=self.current_operation(id).and_then(Operation::rotary_wrap) {
+            let offset=self.fields.get(&Field::Wrap(super::rotary_view::Number::Offset)).and_then(|s|s.parse::<f64>().ok()).unwrap_or(wrap.offset);
+            wrap.radius+offset+value-wrap.surface_z
+        }else{value
             - self
                 .controller
                 .inspection_setup()
-                .origin_position(work_offset)[2];
+                .origin_position(work_offset)[2]};
         fn precision(text: &str) -> usize {
             let (mantissa, exponent) = text
                 .trim()
@@ -438,7 +441,8 @@ impl App {
                         if let Some(z) = heights.plane(plane) {
                             section = section.push(
                                 text(format!(
-                                    "WCS Z {} mm",
+                                    "{} {} mm",
+                                    if self.current_operation(id).and_then(Operation::rotary_wrap).is_some(){"Radius"}else{"WCS Z"},
                                     self.height_display_value(id, plane, z)
                                 ))
                                 .size(11)

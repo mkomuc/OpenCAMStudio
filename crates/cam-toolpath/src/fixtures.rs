@@ -3,6 +3,8 @@
 use crate::CancelToken;
 use cam_cldata::{CutterComp, Point3, Program, Step, Tag};
 use cam_model::{FixtureEnvelope, Tool};
+#[path = "rotary_fixtures.rs"]
+mod rotary;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FixtureContact {
@@ -102,13 +104,13 @@ pub fn verify_fixture_clearance(
     if fixtures.is_empty() {
         return Ok(Vec::new());
     }
-    if program.has_rotary_motion() {return Err("Fixture clearance verification is unavailable for rotary motion".into());}
     program.validate().map_err(|e| e.to_string())?;
     if fixtures.iter().any(|f| {
         (0..3).any(|i| !f.min[i].is_finite() || !f.max[i].is_finite() || f.min[i] > f.max[i])
     }) {
         return Err("Fixture verification requires finite, ordered fixture envelopes".into());
     }
+    if program.has_rotary_motion() {return rotary::verify(program,tools,fixtures,cancel);}
     let mut envelopes = std::collections::BTreeMap::new();
     let mut contacts = Vec::new();
     let mut cur = None;

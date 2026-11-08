@@ -3,6 +3,169 @@ use crate::CancelToken;
 use cam_cldata::{arc_sweep, ArcDir, Point3, Program, Step, Tag};
 use cam_model::RotaryWrap;
 
+/// Invalidates cached planar wrap fragments after radial-height/seam fixes.
+pub const ROTARY_WRAP_REVISION:u32=2;
+
+/// Lock the workpiece at one angle for an ordinary three-axis operation.
+/// Arcs and drill cycles are expanded before attaching the fixed rotary pose.
+pub fn index_program(
+    source: &Program,
+    index: &cam_model::RotaryIndex,
+    cancel: &CancelToken,
+) -> Result<Program, String> {
+    index.validate()?;
+    source.validate().map_err(|e| e.to_string())?;
+    let mut out = Program::new();
+    let mut current = None;
+    let center = Point3::new(index.center[0], index.center[1], index.center[2]);
+    let emit = |out: &mut Program,
+                current: &mut Option<Point3>,
+                to: Point3,
+                feed: Option<f64>,
+                tag: Tag|
+     -> Result<(), String> {
+        if cancel.is_cancelled() {
+            return Err("Indexed toolpath cancelled".into());
+        }
+        if out.len() >= 5_000_000 {
+            return Err("Indexed toolpath exceeds the motion budget".into());
+        }
+        let length = current.map_or(0., |a| (to.x - a.x).hypot(to.y - a.y).hypot(to.z - a.z));
+        if feed.is_some() && length <= 1e-12 {
+            return Ok(());
+        }
+        out.push(Step::Rotary {
+            to,
+            angle: index.angle,
+            axis: index.axis,
+            center,
+            feed,
+            length,
+            tag,
+        });
+        *current = Some(to);
+        Ok(())
+    };
+    for step in source.steps() {
+        match step {
+            Step::Rapid { to, tag } => emit(&mut out, &mut current, *to, None, *tag)?,
+            Step::Linear { to, feed, tag } => emit(&mut out, &mut current, *to, Some(*feed), *tag)?,
+            Step::Arc {
+                end,
+                center,
+                dir,
+                feed,
+                tag,
+            } => {
+                let start = current.ok_or("Indexed arc has no start")?;
+                let r = (start.x - center.x).hypot(start.y - center.y);
+                let sweep = arc_sweep(start, *end, *center, *dir);
+                let n = (sweep / chord_angle(r, index.tolerance)).ceil().max(1.) as usize;
+                if n > 1_000_000 {
+                    return Err("Indexed arc exceeds the motion budget".into());
+                }
+                let a = (start.y - center.y).atan2(start.x - center.x);
+                let sign = if *dir == ArcDir::Cw { -1. } else { 1. };
+                for j in 1..=n {
+                    let t = j as f64 / n as f64;
+                    let to = if j == n {
+                        *end
+                    } else {
+                        Point3::new(
+                            center.x + r * (a + sign * sweep * t).cos(),
+                            center.y + r * (a + sign * sweep * t).sin(),
+                            start.z + (end.z - start.z) * t,
+                        )
+                    };
+                    emit(&mut out, &mut current, to, Some(*feed), *tag)?;
+                }
+            }
+            Step::Drill(cycle) => {
+                for &[x, y] in &cycle.points {
+                    let link = Tag {
+                        kind: cam_cldata::MoveKind::Link,
+                        ..cycle.tag
+                    };
+                    emit(
+                        &mut out,
+                        &mut current,
+                        Point3::new(x, y, cycle.retract),
+                        None,
+                        link,
+                    )?;
+                    emit(
+                        &mut out,
+                        &mut current,
+                        Point3::new(x, y, cycle.z_top),
+                        None,
+                        link,
+                    )?;
+                    let count = cycle
+                        .peck
+                        .map_or(1., |p| ((cycle.z_top - cycle.depth) / p).ceil())
+                        .max(1.);
+                    if count > 100_000. {
+                        return Err("Indexed drilling exceeds the peck budget".into());
+                    }
+                    for j in 1..=count as usize {
+                        if j > 1 {
+                            emit(
+                                &mut out,
+                                &mut current,
+                                Point3::new(
+                                    x,
+                                    y,
+                                    (cycle.z_top - (j - 1) as f64 * cycle.peck.unwrap() + 0.5)
+                                        .min(cycle.z_top),
+                                ),
+                                None,
+                                link,
+                            )?;
+                        }
+                        let z = cycle.peck.map_or(cycle.depth, |p| {
+                            (cycle.z_top - j as f64 * p).max(cycle.depth)
+                        });
+                        emit(
+                            &mut out,
+                            &mut current,
+                            Point3::new(x, y, z),
+                            Some(cycle.feed),
+                            Tag {
+                                kind: cam_cldata::MoveKind::Plunge,
+                                ..cycle.tag
+                            },
+                        )?;
+                        if z <= cycle.depth {
+                            if let Some(seconds) = cycle.dwell {
+                                out.push(Step::Dwell { seconds });
+                            }
+                        }
+                        emit(
+                            &mut out,
+                            &mut current,
+                            Point3::new(x, y, cycle.retract),
+                            None,
+                            Tag {
+                                kind: cam_cldata::MoveKind::Retract,
+                                ..cycle.tag
+                            },
+                        )?;
+                    }
+                }
+            }
+            Step::Rotary { .. } | Step::Datum(_) => {
+                return Err("An indexed operation cannot contain another rotary frame".into())
+            }
+            Step::CutterComp(value) if *value != cam_cldata::CutterComp::Off => {
+                return Err("Indexed operations require computed cutter compensation".into())
+            }
+            _ => out.push(step.clone()),
+        }
+    }
+    out.validate().map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
 pub fn wrap_program(
     source: &Program,
     wrap: &RotaryWrap,

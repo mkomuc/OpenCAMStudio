@@ -692,6 +692,166 @@ mod tests {
         assert!((0..3).all(|i| (a[i] - b[i]).abs() < 1e-8), "{a:?} != {b:?}");
     }
     #[test]
+    fn round_stock_edge_picker_commits_and_clears_a_straight_axis() {
+        use cam_model::*;
+        let mut app = app();
+        app.controller
+            .add_cad_asset(
+                GeometryAsset {
+                    id: 1,
+                    revision: 1,
+                    name: "Axis body".into(),
+                    source_format: CadFormat::Step,
+                    source_data: vec![].into(),
+                    source_units: SourceUnits::Millimetres,
+                    backend: "test".into(),
+                    import_options: None,
+                    import_diagnostics: vec![],
+                    source_fingerprint: String::new(),
+                    topology: TopologySnapshot {
+                        bodies: vec![CadBody {
+                            id: 1,
+                            name: "Body".into(),
+                            valid_solid: true,
+                            bounds: [[0., 0., 0.], [10., 10., 10.]],
+                        }],
+                        vertices: vec![
+                            CadVertex {
+                                id: 1,
+                                body_id: 1,
+                                point: [0., 0., 0.],
+                            },
+                            CadVertex {
+                                id: 2,
+                                body_id: 1,
+                                point: [10., 0., 0.],
+                            },
+                        ],
+                        edges: vec![CadEdge {
+                            id: 1,
+                            body_id: 1,
+                            vertices: [1, 2],
+                            face_ids: vec![],
+                            curve: CadCurve::Line {
+                                start: [0., 0., 0.],
+                                end: [10., 0., 0.],
+                            },
+                        }],
+                        ..Default::default()
+                    }
+                    .into(),
+                },
+                vec![GeometryInstance {
+                    id: 1,
+                    asset_id: 1,
+                    body_id: 1,
+                    name: "Body".into(),
+                    placement: Default::default(),
+                    visible: true,
+                }],
+            )
+            .unwrap();
+        app.begin_setup_draft();
+        app.setup_draft.as_mut().unwrap().model_instances = vec![1];
+        let _ = app.update(Message::SetupStockKindChanged(
+            StockEditorKind::RelativeCylinder,
+        ));
+        let _ = app.update(Message::SetupAxisPick(3));
+        app.show_project_browser = false;
+        app.show_gizmo = false;
+        app.view.yaw = 0.6;
+        app.view.pitch = 0.7;
+        let viewport = app.machining_viewport();
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(900., 600.));
+        let cursor = picking_view::project(viewport.camera(), bounds, [5., 0., 0.])
+            .unwrap()
+            .0;
+        assert!(matches!(
+            viewport.setup_hover_at(cursor, bounds).edge,
+            Some(SetupFeature::Model(_))
+        ));
+        use shader::Program;
+        let action = viewport
+            .update(
+                &mut ViewportState::default(),
+                &iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+                bounds,
+                iced::mouse::Cursor::Available(cursor),
+            )
+            .unwrap();
+        let (picked, _, _) = action.into_inner();
+        assert!(
+            matches!(picked, Some(Message::CadPicked(ref candidates)) if candidates.iter().any(|candidate| candidate.entity.id == 1))
+        );
+        let entity = EntityRef {
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Edge,
+            id: 1,
+        };
+        let mut missing = entity.clone();
+        missing.id = 99;
+        let _ = app.update(Message::CadPicked(vec![PickCandidate {
+            entity: missing,
+            depth: 0.,
+            occluded: false,
+        }]));
+        assert_eq!(app.setup_axis_pick, Some(3));
+        assert!(app.status.contains("missing"));
+        let _ = app.update(Message::CadPicked(vec![PickCandidate {
+            entity: entity.clone(),
+            depth: 0.,
+            occluded: false,
+        }]));
+        assert!(app.setup_axis_pick.is_none());
+        let draft = app.setup_draft.as_ref().unwrap();
+        assert!(
+            matches!(draft.stock, Stock::RelativeRound { axis: Some(axis), .. } if matches!(axis, StockAxis::Edge(edge) if edge.entity() == entity))
+        );
+        let (frame, _, _) = app
+            .controller
+            .document()
+            .round_stock_geometry(draft)
+            .unwrap()
+            .unwrap();
+        close(frame.to_world_vector([0., 0., 1.]), [1., 0., 0.]);
+        let _ = app.update(Message::SetupStockKindChanged(
+            StockEditorKind::FixedCylinder,
+        ));
+        assert!(
+            matches!(app.setup_draft.as_ref().unwrap().stock, Stock::FixedRound { axis: Some(axis), .. } if matches!(axis, StockAxis::Edge(edge) if edge.entity() == entity))
+        );
+        let _ = app.update(Message::SetupStockKindChanged(
+            StockEditorKind::RelativeCylinder,
+        ));
+        assert!(
+            matches!(app.setup_draft.as_ref().unwrap().stock, Stock::RelativeRound { axis: Some(axis), .. } if matches!(axis, StockAxis::Edge(edge) if edge.entity() == entity))
+        );
+        let _ = app.update(Message::SetupCommit);
+        assert!(
+            matches!(app.controller.inspection_setup().stock, Stock::RelativeRound { axis: Some(axis), .. } if matches!(axis, StockAxis::Edge(edge) if edge.entity() == entity)),
+            "{}",
+            app.status
+        );
+        let outcome = app.controller.run(&cam_toolpath::CancelToken::new());
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            outcome.diagnostics
+        );
+        assert!(!outcome.stock_indices.is_empty());
+        app.begin_setup_draft();
+        let _ = app.update(Message::SetupStockAxisClear);
+        assert!(matches!(
+            app.setup_draft.as_ref().unwrap().stock,
+            Stock::RelativeRound { axis: None, .. }
+        ));
+    }
+
+    #[test]
     fn orientation_modes_clear_hidden_references_and_preserve_the_world_datum() {
         let mut app = app();
         let committed = app.controller.inspection_setup().clone();
@@ -1009,6 +1169,71 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn round_stock_can_pick_origin_arrows_without_flipping_the_wcs() {
+        use canvas::Program;
+        let mut app = app();
+        let original = app.setup_draft.as_ref().unwrap().frame.clone();
+        let _ = app.update(Message::SetupStockKindChanged(
+            StockEditorKind::RelativeCylinder,
+        ));
+        let _ = app.update(Message::SetupAxisPick(3));
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(900., 600.));
+        let mut camera = OrbitCamera::framed([-50.; 3], [50.; 3]);
+        camera.orient = cam_render::orientation(0.6, 0.7);
+        let overlay = WorkpieceOverlay {
+            axes: axes(&app).unwrap(),
+            camera,
+            scale: 1.,
+            interactive: true,
+            browser_overlay_width: 0.,
+            browser_overlay_height: f32::INFINITY,
+        };
+        let (_, tips) = overlay.projected(bounds.size()).unwrap();
+        let action = overlay
+            .update(
+                &mut (),
+                &canvas::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+                bounds,
+                iced::mouse::Cursor::Available(tips[0]),
+            )
+            .unwrap();
+        let (message, _, _) = action.into_inner();
+        let _ = app.update(message.unwrap());
+        assert!(matches!(
+            app.setup_draft.as_ref().unwrap().stock,
+            cam_model::Stock::RelativeRound {
+                axis: Some(cam_model::StockAxis::Origin {
+                    origin_axis: cam_model::StockOriginAxis::X
+                }),
+                ..
+            }
+        ));
+        assert_eq!(app.setup_draft.as_ref().unwrap().frame, original);
+        assert!(app.setup_axis_pick.is_none());
+        for (index, expected) in [
+            cam_model::StockOriginAxis::X,
+            cam_model::StockOriginAxis::Y,
+            cam_model::StockOriginAxis::Z,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _ = app.update(Message::SetupStockOriginAxis(index));
+            assert!(
+                matches!(app.setup_draft.as_ref().unwrap().stock, cam_model::Stock::RelativeRound { axis: Some(cam_model::StockAxis::Origin { origin_axis }), .. } if origin_axis == expected)
+            );
+        }
+        let _ = app.update(Message::SetupCommit);
+        assert!(matches!(app.controller.inspection_setup().stock, cam_model::Stock::RelativeRound { axis: Some(cam_model::StockAxis::Origin { origin_axis: cam_model::StockOriginAxis::Z }), .. }), "{}", app.status);
+        app.begin_setup_draft();
+        let _ = app.update(Message::SetupStockAxisClear);
+        assert!(matches!(
+            app.setup_draft.as_ref().unwrap().stock,
+            cam_model::Stock::RelativeRound { axis: None, .. }
+        ));
+    }
+
     #[test]
     fn viewport_arrows_publish_flip_clicks_and_leave_other_clicks_available() {
         use canvas::Program;

@@ -100,7 +100,11 @@ use crate::{BoreOp, Tool};
 /// v37: setup fixture bodies and radial/axial fixture clearances.
 /// v38: multiple pocket regions sharing operation cutting heights.
 /// v39: optional stock contours for pocket and 2D adaptive material footprints.
-pub const SCHEMA_VERSION: u32 = 40;
+/// v42: round, tubular and solid-derived stock definitions.
+/// v43: optional edge-aligned round stock.
+/// v44: round stock supports axes through the setup origin.
+/// v45: fixed fourth-axis indexes on individual operations.
+pub const SCHEMA_VERSION: u32 = 45;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -478,6 +482,67 @@ impl Heights {
     }
 }
 
+/// A straight CAD edge whose direction defines the axis of round stock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StockAxisReference {
+    pub asset_id: u64,
+    pub revision: u64,
+    pub instance_id: u64,
+    pub body_id: u64,
+    pub edge_id: u64,
+}
+impl From<&crate::EntityRef> for StockAxisReference {
+    fn from(entity: &crate::EntityRef) -> Self {
+        Self {
+            asset_id: entity.asset_id,
+            revision: entity.revision,
+            instance_id: entity.instance_id,
+            body_id: entity.body_id,
+            edge_id: entity.id,
+        }
+    }
+}
+impl StockAxisReference {
+    pub fn entity(self) -> crate::EntityRef {
+        crate::EntityRef {
+            asset_id: self.asset_id,
+            revision: self.revision,
+            instance_id: self.instance_id,
+            body_id: self.body_id,
+            id: self.edge_id,
+            kind: crate::EntityKind::Edge,
+        }
+    }
+}
+
+/// A round-stock direction selected from a CAD edge or the setup origin axes.
+/// The untagged edge form preserves projects saved before origin axes were added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum StockAxis {
+    Edge(StockAxisReference),
+    Origin { origin_axis: StockOriginAxis },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StockOriginAxis {
+    X,
+    Y,
+    Z,
+}
+impl StockOriginAxis {
+    pub fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+    pub fn from_index(index: usize) -> Option<Self> {
+        [Self::X, Self::Y, Self::Z].get(index).copied()
+    }
+}
+
 /// Input material for a setup: a model-relative box, or the remaining solid
 /// simulated from the preceding setup. Document-level bounds resolution accounts
 /// for both model selection and the work axes of inherited stock.
@@ -499,6 +564,29 @@ pub enum Stock {
     },
     /// A box grown independently on the negative and positive side of each axis.
     RelativeBox { offsets: [[f64; 3]; 2] },
+    /// Round stock parallel to the selected edge or along an origin axis.
+    /// When unset, the direction is setup Z.
+    FixedRound {
+        diameter: f64,
+        inner_diameter: f64,
+        length: f64,
+        position: f64,
+        tube: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<StockAxis>,
+    },
+    /// Round stock fitted around the model bounds with radial and axial allowances.
+    RelativeRound {
+        radial: f64,
+        inner_diameter: f64,
+        bottom: f64,
+        top: f64,
+        tube: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<StockAxis>,
+    },
+    /// A selected imported solid supplies the stock geometry.
+    FromSolid { instance: Option<u64> },
     /// Remaining material after the preceding setup in document execution order.
     /// Resolve its enclosing bounds through `Document::stock_bounds_for`; the
     /// machining worker supplies the actual simulated solid.
@@ -547,7 +635,19 @@ impl Stock {
                 });
                 (lo, std::array::from_fn(|i| lo[i] + size[i]))
             }
-            Self::PreviousSetup => (min, max),
+            Self::FixedRound { diameter, length, position, .. } => {
+                let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+                let z = min[2] - position * (length - (max[2] - min[2]));
+                ([center[0] - diameter / 2., center[1] - diameter / 2., z],
+                 [center[0] + diameter / 2., center[1] + diameter / 2., z + length])
+            }
+            Self::RelativeRound { radial, bottom, top, .. } => {
+                let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+                let radius = ((max[0] - min[0]).hypot(max[1] - min[1])) * 0.5 + radial;
+                ([center[0] - radius, center[1] - radius, min[2] - bottom],
+                 [center[0] + radius, center[1] + radius, max[2] + top])
+            }
+            Self::FromSolid { .. } | Self::PreviousSetup => (min, max),
             Self::RelativeBox { offsets } => (
                 std::array::from_fn(|i| min[i] - offsets[0][i]),
                 std::array::from_fn(|i| max[i] + offsets[1][i]),
@@ -2397,6 +2497,9 @@ fn default_origin_index() -> u32 {
 /// The top-level document: shared geometry and an ordered collection of setups.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Document {
+    /// Per-operation 3+1 indexing; stable operation IDs are document-wide.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub rotary_indexes: std::collections::BTreeMap<u32, crate::RotaryIndex>,
     /// Schema version this document conforms to.
     pub schema_version: u32,
     /// Independent physical workholding setups, in browser order.
@@ -2437,6 +2540,7 @@ pub struct Document {
 impl PartialEq for Document {
     fn eq(&self, other: &Self) -> bool {
         self.schema_version == other.schema_version
+            && self.rotary_indexes == other.rotary_indexes
             && self.setups == other.setups
             && self.geometry == other.geometry
             && self.cad_linked_operations == other.cad_linked_operations
@@ -2493,6 +2597,7 @@ impl Document {
     pub fn empty() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            rotary_indexes: Default::default(),
             active_setup_id: 0,
             setups: Vec::new(),
             geometry: crate::GeometryState::default(),
@@ -3022,6 +3127,15 @@ mod tests {
             "grown per-axis, bottom = top - thickness"
         );
         assert_eq!(max, [72.0, 55.0, 0.0]);
+    }
+
+    #[test]
+    fn round_stock_resolves_and_round_trips() {
+        let stock = Stock::RelativeRound { radial: 2., inner_diameter: 4., bottom: 1., top: 3., tube: true, axis: None };
+        let (lo, hi) = stock.resolve_bounds([-3., -4., 2.], [3., 4., 12.]);
+        assert_eq!((lo, hi), ([-7., -7., 1.], [7., 7., 15.]));
+        let json = serde_json::to_string(&stock).unwrap();
+        assert_eq!(serde_json::from_str::<Stock>(&json).unwrap(), stock);
     }
 
     #[test]

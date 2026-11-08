@@ -2060,6 +2060,7 @@ impl AppController {
         let new_id = self.next_op_id();
         set_op_id(&mut copy, new_id);
         self.edit_document(move |doc| {
+            if let Some(index)=doc.rotary_indexes.get(&sel).cloned(){doc.rotary_indexes.insert(new_id,index);}
             if let Some(binding) = doc.geometry.bindings.get(&sel).cloned() {
                 doc.geometry.bindings.insert(new_id, binding);
             }
@@ -3188,7 +3189,7 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
     for step in program.steps() {
         match step {
             Step::ToolChange { tool } => current = Some(*tool),
-            Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+            Step::Linear { to, tag, .. } | Step::Rotary {to,tag,feed:Some(_),..} if tag.kind == MoveKind::Cutting => {
                 if let Some(n) = current {
                     let e = deepest.entry(n).or_insert(f64::INFINITY);
                     *e = e.min(to.z);

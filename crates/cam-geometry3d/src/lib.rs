@@ -3,7 +3,7 @@
 //! allowance. Display meshes never enter machining derivation.
 mod parallel;
 mod rotary;
-pub use rotary::{wrap_cylinder, unwrap_boundaries, wrapped_regions, wrapped_boundary_height};
+pub use rotary::{wrap_cylinder, unwrap_boundaries, wrapped_regions, wrapped_boundary_height, periodic_cylinder_selection};
 pub use parallel::{resolve_parallel, ParallelGeometry};
 mod adaptive;
 mod advisory;

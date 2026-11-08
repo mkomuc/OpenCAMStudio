@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>Fixed size cylinder</title>
+  <path d="M3 8h26v16c0 3.3-5.8 6-13 6S3 27.3 3 24Z" fill="#4cc9f0"/>
+  <path d="M22 8h7v16c0 2.1-2.8 4-7 5.1Z" fill="#383838" fill-opacity=".2"/>
+  <ellipse cx="16" cy="8" rx="13" ry="5.5" fill="#e0e0e0"/>
+</svg>

@@ -341,6 +341,12 @@ impl Project {
                     ));
                 }
             }
+            if let cam_model::Stock::FromSolid { instance } = setup.stock {
+                let valid = instance.and_then(|id| self.document.geometry.instance(id)).and_then(|body| {
+                    self.document.geometry.asset(body.asset_id).and_then(|asset| asset.topology.bodies.iter().find(|b| b.id == body.body_id && b.valid_solid))
+                }).is_some();
+                if !valid { return Err(format!("setup {} refers to an unavailable stock solid", setup.name)); }
+            }
             if let cam_model::Stock::FixedBox {
                 size,
                 model_position,

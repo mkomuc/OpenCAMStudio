@@ -1,7 +1,9 @@
 use cam_app::{default_machine, AppController, OpKind, Selection};
 use cam_cldata::{MoveKind, Point3, ProgramBuilder, Step};
 use cam_geo::{Contour, Point};
-use cam_model::{Heights, Operation, RotaryWrap, Side};
+use cam_model::{
+    Heights, Operation, RotaryIndex, RotaryWrap, Side, Stock, StockAxis, StockOriginAxis,
+};
 use cam_post::{PostKind, PostOptions};
 use cam_toolpath::{wrap_program, CancelToken, JobCompletion};
 
@@ -11,6 +13,16 @@ fn new_app() -> AppController {
     app.edit_setup(|s| {
         s.heights = Heights::new(8., 3., 0.);
         s.origin = [0.; 3];
+        s.stock = Stock::FixedRound {
+            diameter: 40.,
+            inner_diameter: 0.,
+            length: 60.,
+            position: 0.5,
+            tube: false,
+            axis: Some(StockAxis::Origin {
+                origin_axis: StockOriginAxis::X,
+            }),
+        };
     });
     app.edit_tool(0, |t| {
         t.diameter = 2.;
@@ -51,11 +63,12 @@ fn wrapped_job_exports_and_roundtrips_with_undo_and_duplication() {
         outcome.diagnostics
     );
     assert!(outcome.program.has_rotary_motion());
-    assert!(outcome
+    assert!(outcome.collisions.is_empty(), "{:?}", outcome.collisions);
+    assert!(!outcome
         .diagnostics
         .iter()
         .any(|d| d.message.contains("not verified")));
-    assert!(outcome.stock_vertices.is_empty());
+    assert!(!outcome.stock_vertices.is_empty());
     let nc = app.export_nc().unwrap().to_string();
     assert!(nc.contains("G93\n") && nc.contains(" A") && nc.contains("G94\n"));
     let path = std::env::temp_dir().join(format!("rotary-wrap-{}.ocam", std::process::id()));
@@ -124,7 +137,10 @@ fn pocket_supports_rotary_adaptive_clearing_and_invalid_wraps_block_export() {
     };
     op.depth = 2.;
     op.clear.clearing.engagement = 0.5;
-    op.wrap = Some(RotaryWrap::default());
+    op.wrap = Some(RotaryWrap {
+        radius: 20.,
+        ..Default::default()
+    });
     app.add_operation(operation);
     assert_eq!(
         app.run(&CancelToken::new()).completion,
@@ -179,4 +195,68 @@ fn wrapped_height_references_use_the_developed_plane_with_nonzero_datum() {
     assert!((bottom - 28.).abs() < 1e-9, "{bottom}");
     let nc = app.export_nc().unwrap();
     assert!(nc.contains("Z18.000"), "{nc}");
+}
+
+#[test]
+fn indexed_operations_post_fixed_angles_and_preserve_indexes_through_history() {
+    let mut app = new_app();
+    let mut operation = profile(&app);
+    operation.set_rotary_wrap(None);
+    if let Operation::Profile(p) = &mut operation {
+        p.chain = Contour::new(vec![
+            Point::new(-5., -3.),
+            Point::new(5., -3.),
+            Point::new(5., 3.),
+            Point::new(-5., 3.),
+        ]);
+    }
+    app.edit_setup(|s| s.heights = Heights::new(28., 24., 20.));
+    app.add_operation(operation);
+    let id = app.document().setup().operations[0].id();
+    let index = RotaryIndex {
+        angle: 90.,
+        ..Default::default()
+    };
+    app.set_operation_rotary_index(id, Some(index.clone()))
+        .unwrap();
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+    assert!(!result.stock_vertices.is_empty());
+    assert!(result
+        .program
+        .steps()
+        .iter()
+        .any(|s| matches!(s,Step::Rotary{angle,feed:Some(_),..} if (*angle-90.).abs()<1e-9)));
+    let nc = app.export_nc().unwrap();
+    assert!(nc.contains("A90.000"), "{nc}");
+    let encoded = serde_json::to_string(app.document()).unwrap();
+    let decoded: cam_model::Document = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.rotary_indexes.get(&id), Some(&index));
+    app.select(Selection::Operation(id));
+    app.duplicate_selected_operation();
+    let copy = app.document().setup().operations[1].id();
+    assert_eq!(app.document().rotary_indexes.get(&copy), Some(&index));
+    app.undo();
+    assert!(!app.document().rotary_indexes.contains_key(&copy));
+    app.set_operation_rotary_index(id, None).unwrap();
+    app.undo();
+    assert_eq!(app.document().rotary_indexes.get(&id), Some(&index));
+    let setup = app.document().setup().id;
+    app.duplicate_setup(setup).unwrap();
+    assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+    assert!(!result.stock_vertices.is_empty());
 }

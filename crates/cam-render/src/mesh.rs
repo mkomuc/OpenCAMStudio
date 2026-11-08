@@ -101,6 +101,45 @@ pub(crate) fn transparent_indices(
         .collect()
 }
 
+/// Closed convex blanks have one front and one rear surface along each view
+/// ray. A long triangle's centroid can be behind the centroid of an overlapping
+/// rear triangle even when that whole overlap is in front. Group the rear faces
+/// first, then sort by depth within each group. Non-convex simulated stock must
+/// use ordinary depth sorting instead.
+#[cfg(any(feature = "gpu", test))]
+pub(crate) fn transparent_convex_indices(
+    vertices: &[MeshVertex],
+    indices: &[u32],
+    view_proj: [[f32; 4]; 4],
+) -> Vec<u32> {
+    let clip = |p: [f32; 3]| -> [f32; 4] {
+        std::array::from_fn(|i| {
+            view_proj[0][i] * p[0]
+                + view_proj[1][i] * p[1]
+                + view_proj[2][i] * p[2]
+                + view_proj[3][i]
+        })
+    };
+    let mut triangles: Vec<_> = indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|triangle| {
+            let p = triangle.map(|i| clip(vertices[i as usize].position));
+            let xy = p.map(|v| [v[0] / v[3], v[1] / v[3]]);
+            let cross = (xy[1][0] - xy[0][0]) * (xy[2][1] - xy[0][1])
+                - (xy[1][1] - xy[0][1]) * (xy[2][0] - xy[0][0]);
+            let depth = p.iter().map(|v| v[2] / v[3]).sum::<f32>();
+            (cross > 0., depth, *triangle)
+        })
+        .collect();
+    triangles.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.total_cmp(&a.1)));
+    triangles
+        .into_iter()
+        .flat_map(|(_, _, triangle)| triangle)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +163,30 @@ mod tests {
         let mut reversed = crate::IDENTITY;
         reversed[2][2] = -1.;
         assert_eq!(transparent_indices(&vertices, &indices, reversed), indices);
+    }
+
+    #[test]
+    fn transparent_convex_stock_draws_rear_before_front_when_centroids_mislead() {
+        // At the overlapping tip, the small front triangle is closer; its
+        // centroid is nevertheless behind that of the long rear triangle.
+        let positions = [
+            [-1., -1., 0.1],
+            [0., 1., 0.9],
+            [1., -1., 0.1],
+            [-0.2, 0.6, 0.75],
+            [0.2, 0.6, 0.75],
+            [0., 0.95, 0.75],
+        ];
+        let vertices = mesh_vertices(&positions, &[[0., 0., 1.]; 6]);
+        let indices = [0, 1, 2, 3, 4, 5];
+        assert_eq!(
+            transparent_indices(&vertices, &indices, crate::IDENTITY),
+            [3, 4, 5, 0, 1, 2]
+        );
+        assert_eq!(
+            transparent_convex_indices(&vertices, &indices, crate::IDENTITY),
+            indices
+        );
     }
 
     #[test]

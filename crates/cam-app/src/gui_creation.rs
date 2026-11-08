@@ -70,7 +70,9 @@ impl App {
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
         self.rotary_pick=None;
-        self.rotary_heights=None;
+        self.rotary_wrap_draft=None;
+        self.rotary_index_draft=None;
+        self.seed_rotary_index_values();
         self.cutting_force_inputs
             .remove(&(self.controller.inspection_setup().id, None));
         self.thread_parameters = thread_parameters::ThreadParameters::for_creation(kind);
@@ -227,7 +229,7 @@ impl App {
             return Ok((draft,None));
         }
         if self.cad_pending_kind.is_some() && draft.rotary_wrap().is_some() {
-            return Err("Select CAD machining boundaries on the Multi-axis tab".into());
+            return Err("Select machining geometry on the Geometry tab".into());
         }
         if let Operation::Profile(profile) = &mut draft {
             if profile.selections.is_none() {
@@ -239,7 +241,7 @@ impl App {
             }
         }
         if let Some(kind) = self.cad_pending_kind {
-            let mut document = self.controller.document().clone();
+            let mut document = self.rotary_draft_document();
             for tool in &self.operation_tools {
                 if let Some(existing) = document
                     .setup_mut()
@@ -372,7 +374,7 @@ impl App {
     pub(super) fn creation_ready(&self) -> bool {
         self.creation_operation()
             .and_then(|(op, binding)| {
-                let mut document = self.controller.document().clone();
+                let mut document = self.rotary_draft_document();
                 for tool in &self.operation_tools {
                     if let Some(existing) = document
                         .setup_mut()

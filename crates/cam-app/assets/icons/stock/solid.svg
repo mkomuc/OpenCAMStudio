@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>From solid</title>
+  <path d="M5 8h22v16c0 3-4.9 5.5-11 5.5S5 27 5 24Z" fill="#a6a6a6"/>
+  <path d="M21 8h6v16c0 1.9-2.4 3.7-6 4.6Z" fill="#383838" fill-opacity=".2"/>
+  <ellipse cx="16" cy="8" rx="11" ry="5" fill="#e0e0e0"/>
+</svg>

@@ -303,6 +303,10 @@ impl AppController {
         let mut previous_setup = String::new();
         for setup in &document.setups {
             // Common machining configuration; omit names and view state.
+            let stock_axis_instance = match setup.stock {
+                Stock::FixedRound { axis, .. } | Stock::RelativeRound { axis, .. } => axis.and_then(|axis| match axis { cam_model::StockAxis::Edge(edge) => Some(edge.instance_id), cam_model::StockAxis::Origin { .. } => None }),
+                _ => None,
+            };
             let models: Vec<_> = document
                 .geometry
                 .instances
@@ -310,6 +314,7 @@ impl AppController {
                 .filter(|instance| {
                     setup.model_instances.contains(&instance.id)
                         || setup.fixture_instances.contains(&instance.id)
+                        || stock_axis_instance == Some(instance.id)
                 })
                 .map(|instance| {
                     let asset = document.geometry.asset(instance.asset_id).map(|asset| {
@@ -368,6 +373,7 @@ impl AppController {
                 let mut bytes = serde_json::to_vec(&(
                     &common,
                     op,
+                    document.rotary_indexes.get(&id),
                     tools,
                     setup.operation_heights.get(&id).unwrap_or(&setup.heights),
                     setup.height_settings.get(&id),
@@ -383,6 +389,7 @@ impl AppController {
                         &cam_toolpath::ParallelStrategy::DOMAIN_REVISION.to_le_bytes(),
                     );
                 }
+                if op.rotary_wrap().is_some() {bytes.extend_from_slice(&cam_toolpath::ROTARY_WRAP_REVISION.to_le_bytes());}
                 if matches!(op, Operation::Adaptive(_)) {
                     bytes.extend_from_slice(
                         &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),

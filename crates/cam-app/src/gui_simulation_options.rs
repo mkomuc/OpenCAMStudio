@@ -62,13 +62,13 @@ impl SimulationOption {
 
 pub(super) fn motion_tag(step: &Step) -> Option<Tag> {
     match step {
-        Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(*tag),
+        Step::Rotary { tag, .. } | Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(*tag),
         _ => None,
     }
 }
 pub(super) fn endpoint(step: &Step) -> Option<Point3> {
     match step {
-        Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+        Step::Rotary { to, .. } | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
         Step::Arc { end, .. } => Some(*end),
         _ => None,
     }
@@ -78,6 +78,11 @@ impl TimedStep {
         let mut step = self.step.clone();
         if let Some(a) = self.from {
             match &mut step {
+                Step::Rotary {to,angle,length,..}=> {
+                    *to=Point3::new(a.x+(to.x-a.x)*fraction,a.y+(to.y-a.y)*fraction,a.z+(to.z-a.z)*fraction);
+                    *angle=self.rotary_from+(*angle-self.rotary_from)*fraction;
+                    *length*=fraction;
+                }
                 Step::Rapid { to, .. } | Step::Linear { to, .. } => {
                     *to = Point3::new(
                         a.x + (to.x - a.x) * fraction,
@@ -104,6 +109,7 @@ impl TimedStep {
     }
     fn length(&self) -> f64 {
         match (&self.step, self.from) {
+            (Step::Rotary{length,..},_)=>*length,
             (
                 Step::Arc {
                     end, center, dir, ..

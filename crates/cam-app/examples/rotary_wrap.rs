@@ -1,7 +1,7 @@
 //! Generate a reviewable wrapped pocket and LinuxCNC program without a GUI.
 use cam_app::{default_machine, AppController, OpKind};
 use cam_geo::{Contour, Point};
-use cam_model::{Heights, Operation, RotaryWrap, Stock};
+use cam_model::{Heights, Operation, RotaryWrap, Stock, StockAxis, StockOriginAxis};
 use cam_post::PostKind;
 use cam_toolpath::{CancelToken, JobCompletion};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,9 +15,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         s.name = "Fourth-axis wrapped pocket".into();
         s.heights = Heights::new(8., 3., 0.);
         s.origin = [0.; 3];
-        s.stock = Stock::FixedBox {
-            size: [80., 50., 50.],
-            model_position: [0.5, 0.5, 0.5],
+        s.stock = Stock::FixedRound {
+            diameter: 50.,
+            inner_diameter: 0.,
+            length: 80.,
+            position: 0.5,
+            tube: false,
+            axis: Some(StockAxis::Origin {
+                origin_axis: StockOriginAxis::X,
+            }),
         };
     });
     app.edit_tool(0, |t| {
@@ -47,10 +53,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if outcome.completion != JobCompletion::Complete {
         return Err(format!("Generation failed: {:?}", outcome.diagnostics).into());
     }
+    let stock_triangles = outcome.stock_indices.len() / 3;
     app.save_project(&destination)?;
     let nc = destination.with_extension("nc");
     app.export_nc_to(&nc)?;
     println!("Saved {} and {}", destination.display(), nc.display());
-    println!("Rotary stock removal and collision simulation are unavailable; inspect the toolpath before machining.");
+    println!(
+        "Verified cylindrical stock simulation: {} triangles.",
+        stock_triangles
+    );
     Ok(())
 }

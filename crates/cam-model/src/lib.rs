@@ -11,7 +11,7 @@
 
 mod cutting_data;
 mod rotary;
-pub use rotary::{RotaryAxis, RotaryWrap};
+pub use rotary::{RotaryAxis, RotaryIndex, RotaryWrap};
 mod cutting_forces;
 pub use cutting_forces::{CuttingEngagement, CuttingForceEstimate, CuttingLoad};
 mod pocket;
@@ -46,7 +46,7 @@ pub use document::{
     ExecutionItem, FaceOp, Hand, Heights, Lead, LinearPatternDirection, Operation,
     OperationPattern, Origin, ParallelOp, PatternDirection, PatternKind, PatternOptions,
     PatternOrder, PatternSpacing, Plunge, PocketOp, ProfileContour, ProfileOp, ProfileTabs, Setup,
-    Side, Stock, StockToLeave, ThreadOp, SCHEMA_VERSION,
+    Side, Stock, StockAxis, StockAxisReference, StockOriginAxis, StockToLeave, ThreadOp, SCHEMA_VERSION,
 };
 pub use geometry::*;
 pub use history::History;

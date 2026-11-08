@@ -1,10 +1,10 @@
-//! A heightfield stock model with sparse bounded intervals for thread teeth.
+//! A dexel stock model: compact column tops plus sparse bounded void intervals.
 //!
 //! The stock is a regular XY grid; each cell stores the Z of the top of the
 //! remaining material. A flat end mill of radius `r` moving along a segment
 //! lowers every cell within `r` of the swept path to the tool's bottom. It is
-//! Side-cutting thread teeth remove finite Z intervals instead, preserving the
-//! material above and below each groove without a full-volume voxel grid.
+//! Side-cutting teeth and rotated finite cutters subtract bounded Z intervals,
+//! preserving material above and below cavities without a full-volume voxel grid.
 
 use crate::{sweep::Sweep, ToolProfile};
 use std::collections::BTreeMap;
@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod bounded;
 #[path = "stock_transfer.rs"]
 mod stock_transfer;
+#[path = "rotary_stock.rs"]
+mod rotary_stock;
+pub use rotary_stock::CylindricalStock;
 use bounded::RemovedSpan;
 
 #[path = "surface.rs"]
@@ -109,6 +112,8 @@ pub struct Heightfield {
     ny: usize,
     top: f32,
     z: Vec<f32>,
+    /// Original non-planar blank surface, when seeded from a cylinder/solid.
+    uncut_z: Vec<f32>,
     // Winning cutter at each sample supplies contour geometry and operation ownership.
     winners: Vec<u32>,
     cuts: Vec<Sweep>,
@@ -117,6 +122,8 @@ pub struct Heightfield {
     layers: Vec<CutLayer>,
     /// Sparse bounded removals for side-cutting teeth, keyed by XY sample.
     bounded: BTreeMap<usize, Vec<RemovedSpan>>,
+    /// Original circular blank, for reconstructing untouched side surfaces.
+    horizontal_cylinder: Option<HorizontalCylinder>,
     /// Optional incremental volume accounting for a force-analysis traversal.
     /// The floor clips through cuts to the physical blank; inherited voids are excluded.
     removal_tracking: Option<(f64, f64)>,
@@ -124,6 +131,14 @@ pub struct Heightfield {
     cut_source: Option<CutSource>,
     // Unique across disposable playback copies, rewinds and replacement blanks.
     mesh_revisions: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HorizontalCylinder {
+    axis: usize,
+    center: [f64; 3],
+    outer_radius: f64,
+    inner_radius: f64,
 }
 
 impl Heightfield {
@@ -140,12 +155,14 @@ impl Heightfield {
             ny,
             top: top as f32,
             z: vec![top as f32; nx * ny],
+            uncut_z: Vec::new(),
             winners: vec![u32::MAX; nx * ny],
             cuts: Vec::new(),
             inherited_operations: Vec::new(),
             previous_layers: vec![u32::MAX; nx * ny],
             layers: Vec::new(),
             bounded: BTreeMap::new(),
+            horizontal_cylinder: None,
             removal_tracking: None,
             surface_tracking: false,
             cut_source: None,
@@ -158,6 +175,10 @@ impl Heightfield {
 
     pub(crate) fn top(&self) -> f32 {
         self.top
+    }
+    pub(super) fn top_is_cut(&self,index:usize)->bool {
+        self.z[index]<self.uncut_z.get(index).copied().unwrap_or(self.top)
+            || self.inherited_operations.get(index).copied().flatten().is_some()
     }
 
     pub(crate) fn set_surface_tracking(&mut self, enabled: bool) {
@@ -192,6 +213,7 @@ impl Heightfield {
 
     pub(crate) fn storage_bytes(&self) -> usize {
         self.z.len() * 12
+            + self.uncut_z.len() * std::mem::size_of::<f32>()
             + self.mesh_revisions.len() * std::mem::size_of::<u64>()
             + self.inherited_operations.len() * std::mem::size_of::<Option<u32>>()
             + self.cuts.len() * std::mem::size_of::<Sweep>()
@@ -211,6 +233,9 @@ impl Heightfield {
     /// Cell size, mm.
     pub fn resolution(&self) -> f64 {
         self.res
+    }
+    pub(crate) fn matches_grid(&self,min:[f64;3],max:[f64;3],res:f64)->bool {
+        (self.res-res).abs()<=1e-9 && (0..2).all(|i|(self.origin[i]-min[i]).abs()<=1e-6 && (self.max[i]-max[i]).abs()<=1e-6)
     }
 
     /// The remaining-stock height at `(x, y)` (nearest cell), or the original top
@@ -584,7 +609,7 @@ impl Heightfield {
             positions,
             normals,
             cut_sources: None,
-            machined: self.z.iter().map(|&z| z < self.top).collect(),
+            machined: (0..self.z.len()).map(|i| self.top_is_cut(i)).collect(),
             operations: (0..self.ny)
                 .flat_map(|y| (0..self.nx).map(move |x| self.operation_at(x, y)))
                 .collect(),
@@ -593,7 +618,7 @@ impl Heightfield {
     }
 
     /// Centre of cell `(ix, iy)`.
-    fn center(&self, ix: usize, iy: usize) -> (f64, f64) {
+    pub(crate) fn center(&self, ix: usize, iy: usize) -> (f64, f64) {
         (
             (self.origin[0]
                 + ix as f64 * self.res
@@ -624,7 +649,7 @@ impl Heightfield {
     }
 
     /// Clamped inclusive cell-index range covering `[lo, hi]` on axis `axis`.
-    fn index_range(&self, lo: f64, hi: f64, axis: usize) -> (usize, usize) {
+    pub(crate) fn index_range(&self, lo: f64, hi: f64, axis: usize) -> (usize, usize) {
         let n = if axis == 0 { self.nx } else { self.ny };
         let i0 =
             (((lo - self.origin[axis]) / self.res).floor()).clamp(0.0, (n - 1) as f64) as usize;

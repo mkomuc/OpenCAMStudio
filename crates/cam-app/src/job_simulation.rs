@@ -5,6 +5,7 @@ use cam_sim::{Heightfield, SimResult};
 #[derive(Default)]
 pub(crate) struct StockSimulationCache {
     current: SimulationCache,
+    rotary: cam_sim::RotarySimulationCache,
     mesh: cam_sim::StockMeshCache,
     previous: Option<(String, Heightfield)>,
 }
@@ -89,9 +90,6 @@ impl JobInputs {
             .preview_program
             .as_ref()
             .ok_or_else(|| Diagnostic::error("Force analysis requires a simulation program."))?;
-        if program.has_rotary_motion() || self.document.setup().operations.iter().any(|op|op.rotary_wrap().is_some()) {
-            return Err(Diagnostic::error("Cutting-force analysis requires material-removal simulation, which is not available for rotary wraps."));
-        }
         let resolution = self
             .preview_resolution
             .unwrap_or_else(|| self.stock_resolution(program));
@@ -108,7 +106,7 @@ impl JobInputs {
             }
             Some(self.previous_stock(resolution, cancel, cache, progress)?)
         } else {
-            None
+            self.defined_round_stock(resolution, cancel)?
         };
         let tools: Vec<_> = self
             .document
@@ -129,7 +127,14 @@ impl JobInputs {
             })
             .collect();
         let fixture_contacts = self.fixture_collisions(program, cancel)?;
-        let mut samples = cam_sim::analyze_removal_controlled(
+        let mut samples = if self.uses_rotary_stock(program) {
+            cam_sim::analyze_rotary_removal_controlled(
+                program, self.min, self.max,
+                &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
+                &self.rotary_sim_tools(), initial.as_ref(), &|| cancel.is_cancelled(),
+                |done,total| progress.set(JobPhase::Verification,done,total,None),
+            )
+        } else { cam_sim::analyze_removal_controlled(
             program,
             self.min,
             self.max,
@@ -142,6 +147,7 @@ impl JobInputs {
             &|| cancel.is_cancelled(),
             |done, total| progress.set(JobPhase::Verification, done, total, None),
         )
+        }
         .map_err(Diagnostic::error)?;
         if let Some(first) = fixture_contacts
             .iter()
@@ -164,7 +170,7 @@ impl JobInputs {
             if let cam_model::Operation::Thread(thread) = operation {
                 let included = program.steps().iter().any(|step| {
                     matches!(step,
-                    cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
+                    cam_cldata::Step::Rotary { tag,feed:Some(_),.. } | cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
                         if tag.op_id == thread.id)
                 });
                 if included {
@@ -200,6 +206,7 @@ impl JobInputs {
             .with_code(DiagnosticCode::InvalidInput)
             .for_setup(self.document.setup().id));
         }
+        self.document.round_stock_geometry(self.document.setup()).map_err(Diagnostic::error)?;
         let (min, max) = (self.min, self.max);
         if min[0] >= max[0] || min[1] >= max[1] {
             return Ok(StockSimulation::default());
@@ -207,6 +214,9 @@ impl JobInputs {
         let resolution = self
             .preview_resolution
             .unwrap_or_else(|| self.stock_resolution(program));
+        let round = self.defined_round_stock(resolution, cancel)?;
+        let assets: Vec<_> = self.document.geometry.assets.iter().map(|a| (a.id, a.revision, &a.source_fingerprint)).collect();
+        let round_key = serde_json::to_string(&(self.document.setup().stock, self.min, self.max, resolution, &self.document.setup().frame, &self.document.geometry.instances, assets)).unwrap();
         let key = self.previous_stock_key(resolution);
         if let Some(key) = &key {
             if simulation
@@ -223,7 +233,8 @@ impl JobInputs {
         } else {
             simulation.previous = None;
         }
-        let initial = key.as_ref().and(simulation.previous.as_ref());
+        let initial = key.as_ref().and(simulation.previous.as_ref()).map(|(k, f)| (k.as_str(), f))
+            .or_else(|| round.as_ref().map(|f| (round_key.as_str(), f)));
         // Setup selection shows the input blank, while operation selection and
         // playback show the material remaining after the destination's cuts.
         let input_mesh = if let Some((_, field)) =
@@ -243,16 +254,15 @@ impl JobInputs {
         simulation
             .current
             .set_surface_sources(self.stock_force_surfaces);
-        let Some(sim) = self.simulate_field(
+        let sim = self.simulate_field(
             program,
             resolution,
-            initial.map(|(k, f)| (k.as_str(), f)),
+            initial,
             cancel,
             progress,
             &mut simulation.current,
-        ) else {
-            return Ok(StockSimulation::default());
-        };
+            &mut simulation.rotary,
+        )?;
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         // Render the stock as a watertight solid down to its floor, so the full
         // thickness shows and cut walls shade crisply (not a smooth top sheet).
@@ -296,7 +306,17 @@ impl JobInputs {
         cancel: &CancelToken,
         progress: &Progress,
         simulation: &mut SimulationCache,
-    ) -> Option<SimResult> {
+        rotary: &mut cam_sim::RotarySimulationCache,
+    ) -> Result<SimResult, Diagnostic> {
+        if self.uses_rotary_stock(program) {
+            return rotary.simulate_controlled(
+                program, self.min, self.max,
+                &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
+                &self.rotary_sim_tools(), initial, self.stock_force_surfaces,
+                &|| cancel.is_cancelled(),
+                |done,total| progress.set(JobPhase::Verification,done,total,None),
+            ).map_err(Diagnostic::error);
+        }
         let tools = &self.document.setup().tools;
         let sim_tools: Vec<SimTool> = tools
             .iter()
@@ -331,7 +351,8 @@ impl JobInputs {
                 )
             }
         };
-        let mut result = verify(program, simulation)?;
+        let stopped = || Diagnostic::error("Stock simulation cancelled");
+        let mut result = verify(program, simulation).ok_or_else(stopped)?;
         if self.preview_program.is_none() {
             if let Some(repaired) =
                 self.reroute_parallel_stock_links(program, &result.collisions, cancel)
@@ -340,10 +361,28 @@ impl JobInputs {
                 // Re-run the unchanged collision checks on the actual output.
                 // Clearance entries can only remove additional stock, so a
                 // previously clear link cannot become blocked by this rewrite.
-                result = verify(program, simulation)?;
+                result = verify(program, simulation).ok_or_else(stopped)?;
             }
         }
-        (!cancelled()).then_some(result)
+        if cancelled() { Err(stopped()) } else { Ok(result) }
+    }
+
+    fn uses_rotary_stock(&self, program: &Program) -> bool {
+        program.has_rotary_motion() || self.document.setup().operations.iter().any(|op|
+            self.document.operation_is_included(self.document.setup().id,op.id()) && (op.rotary_wrap().is_some() || self.document.rotary_indexes.contains_key(&op.id())))
+    }
+
+    fn rotary_sim_tools(&self) -> Vec<cam_sim::RotaryTool> {
+        self.document.setup().tools.iter().map(|t| {
+            let outline=t.profile();
+            let flute=outline.segs.iter().filter(|s|s.cutting).map(|s|s.end.y).fold(0.,f64::max).max(1e-6);
+            cam_sim::RotaryTool {
+                tool: SimTool { number:t.number, profile:sim_profile(t),
+                    noncutting_tip_radius:outline.segs.first().filter(|s|!s.cutting && s.end.y.abs()<1e-9).map(|s|s.end.x) },
+                flute_length:flute, length:t.length.max(flute), neck_length:if matches!(t.kind,cam_model::ToolKind::ThreadMill{..}){t.neck_length.max(t.flute_len())}else{t.neck_length},
+                neck_radius:t.neck_dia()/2., shank_radius:t.shank_dia()/2.,
+            }
+        }).collect()
     }
 
     /// CAD clearance is not proof of cleared stock: a ball nose leaves scallops
@@ -440,6 +479,33 @@ impl JobInputs {
         changed.then_some(output)
     }
 
+    fn defined_round_stock(&self, resolution: f64, cancel: &CancelToken) -> Result<Option<Heightfield>, Diagnostic> {
+        let stock = self.document.setup().stock;
+        if !matches!(stock, cam_model::Stock::FixedRound { .. } | cam_model::Stock::RelativeRound { .. } | cam_model::Stock::FromSolid { .. }) { return Ok(None); }
+        if cancel.is_cancelled() {return Err(Diagnostic::error("Stock calculation cancelled"));}
+        let setup=self.document.setup();
+        if let Some((frame,min,max))=self.document.round_stock_geometry(setup).map_err(Diagnostic::error)? {
+            let direction=setup.frame.to_setup_vector(frame.to_world_vector([0.,0.,1.]));
+            if let Some(axis)=(0..3).find(|&i|direction[i].abs()>1.-1e-9) {
+                let center=setup.frame.to_setup_vector(frame.to_world_vector([(min[0]+max[0])*0.5,(min[1]+max[1])*0.5,0.]));
+                let a=center[axis]+direction[axis]*min[2];
+                let b=center[axis]+direction[axis]*max[2];
+                let inner=match stock {
+                    cam_model::Stock::FixedRound{tube:true,inner_diameter,..}|cam_model::Stock::RelativeRound{tube:true,inner_diameter,..}=>inner_diameter*0.5,
+                    _=>0.,
+                };
+                return cam_sim::CylindricalStock::new_controlled(axis,center,[a.min(b),a.max(b)],(max[0]-min[0])*0.5,inner,resolution,&||cancel.is_cancelled())
+                    .map(|s|Some(s.field)).map_err(Diagnostic::error);
+            }
+        }
+        let mesh = crate::stock_shape::oriented_round_mesh(&self.document, self.document.setup())
+            .map_err(Diagnostic::error)?
+            .or_else(|| crate::stock_shape::solid_mesh(&self.document, self.document.setup()))
+            .ok_or_else(|| Diagnostic::error("Invalid stock dimensions or unavailable solid mesh"))?;
+        Heightfield::from_stock_mesh_controlled(&mesh, self.min, self.max, resolution, &|| cancel.is_cancelled())
+            .map(Some).ok_or_else(|| Diagnostic::error("Stock calculation cancelled"))
+    }
+
     fn previous_stock_key(&self, resolution: f64) -> Option<String> {
         if self.document.setup().stock != cam_model::Stock::PreviousSetup {
             return None;
@@ -459,6 +525,7 @@ impl JobInputs {
             &self.document.setups[..at],
             &self.document.setup().frame,
             &self.document.excluded_operations,
+            &self.document.rotary_indexes,
             &self.document.disabled_origins,
             &geometry.bindings,
             &geometry.instances,
@@ -569,9 +636,6 @@ impl JobInputs {
                 cache,
                 |id| progress.set(JobPhase::Generation, 0, setup.operations.len(), Some(id)),
             );
-            if job.program.has_rotary_motion() {
-                return Err(Diagnostic::error("Previous-setup stock cannot inherit a rotary wrap: cylindrical material-removal simulation is unavailable."));
-            }
             if job.completion != JobCompletion::Complete {
                 let detail = job
                     .diagnostics
@@ -597,7 +661,15 @@ impl JobInputs {
                     transfer(field, frame, *floor, &source, res)
                         .ok_or_else(|| failure("Stock transfer cancelled".into()))?,
                 ),
-                None => None,
+                None => {
+                    // Planning geometry has already been rotated into setup axes.
+                    // The input solid must instead come from the original document.
+                    let mut input = source.clone();
+                    let mut original = (*self.document).clone();
+                    original.active_setup_id = setup.id;
+                    input.document = Arc::new(original);
+                    input.defined_round_stock(res, cancel)?
+                },
             };
             let mut result = source
                 .simulate_field(
@@ -607,8 +679,9 @@ impl JobInputs {
                     cancel,
                     progress,
                     &mut SimulationCache::default(),
+                    &mut cam_sim::RotarySimulationCache::default(),
                 )
-                .ok_or_else(|| failure("Stock simulation cancelled".into()))?;
+                ?;
             result.collisions.extend(source.fixture_collisions_against(
                 &job.program,
                 &source.document.geometry,
@@ -1186,6 +1259,7 @@ mod tests {
                     &cancel,
                     &Progress::default(),
                     &mut SimulationCache::default(),
+                    &mut cam_sim::RotarySimulationCache::default(),
                 )
                 .unwrap()
         };

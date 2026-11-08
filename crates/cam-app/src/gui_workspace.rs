@@ -88,11 +88,18 @@ fn tool_table_matches(
 }
 
 pub(super) fn stock_world_bounds(controller: &AppController) -> Option<([f32; 3], [f32; 3])> {
-    let (min, max) = controller.stock_box();
+    stock_world_bounds_for_setup(controller, controller.inspection_setup())
+}
+
+pub(super) fn stock_world_bounds_for_setup(
+    controller: &AppController,
+    setup: &cam_model::Setup,
+) -> Option<([f32; 3], [f32; 3])> {
+    let (min, max) = controller.pending_setup_stock_bounds(setup);
     if min[0] >= max[0] || min[1] >= max[1] {
         return None;
     }
-    let frame = &controller.inspection_setup().frame;
+    let frame = &setup.frame;
     let points: Vec<_> = (0..8)
         .map(|index| {
             frame
@@ -119,18 +126,54 @@ pub(super) fn stock_world_bounds(controller: &AppController) -> Option<([f32; 3]
 
 /// The configured input blank: a box, or the preceding setup's processed stock.
 pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, Vec<u32>) {
-    if controller.inspection_setup().stock == cam_model::Stock::PreviousSetup {
+    uncut_stock_mesh_for_setup(controller, controller.inspection_setup())
+}
+
+pub(super) fn uncut_stock_mesh_for_setup(
+    controller: &AppController,
+    setup: &cam_model::Setup,
+) -> (Vec<MeshVertex>, Vec<u32>) {
+    if setup.stock == cam_model::Stock::PreviousSetup {
+        if controller.inspection_setup().stock != cam_model::Stock::PreviousSetup {
+            return (Vec::new(), Vec::new());
+        }
         return controller
             .outcome()
             .filter(|o| o.completion == JobCompletion::Complete)
             .and_then(|o| o.initial_stock.clone())
             .unwrap_or_default();
     }
-    let (min, max) = controller.stock_box();
+    let (min, max) = controller.pending_setup_stock_bounds(setup);
     if !controller.has_geometry() || (0..3).any(|axis| max[axis] <= min[axis]) {
         return (vec![], vec![]);
     }
-    let frame = &controller.inspection_setup().frame;
+    let frame = &setup.frame;
+    let stock = setup.stock;
+    let shape = crate::stock_shape::oriented_round_mesh(controller.document(), setup)
+        .ok()
+        .flatten()
+        .or_else(|| crate::stock_shape::solid_mesh(controller.document(), setup));
+    if let Some(mesh) = shape {
+        let vertices = mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .map(|(p, n)| MeshVertex {
+                position: frame.to_world_vector(p.map(f64::from)).map(|v| v as f32),
+                normal: frame.to_world_vector(n.map(f64::from)).map(|v| v as f32),
+                color: [0.72, 0.66, 0.22, 1.],
+            })
+            .collect();
+        return (vertices, mesh.indices);
+    }
+    if matches!(
+        stock,
+        cam_model::Stock::FromSolid { .. }
+            | cam_model::Stock::FixedRound { .. }
+            | cam_model::Stock::RelativeRound { .. }
+    ) {
+        return (vec![], vec![]);
+    }
     let corners: [[f64; 3]; 8] = std::array::from_fn(|index| {
         std::array::from_fn(|axis| {
             if index & (1 << axis) == 0 {
@@ -211,6 +254,7 @@ impl PartialEq for SimulationViewportKey {
 #[derive(Clone, PartialEq)]
 struct EditorKey {
     creating: bool,
+    wrapped_geometry_editor: bool,
     cad_kind: Option<OpKind>,
     cad_editing: Option<u32>,
     drawing_editing: Option<u32>,
@@ -608,6 +652,7 @@ impl App {
             pattern: self.pattern_draft.clone(),
             editor: editing.then(|| EditorKey {
                 creating: self.creating_operation(),
+                wrapped_geometry_editor: self.wrapped_pocket_geometry_editor(),
                 cad_kind: self.cad_pending_kind,
                 cad_editing: self.cad_editing_op,
                 drawing_editing: self.drawing_editing_op,
@@ -701,6 +746,7 @@ impl App {
                 editing.then_some(selected_geometry.as_slice()),
                 silhouette_bottom,
                 Some(self.cached_cad_scene(&cad_hidden)),
+                self.setup_draft.as_ref(),
             );
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
                 let (vertices, indices) = player.tool_mesh();
@@ -811,6 +857,7 @@ impl App {
         let pattern_pick = self.pattern_draft.as_ref().and_then(|draft| draft.picking);
         viewport.setup_axis =
             self.setup_axis_pick.is_some() || pattern_pick.is_some_and(|axis| axis < 2);
+        viewport.stock_axis_model_only = self.setup_axis_pick == Some(3);
         if pattern_pick.is_some() {
             viewport.picking = true;
             viewport.cad_filter = EntityKind::Edge;
@@ -894,7 +941,7 @@ impl App {
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
         }
-        if self.rotary_pick.is_some() {
+        if self.rotary_pick.is_some() || self.wrapped_pocket_geometry_editor() {
             viewport.cad_operation_kind=Some(OpKind::Engrave);
             viewport.cad_filter_explicit=true;
             viewport.cad_silhouette=false;
@@ -1842,6 +1889,26 @@ mod tests {
     }
 
     #[test]
+    fn setup_stock_edits_update_the_visible_draft_without_committing() {
+        let mut app = picking_app();
+        app.show_stock = true;
+        app.settings.view.transparent_stock = true;
+        let saved = app.controller.inspection_setup().stock;
+        let before = app.machining_viewport().transparent_stock_vertices.clone();
+        assert!(!before.is_empty());
+        let _ = app.update(Message::SetupStockNumberChanged(0, "15".into()));
+        let after = app.machining_viewport().transparent_stock_vertices.clone();
+        assert_ne!(before.as_ref(), after.as_ref());
+        assert_eq!(app.controller.inspection_setup().stock, saved);
+        let draft = app.setup_draft.as_ref().unwrap();
+        let expected = uncut_stock_mesh_for_setup(&app.controller, draft).0;
+        assert_eq!(after.len(), expected.len());
+        for (visible, expected) in after.iter().zip(expected.iter()) {
+            assert_eq!(visible.position, expected.position);
+        }
+    }
+
+    #[test]
     fn uncut_stock_follows_rotated_setup_in_world_space() {
         let mut app = picking_app();
         let mut setup = app.controller.inspection_setup().clone();
@@ -2247,6 +2314,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         viewport.browser_overlay_width = 250.;
         let bounds = iced::Rectangle {
@@ -2356,6 +2424,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let bounds = iced::Rectangle {
             x: 0.,
@@ -2430,6 +2499,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             None,
             None,
             None,
@@ -2542,6 +2612,48 @@ mod performance_tests {
             ))
             .unwrap();
         app
+    }
+
+    #[test]
+    fn transparent_stock_reveals_the_model_and_opaque_stock_keeps_reference_edges() {
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.controller = AppController::new(crate::default_machine());
+        let path = std::env::temp_dir().join(format!("rotary-stock-view-{}.ocam", std::process::id()));
+        std::fs::write(&path, include_str!("../tests/fixtures/stepped_rotary.ocam")).unwrap();
+        app.controller.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        app.controller.select(Selection::Operation(0));
+        app.model_view = None;
+        app.setup_draft = None;
+        app.show_stock = false;
+        let model = app.machining_viewport();
+        assert!(!model.mesh_indices.is_empty());
+        assert!(!model.cad_edges.is_empty());
+        let (vertices, indices) = uncut_stock_mesh(&app.controller);
+        assert!(!indices.is_empty());
+        app.show_stock = true;
+        app.settings.view.transparent_stock = false;
+        let stock = app.machining_viewport();
+        assert_eq!(stock.mesh_vertices.len(), vertices.len());
+        assert_eq!(*stock.mesh_indices, indices);
+        assert_eq!(stock.cad_edges, model.cad_edges);
+        app.settings.view.transparent_stock = true;
+        let transparent = app.machining_viewport();
+        assert_eq!(transparent.mesh_indices, model.mesh_indices);
+        assert_eq!(transparent.mesh_vertices, model.mesh_vertices);
+        assert_eq!(*transparent.transparent_stock_indices, indices);
+        assert!(transparent.transparent_stock_convex);
+        app.show_stock = false;
+        assert_eq!(app.machining_viewport().mesh_indices, model.mesh_indices);
+        app.show_stock = true;
+        app.controller.edit_stock(|stock| {
+            if let cam_model::Stock::RelativeRound { tube, inner_diameter, .. } = stock {
+                *tube = true;
+                *inner_diameter = 10.;
+            }
+        });
+        assert!(!app.machining_viewport().transparent_stock_convex, "hollow stock is not convex");
     }
 
     #[test]
@@ -2716,6 +2828,7 @@ mod performance_tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         let neutral = build(&app.controller, None, None, &[], false);
@@ -2769,7 +2882,11 @@ mod performance_tests {
         app.settings.view.transparent_stock = true;
         let transparent = app.machining_viewport();
         assert!(!transparent.transparent_stock_indices.is_empty());
-        assert!(transparent.mesh_indices.len() < opaque.mesh_indices.len());
+        let (cad_vertices, cad_indices) = transparent.cad_scene.mesh(&[], None);
+        assert!(!cad_indices.is_empty());
+        assert_eq!(*transparent.mesh_indices, cad_indices);
+        assert_eq!(transparent.mesh_vertices.len(), cad_vertices.len());
+        assert!(!opaque.mesh_indices.is_empty());
         let id = app
             .controller
             .inspection_setup()

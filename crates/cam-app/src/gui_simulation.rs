@@ -116,7 +116,7 @@ impl Timeline {
                     position=Some(*to);rotary_angle = *angle;
                     length/feed.unwrap_or(rapid_rate).max(1e-6)*60.
                 }
-                Step::Datum(_)=>{position=None;rotary_angle=0.;0.}
+                Step::Datum(_)=>{position=None;0.}
                 Step::Rapid { to, .. } => {
                     position = Some(*to);
                     from.map_or(0., |a| distance(a, *to) / rapid_rate.max(1.) * 60.)
@@ -577,7 +577,7 @@ impl SimulationPlayer {
             _ => None,
         });
         let setup = self.inputs.document.setup();
-        let rotary=program.steps.iter().rev().take_while(|s|!matches!(s,Step::Datum(_))).find_map(|s|match s {
+        let rotary=program.steps.iter().rev().find_map(|s|match s {
             Step::Rotary {axis,center,angle,..}=>Some((*axis,*center,*angle)),_=>None,
         });
         let tool = setup.tools.iter().find(|tool| Some(tool.number) == number);

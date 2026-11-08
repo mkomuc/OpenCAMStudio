@@ -1,5 +1,5 @@
 use super::*;
-use cam_model::{RotaryAxis, RotaryWrap};
+use cam_model::RotaryWrap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Number {
@@ -11,6 +11,42 @@ pub(super) enum Number {
     SurfaceZ,
     Seam,
     Tolerance,
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    #[test]
+    fn indexed_mode_is_staged_and_committed_with_operation_fields_in_one_undo() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        let op = app.controller.operation_template(OpKind::Drill, 1);
+        app.controller.add_operation(op);
+        let id = app.controller.inspection_setup().operations[0].id();
+        app.begin_operation_draft(id);
+        app.rotary_action(Action::Indexed(true));
+        app.rotary_action(Action::IndexValue(0, "90".into()));
+        assert!(app.controller.document().rotary_indexes.is_empty());
+        assert!(app.operation_draft_dirty());
+        app.apply_inspector();
+        assert_eq!(
+            app.controller
+                .document()
+                .rotary_indexes
+                .get(&id)
+                .map(|i| i.angle),
+            Some(90.)
+        );
+        app.controller.undo();
+        assert!(app.controller.document().rotary_indexes.is_empty());
+    }
+    #[test]
+    fn invalid_index_input_cannot_commit_a_previous_valid_number() {
+        let (mut app, _) = App::new();
+        app.rotary_action(Action::Indexed(true));
+        app.rotary_action(Action::IndexValue(0, "unfinished".into()));
+        assert!(app.validate_rotary_index_draft().is_err());
+    }
 }
 impl Number {
     pub(super) const ALL: [Self; 8] = [
@@ -83,106 +119,269 @@ pub(super) enum Pick {
 }
 #[derive(Clone, Debug)]
 pub(super) enum Action {
+    Indexed(bool),
+    IndexAxis(cam_model::RotaryAxis),
+    IndexValue(usize, String),
     Enable(bool),
-    Axis(RotaryAxis),
+    Unwrap(bool),
+    ClearCylinder,
     Pick(Pick),
     Done,
     Clear,
 }
-impl std::fmt::Display for AxisChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self.0 {
-            RotaryAxis::A => "A — around X",
-            RotaryAxis::B => "B — around Y",
-        })
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AxisChoice(RotaryAxis);
 impl App {
+    pub(super) fn rotary_draft_document(&self) -> cam_model::Document {
+        let mut document = self.controller.document().clone();
+        if let Some(op) = &self.operation_draft {
+            if let Some(index) = &self.rotary_index_draft {
+                document.rotary_indexes.insert(op.id(), index.clone());
+            } else {
+                document.rotary_indexes.remove(&op.id());
+            }
+        }
+        document
+    }
+    pub(super) fn indexed_draft_geometry(&self) -> Result<cam_model::GeometryState, String> {
+        crate::cad_operations::geometry_for_operation(
+            &self.rotary_draft_document(),
+            self.operation_draft.as_ref().map_or(0, Operation::id),
+        )
+    }
+    pub(super) fn seed_rotary_index_values(&mut self) {
+        let index = self.rotary_index_draft.clone().unwrap_or_default();
+        self.rotary_index_values = [
+            fmt_num(index.angle),
+            fmt_num(index.center[0]),
+            fmt_num(index.center[1]),
+            fmt_num(index.center[2]),
+        ];
+    }
+    pub(super) fn validate_rotary_index_draft(&self) -> Result<(), String> {
+        if let Some(index) = &self.rotary_index_draft {
+            if self
+                .rotary_index_values
+                .iter()
+                .any(|v| v.parse::<f64>().is_err())
+            {
+                return Err("Enter a finite index angle and axis centre".into());
+            }
+            index.validate()?;
+        }
+        Ok(())
+    }
     pub(super) fn rotary_controls(&self, op: &Operation) -> Element<'_, Message> {
         use iced::widget::column;
-        if !op.supports_rotary_wrap() {
-            return text("Wrap Toolpath is available for Profile and Pocket, including 2D adaptive clearing.").size(12).into();
-        }
-        let mut form = column![row![
-            text("Wrap Toolpath (4th axis)").size(12),
-            checkbox(op.rotary_wrap().is_some()).on_toggle(|v| Message::Rotary(Action::Enable(v)))
+        let enabled = op.rotary_wrap().is_some();
+        let indexed = self.rotary_index_draft.is_some();
+        let mut modes = row![
+            inspector_button(if enabled || indexed {
+                "3-axis"
+            } else {
+                "3-axis ✓"
+            })
+            .on_press(Message::Rotary(Action::Enable(false))),
+            inspector_button(if indexed {
+                "3+1 Indexed ✓"
+            } else {
+                "3+1 Indexed"
+            })
+            .on_press(Message::Rotary(Action::Indexed(true)))
         ]
-        .spacing(8)]
-        .spacing(8);
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if op.supports_rotary_wrap() {
+            modes = modes.push(
+                inspector_button(if enabled { "Wrap ✓" } else { "Wrap" })
+                    .on_press(Message::Rotary(Action::Enable(true))),
+            );
+        }
+        let mut form = column![text("Machining Type").size(12),modes].spacing(12);
+        if let Some(index) = &self.rotary_index_draft {
+            form = form.push(
+                row![
+                    text("Rotary axis").size(12),
+                    inspector_button(if index.axis == cam_model::RotaryAxis::A {
+                        "A (X) ✓"
+                    } else {
+                        "A (X)"
+                    })
+                    .on_press(Message::Rotary(Action::IndexAxis(cam_model::RotaryAxis::A))),
+                    inspector_button(if index.axis == cam_model::RotaryAxis::B {
+                        "B (Y) ✓"
+                    } else {
+                        "B (Y)"
+                    })
+                    .on_press(Message::Rotary(Action::IndexAxis(cam_model::RotaryAxis::B)))
+                ]
+                .spacing(8),
+            );
+            for (i, label) in [
+                "Index angle (degrees)",
+                "Axis centre X (mm)",
+                "Axis centre Y (mm)",
+                "Axis centre Z (mm)",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                form = form.push(
+                    row![
+                        text(label).size(12),
+                        iced::widget::text_input("0", &self.rotary_index_values[i])
+                            .on_input(move |v| Message::Rotary(Action::IndexValue(i, v)))
+                    ]
+                    .spacing(8),
+                );
+            }
+            return form.push(text("CAD geometry is machined at this fixed workpiece angle. Drawing coordinates and heights use the indexed machine frame.").size(12)).into();
+        }
         let Some(wrap) = op.rotary_wrap() else {
-            return form.into();
+            return form
+                .push(text("Tool Orientation").size(14))
+                .push(text("Uses setup orientation").size(12))
+                .into();
         };
-        form = form.push(pick_list(
-            [AxisChoice(RotaryAxis::A), AxisChoice(RotaryAxis::B)],
-            Some(AxisChoice(wrap.axis)),
-            |v| Message::Rotary(Action::Axis(v.0)),
+        form = form.push(text("Wrap").size(14));
+        form = form.push(
+            row![
+                text("Unwrap Geometry").size(12),
+                checkbox(wrap.unwrap_geometry).on_toggle(|v| Message::Rotary(Action::Unwrap(v)))
+            ]
+            .spacing(8),
+        );
+        form = form.push(
+            row![
+                text("Wrap Cylinder").size(12),
+                inspector_button(if wrap.cylinder.is_some() {
+                    "Face"
+                } else {
+                    "Select face…"
+                })
+                .on_press(Message::Rotary(Action::Pick(Pick::Cylinder))),
+                inspector_button("×").on_press(Message::Rotary(Action::ClearCylinder))
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        let field = Field::Wrap(Number::Offset);
+        let value = self
+            .fields
+            .get(&field)
+            .cloned()
+            .unwrap_or_else(|| fmt_num(wrap.offset));
+        form = form.push(field_row_labeled(
+            field,
+            "Offset (mm)",
+            field.help(),
+            &value,
+            self.tooltips,
+            self.field_invalid(field),
         ));
         form = form.push(
-            inspector_button(if wrap.cylinder.is_some() {
-                "Reselect Wrap Cylinder"
-            } else {
-                "Select Wrap Cylinder"
-            })
-            .on_press(Message::Rotary(Action::Pick(Pick::Cylinder))),
+            row![
+                text("Radius").size(12),
+                text(format!(
+                    "{} mm",
+                    fmt_num(wrap.radius + value.parse::<f64>().unwrap_or(wrap.offset))
+                ))
+                .size(12)
+            ]
+            .spacing(12),
         );
-        form=form.push(text("Use a cylindrical face, or enter radius and axis centre. A wraps drawing Y around X; B wraps drawing X around Y. Heights remain in the unwrapped plane.").size(12).color(INSPECTOR_MUTED));
-        for number in Number::ALL {
-            let field = Field::Wrap(number);
-            let value = self
-                .fields
-                .get(&field)
-                .cloned()
-                .unwrap_or_else(|| fmt_num(number.get(wrap)));
-            form = form.push(field_row_labeled(
-                field,
-                number.label(),
-                field.help(),
-                &value,
-                self.tooltips,
-                self.field_invalid(field),
-            ));
-        }
-        form =
-            form.push(text(format!("CAD machining boundaries: {}", wrap.geometry.len())).size(12));
-        form = form.push(
+        form.into()
+    }
+    pub(super) fn rotary_geometry_controls(&self, op: &Operation) -> Element<'_, Message> {
+        use iced::widget::column;
+        let count = op.rotary_wrap().map_or(0, |w| w.geometry.len());
+        column![
+            text(format!("{count} selected machining boundaries")).size(12),
             row![
                 inspector_button("Loops").on_press(Message::Rotary(Action::Pick(Pick::Loops))),
                 inspector_button("Edges").on_press(Message::Rotary(Action::Pick(Pick::Edges))),
                 inspector_button("Faces").on_press(Message::Rotary(Action::Pick(Pick::Faces)))
             ]
             .spacing(4),
-        );
-        form = form.push(
             row![
                 inspector_button("Done selecting").on_press(Message::Rotary(Action::Done)),
                 inspector_button("Use drawing geometry").on_press(Message::Rotary(Action::Clear))
             ]
-            .spacing(4),
-        );
-        if !self.controller.post_kind().supports_rotary_wrap() {
-            form = form.push(
-                text("For rotary G-code, select LinuxCNC, Fanuc or Haas in the post settings.")
-                    .size(12)
-                    .color(INSPECTOR_MUTED),
-            );
-        }
-        form.into()
+            .spacing(4)
+        ]
+        .spacing(8)
+        .into()
     }
     pub(super) fn rotary_action(&mut self, action: Action) {
         match action {
-            Action::Enable(enabled) => {
-                if enabled && self.rotary_heights.is_none() {
-                    self.rotary_heights = self
-                        .height_draft
-                        .clone()
-                        .map(|settings| (settings, self.height_offsets.clone()));
+            Action::Indexed(enabled) => {
+                if enabled {
+                    let mut index = self.rotary_index_draft.clone().unwrap_or_default();
+                    if let Some(wrap) = self
+                        .operation_draft
+                        .as_ref()
+                        .and_then(Operation::rotary_wrap)
+                    {
+                        index.axis = wrap.axis;
+                        index.center = wrap.center;
+                    }
+                    self.rotary_index_draft = Some(index);
+                    self.edit_operation_draft(|op| op.set_rotary_wrap(None));
+                    self.seed_rotary_index_values();
+                } else {
+                    self.rotary_index_draft = None;
                 }
-                let mut wrap = RotaryWrap::default();
-                if let Some(op) = &self.operation_draft {
+            }
+            Action::IndexAxis(axis) => {
+                if let Some(index) = &mut self.rotary_index_draft {
+                    index.axis = axis;
+                }
+            }
+            Action::IndexValue(i, value) => {
+                if i < 4 {
+                    if let (Some(index), Ok(v)) =
+                        (&mut self.rotary_index_draft, value.parse::<f64>())
+                    {
+                        if i == 0 {
+                            index.angle = v;
+                        } else {
+                            index.center[i - 1] = v;
+                        }
+                    }
+                    self.rotary_index_values[i] = value;
+                }
+            }
+            Action::Enable(enabled) => {
+                self.rotary_index_draft = None;
+                let current = self
+                    .operation_draft
+                    .as_ref()
+                    .and_then(Operation::rotary_wrap)
+                    .cloned();
+                if current.is_some() == enabled {
+                    return;
+                }
+                if !enabled {
+                    self.rotary_wrap_draft = current.map(|mut wrap| {
+                        if let Some(value) = self
+                            .fields
+                            .get(&Field::Wrap(Number::Offset))
+                            .and_then(|s| s.parse().ok())
+                        {
+                            wrap.offset = value;
+                        }
+                        wrap
+                    });
+                }
+                let restoring = self.rotary_wrap_draft.is_some();
+                let mut wrap = if enabled {
+                    self.rotary_wrap_draft.take().unwrap_or_default()
+                } else {
+                    RotaryWrap::default()
+                };
+                if let Some(op) = self.operation_draft.as_ref().filter(|_| !restoring) {
                     if let Some(binding) = self.controller.geometry_state().bindings.get(&op.id()) {
                         wrap.geometry = binding.selected.clone();
+                    } else if self.cad_pending_kind.is_some() {
+                        wrap.geometry = self.controller.cad_selection().to_vec();
                     }
                 }
                 self.edit_operation_draft(|op| {
@@ -193,29 +392,21 @@ impl App {
                         }
                     }
                 });
-                if enabled {
-                    let settings = cam_model::OperationHeightSettings::default();
-                    self.height_offsets = cam_model::HeightPlaneKind::ALL
-                        .into_iter()
-                        .map(|p| (p, fmt_num(settings.definition(p).offset)))
-                        .collect();
-                    self.height_draft = Some(settings);
-                } else if let Some((settings, offsets)) = self.rotary_heights.take() {
-                    self.height_draft = Some(settings);
-                    self.height_offsets = offsets;
-                }
                 self.rotary_pick = None;
                 self.refresh_operation_fields();
             }
-            Action::Axis(axis) => {
-                self.edit_operation_draft(|op| {
-                    if let Some(mut w) = op.rotary_wrap().cloned() {
-                        w.axis = axis;
-                        w.cylinder = None;
-                        op.set_rotary_wrap(Some(w));
-                    }
-                });
-            }
+            Action::Unwrap(value) => self.edit_operation_draft(|op| {
+                if let Some(mut w) = op.rotary_wrap().cloned() {
+                    w.unwrap_geometry = value;
+                    op.set_rotary_wrap(Some(w));
+                }
+            }),
+            Action::ClearCylinder => self.edit_operation_draft(|op| {
+                if let Some(mut w) = op.rotary_wrap().cloned() {
+                    w.cylinder = None;
+                    op.set_rotary_wrap(Some(w));
+                }
+            }),
             Action::Pick(pick) => {
                 self.rotary_pick = Some(pick);
                 self.cad_filter = match pick {
@@ -261,7 +452,8 @@ impl App {
                 Ok(w) => {
                     self.edit_operation_draft(|op| op.set_rotary_wrap(Some(w)));
                     self.rotary_pick = None;
-                    self.fields.retain(|f, _| !matches!(f, Field::Wrap(_)));
+                    self.fields
+                        .retain(|f, _| !matches!(f, Field::Wrap(n) if n.cylinder_dimension()));
                     self.refresh_operation_fields();
                     self.status = "Wrap cylinder selected.".into();
                 }
@@ -280,5 +472,21 @@ impl App {
             );
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn wrap_inventory_exposes_only_offset_as_an_editable_number() {
+        let controller = AppController::new(crate::default_machine());
+        let mut operation = controller.operation_template(OpKind::Pocket, 1);
+        operation.set_rotary_wrap(Some(RotaryWrap::default()));
+        let fields: Vec<_> = operation_fields(&operation)
+            .into_iter()
+            .filter(|f| matches!(f, Field::Wrap(_)))
+            .collect();
+        assert_eq!(fields, vec![Field::Wrap(Number::Offset)]);
     }
 }

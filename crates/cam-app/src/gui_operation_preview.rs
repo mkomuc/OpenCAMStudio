@@ -188,7 +188,10 @@ impl App {
     }
 
     pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
-        if let Some(wrap)=self.operation_draft.as_ref().and_then(Operation::rotary_wrap) {
+        if let Some(wrap) = self.operation_draft.as_ref().and_then(Operation::rotary_wrap) {
+            if self.wrapped_pocket_geometry_editor() {
+                return self.controller.cad_selection().to_vec();
+            }
             return wrap.geometry.iter().chain(wrap.cylinder.iter()).cloned().collect();
         }
         if let Some(draft) = &self.pattern_draft {
@@ -235,6 +238,9 @@ impl App {
 
     pub(super) fn operation_geometry_preview(&self) -> Scene {
         let mut scene = Scene::new();
+        if self.wrapped_pocket_geometry_editor() {
+            return scene;
+        }
         let (operation, binding) = if self.creating_operation() {
             match self.creation_operation() {
                 Ok((op, binding)) => (Some(op), binding),
@@ -244,6 +250,7 @@ impl App {
             let operation = self.operation_draft.clone();
             let binding = operation
                 .as_ref()
+                .filter(|op| op.rotary_wrap().is_none())
                 .and_then(|op| {
                     self.operation_binding_preview
                         .as_ref()
@@ -434,6 +441,15 @@ impl App {
                     }
                 }
             }
+        }
+        let index=if self.operation_draft.is_some(){self.rotary_index_draft.as_ref()}else{self.controller.document().rotary_indexes.get(&op.id())};
+        if let Some(index)=index {
+            let center=cam_cldata::Point3::new(index.center[0],index.center[1],index.center[2]);
+            for strip in &mut scene.strips {for point in &mut strip.points {
+                let p=frame.to_setup_vector(point.map(f64::from));
+                let p=index.axis.material_point(cam_cldata::Point3::new(p[0],p[1],p[2]),center,index.angle);
+                *point=frame.to_world_vector([p.x,p.y,p.z]).map(|v|v as f32);
+            }}
         }
         scene
     }

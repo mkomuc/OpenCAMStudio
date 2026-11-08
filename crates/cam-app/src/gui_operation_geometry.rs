@@ -19,6 +19,7 @@ pub(super) enum GeometryMessage {
 
 pub(super) struct GeometryEditor {
     stock: bool,
+    wrapped: bool,
     kind: OpKind,
     cad_selection: Vec<EntityRef>,
     pending: Option<crate::PendingOp>,
@@ -164,11 +165,17 @@ impl App {
         self.cad_pending_kind.is_some()
             || self.cad_editing_op.is_some()
             || self.operation_draft.as_ref().is_some_and(|op| {
-                self.controller
+                matches!(op, Operation::Pocket(p) if p.wrap.as_ref().is_some_and(|wrap| !wrap.geometry.is_empty())) || self.controller
                     .geometry_state()
                     .bindings
                     .contains_key(&op.id())
             })
+    }
+
+    pub(super) fn wrapped_pocket_geometry_editor(&self) -> bool {
+        self.geometry_editor
+            .as_ref()
+            .is_some_and(|editor| editor.wrapped)
     }
 
     pub(super) fn operation_geometry_collection(
@@ -181,8 +188,21 @@ impl App {
             .filter(|index| *index < labels.len())
             .or_else(|| (!labels.is_empty()).then_some(0));
         let cad = self.operation_uses_cad_geometry();
-        let sources = if self.cad_pending_kind.is_some() || self.cad_editing_op.is_some() {
+        let sources = if self.wrapped_pocket_geometry_editor()
+            || (self
+                .operation_draft
+                .as_ref()
+                .and_then(Operation::rotary_wrap)
+                .is_none()
+                && (self.cad_pending_kind.is_some() || self.cad_editing_op.is_some()))
+        {
             self.controller.cad_selection()
+        } else if let Some(wrap) = self
+            .operation_draft
+            .as_ref()
+            .and_then(Operation::rotary_wrap)
+        {
+            wrap.geometry.as_slice()
         } else {
             self.operation_binding_preview
                 .as_ref()
@@ -219,8 +239,27 @@ impl App {
                 action: Some(Message::GeometryRowSelected(index)),
             })
             .collect();
+        let wrapped = kind == OpKind::Pocket
+            && self
+                .operation_draft
+                .as_ref()
+                .and_then(Operation::rotary_wrap)
+                .is_some()
+            && cad;
+        let choices = if wrapped {
+            vec![
+                (CadFilter::Face, "face", "Add a cylindrical machining face."),
+                (
+                    CadFilter::Loop,
+                    "chain",
+                    "Add a closed developed boundary or connected edges.",
+                ),
+            ]
+        } else {
+            modes(kind, cad)
+        };
         let mut toolbar = row![].spacing(4).align_y(Alignment::Center);
-        for (filter, name, description) in modes(kind, cad) {
+        for &(filter, name, description) in &choices {
             toolbar = toolbar.push(hint(
                 button(icon(name, 28.))
                     .padding(4)
@@ -265,7 +304,7 @@ impl App {
             Some(Message::OperationGeometry(if selected.is_some() {
                 GeometryMessage::Edit
             } else {
-                GeometryMessage::Add(modes(kind, cad)[0].0)
+                GeometryMessage::Add(choices[0].0)
             })),
             toolbar,
         )
@@ -528,6 +567,14 @@ impl App {
                 let pending = self.controller.pending_op();
                 let editor = GeometryEditor {
                     stock: matches!(message, GeometryMessage::SelectStock),
+                    wrapped: !matches!(message, GeometryMessage::SelectStock)
+                        && kind == OpKind::Pocket
+                        && self
+                            .operation_draft
+                            .as_ref()
+                            .and_then(Operation::rotary_wrap)
+                            .is_some()
+                        && self.operation_uses_cad_geometry(),
                     kind,
                     cad_selection: self.controller.cad_selection().to_vec(),
                     pending,
@@ -543,7 +590,31 @@ impl App {
                     height_defaults: self.creation_geometry_height_defaults.clone(),
                 };
                 self.height_reference_pick = None;
-                let _ = self.pick_operation_geometry();
+                if editor.wrapped {
+                    let selected = self
+                        .operation_draft
+                        .as_ref()
+                        .and_then(Operation::rotary_wrap)
+                        .map(|wrap| wrap.geometry.clone())
+                        .unwrap_or_default();
+                    self.controller.set_cad_selection(selected);
+                    self.geometry_additive = true;
+                    if let GeometryMessage::Add(filter) = message {
+                        self.cad_filter = filter;
+                    } else {
+                        self.cad_filter =
+                            match self.controller.cad_selection().first().map(|r| r.kind) {
+                                Some(EntityKind::Edge) => CadFilter::Edge,
+                                Some(EntityKind::Loop) => CadFilter::Loop,
+                                _ => CadFilter::Face,
+                            };
+                    }
+                    self.cad_filter_explicit = true;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                } else {
+                    let _ = self.pick_operation_geometry();
+                }
                 if self.drawing_editing_op.is_some() && editor.pending.is_none() {
                     if let Some(operation) = self.operation_draft.as_ref() {
                         let references = self.drawing_sources_for_operation(operation);
@@ -553,7 +624,7 @@ impl App {
                     }
                 }
                 if let GeometryMessage::Add(filter) = message {
-                    if self.operation_uses_cad_geometry() {
+                    if !editor.wrapped && self.operation_uses_cad_geometry() {
                         let _ = self.update(Message::GeometryFilterChanged(filter));
                     }
                 }
@@ -672,6 +743,22 @@ impl App {
                     self.status = error;
                     return;
                 }
+                if self.wrapped_pocket_geometry_editor() {
+                    let selected = self.controller.cad_selection().to_vec();
+                    self.edit_operation_draft(|op| {
+                        if let Some(mut wrap) = op.rotary_wrap().cloned() {
+                            wrap.geometry = selected;
+                            op.set_rotary_wrap(Some(wrap));
+                        }
+                    });
+                    self.geometry_editor = None;
+                    self.geometry_additive = false;
+                    self.geometry_row_selection = None;
+                    self.status =
+                        "Geometry staged. The operation's OK/Cancel applies or discards all tabs."
+                            .into();
+                    return;
+                }
                 if self.cad_editing_op.is_some() {
                     let _ = self.update(Message::ConfirmCadOperation);
                     if self.cad_editing_op.is_some() {
@@ -703,6 +790,25 @@ impl App {
             .geometry_editor
             .as_ref()
             .ok_or("Open geometry settings")?;
+        if editor.wrapped {
+            let selected = self.controller.cad_selection();
+            if selected.is_empty() {
+                return Err("Select at least one cylindrical face or closed boundary".into());
+            }
+            let mut operation = self
+                .operation_draft
+                .clone()
+                .ok_or("Operation unavailable")?;
+            let mut wrap = operation.rotary_wrap().cloned().ok_or("Wrap unavailable")?;
+            wrap.geometry = selected.to_vec();
+            let has_cylinder = wrap.cylinder.is_some();
+            operation.set_rotary_wrap(Some(wrap));
+            if !has_cylinder {
+                return Ok(());
+            }
+            let geometry = crate::cad_operations::geometry_for_setup(self.controller.document())?;
+            return crate::cad_operations::resolve_wrapped_operation(&geometry, &mut operation);
+        }
         if let Some(id) = self.cad_editing_op {
             self.preview_geometry_draft(id, self.controller.cad_selection().to_vec())
                 .map(|_| ())
@@ -839,7 +945,15 @@ impl App {
                 ]
             } else if kind == OpKind::Pocket {
                 vec![
-                    (CadFilter::Face, "face", "Pocket floor and islands"),
+                    (
+                        CadFilter::Face,
+                        "face",
+                        if editor.wrapped {
+                            "Cylindrical machining face"
+                        } else {
+                            "Pocket floor and islands"
+                        },
+                    ),
                     (CadFilter::Loop, "closed", "Closed boundary loop"),
                     (
                         CadFilter::Edge,
@@ -894,6 +1008,8 @@ impl App {
         }
         let description = if editor.stock {
             "Select a stock box edge, closed model loop, connected edge chain, or body silhouette. Use setup stock restores the setup box. Stock contours describe material; the cutter can approach from outside the footprint. Leave unchecked for closed pockets."
+        } else if editor.wrapped {
+            "Select cylindrical faces, closed loops, or connected edges. Select the wrap cylinder on the Multi-axis tab. Faces at different radii require separate operations."
         } else {
             match kind {
             OpKind::Pocket => "Select planar pocket floors with their islands, closed boundary loops, or closed edge chains. Multiple pockets share the operation cutting heights. For chains, set the cutting depth in Heights.",
@@ -908,7 +1024,7 @@ impl App {
         }
         };
         body = body.push(text(description).size(12));
-        if cad && !editor.stock {
+        if cad && !editor.stock && !editor.wrapped {
             if let Some(info) =
                 crate::cad_operations::geometry_for_setup(self.controller.document())
                     .ok()
@@ -971,6 +1087,258 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wrapped_pocket_fixture() -> (App, EntityRef, EntityRef) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        let path = std::env::temp_dir().join(format!(
+            "wrapped-pocket-picker-{}-{}.ocam",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, include_str!("../tests/fixtures/stepped_rotary.ocam")).unwrap();
+        app.controller.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let face = app
+            .controller
+            .operation(0)
+            .unwrap()
+            .rotary_wrap()
+            .unwrap()
+            .cylinder
+            .clone()
+            .unwrap();
+        let boundary = EntityRef {
+            kind: EntityKind::Loop,
+            id: 26,
+            ..face.clone()
+        };
+        app.controller.edit_operation(0, |op| {
+            let mut wrap = op.rotary_wrap().unwrap().clone();
+            wrap.geometry = vec![face.clone()];
+            op.set_rotary_wrap(Some(wrap));
+        });
+        app.setup_draft = None;
+        app.begin_operation_draft(0);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        (app, face, boundary)
+    }
+
+    #[test]
+    fn wrapped_pocket_uses_shared_geometry_editor_and_stages_changes() {
+        let (mut app, face, boundary) = wrapped_pocket_fixture();
+        let before = app.controller.document().clone();
+        let _ = app.operation_inspector(0);
+        let _ = app.update(Message::FieldChanged(Field::Feed, "321".into()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Edit));
+        assert!(app.wrapped_pocket_geometry_editor());
+        assert!(app.operation_geometry_preview().strips.is_empty());
+        assert_eq!(app.controller.cad_selection(), &[face.clone()]);
+        let _ = app.operation_geometry_settings();
+        let larger_face = EntityRef {
+            id: 2,
+            ..face.clone()
+        };
+        app.controller
+            .set_cad_selection(vec![face.clone(), larger_face]);
+        assert!(app
+            .geometry_settings_valid()
+            .unwrap_err()
+            .contains("different radii"));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.wrapped_pocket_geometry_editor());
+        app.controller.set_cad_selection(vec![face.clone()]);
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Loop));
+        assert!(app.controller.cad_selection().is_empty());
+        let viewport = app.machining_viewport();
+        assert_eq!(viewport.cad_filter, EntityKind::Loop);
+        assert_eq!(viewport.cad_operation_kind, Some(OpKind::Engrave));
+        let _ = app.update(Message::CadSelect(boundary.clone()));
+        assert_eq!(app.controller.cad_selection(), &[boundary.clone()]);
+        assert_eq!(app.editor_selected_geometry(), vec![boundary.clone()]);
+        assert!(
+            app.geometry_settings_valid().is_ok(),
+            "{:?}",
+            app.geometry_settings_valid()
+        );
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face.clone()]
+        );
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert!(!app.wrapped_pocket_geometry_editor());
+        assert_eq!(app.controller.document(), &before);
+        assert_eq!(app.fields[&Field::Feed], "321");
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face]
+        );
+
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Loop,
+        )));
+        let _ = app.update(Message::GeometryClear);
+        assert!(app.geometry_settings_valid().is_err());
+        let _ = app.update(Message::CadSelect(boundary.clone()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![boundary.clone()]
+        );
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller
+                .operation(0)
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![boundary]
+        );
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn wrapped_pocket_click_and_remove_use_the_shared_staged_picker() {
+        let (mut app, face, boundary) = wrapped_pocket_fixture();
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::CadSelect(boundary.clone()));
+        assert!(app.wrapped_pocket_geometry_editor(), "{}", app.status);
+        assert_eq!(app.controller.cad_selection(), &[boundary]);
+        let _ = app.update(Message::GeometryClear);
+        let _ = app.update(Message::CadSelect(face.clone()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        let _ = app.update(Message::GeometryRowSelected(0));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        assert!(app.wrapped_pocket_geometry_editor());
+        assert!(app.controller.cad_selection().is_empty());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face]
+        );
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn wrapped_pocket_creation_preserves_and_edits_the_existing_cad_selection() {
+        let (mut app, face, _) = wrapped_pocket_fixture();
+        let _ = app.update(Message::CancelOperationDraft);
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        assert_eq!(app.cad_pending_kind, Some(OpKind::Pocket));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        let _ = app.update(Message::CadSelect(face.clone()));
+        let _ = app.update(Message::Rotary(rotary_view::Action::Enable(true)));
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face.clone()]
+        );
+        let _ = app.update(Message::Rotary(rotary_view::Action::Pick(
+            rotary_view::Pick::Cylinder,
+        )));
+        let _ = app.update(Message::CadSelect(face.clone()));
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .cylinder,
+            Some(face.clone())
+        );
+        let _ = app.operation_inspector(0);
+        let _ = app.update(Message::GeometryRowSelected(0));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        assert!(app
+            .operation_draft
+            .as_ref()
+            .unwrap()
+            .rotary_wrap()
+            .unwrap()
+            .geometry
+            .is_empty());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Face,
+        )));
+        let _ = app.update(Message::CadSelect(face.clone()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face]
+        );
+        assert!(
+            app.creation_operation().is_ok(),
+            "{:?}",
+            app.creation_operation().err()
+        );
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::CancelOp);
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn wrapped_drawing_pocket_uses_the_standard_drawing_geometry_editor() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Pocket);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("pocket selected")
+        };
+        app.setup_draft = None;
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::Rotary(rotary_view::Action::Enable(true)));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        assert!(!app.operation_uses_cad_geometry());
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Loop,
+        )));
+        assert!(app.geometry_editor.is_some());
+        assert!(!app.wrapped_pocket_geometry_editor());
+        assert!(app.drawing_editing_op.is_some());
+        let _ = app.update(Message::GeometryClear);
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert!(app.geometry_editor.is_none());
+        assert_eq!(app.controller.document(), &before);
+    }
 
     #[test]
     #[ignore = "manual supplied-project regression; set OCAM_STOCK_PROJECT"]

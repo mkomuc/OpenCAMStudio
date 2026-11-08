@@ -47,7 +47,7 @@ pub fn unwrap_boundaries(
 ) -> Result<Vec<ProfileContour>, String> {
     wrap.validate()?;
     let view = View::for_path(state, &wrap.geometry)?;
-    let mut wires = Vec::<(Vec<[f64; 3]>, bool, Side)>::new();
+    let mut wires = Vec::<(Vec<[f64; 3]>, bool, Side, bool)>::new();
     if wrap.geometry.iter().all(|r| r.kind == EntityKind::Edge) {
         let mut remaining = wrap.geometry.clone();
         while let Some(first) = remaining.pop() {
@@ -85,7 +85,7 @@ pub fn unwrap_boundaries(
                 }
             }
             let closed = distance3(points[0], *points.last().unwrap()) < T;
-            wires.push((points, closed, Side::On));
+            wires.push((points, closed, Side::On, false));
         }
     } else {
         let mut loops = BTreeSet::new();
@@ -117,12 +117,13 @@ pub fn unwrap_boundaries(
                 } else {
                     Side::Inside
                 },
+                periodic_wire(&view, wire, wrap)?,
             ));
         }
     }
     let mut contours = Vec::new();
     let mut anchor = None;
-    for (points, closed, side) in wires {
+    for (points, closed, side, periodic) in wires {
         if points.len() < 2 {
             return Err("Wrapped boundary is empty".into());
         }
@@ -164,6 +165,31 @@ pub fn unwrap_boundaries(
                 return Err("A boundary winds completely around the cylinder; split it into non-winding patches before wrapping".into());
             }
             developed.pop();
+            if periodic {
+                let min = Point::new(
+                    developed.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+                    developed.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
+                );
+                let max = Point::new(
+                    developed
+                        .iter()
+                        .map(|p| p.x)
+                        .fold(f64::NEG_INFINITY, f64::max),
+                    developed
+                        .iter()
+                        .map(|p| p.y)
+                        .fold(f64::NEG_INFINITY, f64::max),
+                );
+                let width = match wrap.axis {
+                    RotaryAxis::A => max.y - min.y,
+                    RotaryAxis::B => max.x - min.x,
+                };
+                if (width - TAU * wrap.effective_radius()).abs() <= wrap.tolerance * 2. {
+                    // Exact cylinder generators develop into a rectangle. Keep
+                    // its artificial CAD seam out of the pocket-wall geometry.
+                    developed = vec![min, Point::new(max.x, min.y), max, Point::new(min.x, max.y)];
+                }
+            }
             Polygon::new(Contour::new(developed.clone()))
                 .map_err(|e| format!("Invalid unwrapped boundary: {e}"))?;
         }
@@ -179,8 +205,8 @@ pub fn unwrap_boundaries(
     Ok(contours)
 }
 
-/// Cylindrical CAD floors/edges supply a radial bottom-height reference. A
-/// boundary spanning different radii retains operator-defined cutting heights.
+/// Cylindrical CAD floors/edges supply a radial bottom-height reference.
+/// Different cylindrical radii require separate operations.
 pub fn wrapped_boundary_height(
     state: &GeometryState,
     wrap: &RotaryWrap,
@@ -189,6 +215,19 @@ pub fn wrapped_boundary_height(
         return Ok(None);
     }
     let view = View::for_path(state, &wrap.geometry)?;
+    let mut cylinder_radius = None;
+    for reference in &wrap.geometry {
+        if reference.kind == EntityKind::Face {
+            if let CadSurface::Cylinder { radius, .. } = view.face(reference.id)?.surface {
+                if cylinder_radius
+                    .is_some_and(|previous: f64| (previous - radius).abs() > wrap.tolerance * 0.5)
+                {
+                    return Err("Selected wrapped geometry spans different radii. Split the cylindrical faces into separate wrapped operations so each keeps its model radius".into());
+                }
+                cylinder_radius = Some(radius);
+            }
+        }
+    }
     let mut edges = BTreeSet::new();
     for reference in &wrap.geometry {
         match reference.kind {
@@ -220,6 +259,53 @@ pub fn wrapped_boundary_height(
     }
     Ok((max.is_finite() && max - min <= wrap.tolerance * 0.5)
         .then_some(wrap.surface_z + max - wrap.effective_radius()))
+}
+
+fn periodic_wire(view: &View<'_>, wire: &CadLoop, wrap: &RotaryWrap) -> Result<bool, String> {
+    let CadSurface::Cylinder {
+        axis,
+        origin,
+        inward: false,
+        ..
+    } = view.face(wire.face_id)?.surface
+    else {
+        return Ok(false);
+    };
+    let axis = view.vector(axis);
+    let aligned = match wrap.axis {
+        RotaryAxis::A => axis[0].abs() > 1. - T,
+        RotaryAxis::B => axis[1].abs() > 1. - T,
+    };
+    let origin = radial_point(view.point(origin), wrap);
+    Ok(aligned
+        && origin[0].hypot(origin[1]) < T
+        && wire.edge_uses.iter().enumerate().any(|(i, e)| {
+            wire.edge_uses[..i]
+                .iter()
+                .any(|p| p.edge_id == e.edge_id && p.reversed != e.reversed)
+        }))
+}
+
+/// Every selected contour bounds a complete periodic exterior cylinder band.
+pub fn periodic_cylinder_selection(
+    state: &GeometryState,
+    wrap: &RotaryWrap,
+) -> Result<bool, String> {
+    if wrap.geometry.is_empty() {
+        return Ok(false);
+    }
+    let view = View::for_path(state, &wrap.geometry)?;
+    for r in &wrap.geometry {
+        let wires = match r.kind {
+            EntityKind::Face => view.face(r.id)?.loop_ids.clone(),
+            EntityKind::Loop => vec![r.id],
+            _ => return Ok(false),
+        };
+        if wires.len() != 1 || !periodic_wire(&view, view.wire(wires[0])?, wrap)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 fn distance3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a.iter()

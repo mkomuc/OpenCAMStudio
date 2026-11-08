@@ -7,7 +7,7 @@
 //! and left standing.
 
 use cam_cldata::Program;
-use cam_geo::{offset, JoinStyle, Polygon};
+use cam_geo::{offset, Contour, JoinStyle, Point, Polygon};
 use cam_model::PocketOp;
 
 use crate::profile::depth_levels;
@@ -62,6 +62,82 @@ impl Strategy for PocketStrategy {
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if op.wrap.as_ref().is_some_and(|wrap| wrap.periodic) {
+            let Some(tool) = env.tool(op.tool) else {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(
+                        "Wrapped pocket references a missing tool",
+                    )],
+                    ..Default::default()
+                };
+            };
+            let mut expanded = op.clone();
+            let wrap = expanded.wrap.as_mut().unwrap();
+            wrap.periodic = false;
+            let axis = wrap.axis;
+            let margin = tool.radius()
+                + op.clear.offset
+                + if op.finishing.enabled {
+                    op.finishing.count as f64 * op.finishing.stepover
+                } else {
+                    0.
+                };
+            if !margin.is_finite() {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(
+                        "Periodic wrap requires finite cutter and allowance dimensions",
+                    )],
+                    ..Default::default()
+                };
+            }
+            let extend = |chain: &Contour| {
+                let points = chain.points();
+                let coord = |p: &Point| match axis {
+                    cam_model::RotaryAxis::A => p.y,
+                    cam_model::RotaryAxis::B => p.x,
+                };
+                let lo = points.iter().map(coord).fold(f64::INFINITY, f64::min);
+                let hi = points.iter().map(coord).fold(f64::NEG_INFINITY, f64::max);
+                Contour::new(
+                    points
+                        .iter()
+                        .map(|p| {
+                            let mut p = *p;
+                            let v = match axis {
+                                cam_model::RotaryAxis::A => &mut p.y,
+                                cam_model::RotaryAxis::B => &mut p.x,
+                            };
+                            if (*v - lo).abs() < 1e-6 {
+                                *v -= margin;
+                            } else if (*v - hi).abs() < 1e-6 {
+                                *v += margin;
+                            }
+                            p
+                        })
+                        .collect(),
+                )
+            };
+            expanded.boundary = extend(&expanded.boundary);
+            expanded.additional_regions = match expanded
+                .additional_regions
+                .iter()
+                .map(|p| Polygon::with_holes(extend(p.outer()), p.holes().to_vec()))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(regions) => regions,
+                Err(reason) => {
+                    return StrategyResult {
+                        diagnostics: vec![Diagnostic::error(format!(
+                            "Invalid periodic band: {reason}"
+                        ))],
+                        ..Default::default()
+                    }
+                }
+            };
+            // Only the axial ends are physical walls. Extending the developed
+            // seam cancels the planar cutter inset and covers the full turn.
+            return Self::new(expanded).compute(env, cancel);
+        }
         if op.stock_contours.enabled {
             return self.compute_stock_contours(env, cancel);
         }
@@ -695,6 +771,79 @@ mod tests {
             kind: ToolKind::EndMill,
             ..Default::default()
         }]
+    }
+
+    #[test]
+    fn periodic_bands_cover_a_full_turn_without_insetting_the_cad_seam() {
+        for axis in [cam_model::RotaryAxis::A, cam_model::RotaryAxis::B] {
+            let circumference = std::f64::consts::TAU * 15.;
+            let point = |axial, angular| match axis {
+                cam_model::RotaryAxis::A => Point::new(axial, angular),
+                cam_model::RotaryAxis::B => Point::new(angular, axial),
+            };
+            let op = PocketOp {
+                id: 0,
+                tool: 1,
+                wrap: Some(cam_model::RotaryWrap {
+                    axis,
+                    radius: 15.,
+                    periodic: true,
+                    ..Default::default()
+                }),
+                boundary: Contour::new(vec![
+                    point(0., 0.),
+                    point(10., 0.),
+                    point(10., circumference),
+                    point(0., circumference),
+                ]),
+                depth: 1.,
+                islands: Vec::new(),
+                additional_regions: Vec::new(),
+                stock_contours: Default::default(),
+                spindle_rpm: 0.,
+                tool_preset: None,
+                cooling: Default::default(),
+                entry_feeds: Default::default(),
+                work_offset: 1,
+                start: None,
+                end: None,
+                finishing: Default::default(),
+                clear: ClearParams {
+                    stepdown: 1.,
+                    feed: 300.,
+                    plunge_feed: 100.,
+                    ..Default::default()
+                },
+            };
+            let ts = tools(6.);
+            let env = JobEnv {
+                heights: Heights::new(5., 2., 0.),
+                tools: &ts,
+                stock: None,
+                spindle: cam_cldata::SpindleDir::Cw,
+            };
+            let result = PocketStrategy::new(op.clone()).compute(&env, &CancelToken::new());
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let wrapped = crate::wrap_program(
+                &result.program,
+                op.wrap.as_ref().unwrap(),
+                &CancelToken::new(),
+            )
+            .unwrap();
+            let angles: Vec<_> = wrapped
+                .steps()
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Rotary { angle, tag, .. } if tag.kind == MoveKind::Cutting => {
+                        Some(*angle)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let min = angles.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = angles.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            assert!((max - min - 360.).abs() < 0.001, "{axis:?}: {min}..{max}");
+        }
     }
 
     fn plunges(result: &StrategyResult) -> usize {

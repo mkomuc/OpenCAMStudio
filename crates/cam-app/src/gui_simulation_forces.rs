@@ -306,6 +306,12 @@ impl SimulationPlayer {
             let a = endpoint(&step.at(from)).unwrap();
             let clipped = step.at(to);
             match clipped {
+                Step::Rotary{to,angle,axis,center,..}=> {
+                    let start=if let Step::Rotary{angle,..}=step.at(from){angle}else{step.rotary_from};
+                    let a=axis.material_point(a,center,start);
+                    let b=axis.material_point(to,center,angle);
+                    scene.add_strip_with_owner(vec![[a.x as f32,a.y as f32,a.z as f32],[b.x as f32,b.y as f32,b.z as f32]],color,Some(tag.op_id),false,tag.pattern_id,tag.instance_index);
+                }
                 Step::Linear { to, .. } => scene.add_strip_with_owner(
                     vec![
                         [a.x as f32, a.y as f32, a.z as f32],

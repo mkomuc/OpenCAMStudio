@@ -528,6 +528,18 @@ impl MeshRenderer {
         self.upload(device, vertices, &sorted);
     }
 
+    /// Use the front/rear ordering of an uncut, closed convex blank.
+    pub fn upload_transparent_convex(
+        &mut self,
+        device: &wgpu::Device,
+        vertices: &[MeshVertex],
+        indices: &[u32],
+        view_proj: [[f32; 4]; 4],
+    ) {
+        let sorted = crate::mesh::transparent_convex_indices(vertices, indices, view_proj);
+        self.upload(device, vertices, &sorted);
+    }
+
     /// Re-sort an already uploaded translucent mesh after a camera change.
     /// The vertices must match the last upload; only triangle order changes.
     pub fn resort_transparent(
@@ -538,11 +550,27 @@ impl MeshRenderer {
         view_proj: [[f32; 4]; 4],
     ) {
         let sorted = crate::mesh::transparent_indices(vertices, indices, view_proj);
+        self.upload_sorted_indices(device, &sorted);
+    }
+
+    /// Re-sort a closed convex blank after a camera change.
+    pub fn resort_transparent_convex(
+        &mut self,
+        device: &wgpu::Device,
+        vertices: &[MeshVertex],
+        indices: &[u32],
+        view_proj: [[f32; 4]; 4],
+    ) {
+        let sorted = crate::mesh::transparent_convex_indices(vertices, indices, view_proj);
+        self.upload_sorted_indices(device, &sorted);
+    }
+
+    fn upload_sorted_indices(&mut self, device: &wgpu::Device, sorted: &[u32]) {
         self.index_count = sorted.len() as u32;
         self.index_buffer = (!sorted.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cam-render sorted mesh indices"),
-                contents: bytemuck::cast_slice(&sorted),
+                contents: bytemuck::cast_slice(sorted),
                 usage: wgpu::BufferUsages::INDEX,
             })
         });

@@ -13,6 +13,7 @@ pub(super) struct HeightPlane {
     pub color: Color,
     pub active: bool,
     pub corners: [[f32; 3]; 4],
+    pub outlines: Vec<Vec<[f32; 3]>>,
 }
 
 pub(super) struct HeightOverlay {
@@ -82,6 +83,18 @@ impl App {
         let heights = self.resolve_height_editor(id).ok()?;
         let setup = self.controller.inspection_setup();
         let (min, max) = self.controller.stock_box();
+        let mut operation = self.current_operation(id)?.clone();
+        let parsed = self
+            .fields
+            .iter()
+            .filter_map(|(f, v)| v.parse::<f64>().ok().map(|v| (*f, v)))
+            .collect();
+        apply_op_fields(&mut operation, &parsed);
+        if operation.rotary_wrap().is_some() {
+            let geometry =
+                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry, &mut operation).ok()?;
+        }
         let pad = (max[0] - min[0]).max(max[1] - min[1]).max(1.) * 0.08;
         let colors = [
             Color::from_rgb(1., 0.38, 0.16),
@@ -95,6 +108,12 @@ impl App {
             .into_iter()
             .filter_map(|plane| {
                 let z = heights.plane(plane)?;
+                if operation
+                    .rotary_wrap()
+                    .is_some_and(|w| w.effective_radius() + z - w.surface_z <= 0.)
+                {
+                    return None;
+                }
                 let corners = [
                     [min[0] - pad, min[1] - pad, z],
                     [max[0] + pad, min[1] - pad, z],
@@ -102,6 +121,9 @@ impl App {
                     [min[0] - pad, max[1] + pad, z],
                 ]
                 .map(|p| setup.frame.to_world_vector(p).map(|v| v as f32));
+                let outlines = operation.rotary_wrap().map_or_else(Vec::new, |wrap| {
+                    wrapped_plane_outlines(wrap, z, min, max, &setup.frame)
+                });
                 Some(HeightPlane {
                     name: names[plane.index()],
                     z,
@@ -110,6 +132,7 @@ impl App {
                     active: focused.as_deref()
                         == Some(super::height_editor::plane_input_id(plane).as_str()),
                     corners,
+                    outlines,
                 })
             })
             .collect();
@@ -119,6 +142,55 @@ impl App {
             browser_width,
         })
     }
+}
+
+fn wrapped_plane_outlines(
+    wrap: &cam_model::RotaryWrap,
+    z: f64,
+    min: [f64; 3],
+    max: [f64; 3],
+    frame: &cam_model::SetupFrame,
+) -> Vec<Vec<[f32; 3]>> {
+    let radius = wrap.effective_radius() + z - wrap.surface_z;
+    if !radius.is_finite() || radius <= 0. {
+        return Vec::new();
+    }
+    let axial = match wrap.axis {
+        cam_model::RotaryAxis::A => 0,
+        cam_model::RotaryAxis::B => 1,
+    };
+    let pad = (max[axial] - min[axial]).max(1.) * 0.08;
+    let ends = [min[axial] - pad, max[axial] + pad];
+    let point = |along: f64, angle: f64| {
+        let (s, c) = angle.sin_cos();
+        let p = match wrap.axis {
+            cam_model::RotaryAxis::A => [
+                along,
+                wrap.center[1] + radius * s,
+                wrap.center[2] + radius * c,
+            ],
+            cam_model::RotaryAxis::B => [
+                wrap.center[0] + radius * s,
+                along,
+                wrap.center[2] + radius * c,
+            ],
+        };
+        frame.to_world_vector(p).map(|v| v as f32)
+    };
+    let mut paths: Vec<_> = ends
+        .into_iter()
+        .map(|along| {
+            (0..=128)
+                .map(|i| point(along, std::f64::consts::TAU * i as f64 / 128.))
+                .collect()
+        })
+        .collect();
+    paths.extend((0..4).map(|i| {
+        ends.into_iter()
+            .map(|along| point(along, std::f64::consts::FRAC_PI_2 * i as f64))
+            .collect()
+    }));
+    paths
 }
 
 fn project(camera: OrbitCamera, point: [f32; 3], size: iced::Size) -> iced::Point {
@@ -154,39 +226,61 @@ impl canvas::Program<Message> for HeightOverlay {
             if !plane.z.is_finite() {
                 continue;
             }
-            let points = plane
-                .corners
-                .map(|p| project(self.camera, p, bounds.size()));
-            if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
-                continue;
-            }
-            let path = canvas::Path::new(|p| {
-                p.move_to(points[0]);
-                for point in &points[1..] {
-                    p.line_to(*point);
+            let outlines = if plane.outlines.is_empty() {
+                vec![plane
+                    .corners
+                    .into_iter()
+                    .chain(std::iter::once(plane.corners[0]))
+                    .collect()]
+            } else {
+                plane.outlines.clone()
+            };
+            for outline in outlines {
+                let points: Vec<_> = outline
+                    .into_iter()
+                    .map(|p| project(self.camera, p, bounds.size()))
+                    .collect();
+                if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                    continue;
                 }
-                p.close();
-            });
-            frame.stroke(
-                &path,
-                canvas::Stroke::default()
-                    .with_color(plane.color)
-                    .with_width(if plane.active { 2.5 } else { 1.2 }),
-            );
+                let path = canvas::Path::new(|p| {
+                    p.move_to(points[0]);
+                    for point in &points[1..] {
+                        p.line_to(*point);
+                    }
+                });
+                frame.stroke(
+                    &path,
+                    canvas::Stroke::default()
+                        .with_color(plane.color)
+                        .with_width(if plane.active { 2.5 } else { 1.2 }),
+                );
+            }
         }
         let mut labels: Vec<iced::Rectangle> = Vec::new();
         let mut captions = Vec::new();
         for (index, plane) in self.planes.iter().enumerate() {
-            let points = plane
-                .corners
-                .map(|p| project(self.camera, p, bounds.size()));
+            let points: Vec<_> = if let Some(ring) = plane.outlines.first() {
+                ring.iter()
+                    .map(|p| project(self.camera, *p, bounds.size()))
+                    .collect()
+            } else {
+                plane
+                    .corners
+                    .map(|p| project(self.camera, p, bounds.size()))
+                    .to_vec()
+            };
             if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
                 continue;
             }
             // Distribute labels along the same edge; resolve collisions for top views
             // and coincident stock/cutting planes without losing their true Z outline.
             let t = (index as f32 + 0.5) / self.planes.len().max(1) as f32;
-            let anchor = points[0] + (points[1] - points[0]) * t;
+            let anchor = if plane.outlines.is_empty() {
+                points[0] + (points[1] - points[0]) * t
+            } else {
+                points[((points.len() - 1) as f32 * t) as usize]
+            };
             let content = format!("{}: {} mm", plane.name, plane.value_label);
             let width = content.len() as f32 * 6.8 + 16.;
             let mut rect = iced::Rectangle {
@@ -242,6 +336,12 @@ mod tests {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        // Height expectations use the drawing surface as stock top.
+        app.controller.edit_stock(|s| {
+            *s = cam_model::Stock::RelativeBox {
+                offsets: [[1., 1., 0.]; 2],
+            }
+        });
         app.controller.new_operation(OpKind::Profile);
         let id = app
             .controller
@@ -524,5 +624,32 @@ mod tests {
         );
         let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "2e-4".into()));
         assert_eq!(app.height_display_value(id, P::Clearance, 0.1002), "0.1002");
+    }
+    #[test]
+    fn wrapped_planes_are_cylinders_in_both_rotary_orientations() {
+        for axis in [cam_model::RotaryAxis::A, cam_model::RotaryAxis::B] {
+            let wrap = cam_model::RotaryWrap {
+                axis,
+                radius: 100.,
+                offset: 1.,
+                center: [10., 20., 30.],
+                ..Default::default()
+            };
+            let frame = cam_model::SetupFrame::default();
+            let paths = wrapped_plane_outlines(&wrap, 15., [-40.; 3], [40.; 3], &frame);
+            assert_eq!(paths.len(), 6);
+            assert_eq!(paths[0].first(), paths[0].last());
+            for point in paths.iter().take(2).flatten() {
+                let radius = match axis {
+                    cam_model::RotaryAxis::A => {
+                        (point[1] as f64 - 20.).hypot(point[2] as f64 - 30.)
+                    }
+                    cam_model::RotaryAxis::B => {
+                        (point[0] as f64 - 10.).hypot(point[2] as f64 - 30.)
+                    }
+                };
+                assert!((radius - 116.).abs() < 0.0001, "{radius}");
+            }
+        }
     }
 }

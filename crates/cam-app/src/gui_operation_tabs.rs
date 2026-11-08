@@ -448,7 +448,24 @@ impl App {
                 self.tooltips,
             ));
         }
-        if tab == OperationTab::Geometry && creating {
+        if tab == OperationTab::Geometry
+            && op.rotary_wrap().is_some()
+            && !matches!(op, Operation::Pocket(_))
+        {
+            list = list.push(self.rotary_geometry_controls(op));
+        }
+        if tab == OperationTab::Geometry
+            && matches!(op, Operation::Pocket(p) if p.wrap.is_some())
+            && self.operation_uses_cad_geometry()
+        {
+            let selected = &op.rotary_wrap().unwrap().geometry;
+            list = list.push(self.geometry_list(cad_geometry_labels(selected)));
+        }
+        if tab == OperationTab::Geometry
+            && creating
+            && (op.rotary_wrap().is_none()
+                || (matches!(op, Operation::Pocket(_)) && !self.operation_uses_cad_geometry()))
+        {
             list = list.push(self.creation_geometry_controls());
         }
         if tab == OperationTab::Geometry {
@@ -504,7 +521,11 @@ impl App {
                 );
             }
         }
-        if tab == OperationTab::Geometry && !creating {
+        if tab == OperationTab::Geometry
+            && !creating
+            && (op.rotary_wrap().is_none()
+                || (matches!(op, Operation::Pocket(_)) && !self.operation_uses_cad_geometry()))
+        {
             list = list.section("Geometry");
             let geometry = match op {
                 Operation::Profile(p) => format!(
@@ -573,6 +594,7 @@ impl App {
             list = list.push(self.operation_linking_controls(op, linked.is_some()));
         }
         for field in self.geometry_operation_fields(op) {
+            if matches!(field,Field::Wrap(_)) {continue;}
             if tab == OperationTab::Linking {
                 continue; // Rendered once in the grouped linking sections.
             }
@@ -2767,6 +2789,7 @@ mod tests {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
+        app.controller.edit_stock(|s|*s=cam_model::Stock::RelativeBox{offsets:[[1.,1.,0.];2]});
         app.operation_tab = OperationTab::Heights;
         app.setup_draft = None;
         app.controller.select(Selection::Setup);

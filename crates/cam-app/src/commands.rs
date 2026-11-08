@@ -283,6 +283,7 @@ impl AppController {
             setup.height_settings.remove(&id);
             setup.stock_to_leave.remove(&id);
             doc.geometry.bindings.remove(&id);
+            doc.rotary_indexes.remove(&id);
             doc.excluded_operations.remove(&id);
             doc.cad_linked_operations.remove(&id);
         });
@@ -326,6 +327,8 @@ impl AppController {
             for j in (i + 1)..ops.len() {
                 if !taken[j]
                     && ops[i].same_work(ops[j])
+                    && self.document().rotary_indexes.get(&ops[i].id())
+                        == self.document().rotary_indexes.get(&ops[j].id())
                     && self.setup().height_settings.get(&ops[i].id())
                         == self.setup().height_settings.get(&ops[j].id())
                     && self.setup().heights_for(ops[i].id())

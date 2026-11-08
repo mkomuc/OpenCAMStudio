@@ -197,12 +197,7 @@ impl JobInputs {
             job
         };
         let mut completion = job.completion;
-        let rotary=job.program.has_rotary_motion() || self.document.setup().operations.iter().any(|op|self.document.operation_is_included(self.document.setup().id,op.id()) && op.rotary_wrap().is_some());
-        if rotary {
-            job.diagnostics.push(Diagnostic::warning("Rotary wrap backplot and NC output are available. Cylindrical material-removal and collision simulation are not available; this run has not verified rotary stock clearance."));
-        }
         let mut stock = if !self.toolpath_preview
-            && !rotary
             && completion == JobCompletion::Complete
             && !cancel.is_cancelled()
         {
@@ -219,7 +214,7 @@ impl JobInputs {
         };
         // Verify the actual output after stock-link repairs as well as playback
         // prefixes and generation-only previews, even when there is no stock.
-        if completion != JobCompletion::Cancelled && !rotary {
+        if completion != JobCompletion::Cancelled {
             match self.fixture_collisions(&job.program, cancel) {
                 Ok(contacts) => stock.collisions.extend(contacts),
                 Err(error) => {

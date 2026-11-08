@@ -6,6 +6,7 @@ type EntryContours = Result<(Vec<ProfileContour>, Option<cam_model::CuttingHeigh
 
 #[derive(PartialEq)]
 struct ContourKey {
+    index: Option<cam_model::RotaryIndex>,
     revision: u64,
     setup: u64,
     entries: Vec<cam_model::ProfileGeometryEntry>,
@@ -13,6 +14,7 @@ struct ContourKey {
 
 #[derive(PartialEq)]
 struct ResolutionKey {
+    index: Option<cam_model::RotaryIndex>,
     revision: u64,
     setup: u64,
     operation: u32,
@@ -44,6 +46,7 @@ impl App {
         profile: &mut ProfileOp,
     ) -> Result<Option<cam_model::GeometryBinding>, String> {
         let key = ResolutionKey {
+            index:self.rotary_index_draft.clone(),
             revision: self.controller.revision(),
             setup: self.controller.active_setup_id(),
             operation: profile.id,
@@ -60,7 +63,7 @@ impl App {
             } else {
                 let mut resolved = profile.clone();
                 let result = crate::cad_operations::resolve_profile_entries(
-                    self.controller.document(),
+                    &self.rotary_draft_document(),
                     &mut resolved,
                 )
                 .map(|binding| {
@@ -93,7 +96,7 @@ impl App {
             return Some(cache.contours.clone());
         }
         let geometry =
-            crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+            self.indexed_draft_geometry().ok()?;
         let contours = Arc::new(
             entries
                 .iter()
@@ -113,6 +116,7 @@ impl App {
             entry.contour_count = 0;
         }
         ContourKey {
+            index:self.rotary_index_draft.clone(),
             revision: self.controller.revision(),
             setup: self.controller.active_setup_id(),
             entries: geometry_entries,
@@ -128,7 +132,7 @@ impl App {
         if let Some((_, finding)) = cache.verification.as_ref().filter(|(old, _)| *old == key) {
             return finding.clone();
         }
-        let finding = crate::cad_operations::geometry_for_setup(self.controller.document())
+        let finding = self.indexed_draft_geometry()
             .ok()
             .and_then(|geometry| cam_geometry3d::verify_profile_entry(&geometry, entry));
         cache.verification = Some((key, finding.clone()));
@@ -256,7 +260,7 @@ impl App {
         }
         let z = if let Some(binding) = binding {
             let geometry =
-                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+                self.indexed_draft_geometry().ok()?;
             let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding).ok()?;
             let old_sides: Vec<_> = profile.contours().map(|c| c.side).collect();
             if let Some(first) = resolved.profiles.first() {

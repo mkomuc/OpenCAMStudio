@@ -253,6 +253,26 @@ fn select_all_models(app: &mut AppController) {
 }
 
 #[test]
+fn indexed_cad_resolves_side_faces_in_the_machine_frame_and_invalidates_paths() {
+    let (state,face)=pocket();
+    let mut app=controller();
+    app.add_cad_asset(state.assets[0].clone(),state.instances).unwrap();
+    select_all_models(&mut app);
+    let id=app.create_cad_operation(OpKind::Pocket,vec![face]).unwrap();
+    app.place_cad_instance(1,RigidTransform{rotation:[[1.,0.,0.],[0.,0.,1.],[0.,-1.,0.]],translation:[0.;3]}).unwrap();
+    app.set_operation_rotary_index(id,Some(RotaryIndex{angle:90.,..Default::default()})).unwrap();
+    app.edit_stock(|s|*s=Stock::FixedBox{size:[22.,7.,22.],model_position:[0.5;3]});
+    app.edit_tool(0,|t|{t.flute_length=30.;t.length=30.;});
+    let result=app.run(&CancelToken::new());
+    assert_eq!(result.completion,JobCompletion::Complete,"{:?}",result.diagnostics);
+    assert!(result.program.steps().iter().any(|s|matches!(s,cam_cldata::Step::Rotary{feed:Some(_),angle,..} if (*angle-90.).abs()<1e-9)));
+    assert!(app.toolpath_is_up_to_date(id));
+    app.set_operation_rotary_index(id,Some(RotaryIndex{angle:180.,..Default::default()})).unwrap();
+    assert!(!app.toolpath_is_up_to_date(id));
+    app.undo();assert!(app.toolpath_is_up_to_date(id));
+}
+
+#[test]
 fn closed_spline_boundary_profiles_keep_explicit_depth_after_save_and_reopen() {
     let (mut state, face) = pocket();
     let wire = state.assets[0]

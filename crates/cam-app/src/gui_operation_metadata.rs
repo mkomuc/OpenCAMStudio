@@ -316,6 +316,6 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
     if super::operation_tabs::operation_start(op).is_some() {
         fields.extend([Field::StartX, Field::StartY]);
     }
-    if op.rotary_wrap().is_some() {fields.extend(rotary_view::Number::ALL.map(Field::Wrap));}
+    if op.rotary_wrap().is_some() {fields.extend(rotary_view::Number::ALL.into_iter().filter(|n|*n==rotary_view::Number::Offset).map(Field::Wrap));}
     fields
 }
