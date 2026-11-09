@@ -7,7 +7,6 @@
 //! preserving material above and below cavities without a full-volume voxel grid.
 
 use crate::{sweep::Sweep, ToolProfile};
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "bounded.rs"]
 mod bounded;
@@ -17,6 +16,12 @@ mod stock_transfer;
 mod rotary_stock;
 pub use rotary_stock::CylindricalStock;
 use bounded::RemovedSpan;
+#[path = "interval_columns.rs"]
+mod interval_columns;
+use interval_columns::IntervalColumns;
+#[path = "stock_snapshot.rs"]
+mod stock_snapshot;
+pub use stock_snapshot::StockSnapshot;
 
 #[path = "surface.rs"]
 mod surface;
@@ -72,7 +77,7 @@ pub struct SurfaceLocation {
     pub fraction: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CutSource {
     pub step_index: usize,
     pub range: (f64, f64),
@@ -94,12 +99,32 @@ fn tri_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
 
 /// A former surface, retained only when a different operation cuts it deeper.
 /// The linked layers let vertical walls keep the ownership of their upper bands.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct CutLayer {
     height: f32,
     operation: Option<u32>,
     previous: u32,
     cut: u32,
+}
+
+/// A clipped removal query prepared before borrowing a column for mutation.
+struct RemovalInterval {
+    lower: f64,
+    upper: f64,
+    dx: f64,
+    dy: f64,
+}
+impl RemovalInterval {
+    fn volume(&self, spans: &[RemovedSpan]) -> f64 {
+        let void = spans
+            .iter()
+            .map(|span| {
+                (self.upper.min(f64::from(span.upper)) - self.lower.max(f64::from(span.lower))).max(0.)
+            })
+            .sum::<f64>();
+        // Keep the summation and multiplication order of the reference traversal.
+        (self.upper - self.lower - void).max(0.) * self.dx * self.dy
+    }
 }
 
 /// A grid of remaining-stock heights.
@@ -120,8 +145,8 @@ pub struct Heightfield {
     inherited_operations: Vec<Option<u32>>,
     previous_layers: Vec<u32>,
     layers: Vec<CutLayer>,
-    /// Sparse bounded removals for side-cutting teeth, keyed by XY sample.
-    bounded: BTreeMap<usize, Vec<RemovedSpan>>,
+    /// Lazily allocated pages of bounded removals, indexed by XY sample.
+    bounded: IntervalColumns,
     /// Original circular blank, for reconstructing untouched side surfaces.
     horizontal_cylinder: Option<HorizontalCylinder>,
     /// Optional incremental volume accounting for a force-analysis traversal.
@@ -133,7 +158,7 @@ pub struct Heightfield {
     mesh_revisions: Vec<u64>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct HorizontalCylinder {
     axis: usize,
     center: [f64; 3],
@@ -142,6 +167,11 @@ struct HorizontalCylinder {
 }
 
 impl Heightfield {
+    #[cfg(test)]
+    pub(crate) fn use_reference_intervals(&mut self) {
+        self.bounded.use_reference();
+    }
+
     /// A fresh block of stock over `[min, max]` (XY), with `res`-sized cells, all
     /// at height `top`.
     pub fn new(min: [f64; 2], max: [f64; 2], res: f64, top: f64) -> Self {
@@ -161,7 +191,7 @@ impl Heightfield {
             inherited_operations: Vec::new(),
             previous_layers: vec![u32::MAX; nx * ny],
             layers: Vec::new(),
-            bounded: BTreeMap::new(),
+            bounded: IntervalColumns::new(nx * ny),
             horizontal_cylinder: None,
             removal_tracking: None,
             surface_tracking: false,
@@ -218,11 +248,7 @@ impl Heightfield {
             + self.inherited_operations.len() * std::mem::size_of::<Option<u32>>()
             + self.cuts.len() * std::mem::size_of::<Sweep>()
             + self.layers.len() * std::mem::size_of::<CutLayer>()
-            + self
-                .bounded
-                .values()
-                .map(|v| v.capacity() * std::mem::size_of::<RemovedSpan>() + 64)
-                .sum::<usize>()
+            + self.bounded.storage_bytes()
     }
 
     /// Grid dimensions (columns, rows).
@@ -234,8 +260,12 @@ impl Heightfield {
     pub fn resolution(&self) -> f64 {
         self.res
     }
-    pub(crate) fn matches_grid(&self,min:[f64;3],max:[f64;3],res:f64)->bool {
-        (self.res-res).abs()<=1e-9 && (0..2).all(|i|(self.origin[i]-min[i]).abs()<=1e-6 && (self.max[i]-max[i]).abs()<=1e-6)
+    /// Whether cached XY bounds and spacing match a simulation request.
+    pub fn matches_grid(&self, min: [f64; 3], max: [f64; 3], res: f64) -> bool {
+        (self.res - res).abs() <= 1e-9
+            && (0..2).all(|i| {
+                (self.origin[i] - min[i]).abs() <= 1e-6 && (self.max[i] - max[i]).abs() <= 1e-6
+            })
     }
 
     /// The remaining-stock height at `(x, y)` (nearest cell), or the original top
@@ -463,7 +493,7 @@ impl Heightfield {
             + self
                 .bounded
                 .iter()
-                .map(|(&id, spans)| {
+                .map(|(id, spans)| {
                     spans
                         .iter()
                         .map(|s| (s.upper.min(self.z[id]) - s.lower).max(0.) as f64 * cell)
@@ -476,6 +506,20 @@ impl Heightfield {
         self.removal_tracking = Some((floor, 0.));
     }
 
+    pub(crate) fn stop_removal_tracking(&mut self) {
+        self.removal_tracking = None;
+    }
+
+    /// Conservative envelope of all remaining stock; subtraction cannot enlarge it.
+    pub(crate) fn cylindrical_envelope(&self) -> Option<(usize, [f64; 3], f64)> {
+        self.horizontal_cylinder.map(|c| {
+            // Stored Z endpoints can round outside the analytic blank, especially
+            // far from zero. The search envelope must include those f32 endpoints.
+            let rounding = f64::from(f32::EPSILON) * (c.center[2].abs() + c.outer_radius).max(1.);
+            (c.axis, c.center, c.outer_radius + rounding)
+        })
+    }
+
     pub(crate) fn tracked_removed_volume(&self) -> f64 {
         self.removal_tracking.map_or(0., |(_, volume)| volume)
     }
@@ -483,27 +527,29 @@ impl Heightfield {
     /// Account only for material that still exists in this column, including
     /// sparse voids left by thread teeth. Called before changing the column.
     pub(super) fn track_removed_interval(&mut self, index: usize, lower: f64, upper: f64) {
-        let Some((floor, _)) = self.removal_tracking else {
-            return;
-        };
+        if let Some(query) = self.removal_interval(index, lower, upper) {
+            let volume = query.volume(self.bounded.get(&index).map_or(&[], Vec::as_slice));
+            self.removal_tracking.as_mut().unwrap().1 += volume;
+        }
+    }
+
+    fn removal_interval(&self, index: usize, lower: f64, upper: f64) -> Option<RemovalInterval> {
+        let (floor, _) = self.removal_tracking?;
         let lower = lower.max(floor);
         let upper = upper.min(f64::from(self.z[index]));
         if upper <= lower {
-            return;
+            return None;
         }
-        let void = self.bounded.get(&index).map_or(0., |spans| {
-            spans
-                .iter()
-                .map(|span| {
-                    (upper.min(f64::from(span.upper)) - lower.max(f64::from(span.lower))).max(0.)
-                })
-                .sum::<f64>()
-        });
         let x = index % self.nx;
         let y = index / self.nx;
         let dx = (self.max[0] - self.origin[0] - x as f64 * self.res).clamp(0., self.res);
         let dy = (self.max[1] - self.origin[1] - y as f64 * self.res).clamp(0., self.res);
-        self.removal_tracking.as_mut().unwrap().1 += (upper - lower - void).max(0.) * dx * dy;
+        Some(RemovalInterval {
+            lower,
+            upper,
+            dx,
+            dy,
+        })
     }
 
     /// Lower every cell whose centre lies in the XY rectangle `[min, max]` to

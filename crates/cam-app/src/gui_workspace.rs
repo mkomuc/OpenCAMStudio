@@ -2,6 +2,7 @@
 use super::*;
 use iced::widget::column;
 
+#[cfg(test)]
 fn stock_to_machine_view(
     frame: &cam_model::SetupFrame,
     axis: cam_cldata::RotaryAxis,
@@ -275,6 +276,7 @@ struct EditorKey {
     drawing_editing: Option<u32>,
     tool: Option<cam_model::Tool>,
     operation: Option<Operation>,
+    rotary_index: Option<cam_model::RotaryIndex>,
     binding: Option<cam_model::GeometryBinding>,
     geometry: Vec<EntityRef>,
     fields: BTreeMap<Field, String>,
@@ -676,6 +678,7 @@ impl App {
                 drawing_editing: self.drawing_editing_op,
                 tool: self.wizard_tool(),
                 operation: self.operation_draft.clone(),
+                rotary_index: self.rotary_index_draft.clone(),
                 binding: self.operation_binding_preview.clone(),
                 geometry: selected_geometry.clone(),
                 fields: self.fields.clone(),
@@ -770,24 +773,19 @@ impl App {
                 if player.options.rotary_view == crate::settings::SimulationRotaryView::RotatingStock {
                     if let Some((axis, center, angle)) = player.rotary_pose() {
                         let frame = &self.controller.inspection_setup().frame;
-                        let rotate = |point: [f32; 3], vector: bool| {
-                            stock_to_machine_view(frame, axis, center, angle, point, vector)
-                        };
-                        for vertex in Arc::make_mut(&mut viewport.mesh_vertices).iter_mut()
-                            .chain(Arc::make_mut(&mut viewport.transparent_stock_vertices).iter_mut()) {
-                            vertex.position = rotate(vertex.position, false);
-                            vertex.normal = rotate(vertex.normal, true);
-                        }
+                        let rotate = cam_render::RotaryStockTransform::new(frame, axis, center, angle);
+                        rotate.apply_mesh(Arc::make_mut(&mut viewport.mesh_vertices).as_mut_slice());
+                        rotate.apply_mesh(Arc::make_mut(&mut viewport.transparent_stock_vertices).as_mut_slice());
                         for vertex in Arc::make_mut(&mut viewport.vertices).iter_mut()
                             .chain(Arc::make_mut(&mut viewport.cad_edges).iter_mut()) {
-                            vertex.position = rotate(vertex.position, false);
+                            vertex.position = rotate.point(vertex.position);
                         }
                         for cone in Arc::make_mut(&mut viewport.path_cones).iter_mut() {
-                            cone.at = rotate(cone.at, false);
-                            cone.direction = rotate(cone.direction, true);
+                            cone.at = rotate.point(cone.at);
+                            cone.direction = rotate.vector(cone.direction);
                         }
                         for mark in Arc::make_mut(&mut viewport.drill_marks).iter_mut() {
-                            mark.at = rotate(mark.at, false);
+                            mark.at = rotate.point(mark.at);
                         }
                     }
                 }
@@ -862,6 +860,10 @@ impl App {
                 Arc::make_mut(&mut viewport.mesh_vertices).extend(vertices);
                 Arc::make_mut(&mut viewport.mesh_indices)
                     .extend(indices.into_iter().map(|i| i + offset));
+            }
+            if editing {
+                let overlay = self.index_face_overlay(&viewport.cad_scene);
+                Arc::make_mut(&mut viewport.vertices).extend(overlay.line_vertices());
             }
             if self.pattern_draft.is_some() {
                 let preview = self.pattern_placement_preview();
@@ -987,6 +989,16 @@ impl App {
             viewport.cad_operation_kind=Some(OpKind::Engrave);
             viewport.cad_filter_explicit=true;
             viewport.cad_silhouette=false;
+            if let Some(pick) = self.rotary_pick {
+                // A pending drawing operation otherwise intercepts the click as a
+                // planar pick before the CAD face can be hit-tested.
+                viewport.picking = false;
+                viewport.cad_filter = match pick {
+                    rotary_view::Pick::Cylinder | rotary_view::Pick::Faces | rotary_view::Pick::IndexFace => EntityKind::Face,
+                    rotary_view::Pick::Edges => EntityKind::Edge,
+                    rotary_view::Pick::Loops => EntityKind::Loop,
+                };
+            }
         }
         if self.stock_contour_editor() {
             viewport.cad_operation_kind = None;
@@ -2649,6 +2661,53 @@ mod tests {
 mod performance_tests {
     use super::*;
     use std::{hint::black_box, time::Instant};
+
+    /// Isolate the rotating-stock display transform, excluding removal and GPU work.
+    #[test]
+    #[ignore = "large display-transform benchmark; run with --ignored --nocapture"]
+    fn rotating_stock_transform_benchmark() {
+        let frame = cam_model::SetupFrame::from_xy([1., 2., 3.], [-2., 1., 0.]).unwrap();
+        let axis = cam_cldata::RotaryAxis::A;
+        let center = cam_cldata::Point3::new(3., 4., 5.);
+        let original: Vec<_> = (0..771_068)
+            .map(|i| MeshVertex {
+                position: [
+                    (i % 1024) as f32 * 0.03,
+                    (i / 1024) as f32 * 0.03,
+                    (i as f32 * 0.01).sin(),
+                ],
+                normal: [0.6, 0.8, 0.],
+                color: [0.1, 0.2, 0.3, 1.],
+            })
+            .collect();
+        let (mut scalar_seconds, mut bulk_seconds) = (0., 0.);
+        for angle in [37., 90., 173.] {
+            let mut reference = original.clone();
+            let start = Instant::now();
+            for vertex in &mut reference {
+                vertex.position =
+                    stock_to_machine_view(&frame, axis, center, angle, vertex.position, false);
+                vertex.normal = stock_to_machine_view(&frame, axis, center, angle, vertex.normal, true);
+            }
+            scalar_seconds += start.elapsed().as_secs_f64();
+            black_box(&reference);
+            let mut optimized = original.clone();
+            let start = Instant::now();
+            let transform = cam_render::RotaryStockTransform::new(&frame, axis, center, angle);
+            transform.apply_mesh(&mut optimized);
+            bulk_seconds += start.elapsed().as_secs_f64();
+            black_box(&optimized);
+            for (a, b) in reference.iter().zip(&optimized) {
+                for i in 0..3 {
+                    assert!((a.position[i] - b.position[i]).abs() < 1e-5);
+                    assert!((a.normal[i] - b.normal[i]).abs() < 1e-6);
+                }
+                assert_eq!(a.color, b.color);
+            }
+        }
+        println!("rotating stock, {} vertices: scalar {:.3} ms/frame; bulk {:.3} ms/frame; {:.1}x transform speedup",
+            original.len(), scalar_seconds / 3. * 1000., bulk_seconds / 3. * 1000., scalar_seconds / bulk_seconds);
+    }
 
     fn cad_app() -> App {
         let (mut app, _) = App::new();

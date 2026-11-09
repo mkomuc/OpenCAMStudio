@@ -1,6 +1,26 @@
 use super::*;
 use cam_model::RotaryWrap;
 
+pub(super) const INDEX_FACE_COLOR: cam_render::Color = [1.0, 0.48, 0.12, 1.0];
+
+/// Convert a point in the indexed machine frame back to the displayed model frame.
+pub(super) fn index_point_to_world(
+    frame: &cam_model::SetupFrame,
+    index: Option<&cam_model::RotaryIndex>,
+    point: [f64; 3],
+) -> [f64; 3] {
+    let point = if let Some(index) = index {
+        let center = cam_cldata::Point3::new(index.center[0], index.center[1], index.center[2]);
+        let p = index.axis.material_point(
+            cam_cldata::Point3::new(point[0], point[1], point[2]), center, index.angle,
+        );
+        [p.x, p.y, p.z]
+    } else {
+        point
+    };
+    frame.to_world_vector(point)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Number {
     Radius,
@@ -16,6 +36,28 @@ pub(super) enum Number {
 #[cfg(test)]
 mod index_tests {
     use super::*;
+    #[test]
+    fn rotary_picks_override_profile_contour_filter() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.cad_pending_kind = Some(OpKind::Profile);
+        app.operation_draft = Some(app.controller.operation_template(OpKind::Profile, 1));
+        app.rotary_action(Action::Indexed(true));
+        app.rotary_action(Action::IndexMode(IndexMode::Face));
+        for (pick, expected) in [
+            (Pick::IndexFace, EntityKind::Face),
+            (Pick::Cylinder, EntityKind::Face),
+            (Pick::Faces, EntityKind::Face),
+            (Pick::Edges, EntityKind::Edge),
+            (Pick::Loops, EntityKind::Loop),
+        ] {
+            app.rotary_action(Action::Pick(pick));
+            let viewport = app.machining_viewport();
+            assert_eq!(viewport.cad_filter, expected);
+            assert!(viewport.cad_filter_explicit);
+            assert!(!viewport.cad_silhouette);
+        }
+    }
     #[test]
     fn indexed_mode_is_staged_and_committed_with_operation_fields_in_one_undo() {
         let (mut app, _) = App::new();
@@ -183,6 +225,74 @@ fn index_angle_for_normal(
     Ok(if flip { angle + 180. } else { angle })
 }
 impl App {
+    /// Draw the orientation reference independently of machining selections.
+    pub(super) fn index_face_overlay(&self, cad_scene: &cam_render::CadScene) -> Scene {
+        let mut overlay = Scene::new();
+        let Some(index) = &self.rotary_index_draft else { return overlay };
+        let Some(reference) = &index.face else { return overlay };
+        let geometry = self.controller.geometry_state();
+        let Some(instance) = geometry.instance(reference.instance_id).filter(|i| i.visible) else {
+            return overlay;
+        };
+        let Some(asset) = geometry.asset(reference.asset_id) else { return overlay };
+        if !geometry.entity_exists(reference) {
+            return overlay;
+        }
+        let Some(face) = asset.topology.faces.iter().find(|f| f.id == reference.id) else {
+            return overlay;
+        };
+        let cam_model::CadSurface::Plane { origin, normal } = face.surface else {
+            return overlay;
+        };
+        // CadScene omits hidden instances. Retain only the face's highlighted
+        // edges so the overlay does not redraw the rest of the model.
+        let outline = cad_scene.edges(std::slice::from_ref(reference), None);
+        for strip in outline.strips.into_iter().filter(|s| s.width > 1.0) {
+            overlay.add_highlight(strip.points, INDEX_FACE_COLOR);
+        }
+        if overlay.strips.is_empty() {
+            return overlay;
+        }
+        let norm = normal.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if !norm.is_finite() || norm < 1e-10 {
+            return overlay;
+        }
+        let n = normal.map(|v| v / norm);
+        let center = std::array::from_fn::<_, 3, _>(|i| {
+            (face.bounds[0][i] + face.bounds[1][i]) * 0.5
+        });
+        let distance: f64 = (0..3).map(|i| (center[i] - origin[i]) * n[i]).sum();
+        let center = std::array::from_fn(|i| center[i] - distance * n[i]);
+        let tip = instance.placement.transform_point(center);
+        let direction = instance.placement.transform_vector(n).map(|v| {
+            if index.flip { -v } else { v }
+        });
+        let extent = (0..3)
+            .map(|i| face.bounds[1][i] - face.bounds[0][i])
+            .fold(0.0_f64, f64::max);
+        let length = (extent * 0.35).clamp(1.0, 15.0);
+        let tangent_seed = if direction[0].abs() < 0.8 {
+            [1., 0., 0.]
+        } else {
+            [0., 1., 0.]
+        };
+        let cross = [
+            direction[1] * tangent_seed[2] - direction[2] * tangent_seed[1],
+            direction[2] * tangent_seed[0] - direction[0] * tangent_seed[2],
+            direction[0] * tangent_seed[1] - direction[1] * tangent_seed[0],
+        ];
+        let cross_length = cross.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let wing = cross.map(|v| v / cross_length);
+        let tail = std::array::from_fn::<_, 3, _>(|i| tip[i] + direction[i] * length);
+        let head = std::array::from_fn::<_, 3, _>(|i| tip[i] + direction[i] * length * 0.25);
+        let left = std::array::from_fn::<_, 3, _>(|i| head[i] + wing[i] * length * 0.13);
+        let right = std::array::from_fn::<_, 3, _>(|i| head[i] - wing[i] * length * 0.13);
+        let point = |p: [f64; 3]| p.map(|v| v as f32);
+        overlay.add_highlight(vec![point(tail), point(tip)], INDEX_FACE_COLOR);
+        overlay.add_highlight(vec![point(left), point(tip), point(right)], INDEX_FACE_COLOR);
+        overlay
+    }
+
     pub(super) fn rotary_draft_document(&self) -> cam_model::Document {
         let mut document = self.controller.document().clone();
         if let Some(op) = &self.operation_draft {
@@ -301,6 +411,8 @@ impl App {
                     .spacing(8)
                     .align_y(Alignment::Center),
                 );
+                form = form.push(text("Flip adds 180° to the index angle, turning the selected face away from the tool. Select geometry accessible from the resulting direction.").size(12));
+                form = form.push(text("Orange: orientation face and tool approach. Blue: cutting geometry.").size(12));
             } else {
                 form = form.push(
                     row![

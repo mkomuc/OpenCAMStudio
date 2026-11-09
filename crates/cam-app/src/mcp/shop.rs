@@ -34,8 +34,7 @@ shop_catalog! {
         candidate.library_version=crate::LIBRARY_VERSION; candidate.validate()?; *c.library=candidate; serialized(&c.library)
     }
     import_tool_library [false] "Import a .ocam tool library by path, replacing the session library after validation." {"path":text()} |c,a| {
-        let text=std::fs::read_to_string(a.get::<String>("path")?).map_err(|e|e.to_string())?;
-        match crate::OcamFile::from_json(&text).map_err(|e|e.to_string())? {
+        match crate::OcamFile::read(a.get::<String>("path")?).map_err(|e|e.to_string())? {
             crate::OcamFile::Library(library)=>*c.library=library,
             _=>return Err("file contains a project, not a tool library".into()),
         }

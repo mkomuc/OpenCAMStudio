@@ -22,7 +22,7 @@ pub use simulation::{
     analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache,
 };
 
-pub use heightfield::{CylindricalStock, Heightfield, StockMeshCache, SurfaceDiff, SurfaceLocation, SurfaceMesh};
+pub use heightfield::{CylindricalStock, Heightfield, StockMeshCache, StockSnapshot, SurfaceDiff, SurfaceLocation, SurfaceMesh};
 
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use cam_geo::{Arc, Point};
@@ -47,7 +47,7 @@ impl Default for SimOptions {
 
 /// The bottom shape of a tool within its cutting radius — what makes a ball mill
 /// leave a rounded floor where an end mill leaves a flat one.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileShape {
     /// Flat bottom (end mill / face mill).
     Flat,
@@ -91,7 +91,7 @@ pub enum ProfileShape {
 /// `axis_bottom + offset(d)`.
 ///
 /// [`offset`]: ToolProfile::offset
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolProfile {
     /// Cutting radius, mm — the swept footprint.
     pub radius: f64,

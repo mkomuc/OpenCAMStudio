@@ -330,10 +330,9 @@ impl App {
                     editor.draft.name =
                         format!("{} {}", kind_name(editor.draft.kind), editor.index + 1);
                 }
-                let result = crate::cad_operations::geometry_for_setup(self.controller.document())
-                    .and_then(|g| {
-                        cam_geometry3d::profile_entry_contours(&g, &editor.draft).map(|_| ())
-                    });
+                let result = self.indexed_draft_geometry().and_then(|g| {
+                    cam_geometry3d::profile_entry_contours(&g, &editor.draft).map(|_| ())
+                });
                 if let Err(error) = result {
                     self.report_error(format!(
                         "Profile geometry entry '{}' rejected: {error}",
@@ -843,8 +842,7 @@ impl App {
                 });
             }
         }
-        let Ok(geometry) = crate::cad_operations::geometry_for_setup(self.controller.document())
-        else {
+        let Ok(geometry) = self.indexed_draft_geometry() else {
             return;
         };
         let mut offset = 0;

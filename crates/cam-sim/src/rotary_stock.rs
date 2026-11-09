@@ -179,8 +179,12 @@ impl Heightfield {
         if upper <= lower + 1e-6 {
             return;
         }
-        self.track_removed_interval(index, f64::from(lower), f64::from(upper));
-        let spans = self.bounded.entry(index).or_default();
+        let removal = self.removal_interval(index, f64::from(lower), f64::from(upper));
+        let spans = self.bounded.get_or_default(index);
+        if let Some(query) = removal {
+            // Account and update through the same column lookup.
+            self.removal_tracking.as_mut().unwrap().1 += query.volume(spans);
+        }
         spans.push(RemovedSpan {
             lower,
             upper,

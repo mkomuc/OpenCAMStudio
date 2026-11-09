@@ -81,7 +81,11 @@ impl App {
         }
         use cam_model::{ExtractionRecipe, ProfileGeometrySource};
         let kind = self.geometry_operation_kind().or(self.cad_pending_kind);
-        let geometry = crate::cad_operations::geometry_for_setup(self.controller.document());
+        let geometry = if kind == Some(OpKind::Profile) {
+            self.indexed_draft_geometry()
+        } else {
+            crate::cad_operations::geometry_for_setup(self.controller.document())
+        };
         let (selected, entry, recipe, result) = if let Some(editor) = &self.profile_entry_editor {
             let selected = match &editor.draft.source {
                 ProfileGeometrySource::Cad(selected) => selected.clone(),

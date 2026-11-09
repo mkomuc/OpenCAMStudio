@@ -1,4 +1,4 @@
-//! Operation height preview: setup-aligned bounding rectangles and labels.
+//! Operation height preview: machining-plane rectangles and labels.
 use super::*;
 
 pub(super) fn field_id(field: Field) -> String {
@@ -82,7 +82,12 @@ impl App {
         };
         let heights = self.resolve_height_editor(id).ok()?;
         let setup = self.controller.inspection_setup();
-        let (min, max) = self.controller.stock_box();
+        let document = self.rotary_draft_document();
+        let indexed = document.indexed_view(id).ok()?;
+        let (min, max) = indexed.as_ref().map_or_else(
+            || self.controller.stock_box(),
+            |view| view.stock_bounds_for(view.setup()),
+        );
         let mut operation = self.current_operation(id)?.clone();
         let parsed = self
             .fields
@@ -120,7 +125,14 @@ impl App {
                     [max[0] + pad, max[1] + pad, z],
                     [min[0] - pad, max[1] + pad, z],
                 ]
-                .map(|p| setup.frame.to_world_vector(p).map(|v| v as f32));
+                .map(|p| {
+                    rotary_view::index_point_to_world(
+                        &setup.frame,
+                        self.rotary_index_draft.as_ref(),
+                        p,
+                    )
+                    .map(|v| v as f32)
+                });
                 let outlines = operation.rotary_wrap().map_or_else(Vec::new, |wrap| {
                     wrapped_plane_outlines(wrap, z, min, max, &setup.frame)
                 });
@@ -459,6 +471,109 @@ mod tests {
             .inspection_setup()
             .height_settings
             .contains_key(&id));
+    }
+
+    #[test]
+    fn indexed_height_planes_match_rotated_stock_and_machine_frame_for_both_axes() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R, RotaryAxis};
+        let (mut app, id) = operation_editor();
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::FixedBox {
+                size: [30., 20., 12.],
+                model_position: [0.3, 0.4, 0.2],
+            }
+        });
+        app.controller.edit_setup(|setup| {
+            setup.frame.world_from_setup.rotation = [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]];
+        });
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        for (plane, reference, offset) in [
+            (P::Top, R::StockTop, 0.),
+            (P::Bottom, R::StockBottom, 0.),
+            (P::Feed, R::Plane(P::Top), 2.),
+            (P::Retract, R::Plane(P::Top), 4.),
+            (P::Clearance, R::Plane(P::Retract), 6.),
+        ] {
+            *app.height_draft.as_mut().unwrap().definition_mut(plane) =
+                cam_model::HeightDefinition::new(reference, offset);
+            app.height_offsets.insert(plane, fmt_num(offset));
+        }
+        let (min, max) = app.controller.stock_box();
+        let frame = app.controller.inspection_setup().frame.clone();
+        let camera = OrbitCamera::framed([-50.; 3], [100.; 3]);
+        for (axis, angle) in [(RotaryAxis::A, 90.), (RotaryAxis::B, -45.), (RotaryAxis::A, 270.)] {
+            app.rotary_action(rotary_view::Action::IndexAxis(axis));
+            for (i, value) in [(0, angle), (1, 2.), (2, 3.), (3, -4.)] {
+                app.rotary_action(rotary_view::Action::IndexValue(i, value.to_string()));
+            }
+            let center = cam_cldata::Point3::new(2., 3., -4.);
+            let rotated: Vec<_> = (0..8).map(|bits| {
+                let p = std::array::from_fn::<_, 3, _>(|i| if bits & (1 << i) == 0 { min[i] } else { max[i] });
+                axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle)
+            }).collect();
+            let zmin = rotated.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+            let zmax = rotated.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+            let heights = app.resolve_height_editor(id).unwrap();
+            assert!((heights.top - zmax).abs() < 1e-8);
+            assert!((heights.bottom - zmin).abs() < 1e-8);
+            assert!((heights.clearance - zmax - 10.).abs() < 1e-8);
+            let overlay = app.height_preview(camera, 0.).unwrap();
+            assert_eq!(overlay.planes.len(), 5);
+            for plane in overlay.planes {
+                for point in plane.corners {
+                    let p = frame.to_setup_vector(point.map(f64::from));
+                    let machine = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle);
+                    assert!((machine.z - plane.z).abs() < 1e-4, "{} {axis:?} {angle}", plane.name);
+                }
+                assert!((plane.value_label.parse::<f64>().unwrap() - plane.z).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_round_stock_heights_follow_the_rotated_cylinder() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R, RotaryAxis};
+        let (mut app, id) = operation_editor();
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::FixedRound {
+                diameter: 20., inner_diameter: 0., length: 50., position: 0.5,
+                tube: false, axis: Some(cam_model::StockAxis::Origin {
+                    origin_axis: cam_model::StockOriginAxis::X,
+                }),
+            }
+        });
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        *app.height_draft.as_mut().unwrap().definition_mut(P::Top) = cam_model::HeightDefinition::new(R::StockTop, 0.);
+        *app.height_draft.as_mut().unwrap().definition_mut(P::Bottom) = cam_model::HeightDefinition::new(R::StockBottom, 0.);
+        app.height_offsets.insert(P::Top, "0".into());
+        app.height_offsets.insert(P::Bottom, "0".into());
+        let setup = app.controller.inspection_setup();
+        let (frame, min, max) = app.controller.document().round_stock_geometry(setup).unwrap().unwrap();
+        let setup_frame = setup.frame.clone();
+        for (axis, angle) in [(RotaryAxis::A, 47.), (RotaryAxis::B, 90.)] {
+            app.rotary_action(rotary_view::Action::IndexAxis(axis));
+            app.rotary_action(rotary_view::Action::IndexValue(0, angle.to_string()));
+            app.rotary_action(rotary_view::Action::IndexValue(2, "3".into()));
+            let center = cam_cldata::Point3::new(0., 3., 0.);
+            let mut lower = f64::INFINITY;
+            let mut upper = f64::NEG_INFINITY;
+            for axial in [min[2], max[2]] {
+                for i in 0..1440 {
+                    let angle_sample = std::f64::consts::TAU * i as f64 / 1440.;
+                    let p = [
+                        (min[0]+max[0])*0.5 + (max[0]-min[0])*0.5*angle_sample.cos(),
+                        (min[1]+max[1])*0.5 + (max[0]-min[0])*0.5*angle_sample.sin(), axial,
+                    ];
+                    let p = setup_frame.to_setup_vector(frame.to_world_vector(p));
+                    let p = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle);
+                    lower = lower.min(p.z);
+                    upper = upper.max(p.z);
+                }
+            }
+            let heights = app.resolve_height_editor(id).unwrap();
+            assert!((heights.top - upper).abs() < 0.001, "{axis:?}: {} vs {upper}", heights.top);
+            assert!((heights.bottom - lower).abs() < 0.001, "{axis:?}: {} vs {lower}", heights.bottom);
+        }
     }
     #[test]
     fn cycles_invalid_offsets_and_missing_selections_block_apply_and_defaults_recover() {

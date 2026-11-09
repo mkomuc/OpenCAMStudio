@@ -190,13 +190,14 @@ impl App {
                                 self.profile_silhouette_bottom(heights.map_or(0., |h| h.bottom))
                             }
                             cam_model::ProfileGeometrySource::Cad(refs)
-                                if entry.kind == cam_model::ProfileGeometryKind::Chain =>
+                                if matches!(entry.kind, cam_model::ProfileGeometryKind::Chain | cam_model::ProfileGeometryKind::FaceContours) =>
                             {
                                 // Open chains have no certified cutting interval.
                                 // Place the editor geometry on its source plane,
                                 // independently of the operation's cutting depth.
-                                self.controller
-                                    .document()
+                                let document = self.rotary_draft_document();
+                                let view = document.indexed_view(profile.id).ok()?;
+                                view.as_ref().unwrap_or(&document)
                                     .height_selection_bounds(refs)
                                     .ok()?
                                     .1[2]
@@ -388,6 +389,7 @@ impl App {
             browser_width,
             z,
             frame: self.controller.inspection_setup().frame.clone(),
+            index: self.rotary_index_draft.clone(),
             radius: self.profile_tab_diameter(&profile).unwrap_or(0.) * 0.5 + profile.offset,
             contours: profile.contours().collect(),
             climb: profile.clearing.climb,
@@ -404,6 +406,7 @@ pub(super) struct SideOverlay {
     camera: OrbitCamera,
     browser_width: f32,
     frame: cam_model::SetupFrame,
+    index: Option<cam_model::RotaryIndex>,
     z: f64,
     radius: f64,
     contours: Vec<ProfileContour>,
@@ -467,11 +470,11 @@ fn side_normal(contour: &ProfileContour, tangent: [f64; 2]) -> [f64; 2] {
 }
 
 impl SideOverlay {
-    fn project(&self, point: [f64; 2], bounds: iced::Rectangle) -> Option<iced::Point> {
+    pub(super) fn project(&self, point: [f64; 2], bounds: iced::Rectangle) -> Option<iced::Point> {
         picking_view::project(
             self.camera,
             bounds,
-            self.frame.to_world_vector([point[0], point[1], self.z]),
+            rotary_view::index_point_to_world(&self.frame, self.index.as_ref(), [point[0], point[1], self.z]),
         )
         .filter(|(p, depth)| p.x.is_finite() && p.y.is_finite() && (0.0..=1.0).contains(depth))
         .map(|p| p.0)
@@ -799,6 +802,7 @@ mod tests {
             camera: OrbitCamera::framed([-10., -10., -5.], [50., 50., 5.]),
             browser_width: 0.,
             frame: Default::default(),
+            index: None,
             z: 0.,
             radius: 3.,
             contours: vec![square(side)],

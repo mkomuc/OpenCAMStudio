@@ -872,7 +872,7 @@ fn a_cad_linked_operation_cannot_reopen_with_its_binding_removed() {
         std::env::temp_dir().join(format!("cad-missing-binding-{}.ocam", std::process::id()));
     app.save_project(&path).unwrap();
     let mut project: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        serde_json::from_str(&cam_app::OcamFile::read(&path).unwrap().to_json().unwrap()).unwrap();
     project["document"]["geometry"]["bindings"]
         .as_object_mut()
         .unwrap()
@@ -895,7 +895,7 @@ fn a_persisted_binding_cannot_reopen_after_its_linked_marker_is_removed() {
     let path = std::env::temp_dir().join(format!("cad-missing-marker-{}.ocam", std::process::id()));
     app.save_project(&path).unwrap();
     let mut project: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        serde_json::from_str(&cam_app::OcamFile::read(&path).unwrap().to_json().unwrap()).unwrap();
     assert!(project["document"]["geometry"]["bindings"][operation.to_string()].is_object());
     project["document"]["cad_linked_operations"] = serde_json::json!([]);
     std::fs::write(&path, project.to_string()).unwrap();
@@ -1449,7 +1449,7 @@ fn persisted_mixed_geometry_cannot_generate_or_export_using_cached_contours() {
         std::env::temp_dir().join(format!("cad-mixed-selection-{}.ocam", std::process::id()));
     app.save_project(&path).unwrap();
     let mut project: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        serde_json::from_str(&cam_app::OcamFile::read(&path).unwrap().to_json().unwrap()).unwrap();
     project["document"]["geometry"]["bindings"][id.to_string()]["selected"]
         .as_array_mut()
         .unwrap()

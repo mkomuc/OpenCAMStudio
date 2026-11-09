@@ -131,7 +131,7 @@ impl Heightfield {
                     }
                     changed = true;
                     self.track_removed_interval(index, f64::from(lower), f64::from(upper));
-                    let spans = self.bounded.entry(index).or_default();
+                    let spans = self.bounded.get_or_default(index);
                     spans.push(RemovedSpan {
                         lower,
                         upper,

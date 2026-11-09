@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(app.controller.outcome().unwrap().collisions, source.outcome().unwrap().collisions);
 
         let mut legacy: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&crate::OcamFile::read(&path).unwrap().to_json().unwrap()).unwrap();
         legacy.as_object_mut().unwrap().remove("toolpaths");
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         app.open_project(&path).unwrap();

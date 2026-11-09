@@ -270,53 +270,178 @@ impl AppController {
     pub(super) fn remember_full_verification(&mut self, submitted: Option<&str>) {
         let inputs = self.job_inputs();
         let fingerprint = self.verification_fingerprint(&inputs);
-        if submitted.is_some_and(|saved| saved != fingerprint) { return; }
-        let Some(outcome) = self.outcome.as_ref() else { return; };
+        if submitted.is_some_and(|saved| saved != fingerprint) {
+            return;
+        }
+        let Some(outcome) = self.outcome.as_ref() else {
+            return;
+        };
         if outcome.completion == JobCompletion::Failed {
             self.saved_verification.remove(&self.active_setup_id);
             return;
         }
-        if outcome.completion != JobCompletion::Complete { return; }
-        self.saved_verification.insert(self.active_setup_id, crate::project::StoredVerification {
-            fingerprint,
-            program: outcome.program.clone(),
-            diagnostics: outcome.diagnostics.clone(),
-            collisions: outcome.collisions.clone(),
-            initial_stock: outcome.initial_stock.clone(),
-            stock_vertices: outcome.stock_vertices.clone(),
-            stock_indices: outcome.stock_indices.clone(),
-            stock_machined: outcome.stock_machined.clone(),
-            stock_operations: outcome.stock_operations.clone(),
-            stock_cut_sources: outcome.stock_cut_sources.clone(),
-        });
+        if outcome.completion != JobCompletion::Complete {
+            return;
+        }
+        self.saved_verification.insert(
+            self.active_setup_id,
+            crate::project::StoredVerification {
+                fingerprint,
+                program: outcome.program.clone(),
+                diagnostics: outcome.diagnostics.clone(),
+                collisions: outcome.collisions.clone(),
+                stock_snapshot: outcome.stock_snapshot.clone(),
+                initial_stock_snapshot: outcome.initial_stock_snapshot.clone(),
+                requires_stock_cache: false,
+                initial_stock: outcome
+                    .initial_stock
+                    .as_ref()
+                    .filter(|_| outcome.initial_stock_snapshot.is_none())
+                    .cloned(),
+                stock_vertices: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_vertices.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_indices: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_indices.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_machined: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_machined.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_operations: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_operations.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_cut_sources: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_cut_sources.clone()
+                } else {
+                    Vec::new()
+                },
+            },
+        );
     }
 
     pub(super) fn restore_saved_verification(&mut self) -> bool {
-        if self.setups().is_empty() { return false; }
+        if self.setups().is_empty() {
+            return false;
+        }
         let inputs = self.job_inputs();
         let fingerprint = self.verification_fingerprint(&inputs);
-        let Some(saved) = self.saved_verification.get(&self.active_setup_id) else { return false; };
-        let vertices_valid = |vertices: &[cam_render::MeshVertex], indices: &[u32]| {
-            indices.len() % 3 == 0 && indices.iter().all(|&i| (i as usize) < vertices.len())
-                && vertices.iter().all(|v| v.position.iter().chain(&v.normal).chain(&v.color).all(|n| n.is_finite()))
+        let Some(saved) = self.saved_verification.get(&self.active_setup_id) else {
+            return false;
         };
-        if saved.fingerprint != fingerprint || saved.program.validate().is_err()
+        let vertices_valid = |vertices: &[cam_render::MeshVertex], indices: &[u32]| {
+            indices.len() % 3 == 0
+                && indices.iter().all(|&i| (i as usize) < vertices.len())
+                && vertices.iter().all(|v| {
+                    v.position
+                        .iter()
+                        .chain(&v.normal)
+                        .chain(&v.color)
+                        .all(|n| n.is_finite())
+                })
+        };
+        if saved.fingerprint != fingerprint
+            || saved.program.validate().is_err()
+            || (saved.requires_stock_cache
+                && saved.stock_snapshot.is_none()
+                && saved.stock_vertices.is_empty()
+                && saved.initial_stock.is_none())
             || !vertices_valid(&saved.stock_vertices, &saved.stock_indices)
-            || saved.initial_stock.as_ref().is_some_and(|(v, i)| !vertices_valid(v, i))
+            || saved
+                .initial_stock
+                .as_ref()
+                .is_some_and(|(v, i)| !vertices_valid(v, i))
             || saved.stock_machined.len() != saved.stock_vertices.len()
             || saved.stock_operations.len() != saved.stock_vertices.len()
-            || (!saved.stock_cut_sources.is_empty() && saved.stock_cut_sources.len() != saved.stock_vertices.len())
-            || saved.collisions.iter().any(|c| !c.fraction.is_finite() || c.at.iter().any(|v| !v.is_finite()))
-        { return false; }
+            || (!saved.stock_cut_sources.is_empty()
+                && saved.stock_cut_sources.len() != saved.stock_vertices.len())
+            || saved
+                .collisions
+                .iter()
+                .any(|c| !c.fraction.is_finite() || c.at.iter().any(|v| !v.is_finite()))
+        {
+            return false;
+        }
+        let render = |snapshot: &cam_sim::StockSnapshot, tiled: bool| {
+            let (field, floor) = snapshot.restore().ok()?;
+            if !field.matches_grid(
+                inputs.min,
+                inputs.max,
+                inputs.stock_resolution(&saved.program),
+            ) || floor != inputs.min[2]
+            {
+                return None;
+            }
+            let surface = if tiled {
+                cam_sim::StockMeshCache::default().mesh_controlled(&field, floor, &|| false)?
+            } else {
+                field.to_solid_mesh_controlled(floor, &|| false)?
+            };
+            let vertices = cam_render::stock_mesh_vertices_controlled(
+                &surface.positions,
+                &surface.normals,
+                &inputs.document.setup().frame,
+                &|| false,
+            )?;
+            Some((vertices, surface))
+        };
+        let (stock_vertices, stock_indices, stock_machined, stock_operations, stock_cut_sources) =
+            if let Some(snapshot) = &saved.stock_snapshot {
+                let Some((vertices, surface)) = render(snapshot, true) else {
+                    return false;
+                };
+                (
+                    vertices,
+                    surface.indices,
+                    surface.machined,
+                    surface.operations,
+                    surface.cut_sources.unwrap_or_default(),
+                )
+            } else {
+                (
+                    saved.stock_vertices.clone(),
+                    saved.stock_indices.clone(),
+                    saved.stock_machined.clone(),
+                    saved.stock_operations.clone(),
+                    saved.stock_cut_sources.clone(),
+                )
+            };
+        let initial_stock = if let Some(snapshot) = &saved.initial_stock_snapshot {
+            let Some((vertices, surface)) = render(snapshot, false) else {
+                return false;
+            };
+            Some((vertices, surface.indices))
+        } else {
+            saved.initial_stock.clone()
+        };
         let scene = inputs.program_scene(&saved.program, &CancelToken::new());
         self.outcome = Some(RunOutcome {
             completion: JobCompletion::Complete,
-            stamp: Some(JobStamp { request_id: 0, revision: self.document_epoch, input_fingerprint: fingerprint }),
-            program: saved.program.clone(), diagnostics: saved.diagnostics.clone(), scene,
-            initial_stock: saved.initial_stock.clone(), stock_vertices: saved.stock_vertices.clone(),
-            stock_machined: saved.stock_machined.clone(), stock_operations: saved.stock_operations.clone(),
-            stock_cut_sources: saved.stock_cut_sources.clone(), stock_indices: saved.stock_indices.clone(),
-            collisions: saved.collisions.clone(), ..Default::default()
+            stamp: Some(JobStamp {
+                request_id: 0,
+                revision: self.document_epoch,
+                input_fingerprint: fingerprint,
+            }),
+            program: saved.program.clone(),
+            diagnostics: saved.diagnostics.clone(),
+            scene,
+            initial_stock,
+            stock_vertices,
+            stock_machined,
+            stock_operations,
+            stock_cut_sources,
+            stock_indices,
+            stock_snapshot: saved.stock_snapshot.clone(),
+            initial_stock_snapshot: saved.initial_stock_snapshot.clone(),
+            collisions: saved.collisions.clone(),
+            ..Default::default()
         });
         true
     }
@@ -604,6 +729,34 @@ mod tests {
         different_accuracy.set_simulation_accuracy(0.5);
         different_accuracy.open_project(&path).unwrap();
         assert!(different_accuracy.outcome().is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn inherited_stock_snapshots_restore_both_input_and_result() {
+        let mut app = app();
+        let first = app.active_setup_id();
+        let second = app.add_setup();
+        app.edit_setup(|s| s.stock = Stock::PreviousSetup);
+        let original = app.run(&CancelToken::new()).clone();
+        assert_eq!(original.completion, JobCompletion::Complete);
+        assert!(original.initial_stock_snapshot.is_some());
+        assert!(original.stock_snapshot.is_some());
+        let path =
+            std::env::temp_dir().join(format!("inherited-snapshots-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        reopened.activate_setup(second).unwrap();
+        let restored = reopened.outcome().expect("saved inherited setup restored");
+        assert_eq!(restored.initial_stock, original.initial_stock);
+        assert_eq!(restored.stock_vertices, original.stock_vertices);
+        assert_eq!(restored.stock_indices, original.stock_indices);
+        assert_eq!(restored.stock_machined, original.stock_machined);
+        assert_eq!(restored.stock_operations, original.stock_operations);
+        assert_eq!(restored.stock_cut_sources, original.stock_cut_sources);
+        assert_eq!(restored.program, original.program);
+        reopened.activate_setup(first).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 

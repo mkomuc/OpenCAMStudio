@@ -579,8 +579,18 @@ impl App {
                     normal
                 };
                 let base = vertices.len() as u32;
+                let normal = if let Some(index) = &self.rotary_index_draft {
+                    let n = index.axis.material_point(
+                        cam_cldata::Point3::new(normal[0], normal[1], normal[2]),
+                        cam_cldata::Point3::new(0., 0., 0.),
+                        index.angle,
+                    );
+                    [n.x, n.y, n.z]
+                } else {
+                    normal
+                };
                 vertices.extend(quad.map(|corner| MeshVertex {
-                    position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
+                    position: rotary_view::index_point_to_world(frame, self.rotary_index_draft.as_ref(), corners[corner]).map(|v| v as f32),
                     normal: frame.to_world_vector(normal).map(|v| v as f32),
                     color,
                 }));

@@ -9,7 +9,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
 rayon.workspace = true
 cam-cldata = { path = "../cam-cldata" }
 cam-geo = { path = "../cam-geo" }

@@ -149,7 +149,7 @@ impl App {
         &self,
         id: u32,
     ) -> Result<ResolvedOperationHeights, String> {
-        let mut document = self.controller.document().clone();
+        let mut document = self.rotary_draft_document();
         for tool in &self.operation_tools {
             if !document
                 .setup()
@@ -206,6 +206,25 @@ impl App {
             }
         } else if let Some(binding) = &self.operation_binding_preview {
             document.geometry.bindings.insert(id, binding.clone());
+        }
+        if document.rotary_indexes.contains_key(&id)
+            && !matches!(&op, Operation::Profile(p) if p.selections.is_some())
+        {
+            if let Some(mut binding) = document.geometry.bindings.get(&id).cloned() {
+                if crate::cad_operations::surface_recipe(&binding.recipe) {
+                    let cutting = document.operation_base_cutting_heights(&op);
+                    binding.heights.bottom = binding.heights.top - cutting.depth();
+                }
+                if matches!(binding.recipe, cam_model::ExtractionRecipe::FaceRegion) {
+                    if let Some(view) = document.indexed_view(id)? {
+                        binding.heights.top = view.stock_bounds_for(view.setup()).1[2];
+                    }
+                }
+                let geometry = crate::cad_operations::geometry_for_operation(&document, id)?;
+                binding.heights = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?.heights;
+                binding.overrides = cam_model::GeometryOverrides::default();
+                document.geometry.bindings.insert(id, binding);
+            }
         }
         self.edited_height_settings()?.resolve(&document, &op)
     }

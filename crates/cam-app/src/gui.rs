@@ -6329,24 +6329,21 @@ impl App {
                     }
                     return iced::Task::none();
                 }
-                self.status = match std::fs::read_to_string(&path) {
-                    Ok(text) => match OcamFile::from_json(&text) {
-                        Ok(OcamFile::Library(lib)) => {
-                            let n = lib.tools.len();
-                            let base = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Imported library");
-                            let name = self.libraries.unique_name(base);
-                            self.libraries.libraries.insert(name.clone(), lib);
-                            self.switch_tool_library(name);
-                            format!("Imported {n} tool(s) from {}.", path.display())
-                        }
-                        Ok(OcamFile::Project(_)) => {
-                            "That .ocam is a project, not a tool library.".to_string()
-                        }
-                        Err(e) => format!("Library import failed: {e}"),
-                    },
+                self.status = match OcamFile::read(&path) {
+                    Ok(OcamFile::Library(lib)) => {
+                        let n = lib.tools.len();
+                        let base = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Imported library");
+                        let name = self.libraries.unique_name(base);
+                        self.libraries.libraries.insert(name.clone(), lib);
+                        self.switch_tool_library(name);
+                        format!("Imported {n} tool(s) from {}.", path.display())
+                    }
+                    Ok(OcamFile::Project(_)) => {
+                        "That .ocam is a project, not a tool library.".to_string()
+                    }
                     Err(e) => format!("Library import failed: {e}"),
                 };
             }
@@ -6549,6 +6546,12 @@ impl App {
             }
             Message::CadHover(entity) => self.cad_hover = entity,
             Message::CadPicked(candidates) => {
+                if self.rotary_pick.is_some() {
+                    if let Some(candidate) = candidates.first() {
+                        self.rotary_cad_pick(&candidate.entity);
+                    }
+                    return iced::Task::none();
+                }
                 if self
                     .pattern_draft
                     .as_ref()
@@ -11912,7 +11915,7 @@ impl App {
             && self.profile_coplanar
             && entity.kind == EntityKind::Face
         {
-            let result = crate::cad_operations::geometry_for_setup(self.controller.document())
+            let result = self.indexed_draft_geometry()
                 .and_then(|geometry| cam_geometry3d::coplanar_profile_faces(&geometry, &entity));
             match result {
                 Ok(references) => {

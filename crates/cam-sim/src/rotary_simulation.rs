@@ -93,6 +93,39 @@ fn clip_tool_axis(
     Some((lerp(a, b, lo), lerp(a, b, hi)))
 }
 
+/// Clip a tool-axis capsule to the enclosing cylinder of the original blank.
+/// This only narrows the candidate window; exact cutter/ray tests stay unchanged.
+fn clip_cylinder_axis(
+    a: Point3,
+    b: Point3,
+    axis: usize,
+    center: [f64; 3],
+    radius: f64,
+) -> Option<(Point3, Point3)> {
+    let p = xyz(a);
+    let q = xyz(b);
+    let u = (axis + 1) % 3;
+    let v = (axis + 2) % 3;
+    let (x, y) = (p[u] - center[u], p[v] - center[v]);
+    let (dx, dy) = (q[u] - p[u], q[v] - p[v]);
+    let aa = dx * dx + dy * dy;
+    let bb = x * dx + y * dy;
+    // Round outward at tangencies, never inward into a material column.
+    let radius = radius + 1e-9 * radius.max(1.);
+    let cc = x * x + y * y - radius * radius;
+    if aa < 1e-20 {
+        return (cc <= 0.).then_some((a, b));
+    }
+    let disc = bb * bb - aa * cc;
+    if disc < 0. {
+        return None;
+    }
+    let h = disc.sqrt();
+    let lo = ((-bb - h) / aa).max(0.);
+    let hi = ((-bb + h) / aa).min(1.);
+    (lo <= hi).then(|| (lerp(a, b, lo), lerp(a, b, hi)))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Config {
     min: [f64; 3],
@@ -102,6 +135,7 @@ struct Config {
     initial_key: Option<String>,
     frame: Frame,
     sources: bool,
+    volume_tracking: bool,
     #[cfg(test)]
     tight_bounds: bool,
 }
@@ -126,8 +160,16 @@ pub struct RotarySimulationCache {
     steps: Vec<Step>,
     state: Option<State>,
     checkpoints: Vec<(usize, State)>,
+    without_volume_tracking: bool,
 }
 impl RotarySimulationCache {
+    /// Disable unused volume accounting for geometry-only consumers. Enabled by
+    /// default; when disabled, `SimResult::removed_volume` is zero. Changing this
+    /// setting invalidates incompatible checkpoints on the next simulation.
+    pub fn set_volume_tracking(&mut self, enabled: bool) {
+        self.without_volume_tracking = !enabled;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn simulate_controlled(
         &mut self,
@@ -147,7 +189,7 @@ impl RotarySimulationCache {
         if initial.is_some_and(|(_, f)| !f.matches_grid(min, max, options.resolution)) {
             return Err("Initial rotary stock must use the requested bounds and resolution".into());
         }
-        let config = config(
+        let mut config = config(
             program,
             min,
             max,
@@ -156,6 +198,7 @@ impl RotarySimulationCache {
             initial.map(|v| v.0),
             surface_sources,
         )?;
+        config.volume_tracking = !self.without_volume_tracking;
         if cancelled() {
             return Err("Stock simulation cancelled".into());
         }
@@ -358,6 +401,7 @@ fn config(
             center: Point3::new(0., 0., 0.),
         }),
         sources,
+        volume_tracking: true,
         #[cfg(test)]
         tight_bounds: true,
     })
@@ -374,7 +418,11 @@ impl State {
             )
         });
         field.set_surface_tracking(c.sources);
-        field.start_removal_tracking(c.min[2]);
+        if c.volume_tracking {
+            field.start_removal_tracking(c.min[2]);
+        } else {
+            field.stop_removal_tracking();
+        }
         Self {
             field,
             current: None,
@@ -667,6 +715,7 @@ impl State {
         }
         let mut contact = false;
         let mut sample_before = self.field.tracked_removed_volume();
+        let cylinder = self.field.cylindrical_envelope();
         for j in 0..=count {
             if cancelled() {
                 return Err("Stock simulation cancelled".into());
@@ -696,7 +745,14 @@ impl State {
             // Clip the tool axis to an expanded stock box before projecting it.
             // The capsule encloses every flute/neck/shank section. This rejects
             // air poses and avoids scanning the long stickout outside the blank.
-            let bounds = clip_tool_axis(material_tip, end, c.min, c.max, body_radius + pad);
+            let bounds = clip_tool_axis(material_tip, end, c.min, c.max, body_radius + pad).and_then(
+                |(a, b)| match cylinder {
+                    Some((axis, center, radius)) => {
+                        clip_cylinder_axis(a, b, axis, center, radius + body_radius + pad)
+                    }
+                    None => Some((a, b)),
+                },
+            );
             #[cfg(test)]
             let bounds = if c.tight_bounds {
                 bounds
@@ -1120,6 +1176,101 @@ mod tests {
                 ));
             }
             assert_eq!(results[0], results[1], "{axis:?}");
+        }
+    }
+    #[test]
+    fn paged_intervals_match_tree_storage_for_rotary_tools_and_force_samples() {
+        for axis in [RotaryAxis::A, RotaryAxis::B] {
+            for center in [[0.; 3], [2.3, -1.4, 10_000.2]] {
+                let axial_axis = if axis == RotaryAxis::A { 0 } else { 1 };
+                let stock = CylindricalStock::new(
+                    axial_axis,
+                    center,
+                    [-4.1 + center[axial_axis], 4.3 + center[axial_axis]],
+                    5.,
+                    1.,
+                    0.25,
+                )
+                .unwrap();
+                for shape in [
+                    ProfileShape::Flat,
+                    ProfileShape::Ball,
+                    ProfileShape::BullNose { corner_radius: 0.3 },
+                    ProfileShape::Cone {
+                        half_angle_rad: std::f64::consts::FRAC_PI_4,
+                        flat_radius: 0.2,
+                    },
+                    ProfileShape::VTip {
+                        half_angle_rad: 0.6,
+                        tip_radius: 0.2,
+                    },
+                    ProfileShape::Thread {
+                        root_radius: 0.4,
+                        tooth_height: 0.5,
+                        pitch: 1.,
+                        tooth_count: 2,
+                    },
+                ] {
+                    let mut cutter = tool();
+                    cutter.tool.profile.shape = shape;
+                    let mut steps = Vec::new();
+                    for angle in [0., 37., 90., 179., 270., 360.] {
+                        steps.extend(groove(axis, angle));
+                    }
+                    // Repeated material, an air turn and a colliding index.
+                    steps.extend(groove(axis, 360.));
+                    steps.push(movement(axis, 0., 20., 720., None, MoveKind::Traverse));
+                    steps.push(movement(axis, 0., 3., 720., None, MoveKind::Traverse));
+                    for step in &mut steps {
+                        if let Step::Rotary {
+                            to,
+                            center: rotary_center,
+                            ..
+                        } = step
+                        {
+                            to.x += center[0];
+                            to.y += center[1];
+                            to.z += center[2];
+                            *rotary_center = Point3::new(center[0], center[1], center[2]);
+                        }
+                    }
+                    let program = Program { steps };
+                    let mut c = config(
+                        &program,
+                        stock.min,
+                        stock.max,
+                        &SimOptions {
+                            resolution: 0.25,
+                            tool_radius: 1.,
+                        },
+                        &[cutter],
+                        None,
+                        true,
+                    )
+                    .unwrap();
+                    let mut results = Vec::new();
+                    for reference in [false, true] {
+                        c.tight_bounds = !reference;
+                        let mut state = State::new(&c, Some(&stock.field));
+                        if reference {
+                            state.field.use_reference_intervals();
+                        }
+                        let mut samples = Some(Vec::new());
+                        for (index, step) in program.steps().iter().enumerate() {
+                            state
+                                .step(step, index, &c, &|| false, &mut samples)
+                                .unwrap();
+                        }
+                        results.push((
+                            state.collisions,
+                            state.field.tracked_removed_volume(),
+                            state.field.to_solid_mesh(stock.min[2]),
+                            samples.unwrap(),
+                        ));
+                    }
+                    assert_eq!(results[0], results[1], "{axis:?} {shape:?} {center:?}");
+                }
+            }
         }
     }
     #[test]
@@ -1585,5 +1736,31 @@ mod tests {
         );
         assert!((samples.iter().map(|s| s.seconds).sum::<f64>() - 12.).abs() < 1e-6);
         assert!(samples.iter().all(|s| !s.collision));
+    }
+    #[test]
+    fn geometry_only_tracking_mode_preserves_stock_and_invalidates_volume_checkpoints() {
+        let stock = blank(RotaryAxis::A);
+        let program = Program {
+            steps: groove(RotaryAxis::A, 90.),
+        };
+        let mut cache = RotarySimulationCache::default();
+        let tracked = run(&mut cache, &program, &stock, &[tool()]);
+        assert!(tracked.removed_volume > 0.);
+        cache.set_volume_tracking(false);
+        let geometry = run(&mut cache, &program, &stock, &[tool()]);
+        assert_eq!(geometry.removed_volume, 0.);
+        assert_eq!(geometry.collisions, tracked.collisions);
+        assert_eq!(
+            geometry.field.to_solid_mesh(stock.min[2]),
+            tracked.field.to_solid_mesh(stock.min[2])
+        );
+        cache.set_volume_tracking(true);
+        let restored = run(&mut cache, &program, &stock, &[tool()]);
+        assert_eq!(restored.removed_volume, tracked.removed_volume);
+        assert_eq!(restored.collisions, tracked.collisions);
+        assert_eq!(
+            restored.field.to_solid_mesh(stock.min[2]),
+            tracked.field.to_solid_mesh(stock.min[2])
+        );
     }
 }

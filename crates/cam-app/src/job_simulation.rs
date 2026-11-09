@@ -13,6 +13,8 @@ pub(crate) struct StockSimulationCache {
 #[derive(Default)]
 pub(super) struct StockSimulation {
     pub initial: Option<(Vec<MeshVertex>, Vec<u32>)>,
+    pub snapshot: Option<cam_sim::StockSnapshot>,
+    pub initial_snapshot: Option<cam_sim::StockSnapshot>,
     pub vertices: Vec<MeshVertex>,
     pub indices: Vec<u32>,
     pub machined: Vec<bool>,
@@ -237,8 +239,11 @@ impl JobInputs {
             .or_else(|| round.as_ref().map(|f| (round_key.as_str(), f)));
         // Setup selection shows the input blank, while operation selection and
         // playback show the material remaining after the destination's cuts.
+        let inherited = self.document.setup().stock == cam_model::Stock::PreviousSetup;
+        let initial_snapshot = initial.filter(|_| inherited && self.preview_program.is_none())
+            .map(|(_, field)| field.snapshot(min[2]).map_err(Diagnostic::error)).transpose()?;
         let input_mesh = if let Some((_, field)) =
-            initial.filter(|_| self.preview_program.is_none())
+            initial.filter(|_| inherited && self.preview_program.is_none())
         {
             let Some(surface) = field.to_solid_mesh_controlled(min[2], &|| cancel.is_cancelled())
             else {
@@ -264,6 +269,9 @@ impl JobInputs {
             &mut simulation.rotary,
         )?;
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
+        let snapshot = if self.preview_program.is_none() {
+            Some(sim.field.snapshot(min[2]).map_err(Diagnostic::error)?)
+        } else { None };
         // Render the stock as a watertight solid down to its floor, so the full
         // thickness shows and cut walls shade crisply (not a smooth top sheet).
         let Some(surface) = simulation
@@ -277,6 +285,8 @@ impl JobInputs {
         };
         Ok(StockSimulation {
             initial: input_mesh,
+            snapshot,
+            initial_snapshot,
             vertices,
             indices: surface.indices,
             machined: surface.machined,
@@ -309,6 +319,9 @@ impl JobInputs {
         rotary: &mut cam_sim::RotarySimulationCache,
     ) -> Result<SimResult, Diagnostic> {
         if self.uses_rotary_stock(program) {
+            // This lane consumes geometry and contacts. Force analysis traverses
+            // separately with volume accounting enabled in cam-sim.
+            rotary.set_volume_tracking(false);
             return rotary.simulate_controlled(
                 program, self.min, self.max,
                 &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
@@ -712,6 +725,10 @@ fn simulation_resolution(span: f64, feature: f64, accuracy: f32) -> f64 {
         .clamp(0.02, 2.0)
         .max(span / MAX_SIM_CELLS_ACROSS)
 }
+
+#[cfg(test)]
+#[path = "project_cache_bench.rs"]
+mod cache_bench;
 
 #[cfg(test)]
 mod tests {

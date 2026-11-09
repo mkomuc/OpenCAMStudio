@@ -1,5 +1,6 @@
 //! Reproduce a rotary project without a GUI and time the worker phases.
-//! cargo run -p cam-app --example rotary_verify_bench -- project.ocam [--simulate]
+//! cargo run -p cam-app --example rotary_verify_bench -- project.ocam [--simulate] [--timeout 600]
+//! --profile reports operation timings from progress polling and a stock-result digest.
 use cam_app::{default_machine, AppController};
 use cam_cldata::Step;
 use std::{
@@ -11,6 +12,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let path = args.first().ok_or("Supply a .ocam project path")?;
     let simulate = args.iter().any(|a| a == "--simulate");
+    let profile = args.iter().any(|a| a == "--profile");
+    let timeout = args
+        .iter()
+        .position(|a| a == "--timeout")
+        .map(|i| {
+            args.get(i + 1)
+                .ok_or("--timeout requires seconds")?
+                .parse::<u64>()
+                .map_err(|_| "Invalid timeout")
+        })
+        .transpose()?
+        .unwrap_or(180);
     let mut app = AppController::new(default_machine());
     let start = Instant::now();
     app.open_project(path)?;
@@ -79,9 +92,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last = Instant::now();
     let mut phase = "Queued".to_string();
     let mut times = BTreeMap::<String, f64>::new();
+    let mut verification = Vec::<(f64, Option<usize>)>::new();
     while app.run_pending() {
         app.poll_run();
         if let Some(p) = app.run_progress() {
+            if profile {
+                let step = (p.phase == cam_app::JobPhase::Verification).then_some(p.completed);
+                if verification.last().map(|v| v.1) != Some(step) {
+                    verification.push((start.elapsed().as_secs_f64(), step));
+                }
+            }
             let next = format!("{:?}", p.phase);
             if next != phase {
                 *times.entry(phase.clone()).or_default() += last.elapsed().as_secs_f64();
@@ -90,13 +110,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("phase {next}");
             }
         }
-        if start.elapsed() > Duration::from_secs(180) {
+        if start.elapsed() > Duration::from_secs(timeout) {
             app.cancel_run();
-            return Err("Timed out after 180 seconds".into());
+            return Err(format!("Timed out after {timeout} seconds").into());
         }
         std::thread::sleep(Duration::from_millis(2));
     }
     *times.entry(phase).or_default() += last.elapsed().as_secs_f64();
+    verification.push((start.elapsed().as_secs_f64(), None));
     let out = app.outcome().ok_or("No outcome")?;
     println!(
         "completion {:?}; total {:.3} s; phases {:?}; {} steps; {} triangles; {} collisions",
@@ -108,6 +129,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         out.collisions.len()
     );
     println!("diagnostics {:?}", out.diagnostics);
+    if profile {
+        let mut operations = BTreeMap::<Option<u32>, f64>::new();
+        for pair in verification.windows(2) {
+            if let Some(index) = pair[0].1 {
+                let operation = out
+                    .program
+                    .steps()
+                    .get(index)
+                    .and_then(Step::tag)
+                    .map(|t| t.op_id);
+                *operations.entry(operation).or_default() += pair[1].0 - pair[0].0;
+            }
+        }
+        println!("verification seconds by operation (polled): {operations:?}");
+        // Hash all persisted result buffers in serialization order without allocating
+        // a second full mesh. This is a reproducibility check, not a security hash.
+        struct Digest(u64);
+        impl std::io::Write for Digest {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                for byte in bytes {
+                    self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut digest = Digest(0xcbf29ce484222325);
+        serde_json::to_writer(
+            &mut digest,
+            &(
+                &out.program,
+                &out.diagnostics,
+                &out.collisions,
+                &out.initial_stock,
+                &out.stock_vertices,
+                &out.stock_indices,
+                &out.stock_machined,
+                &out.stock_operations,
+                &out.stock_cut_sources,
+            ),
+        )?;
+        println!("stock result digest: {:016x}", digest.0);
+    }
     let mut radii = BTreeMap::<u32, (f64, f64)>::new();
     for step in out.program.steps() {
         if let Step::Rotary {
@@ -136,7 +202,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     if let Some(i) = args.iter().position(|a| a == "--save") {
+        let start = Instant::now();
         app.save_project(&args[i + 1])?;
+        println!(
+            "save {:.3} s; {} bytes",
+            start.elapsed().as_secs_f64(),
+            std::fs::metadata(&args[i + 1])?.len()
+        );
     }
     Ok(())
 }

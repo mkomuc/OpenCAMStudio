@@ -293,6 +293,8 @@ impl JobInputs {
             diagnostics: job.diagnostics,
             scene,
             initial_stock: stock.initial,
+            stock_snapshot: stock.snapshot,
+            initial_stock_snapshot: stock.initial_snapshot,
             stock_vertices: stock.vertices,
             stock_machined: stock.machined,
             stock_operations: stock.operations,

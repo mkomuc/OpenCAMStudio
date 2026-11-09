@@ -464,9 +464,8 @@ impl Document {
         let Some(binding) = self.geometry.bindings.get(&op.id()) else {
             return Ok(self.operation_base_cutting_heights(op).bottom);
         };
-        // A selected edge chain has its own Z plane. The binding's interval
-        // describes the adjoining wall that is safe to cut, and its bottom can
-        // be well below that plane (or contain an older cached depth).
+        // Profile face contours and selected edge chains have their own Z plane.
+        // A binding's wall interval can extend well below that source plane.
         if matches!(
             binding.recipe,
             crate::ExtractionRecipe::ChamferLoop
@@ -481,7 +480,10 @@ impl Document {
         let references: Vec<_> = match &binding.recipe {
             crate::ExtractionRecipe::ProfileEntries { entries }
                 if entries.iter().all(|entry| {
-                    entry.kind == crate::ProfileGeometryKind::Chain
+                    matches!(
+                        entry.kind,
+                        crate::ProfileGeometryKind::Chain | crate::ProfileGeometryKind::FaceContours
+                    )
                         && matches!(&entry.source, crate::ProfileGeometrySource::Cad(_))
                 }) =>
             {
@@ -498,10 +500,17 @@ impl Document {
             }
             _ => vec![],
         };
+        let profile_faces = matches!(op, Operation::Profile(_))
+            && matches!(
+                binding.recipe,
+                crate::ExtractionRecipe::ProfileEntries { .. }
+                    | crate::ExtractionRecipe::ProfileContours
+            );
         if references.is_empty()
-            || references
-                .iter()
-                .any(|r| !matches!(r.kind, EntityKind::Edge | EntityKind::Loop))
+            || references.iter().any(|r| {
+                !matches!(r.kind, EntityKind::Edge | EntityKind::Loop)
+                    && !(profile_faces && r.kind == EntityKind::Face)
+            })
         {
             return Ok(binding.heights.bottom);
         }

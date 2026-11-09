@@ -191,6 +191,11 @@ cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam"
 
 Packaged builds accept the same `--setup <path.ocam>` option.
 
+Project saves use compressed `.ocam` archives with editable JSON and lossless stock
+state; display meshes rebuild when opened. Legacy JSON projects still open and
+convert on save. Tool libraries remain JSON. See the [project cache policy](docs/project-cache-policy.md)
+for format details and measurements. New project archives require an updated build.
+
 build the distributiable app
 ```bash
 OCCT_ROOT="$PWD/.local/occt" \

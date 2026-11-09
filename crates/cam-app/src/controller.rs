@@ -139,6 +139,9 @@ pub struct RunOutcome {
     pub scene: Scene,
     /// Processed input blank for an inherited-stock setup, before its own cuts.
     pub initial_stock: Option<(Vec<MeshVertex>, Vec<u32>)>,
+    /// Lossless material caches; render meshes are derived and need not be persisted.
+    pub stock_snapshot: Option<cam_sim::StockSnapshot>,
+    pub initial_stock_snapshot: Option<cam_sim::StockSnapshot>,
     /// Interleaved position+normal vertices of the cut stock surface.
     pub stock_vertices: Vec<MeshVertex>,
     /// Per-vertex flag distinguishing cut surfaces from original stock faces.
@@ -1503,16 +1506,12 @@ impl AppController {
             machine: Some(self.machine.clone()),
             post: Some(self.post_kind),
         };
-        // Written through the tagged `.ocam` union (§3.1) so the file self-describes.
-        let json = OcamFile::Project(project)
-            .to_json()
-            .map_err(|e| ProjectError::Json(e.to_string()))?;
         let path = path.as_ref();
         self.document()
             .geometry
             .validate()
             .map_err(ProjectError::Json)?;
-        crate::project::atomic_save(path, &json).map_err(ProjectError::Io)?;
+        crate::project::atomic_save(path, &project).map_err(ProjectError::Io)?;
         self.current_path = Some(path.to_path_buf());
         self.mark_project_saved();
         Ok(())
@@ -1521,10 +1520,10 @@ impl AppController {
     /// Open a `.ocam` project from `path`, replacing the current session.
     pub fn open_project(&mut self, path: impl AsRef<Path>) -> Result<(), ProjectError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io(e.to_string()))?;
+        let bytes = std::fs::read(path).map_err(|e| ProjectError::Io(e.to_string()))?;
         // Route through the tagged union; a legacy untagged project still parses (§3.1)
         // and is migrated to the current schema on the way through.
-        let project = match OcamFile::from_json(&text).map_err(ProjectError::from)? {
+        let project = match OcamFile::from_bytes(&bytes).map_err(ProjectError::from)? {
             OcamFile::Project(p) => p,
             OcamFile::Library(_) => return Err(ProjectError::NotAProject),
         };

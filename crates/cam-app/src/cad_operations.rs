@@ -859,7 +859,7 @@ pub(crate) fn resolve_document_checked(
         if !document.operation_is_included(document.setup().id, operation.id()) {
             continue;
         }
-        if operation.rotary_wrap().is_some() {continue;}
+        if operation.rotary_wrap().is_some() || document.rotary_indexes.contains_key(&operation.id()) {continue;}
         if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
             let heights = settings.resolve(document, operation).map_err(|reason| {
                 error(format!("Operation {}: {reason}", operation.id())).for_op(operation.id())
@@ -947,7 +947,7 @@ pub(crate) fn resolve_document_checked(
                     })?;
             let depth = input.heights.depth();
             let region = || input.regions.first().ok_or("No resolved machining region");
-            match (operation, &binding.recipe) {
+            match (&mut *operation, &binding.recipe) {
                 (
                     Operation::Pocket(p),
                     ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary,
@@ -1159,6 +1159,23 @@ pub(crate) fn resolve_document_checked(
         })();
         resolved.geometry.instances=base_instances;
         resolved_operation.map_err(|message| error(message).for_op(id))?;
+        if document.rotary_indexes.contains_key(&id) {
+            if let Some(settings) = document.setup().height_settings.get(&id) {
+                // References such as SelectedContours depend on the binding's
+                // cutting interval. Resolve it after extracting indexed CAD,
+                // while keeping original placements for the indexed view.
+                let mut source = document.clone();
+                if let Some(binding) = resolved.geometry.bindings.get(&id) {
+                    source.geometry.bindings.insert(id, binding.clone());
+                }
+                let mut settings = settings.clone();
+                settings.resolved = None;
+                let heights = settings.resolve(&source, operation).map_err(|reason| {
+                    error(format!("Operation {id}: {reason}")).for_op(id)
+                })?;
+                resolved.setup_mut().height_settings.get_mut(&id).unwrap().resolved = Some(heights);
+            }
+        }
     }
     resolved.setup_mut().operations = operations;
     // Keep fixture placements for the planner's independent safety checks, after

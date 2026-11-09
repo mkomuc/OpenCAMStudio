@@ -564,6 +564,7 @@ dependencies = [
  "cam-toolpath",
  "rayon",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
