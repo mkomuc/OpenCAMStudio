@@ -270,10 +270,14 @@ impl App {
             lines.push(self.status.clone());
         }
         if let Some(progress) = self.controller.run_progress() {
-            lines.push(format!(
-                "{:?}: {} / {}",
-                progress.phase, progress.completed, progress.total
-            ));
+            if progress.phase == crate::JobPhase::Generation {
+                lines.push(format!("Generation: {} fragments calculated", progress.completed));
+            } else {
+                lines.push(format!(
+                    "{:?}: {} / {}",
+                    progress.phase, progress.completed, progress.total
+                ));
+            }
         }
         if let Some(outcome) = self.controller.outcome() {
             lines.push("Toolpath diagnostics:".into());

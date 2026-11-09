@@ -358,9 +358,15 @@ impl SimulationCache {
                 return None;
             }
             let count = index + 1;
-            if count % 256 == 0 {
+            let current = step.tag().map(|tag| tag.op_id);
+            let next = program
+                .steps()
+                .get(count)
+                .and_then(Step::tag)
+                .map(|tag| tag.op_id);
+            if count % 256 == 0 || (current.is_some() && current != next) {
                 let checkpoint_limit =
-                    (32 * 1024 * 1024 / state.field.storage_bytes().max(1)).min(4);
+                    (32 * 1024 * 1024 / state.field.storage_bytes().max(1)).clamp(1, 4);
                 if checkpoint_limit > 0 {
                     self.checkpoints.push((count, state.clone()));
                 } else {

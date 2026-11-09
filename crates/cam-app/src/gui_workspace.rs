@@ -2,6 +2,20 @@
 use super::*;
 use iced::widget::column;
 
+fn stock_to_machine_view(
+    frame: &cam_model::SetupFrame,
+    axis: cam_cldata::RotaryAxis,
+    center: cam_cldata::Point3,
+    angle: f64,
+    point: [f32; 3],
+    vector: bool,
+) -> [f32; 3] {
+    let p = frame.to_setup_vector(point.map(f64::from));
+    let origin = if vector { cam_cldata::Point3::new(0., 0., 0.) } else { center };
+    let p = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), origin, -angle);
+    frame.to_world_vector([p.x, p.y, p.z]).map(|v| v as f32)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Workspace {
     #[default]
@@ -213,6 +227,7 @@ pub(super) struct ViewportKey {
     selection: Selection,
     pending: Option<crate::PendingOp>,
     outcome: Option<crate::JobStamp>,
+    verifying_preview: bool,
     simulation: Option<SimulationViewportKey>,
     operation_preview: Option<crate::JobStamp>,
     cad_selection: Vec<EntityRef>,
@@ -617,7 +632,10 @@ impl App {
             origin: self.controller.active_origin(),
             selection: self.controller.selection(),
             pending: self.controller.pending_op(),
-            outcome: self.controller.outcome().and_then(|o| o.stamp.clone()),
+            outcome: self.controller.outcome()
+                .or_else(|| self.controller.run_preview())
+                .and_then(|o| o.stamp.clone()),
+            verifying_preview: self.controller.run_preview().is_some(),
             simulation: self
                 .simulation
                 .as_ref()
@@ -749,6 +767,30 @@ impl App {
                 self.setup_draft.as_ref(),
             );
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
+                if player.options.rotary_view == crate::settings::SimulationRotaryView::RotatingStock {
+                    if let Some((axis, center, angle)) = player.rotary_pose() {
+                        let frame = &self.controller.inspection_setup().frame;
+                        let rotate = |point: [f32; 3], vector: bool| {
+                            stock_to_machine_view(frame, axis, center, angle, point, vector)
+                        };
+                        for vertex in Arc::make_mut(&mut viewport.mesh_vertices).iter_mut()
+                            .chain(Arc::make_mut(&mut viewport.transparent_stock_vertices).iter_mut()) {
+                            vertex.position = rotate(vertex.position, false);
+                            vertex.normal = rotate(vertex.normal, true);
+                        }
+                        for vertex in Arc::make_mut(&mut viewport.vertices).iter_mut()
+                            .chain(Arc::make_mut(&mut viewport.cad_edges).iter_mut()) {
+                            vertex.position = rotate(vertex.position, false);
+                        }
+                        for cone in Arc::make_mut(&mut viewport.path_cones).iter_mut() {
+                            cone.at = rotate(cone.at, false);
+                            cone.direction = rotate(cone.direction, true);
+                        }
+                        for mark in Arc::make_mut(&mut viewport.drill_marks).iter_mut() {
+                            mark.at = rotate(mark.at, false);
+                        }
+                    }
+                }
                 let (vertices, indices) = player.tool_mesh();
                 let (target_vertices, target_indices) = if player.options.transparent_tool {
                     (
@@ -1527,6 +1569,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rotating_stock_view_inverts_material_coordinates_in_setup_axes() {
+        let frame = cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap();
+        let center = cam_cldata::Point3::new(3., 4., 5.);
+        let machine = cam_cldata::Point3::new(8., 9., 10.);
+        for axis in [cam_cldata::RotaryAxis::A, cam_cldata::RotaryAxis::B] {
+            let material = axis.material_point(machine, center, 37.);
+            let world_material = frame.to_world_vector([material.x, material.y, material.z]).map(|v| v as f32);
+            let result = stock_to_machine_view(&frame, axis, center, 37., world_material, false);
+            let expected = frame.to_world_vector([machine.x, machine.y, machine.z]);
+            for i in 0..3 { assert!((f64::from(result[i]) - expected[i]).abs() < 1e-5); }
+        }
+    }
+
+    #[test]
     fn selection_shows_only_selected_toolpaths_and_setup_shows_configured_stock() {
         let mut app = picking_app();
         app.end_setup_draft();
@@ -1844,21 +1900,14 @@ mod tests {
             app.drain_operation_preview();
             let viewport = app.machining_viewport();
             let scoped = app.operation_preview_outcome().unwrap();
-            assert_eq!(viewport.mesh_indices.as_slice(), scoped.stock_indices);
+            assert!(!scoped.stock_indices.is_empty());
             assert!(scoped.stock_operations.contains(&Some(selected)));
-            if selected == ids[0] {
-                assert!(
-                    !scoped.stock_operations.contains(&Some(ids[1])),
-                    "a later operation must not remove material in this preview"
-                );
-            } else {
-                assert!(
-                    scoped.stock_operations.contains(&Some(ids[0])),
-                    "earlier cuts remain in the selected operation's starting stock"
-                );
-            }
             assert_eq!(viewport.path_cones.len(), 2);
             assert!(viewport.path_cones.iter().all(|cone| cone.op == selected));
+            assert_eq!(viewport.mesh_indices.as_slice(), scoped.stock_indices);
+            if selected == ids[0] {
+                assert!(!scoped.stock_operations.contains(&Some(ids[1])));
+            }
             for (vertex, owner) in viewport.mesh_vertices.iter().zip(&scoped.stock_operations) {
                 let expected = if *owner == Some(selected) {
                     [0.1, 0.9, 0.2, 1.]

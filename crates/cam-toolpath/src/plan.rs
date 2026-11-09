@@ -89,8 +89,26 @@ pub fn build_job_cached(
     cache: &mut crate::OperationCache,
     mut progress: impl FnMut(u32),
 ) -> JobResult {
+    build_job_cached_with_progress(request, cancel, cache, |operation| {
+        if let CalculationProgress::Started(id) = operation { progress(id); }
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalculationProgress {
+    Started(u32),
+    Finished { operation: u32, success: bool },
+}
+
+/// Report the start and end of actual fragment computations; cache hits do not
+/// represent recalculation and therefore do not produce progress events.
+pub fn build_job_cached_with_progress(
+    request: PlanRequest<'_>,
+    cancel: &CancelToken,
+    cache: &mut crate::OperationCache,
+    mut progress: impl FnMut(CalculationProgress),
+) -> JobResult {
     cache.reset_stats();
-    let mut reported = std::collections::HashSet::new();
     build_job_with_compute(
         request.document,
         request.spindle_rpm,
@@ -99,13 +117,13 @@ pub fn build_job_cached(
         request.tool_change_height,
         cancel,
         |op, env, token, stock_to_leave, geometry, heights| {
-            if reported.insert(op.id()) {
-                progress(op.id());
-            }
             let mut geometry_fingerprint = geometry
                 .bindings
                 .get(&op.id())
                 .map(|binding| geometry.binding_fingerprint(binding));
+            if let Some(index) = request.document.rotary_indexes.get(&op.id()) {
+                geometry_fingerprint = Some(format!("{}:index:{index:?}", geometry_fingerprint.unwrap_or_default()));
+            }
             if let Some(wrap) = op.rotary_wrap() {
                 geometry_fingerprint = Some(format!(
                     "{}:wrap:{}:periodic:{}",
@@ -158,7 +176,15 @@ pub fn build_job_cached(
                     geometry_fingerprint,
                     cutting_heights: heights,
                 },
-                || compute_with_stock(op, env, token, stock_to_leave, geometry, heights),
+                || {
+                    progress(CalculationProgress::Started(op.id()));
+                    let result = compute_with_stock(op, env, token, stock_to_leave, geometry, heights);
+                    progress(CalculationProgress::Finished {
+                        operation: op.id(),
+                        success: !result.cancelled && !result.has_errors() && !token.is_cancelled(),
+                    });
+                    result
+                },
             )
         },
     )
@@ -1880,6 +1906,24 @@ mod tests {
             stock_to_leave: Default::default(),
             tool_change_height: None,
         })
+    }
+
+    #[test]
+    fn progress_reports_only_fragments_actually_recomputed() {
+        let doc = document(3);
+        let mut cache = crate::OperationCache::default();
+        let cancel = CancelToken::new();
+        let mut events = Vec::new();
+        assert_eq!(build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events.push(event)).completion, JobCompletion::Complete);
+        assert_eq!(events, [CalculationProgress::Started(0), CalculationProgress::Finished { operation: 0, success: true }, CalculationProgress::Started(1), CalculationProgress::Finished { operation: 1, success: true }, CalculationProgress::Started(2), CalculationProgress::Finished { operation: 2, success: true }]);
+        events.clear();
+        assert_eq!(build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events.push(event)).completion, JobCompletion::Complete);
+        assert!(events.is_empty());
+        cache.invalidate_operations(&[2]);
+        assert_eq!(build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events.push(event)).completion, JobCompletion::Complete);
+        assert_eq!(events, [CalculationProgress::Started(2), CalculationProgress::Finished { operation: 2, success: true }]);
+        assert_eq!(cache.stats.reused, 2);
+        assert_eq!(cache.stats.computed, 1);
     }
 
     #[test]

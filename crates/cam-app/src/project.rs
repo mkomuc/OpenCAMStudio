@@ -173,6 +173,23 @@ pub struct StoredToolpaths {
     pub cache: cam_toolpath::OperationCache,
     /// Each value combines the local input hash and the ordered dependency hash.
     pub fingerprints: std::collections::BTreeMap<u32, String>,
+    /// Completed, full-setup verification results, keyed by setup identity.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub verification: std::collections::BTreeMap<u64, StoredVerification>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredVerification {
+    pub fingerprint: String,
+    pub program: cam_cldata::Program,
+    pub diagnostics: Vec<cam_toolpath::Diagnostic>,
+    pub collisions: Vec<cam_sim::Collision>,
+    pub initial_stock: Option<(Vec<cam_render::MeshVertex>, Vec<u32>)>,
+    pub stock_vertices: Vec<cam_render::MeshVertex>,
+    pub stock_indices: Vec<u32>,
+    pub stock_machined: Vec<bool>,
+    pub stock_operations: Vec<Option<u32>>,
+    pub stock_cut_sources: Vec<Option<cam_sim::SurfaceLocation>>,
 }
 
 /// A stable project-browser node, shared with the persisted view.

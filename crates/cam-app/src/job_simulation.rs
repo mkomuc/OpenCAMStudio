@@ -623,7 +623,7 @@ impl JobInputs {
                     setup.name
                 )));
             }
-            let mut job = build_job_cached(
+            let mut job = cam_toolpath::build_job_cached(
                 PlanRequest {
                     document: &document,
                     spindle_rpm: self.spindle_rpm,

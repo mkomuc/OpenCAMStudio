@@ -196,7 +196,7 @@ pub struct SimTool {
 }
 
 /// The kind of a detected problem.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CollisionKind {
     /// Tool or shank enters a setup fixture keep-out envelope.
     Fixture,
@@ -210,7 +210,7 @@ pub enum CollisionKind {
 }
 
 /// A detected problem, with where it happened.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Collision {
     pub kind: CollisionKind,
     pub at: [f64; 3],

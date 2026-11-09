@@ -550,6 +550,7 @@ dependencies = [
  "cam-cldata",
  "cam-geo",
  "cam-model",
+ "serde",
  "wgpu",
 ]
 
@@ -562,6 +563,7 @@ dependencies = [
  "cam-model",
  "cam-toolpath",
  "rayon",
+ "serde",
 ]
 
 [[package]]

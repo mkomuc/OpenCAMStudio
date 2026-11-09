@@ -12,7 +12,7 @@
 /// A vertex for solid surface rendering: position (mm) and unit normal. Plain
 /// data; the `gpu` feature makes it `bytemuck`-castable for upload.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "gpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct MeshVertex {
     pub position: [f32; 3],
@@ -186,6 +186,97 @@ mod tests {
         assert_eq!(
             transparent_convex_indices(&vertices, &indices, crate::IDENTITY),
             indices
+        );
+    }
+
+    #[test]
+    fn translucent_long_cylinder_keeps_the_nearest_surface_last_across_the_view() {
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        for i in 0..128 {
+            let a = std::f32::consts::TAU * i as f32 / 128.;
+            let b = std::f32::consts::TAU * (i + 1) as f32 / 128.;
+            let p = |angle: f32, z| [16. * angle.cos(), 16. * angle.sin(), z];
+            let [oa, ob, oc, od] = [p(a, -1.), p(b, -1.), p(a, 41.), p(b, 41.)];
+            for point in [oa, ob, od, oa, od, oc] {
+                indices.push(positions.len() as u32);
+                positions.push(point);
+            }
+        }
+        let vertices = mesh_vertices(&positions, &vec![[0., 0., 1.]; positions.len()]);
+        let mut camera = crate::OrbitCamera::framed([-16., -16., -1.], [16., 16., 41.]);
+        let mut worst = (0, 0);
+        for pitch in [0.25, 0.5, 0.75, 1., 1.25, 1.45, 1.55] {
+            for yaw in [0., 0.3, 0.7, 1.1] {
+                camera.orient = crate::orientation(yaw, pitch);
+                let matrix = camera.view_proj(1.);
+                let project = |p: [f32; 3]| -> [f32; 3] {
+                    std::array::from_fn(|i| {
+                        matrix[0][i] * p[0]
+                            + matrix[1][i] * p[1]
+                            + matrix[2][i] * p[2]
+                            + matrix[3][i]
+                    })
+                };
+                let projected: Vec<_> = positions.iter().copied().map(project).collect();
+                let reversed_pixels = |order: &[u32]| {
+                    let mut reversed = 0;
+                    let mut overlaps = 0;
+                    for y in 0..96 {
+                        for x in 0..96 {
+                            let (px, py) = (
+                                -0.9 + 1.8 * (x as f32 + 0.5) / 96.,
+                                -0.9 + 1.8 * (y as f32 + 0.5) / 96.,
+                            );
+                            let mut nearest = f32::INFINITY;
+                            let mut last = f32::INFINITY;
+                            let mut hits = 0;
+                            for triangle in order.chunks_exact(3) {
+                                let [a, b, c] = [
+                                    projected[triangle[0] as usize],
+                                    projected[triangle[1] as usize],
+                                    projected[triangle[2] as usize],
+                                ];
+                                let den =
+                                    (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+                                if den.abs() < 1e-10 {
+                                    continue;
+                                }
+                                let u = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1]))
+                                    / den;
+                                let v = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1]))
+                                    / den;
+                                let w = 1. - u - v;
+                                if u > 1e-5 && v > 1e-5 && w > 1e-5 {
+                                    let z = u * a[2] + v * b[2] + w * c[2];
+                                    nearest = nearest.min(z);
+                                    last = z;
+                                    hits += 1;
+                                }
+                            }
+                            if hits > 1 {
+                                overlaps += 1;
+                                if last > nearest + 1e-5 {
+                                    reversed += 1;
+                                }
+                            }
+                        }
+                    }
+                    (reversed, overlaps)
+                };
+                let ordinary = transparent_indices(&vertices, &indices, matrix);
+                let corrected = transparent_convex_indices(&vertices, &indices, matrix);
+                let before = reversed_pixels(&ordinary);
+                let after = reversed_pixels(&corrected);
+                assert_eq!(after.0, 0);
+                if before.0 > worst.0 {
+                    worst = before;
+                }
+            }
+        }
+        assert!(
+            worst.0 > 0,
+            "exercise the long-cylinder ordering defect: {worst:?}"
         );
     }
 

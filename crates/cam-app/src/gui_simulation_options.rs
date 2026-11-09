@@ -17,6 +17,7 @@ pub(in crate::gui) enum SimulationOption {
     Tool(bool),
     ToolDisplay(SimulationToolDisplay),
     TransparentTool(bool),
+    RotaryView(SimulationRotaryView),
     ProgrammedPoint(bool),
     Toolpath(bool),
     Links(bool),
@@ -40,6 +41,7 @@ impl SimulationOption {
             Self::Tool(v) => prefs.show_tool = v,
             Self::ToolDisplay(v) => prefs.tool_display = v,
             Self::TransparentTool(v) => prefs.transparent_tool = v,
+            Self::RotaryView(v) => prefs.rotary_view = v,
             Self::ProgrammedPoint(v) => prefs.programmed_point = v,
             Self::Toolpath(v) => prefs.show_toolpath = v,
             Self::Links(v) => prefs.show_links = v,
@@ -280,13 +282,16 @@ impl SimulationPlayer {
             let clipped = step.at((hi - step.start) / duration);
             if previous_end != Some(a) {
                 flush(&mut run, &mut scene);
-                run.steps.push(Step::Rapid {
-                    to: a,
-                    tag: Tag {
-                        kind: MoveKind::Link,
-                        ..tag
-                    },
-                });
+                let link_tag = Tag { kind: MoveKind::Link, ..tag };
+                if let Some((axis, center)) = step.rotary_frame {
+                    let angle = match step.at((lo - step.start) / duration) {
+                        Step::Rotary { angle, .. } => angle,
+                        _ => step.rotary_from,
+                    };
+                    run.steps.push(Step::Rotary { to: a, axis, center, angle, feed: None, length: 0., tag: link_tag });
+                } else {
+                    run.steps.push(Step::Rapid { to: a, tag: link_tag });
+                }
             }
             previous_end = endpoint(&clipped);
             run.steps.push(clipped);
@@ -334,7 +339,10 @@ impl SimulationPlayer {
             }
         }
         if self.options.show_tool && self.options.programmed_point {
-            if let Some(tip) = self.preview.program.steps.iter().rev().find_map(endpoint) {
+            if let Some(mut tip) = self.preview.program.steps.iter().rev().find_map(endpoint) {
+                if let Some((axis, center, angle)) = self.rotary_pose() {
+                    tip = axis.material_point(tip, center, angle);
+                }
                 let p = self
                     .inputs
                     .document
@@ -514,6 +522,9 @@ impl SimulationPlayer {
             .width(Length::Fill)
         };
         let mut list = column![section(0, "Tool")].spacing(10);
+        if self.timeline.steps.iter().any(|step| matches!(step.step, Step::Rotary { .. })) {
+            list = list.push(picker("Rotary view", SimulationRotaryView::ALL, p.rotary_view, SimulationOption::RotaryView));
+        }
         if self.sections[0] {
             list = list.push(check("Show tool", p.show_tool, SimulationOption::Tool));
             if p.show_tool {

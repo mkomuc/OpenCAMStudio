@@ -74,6 +74,7 @@ impl AppController {
         self.selection = Selection::Setup;
         self.cad_selection.clear();
         self.invalidate();
+        self.restore_saved_verification();
         Ok(())
     }
 

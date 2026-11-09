@@ -176,6 +176,8 @@ pub struct SimulationPrefs {
     pub show_tool: bool,
     pub tool_display: SimulationToolDisplay,
     pub transparent_tool: bool,
+    /// Choose which side of the rotary motion remains stationary on screen.
+    pub rotary_view: SimulationRotaryView,
     pub programmed_point: bool,
     pub show_toolpath: bool,
     pub show_links: bool,
@@ -204,6 +206,7 @@ impl Default for SimulationPrefs {
             show_tool: true,
             tool_display: SimulationToolDisplay::Shaft,
             transparent_tool: false,
+            rotary_view: SimulationRotaryView::FixedStock,
             programmed_point: false,
             show_toolpath: true,
             show_links: true,
@@ -239,6 +242,9 @@ macro_rules! simulation_choices {
         }
     };
 }
+simulation_choices!(SimulationRotaryView {
+    FixedStock => "Fixed stock, rotating tool", RotatingStock => "Rotating stock, fixed tool",
+});
 simulation_choices!(SimulationToolDisplay {
     Cutter => "Cutter", Shaft => "Cutter and shaft", Holder => "Cutter and holder",
 });
@@ -826,6 +832,7 @@ mod tests {
         let old: Settings = serde_json::from_str(r#"{"simulation":{"accuracy":1.5}}"#).unwrap();
         assert_eq!(old.simulation.accuracy, 1.5);
         assert!(old.simulation.stop_on_collision);
+        assert_eq!(old.simulation.rotary_view, SimulationRotaryView::FixedStock);
         assert!(old.simulation.regenerate_on_rewind);
         assert_eq!(
             old.simulation.toolpath_mode,
@@ -837,6 +844,7 @@ mod tests {
         );
         let mut settings = old;
         settings.simulation.tool_display = SimulationToolDisplay::Holder;
+        settings.simulation.rotary_view = SimulationRotaryView::RotatingStock;
         settings.simulation.toolpath_mode = SimulationToolpathMode::Leading;
         settings.simulation.toolpath_coloring = SimulationToolpathColoring::CuttingForce;
         settings.simulation.stock_coloring = SimulationStockColoring::Tool;

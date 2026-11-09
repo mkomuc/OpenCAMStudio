@@ -3,7 +3,7 @@
 use super::*;
 use crate::jobs::{JobInputs, JobService};
 use crate::settings::{
-    SimulationPrefs, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathColoring,
+    SimulationPrefs, SimulationRotaryView, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathColoring,
     SimulationToolpathMode,
 };
 use cam_cldata::{ArcDir, Point3, Program, Step};
@@ -19,6 +19,7 @@ struct TimedStep {
     step: Step,
     from: Option<Point3>,
     rotary_from: f64,
+    rotary_frame: Option<(cam_cldata::RotaryAxis, Point3)>,
     start: f64,
     end: f64,
 }
@@ -108,7 +109,9 @@ impl Timeline {
         let mut position = None;
         let mut duration = 0.;
         let mut rotary_angle=0.;
+        let mut rotary_frame = None;
         for step in expanded {
+            if let Step::Rotary { axis, center, .. } = &step { rotary_frame = Some((*axis, *center)); }
             let from = position;
             let rotary_from=rotary_angle;
             let seconds = match &step {
@@ -149,6 +152,7 @@ impl Timeline {
                 step,
                 from,
                 rotary_from,
+                rotary_frame,
                 start,
                 end: duration,
             });
@@ -436,7 +440,11 @@ impl SimulationPlayer {
             } else {
                 self.playing = false;
                 self.rendered = self.requested;
-                self.error = Some("Simulation preview failed. Seek again to retry.".into());
+                let reason = result.outcome.diagnostics.iter()
+                    .find(|diagnostic| diagnostic.severity == cam_toolpath::Severity::Error)
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .unwrap_or("Unknown error");
+                self.error = Some(format!("Simulation preview failed: {reason}. Seek again to retry."));
             }
         }
         if let Some(classes) = self.comparison.poll() {
@@ -560,6 +568,13 @@ impl SimulationPlayer {
             || self.force_jobs.needs_poll()
             || self.comparison.pending()
     }
+    pub(super) fn rotary_pose(&self) -> Option<(cam_cldata::RotaryAxis, Point3, f64)> {
+        self.preview.program.steps.iter().rev().find_map(|step| match step {
+            Step::Rotary { axis, center, angle, .. } => Some((*axis, *center, *angle)),
+            _ => None,
+        })
+    }
+
     /// Follow the rendered frame, including its active tool, when seeking in
     /// either direction. The tool and stock must describe the same instant.
     pub fn tool_mesh(&self) -> (Vec<MeshVertex>, Vec<u32>) {
@@ -577,9 +592,8 @@ impl SimulationPlayer {
             _ => None,
         });
         let setup = self.inputs.document.setup();
-        let rotary=program.steps.iter().rev().find_map(|s|match s {
-            Step::Rotary {axis,center,angle,..}=>Some((*axis,*center,*angle)),_=>None,
-        });
+        let rotary = (self.options.rotary_view == SimulationRotaryView::FixedStock)
+            .then(|| self.rotary_pose()).flatten();
         let tool = setup.tools.iter().find(|tool| Some(tool.number) == number);
         let (Some(tip), Some(tool)) = (tip, tool) else {
             return (vec![], vec![]);
@@ -1761,6 +1775,93 @@ mod tests {
         assert_ne!(player.preview.stock_vertices, cut);
     }
     #[test]
+    fn indexed_path_and_tool_use_the_selected_rotary_frame() {
+        let tag = Tag::new(7, MoveKind::Cutting);
+        let start = Point3::new(0., 0., 10.);
+        let end = Point3::new(5., 0., 10.);
+        let program = Program { steps: vec![
+            Step::ToolChange { tool: 2 },
+            Step::Rapid { to: start, tag: Tag { kind: MoveKind::Traverse, ..tag } },
+            Step::Rotary { to: start, angle: 90., axis: cam_cldata::RotaryAxis::A,
+                center: Point3::new(0., 0., 0.), feed: None, length: 15., tag: Tag { kind: MoveKind::Traverse, ..tag } },
+            Step::Rotary { to: end, angle: 90., axis: cam_cldata::RotaryAxis::A,
+                center: Point3::new(0., 0., 0.), feed: Some(60.), length: 5., tag },
+        ]};
+        let mut player = collision_player();
+        player.timeline = Timeline::new(&program, 60.).unwrap();
+        player.rendered = player.timeline.duration;
+        player.preview.program = player.timeline.prefix(player.rendered);
+        player.options.show_links = false;
+        player.options.toolpath_mode = SimulationToolpathMode::All;
+        player.refresh_display();
+        let cutting: Vec<_> = player.preview.scene.strips.iter().filter(|s| s.op == Some(7)).collect();
+        assert!(!cutting.is_empty());
+        for point in cutting.iter().flat_map(|s| &s.points) {
+            assert!((point[1] - 10.).abs() < 1e-4, "{point:?}");
+            assert!(point[2].abs() < 1e-4, "{point:?}");
+        }
+        let (fixed_tool, _) = player.tool_mesh();
+        assert!(!fixed_tool.is_empty());
+        let fixed_tip = fixed_tool[0].position;
+        player.options.rotary_view = SimulationRotaryView::RotatingStock;
+        let (machine_tool, _) = player.tool_mesh();
+        let machine_tip = machine_tool[0].position;
+        let mapped = cam_cldata::RotaryAxis::A.material_point(
+            Point3::new(fixed_tip[0] as f64, fixed_tip[1] as f64, fixed_tip[2] as f64),
+            Point3::new(0., 0., 0.), -90.);
+        assert!((machine_tip[0] - mapped.x as f32).abs() < 1e-4);
+        assert!((machine_tip[1] - mapped.y as f32).abs() < 1e-4);
+        assert!((machine_tip[2] - mapped.z as f32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn indexed_operation_can_simulate_from_start_through_end() {
+        let mut controller = AppController::new(crate::default_machine());
+        controller.edit_stock(|stock| *stock = cam_model::Stock::FixedBox {
+            size: [8., 8., 4.], model_position: [0.; 3],
+        });
+        controller.add_operation(Operation::Drill(cam_model::DrillOp {
+            id: 0, tool: 1, points: vec![[2., 2.]], depth: 2., start_offset: 0.,
+            peck: None, dwell: None, spindle_rpm: 1000., tool_preset: None,
+            cooling: Default::default(), entry_feeds: Default::default(), work_offset: 1, feed: 100.,
+        }));
+        controller.set_operation_rotary_index(0, Some(cam_model::RotaryIndex {
+            axis: cam_cldata::RotaryAxis::B, angle: 90., center: [4., 4., 2.], ..Default::default()
+        })).unwrap();
+        controller.start_run();
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while controller.run_needs_poll() { controller.poll_run(); assert!(Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(1)); }
+        let outcome = controller.outcome().unwrap();
+        assert_eq!(outcome.completion, JobCompletion::Complete, "{:?}", outcome.diagnostics);
+        let mut player = SimulationPlayer::new_for_operation(&controller, Some(0)).unwrap();
+        drain_player(&mut player);
+        assert!(player.error.is_none(), "{:?}", player.error);
+        player.options.stop_on_collision = false;
+        player.seek_end(true);
+        drain_player(&mut player);
+        assert!(player.error.is_none(), "{:?}", player.error);
+        assert!(player.preview.program.has_rotary_motion());
+        assert!(!player.preview.stock_indices.is_empty());
+        let (axis, center, angle) = player.rotary_pose().unwrap();
+        let first = player.preview.stock_vertices[0].position;
+        let expected = axis.material_point(Point3::new(first[0] as f64, first[1] as f64, first[2] as f64), center, -angle);
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.controller = controller;
+        app.end_setup_draft();
+        app.model_view = None;
+        app.settings.simulation = player.options.clone();
+        app.simulation = Some(player);
+        let fixed = app.machining_viewport();
+        assert_eq!(fixed.mesh_vertices[0].position, first);
+        let _ = app.update(Message::SimulationOption(SimulationOption::RotaryView(SimulationRotaryView::RotatingStock)));
+        let rotating = app.machining_viewport();
+        for (actual, target) in rotating.mesh_vertices[0].position.iter().zip([expected.x, expected.y, expected.z]) {
+            assert!((f64::from(*actual) - target).abs() < 1e-4);
+        }
+    }
+
+    #[test]
     fn rotary_playback_interpolates_the_angle_and_material_path_duration() {
         let tag=cam_cldata::Tag::new(0,cam_cldata::MoveKind::Cutting);
         let to=Point3::new(0.,0.,20.);
@@ -1777,6 +1878,15 @@ mod tests {
         let material=prefix.rotary_backplot();
         let Step::Linear{to,..}=material.steps.last().unwrap() else {panic!()};
         assert!((to.y-10.*2_f64.sqrt()).abs()<1e-9 && (to.z-to.y).abs()<1e-9);
+        let mut player = collision_player();
+        player.timeline = timeline;
+        player.options.toolpath_mode = SimulationToolpathMode::Trailing;
+        player.rendered = length * 0.5;
+        player.preview.program = prefix;
+        player.refresh_display();
+        let last = player.preview.scene.strips.iter().flat_map(|strip| &strip.points).last().unwrap();
+        assert!((f64::from(last[1]) - to.y).abs() < 1e-4);
+        assert!((f64::from(last[2]) - to.z).abs() < 1e-4);
     }
 
 }

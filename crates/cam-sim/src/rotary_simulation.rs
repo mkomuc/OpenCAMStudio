@@ -118,13 +118,14 @@ struct State {
     last_tag: Option<Tag>,
 }
 
-/// Prefix cache for operation previews and forward playback. The interpolated
-/// final step is disposable; rewinds and edits rebuild from the input blank.
+/// Bounded stock checkpoints let edits and reordered operations reuse their
+/// unchanged verified prefix. The interpolated final step is disposable.
 #[derive(Default)]
 pub struct RotarySimulationCache {
     config: Option<Config>,
     steps: Vec<Step>,
     state: Option<State>,
+    checkpoints: Vec<(usize, State)>,
 }
 impl RotarySimulationCache {
     #[allow(clippy::too_many_arguments)]
@@ -159,16 +160,30 @@ impl RotarySimulationCache {
             return Err("Stock simulation cancelled".into());
         }
         let stable = program.steps().len().saturating_sub(1);
-        let reusable = self.config.as_ref() == Some(&config)
-            && self.steps.len() <= stable
-            && program.steps()[..self.steps.len()] == self.steps;
-        let (mut state, start) = if reusable && self.state.is_some() {
-            (self.state.take().unwrap(), self.steps.len())
+        if self.config.as_ref() != Some(&config) {
+            self.steps.clear();
+            self.state = None;
+            self.checkpoints.clear();
+        }
+        let common = self
+            .steps
+            .iter()
+            .zip(program.steps())
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(stable);
+        let reusable = self.state.is_some() && common == self.steps.len();
+        self.checkpoints.retain(|(count, _)| *count <= common);
+        let (mut state, start) = if reusable {
+            (self.state.as_ref().unwrap().clone(), self.steps.len())
+        } else if let Some((count, state)) = self.checkpoints.last() {
+            (state.clone(), *count)
         } else {
             (State::new(&config, initial.map(|v| v.1)), 0)
         };
-        // A failed/cancelled traversal must never publish partial stock as a checkpoint.
-        self.state = None;
+        // Only commit new checkpoints after the traversal completes. Cancellation
+        // keeps previously verified checkpoints usable by a replacement job.
+        let mut checkpoints = self.checkpoints.clone();
         for index in start..stable {
             progress(index, program.steps().len());
             state.step(
@@ -178,10 +193,37 @@ impl RotarySimulationCache {
                 cancelled,
                 &mut None,
             )?;
+            let current = program.steps()[index].tag().map(|tag| tag.op_id);
+            let next = program
+                .steps()
+                .get(index + 1)
+                .and_then(Step::tag)
+                .map(|tag| tag.op_id);
+            if current.is_some() && current != next {
+                let limit = (64 * 1024 * 1024 / state.field.storage_bytes().max(1)).clamp(1, 8);
+                checkpoints.push((index + 1, state.clone()));
+                while checkpoints.len() > limit {
+                    let remove = if checkpoints.len() <= 2 {
+                        0
+                    } else {
+                        (0..checkpoints.len() - 1)
+                            .min_by_key(|&i| {
+                                let previous = if i == 0 { 0 } else { checkpoints[i - 1].0 };
+                                checkpoints[i + 1].0 - previous
+                            })
+                            .unwrap()
+                    };
+                    checkpoints.remove(remove);
+                }
+            }
+        }
+        if cancelled() {
+            return Err("Stock simulation cancelled".into());
         }
         self.steps = program.steps()[..stable].to_vec();
         self.config = Some(config.clone());
         self.state = Some(state.clone());
+        self.checkpoints = checkpoints;
         if let Some(step) = program.steps().last() {
             state.step(step, stable, &config, cancelled, &mut None)?;
         }
@@ -1082,85 +1124,96 @@ mod tests {
     }
     #[test]
     fn full_turn_removes_the_entire_annulus_without_internal_caps() {
-        let stock = CylindricalStock::new(0, [0.; 3], [-1., 11.], 16., 0., 0.14).unwrap();
-        let mut cutter = tool();
-        cutter.tool.profile = ToolProfile::flat(3.);
-        cutter.flute_length = 13.;
-        cutter.length = 57.;
-        cutter.neck_radius = 3.;
-        cutter.shank_radius = 3.;
-        let p = Program {
-            steps: vec![
-                movement(RotaryAxis::A, 3., 22., -180., None, MoveKind::Traverse),
-                movement(RotaryAxis::A, 3., 15., -180., Some(100.), MoveKind::Plunge),
-                movement(RotaryAxis::A, 3., 15., 180., Some(100.), MoveKind::Cutting),
-            ],
-        };
-        let options = SimOptions {
-            resolution: 0.14,
-            tool_radius: 3.,
-        };
-        let result = RotarySimulationCache::default()
-            .simulate_controlled(
-                &p,
-                stock.min,
-                stock.max,
-                &options,
-                &[cutter],
-                Some(("blank", &stock.field)),
-                true,
-                &|| false,
-                |_, _| {},
-            )
-            .unwrap();
-        assert!(result.is_clean(), "{:?}", result.collisions);
-        let field = &result.field;
-        let (nx, ny) = field.dims();
-        for y in 0..ny {
-            for x in 0..nx {
-                let (axial, radial) = field.center(x, y);
-                if (1. ..5.).contains(&axial) && radial.abs() > 15.1 {
-                    assert!(
-                        !field.interval_contact(y * nx + x, -16., 16., stock.min[2]),
-                        "uncut annulus {axial},{radial}"
-                    );
-                }
-            }
-        }
-        let mesh = field.to_solid_mesh(stock.min[2]);
-        let mut bad_normals = 0;
-        let mut checked_normals = 0;
-        let mut samples = Vec::new();
-        for (positions, normals) in mesh
-            .positions
-            .chunks_exact(4)
-            .zip(mesh.normals.chunks_exact(4))
-        {
-            let p: [f32; 3] =
-                std::array::from_fn(|i| positions.iter().map(|p| p[i]).sum::<f32>() * 0.25);
-            let n = normals[0];
-            let r = p[1].hypot(p[2]);
-            if p[0] > 1. && p[0] < 5. && (r - 15.).abs() < 0.2 && n[0].abs() < 0.1 {
-                checked_normals += 1;
-                if (p[1] * n[1] + p[2] * n[2]) / r < 0.8 {
-                    bad_normals += 1;
-                    if samples.len() < 8 {
-                        samples.push((p, n));
+        for axis in [RotaryAxis::A, RotaryAxis::B] {
+            let axial_axis = if axis == RotaryAxis::A { 0 } else { 1 };
+            let transverse_axis = 1 - axial_axis;
+            let stock =
+                CylindricalStock::new(axial_axis, [0.; 3], [-1., 11.], 16., 0., 0.14).unwrap();
+            let mut cutter = tool();
+            cutter.tool.profile = ToolProfile::flat(3.);
+            cutter.flute_length = 13.;
+            cutter.length = 57.;
+            cutter.neck_radius = 3.;
+            cutter.shank_radius = 3.;
+            let p = Program {
+                steps: vec![
+                    movement(axis, 3., 22., -180., None, MoveKind::Traverse),
+                    movement(axis, 3., 15., -180., Some(100.), MoveKind::Plunge),
+                    movement(axis, 3., 15., 180., Some(100.), MoveKind::Cutting),
+                ],
+            };
+            let options = SimOptions {
+                resolution: 0.14,
+                tool_radius: 3.,
+            };
+            let result = RotarySimulationCache::default()
+                .simulate_controlled(
+                    &p,
+                    stock.min,
+                    stock.max,
+                    &options,
+                    &[cutter],
+                    Some(("blank", &stock.field)),
+                    true,
+                    &|| false,
+                    |_, _| {},
+                )
+                .unwrap();
+            assert!(result.is_clean(), "{:?}", result.collisions);
+            let field = &result.field;
+            let (nx, ny) = field.dims();
+            for y in 0..ny {
+                for x in 0..nx {
+                    let (cx, cy) = field.center(x, y);
+                    let axial = [cx, cy][axial_axis];
+                    let radial = [cx, cy][transverse_axis];
+                    if (1. ..5.).contains(&axial) && radial.abs() > 15.1 {
+                        assert!(
+                            !field.interval_contact(y * nx + x, -16., 16., stock.min[2]),
+                            "uncut annulus {axial},{radial}"
+                        );
                     }
                 }
             }
-        }
-        assert!(checked_normals > 100);
-        assert_eq!(
+            let mesh = field.to_solid_mesh(stock.min[2]);
+            let mut bad_normals = 0;
+            let mut checked_normals = 0;
+            let mut samples = Vec::new();
+            for (positions, normals) in mesh
+                .positions
+                .chunks_exact(4)
+                .zip(mesh.normals.chunks_exact(4))
+            {
+                let p: [f32; 3] =
+                    std::array::from_fn(|i| positions.iter().map(|p| p[i]).sum::<f32>() * 0.25);
+                let n = normals[0];
+                let r = p[transverse_axis].hypot(p[2]);
+                if p[axial_axis] > 1.
+                    && p[axial_axis] < 5.
+                    && (r - 15.).abs() < 0.2
+                    && n[axial_axis].abs() < 0.1
+                {
+                    checked_normals += 1;
+                    if (p[transverse_axis] * n[transverse_axis] + p[2] * n[2]) / r < 0.8 {
+                        bad_normals += 1;
+                        if samples.len() < 8 {
+                            samples.push((p, n));
+                        }
+                    }
+                }
+            }
+            assert!(checked_normals > 100);
+            assert_eq!(
             bad_normals, 0,
-            "{bad_normals} of {checked_normals} cut side quads have sideways normals: {samples:?}"
+            "{axis:?}: {bad_normals} of {checked_normals} cut side quads have sideways normals: {samples:?}"
         );
-        for point in &mesh.positions {
-            if point[0] > 1. && point[0] < 5. {
-                assert!(
-                    (point[1].hypot(point[2]) - 15.).abs() < 0.3,
-                    "bad skin {point:?}"
-                );
+            for point in &mesh.positions {
+                if point[axial_axis] > 1. && point[axial_axis] < 5. {
+                    assert!(
+                        (point[transverse_axis].hypot(point[2]) - 15.).abs() < 0.3,
+                        "bad skin {point:?}"
+                    );
+                }
             }
         }
     }
@@ -1271,6 +1324,143 @@ mod tests {
         let a = run(&mut cache, &p, &stock, &[tool()]);
         let b = run(&mut RotarySimulationCache::default(), &p, &stock, &[tool()]);
         assert_eq!(a.removed_volume, b.removed_volume);
+    }
+    #[test]
+    fn operation_checkpoints_reuse_prefix_after_append_and_edit() {
+        let stock = blank(RotaryAxis::A);
+        let op = |id, angle| {
+            groove(RotaryAxis::A, angle)
+                .into_iter()
+                .map(|mut step| {
+                    if let Step::Rotary { tag, .. } = &mut step {
+                        tag.op_id = id;
+                    }
+                    step
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut cache = RotarySimulationCache::default();
+        let mut steps = op(1, 0.);
+        steps.push(Step::SpindleOff);
+        run(&mut cache, &Program { steps }, &stock, &[tool()]);
+        let mut steps = op(1, 0.);
+        steps.extend(op(2, 90.));
+        steps.push(Step::SpindleOff);
+        let mut reordered = op(1, 0.);
+        reordered.extend(op(3, 180.));
+        reordered.extend(op(2, 90.));
+        reordered.push(Step::SpindleOff);
+        for program in [
+            Program {
+                steps: steps.clone(),
+            },
+            {
+                let mut edited = steps.clone();
+                edited[5] = movement(RotaryAxis::A, -2., 3., 90., Some(100.), MoveKind::Plunge);
+                if let Step::Rotary { tag, .. } = &mut edited[5] {
+                    tag.op_id = 2;
+                }
+                Program { steps: edited }
+            },
+            Program { steps: reordered },
+        ] {
+            let mut first = None;
+            let cached = cache
+                .simulate_controlled(
+                    &program,
+                    stock.min,
+                    stock.max,
+                    &SimOptions {
+                        resolution: 0.25,
+                        tool_radius: 1.,
+                    },
+                    &[tool()],
+                    Some(("blank", &stock.field)),
+                    true,
+                    &|| false,
+                    |done, _| {
+                        first.get_or_insert(done);
+                    },
+                )
+                .unwrap();
+            assert!(
+                first.unwrap() >= 4,
+                "unchanged operation must not be reverified"
+            );
+            let fresh = run(
+                &mut RotarySimulationCache::default(),
+                &program,
+                &stock,
+                &[tool()],
+            );
+            assert_eq!(cached.collisions, fresh.collisions);
+            assert_eq!(cached.removed_volume, fresh.removed_volume);
+            assert_eq!(
+                cached.field.to_solid_mesh(stock.min[2]),
+                fresh.field.to_solid_mesh(stock.min[2])
+            );
+        }
+    }
+    #[test]
+    fn cancelled_suffix_keeps_the_last_verified_prefix() {
+        let stock = blank(RotaryAxis::A);
+        let mut first = groove(RotaryAxis::A, 0.);
+        first.push(Step::SpindleOff);
+        let mut cache = RotarySimulationCache::default();
+        run(&mut cache, &Program { steps: first }, &stock, &[tool()]);
+        let mut steps = groove(RotaryAxis::A, 0.);
+        let mut second = groove(RotaryAxis::A, 90.);
+        for step in &mut second {
+            if let Step::Rotary { tag, .. } = step {
+                tag.op_id = 9;
+            }
+        }
+        steps.extend(second);
+        steps.push(Step::SpindleOff);
+        let program = Program { steps };
+        let stop = std::cell::Cell::new(false);
+        let options = SimOptions {
+            resolution: 0.25,
+            tool_radius: 1.,
+        };
+        assert!(cache
+            .simulate_controlled(
+                &program,
+                stock.min,
+                stock.max,
+                &options,
+                &[tool()],
+                Some(("blank", &stock.field)),
+                true,
+                &|| stop.get(),
+                |_, _| stop.set(true)
+            )
+            .is_err());
+        let mut first = None;
+        let result = cache
+            .simulate_controlled(
+                &program,
+                stock.min,
+                stock.max,
+                &options,
+                &[tool()],
+                Some(("blank", &stock.field)),
+                true,
+                &|| false,
+                |done, _| {
+                    first.get_or_insert(done);
+                },
+            )
+            .unwrap();
+        assert!(first.unwrap() >= 4);
+        let fresh = run(
+            &mut RotarySimulationCache::default(),
+            &program,
+            &stock,
+            &[tool()],
+        );
+        assert_eq!(result.collisions, fresh.collisions);
+        assert_eq!(result.removed_volume, fresh.removed_volume);
     }
     #[test]
     fn short_flutes_report_noncutting_shank_contact() {

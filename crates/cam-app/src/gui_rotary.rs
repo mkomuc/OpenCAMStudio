@@ -41,6 +41,25 @@ mod index_tests {
         assert!(app.controller.document().rotary_indexes.is_empty());
     }
     #[test]
+    fn face_angles_align_normals_and_flip_to_the_other_side() {
+        for (axis, normal) in [
+            (cam_model::RotaryAxis::A, [0., 0.6, 0.8]),
+            (cam_model::RotaryAxis::B, [0.6, 0., 0.8]),
+        ] {
+            for flip in [false, true] {
+                let angle = index_angle_for_normal(normal, axis, flip).unwrap();
+                let n = axis.material_point(
+                    cam_cldata::Point3::new(normal[0], normal[1], normal[2]),
+                    cam_cldata::Point3::new(0., 0., 0.),
+                    -angle,
+                );
+                assert!(n.x.abs() < 1e-9 && n.y.abs() < 1e-9);
+                assert!((n.z - if flip { -1. } else { 1. }).abs() < 1e-9);
+            }
+        }
+        assert!(index_angle_for_normal([0.5, 0., 0.866], cam_model::RotaryAxis::A, false).is_err());
+    }
+    #[test]
     fn invalid_index_input_cannot_commit_a_previous_valid_number() {
         let (mut app, _) = App::new();
         app.rotary_action(Action::Indexed(true));
@@ -116,11 +135,27 @@ pub(super) enum Pick {
     Loops,
     Edges,
     Faces,
+    IndexFace,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum IndexMode {
+    Manual,
+    Face,
+}
+impl std::fmt::Display for IndexMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Manual => "Manual angle",
+            Self::Face => "Select face",
+        })
+    }
 }
 #[derive(Clone, Debug)]
 pub(super) enum Action {
     Indexed(bool),
     IndexAxis(cam_model::RotaryAxis),
+    IndexMode(IndexMode),
+    IndexFlip(bool),
     IndexValue(usize, String),
     Enable(bool),
     Unwrap(bool),
@@ -128,6 +163,24 @@ pub(super) enum Action {
     Pick(Pick),
     Done,
     Clear,
+}
+fn index_angle_for_normal(
+    n: [f64; 3],
+    axis: cam_model::RotaryAxis,
+    flip: bool,
+) -> Result<f64, String> {
+    let length = n.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if !length.is_finite() || length < 1e-10 {
+        return Err("Face normal is invalid".into());
+    }
+    let (along, angle) = match axis {
+        cam_model::RotaryAxis::A => (n[0], n[1].atan2(n[2]).to_degrees()),
+        cam_model::RotaryAxis::B => (n[1], (-n[0]).atan2(n[2]).to_degrees()),
+    };
+    if along.abs() / length > 1e-6 {
+        return Err("This face cannot be aligned with Z using the selected rotary axis".into());
+    }
+    Ok(if flip { angle + 180. } else { angle })
 }
 impl App {
     pub(super) fn rotary_draft_document(&self) -> cam_model::Document {
@@ -158,6 +211,9 @@ impl App {
     }
     pub(super) fn validate_rotary_index_draft(&self) -> Result<(), String> {
         if let Some(index) = &self.rotary_index_draft {
+            if self.rotary_index_mode == IndexMode::Face && index.face.is_none() {
+                return Err("Select a planar index face".into());
+            }
             if self
                 .rotary_index_values
                 .iter()
@@ -195,7 +251,7 @@ impl App {
                     .on_press(Message::Rotary(Action::Enable(true))),
             );
         }
-        let mut form = column![text("Machining Type").size(12),modes].spacing(12);
+        let mut form = column![text("Machining Type").size(12), modes].spacing(12);
         if let Some(index) = &self.rotary_index_draft {
             form = form.push(
                 row![
@@ -215,8 +271,47 @@ impl App {
                 ]
                 .spacing(8),
             );
+            form = form.push(
+                row![
+                    text("Angle mode").size(12),
+                    pick_list(
+                        [IndexMode::Manual, IndexMode::Face],
+                        Some(self.rotary_index_mode),
+                        |v| Message::Rotary(Action::IndexMode(v))
+                    )
+                    .text_size(12)
+                    .padding([7, 9])
+                    .style(inspector_picker)
+                ]
+                .spacing(8),
+            );
+            if self.rotary_index_mode == IndexMode::Face {
+                form = form.push(
+                    row![
+                        inspector_button(if index.face.is_some() {
+                            "Change face…"
+                        } else {
+                            "Select face…"
+                        })
+                        .on_press(Message::Rotary(Action::Pick(Pick::IndexFace))),
+                        text(format!("Angle: {}°", fmt_num(index.angle))).size(12),
+                        text("Flip tool engagement").size(12),
+                        checkbox(index.flip).on_toggle(|v| Message::Rotary(Action::IndexFlip(v)))
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            } else {
+                form = form.push(
+                    row![
+                        text("Index angle (degrees)").size(12),
+                        iced::widget::text_input("0", &self.rotary_index_values[0])
+                            .on_input(|v| Message::Rotary(Action::IndexValue(0, v)))
+                    ]
+                    .spacing(8),
+                );
+            }
             for (i, label) in [
-                "Index angle (degrees)",
                 "Axis centre X (mm)",
                 "Axis centre Y (mm)",
                 "Axis centre Z (mm)",
@@ -224,6 +319,7 @@ impl App {
             .into_iter()
             .enumerate()
             {
+                let i = i + 1;
                 form = form.push(
                     row![
                         text(label).size(12),
@@ -233,7 +329,7 @@ impl App {
                     .spacing(8),
                 );
             }
-            return form.push(text("CAD geometry is machined at this fixed workpiece angle. Drawing coordinates and heights use the indexed machine frame.").size(12)).into();
+            return form.push(text("Axis centre is a point on the rotary axis in setup coordinates. CAD geometry is machined at this fixed workpiece angle; drawing coordinates and heights use the indexed machine frame.").size(12)).into();
         }
         let Some(wrap) = op.rotary_wrap() else {
             return form
@@ -334,6 +430,22 @@ impl App {
                 if let Some(index) = &mut self.rotary_index_draft {
                     index.axis = axis;
                 }
+                self.recalculate_index_face();
+            }
+            Action::IndexMode(mode) => {
+                self.rotary_index_mode = mode;
+                self.rotary_pick = None;
+                if mode == IndexMode::Manual {
+                    if let Some(index) = &mut self.rotary_index_draft {
+                        index.face = None;
+                    }
+                }
+            }
+            Action::IndexFlip(flip) => {
+                if let Some(index) = &mut self.rotary_index_draft {
+                    index.flip = flip;
+                }
+                self.recalculate_index_face();
             }
             Action::IndexValue(i, value) => {
                 if i < 4 {
@@ -351,6 +463,7 @@ impl App {
             }
             Action::Enable(enabled) => {
                 self.rotary_index_draft = None;
+                self.rotary_index_mode = IndexMode::Manual;
                 let current = self
                     .operation_draft
                     .as_ref()
@@ -410,12 +523,12 @@ impl App {
             Action::Pick(pick) => {
                 self.rotary_pick = Some(pick);
                 self.cad_filter = match pick {
-                    Pick::Cylinder | Pick::Faces => CadFilter::Face,
+                    Pick::Cylinder | Pick::Faces | Pick::IndexFace => CadFilter::Face,
                     Pick::Edges => CadFilter::Edge,
                     Pick::Loops => CadFilter::Loop,
                 };
                 self.cad_filter_explicit = true;
-                self.status=if pick==Pick::Cylinder {"Select the exterior cylinder face."}else{"Select wrapped boundaries, then Done selecting. Click a selected boundary to remove it."}.into();
+                self.status=if pick==Pick::IndexFace {"Select a planar face to align with Z."} else if pick==Pick::Cylinder {"Select the exterior cylinder face."}else{"Select wrapped boundaries, then Done selecting. Click a selected boundary to remove it."}.into();
             }
             Action::Done => {
                 self.rotary_pick = None;
@@ -432,10 +545,76 @@ impl App {
             }
         }
     }
+    fn index_face_angle(&self, entity: &EntityRef) -> Result<f64, String> {
+        let geometry = crate::cad_operations::geometry_for_setup(self.controller.document())?;
+        if entity.kind != EntityKind::Face || !geometry.entity_exists(entity) {
+            return Err("Select a valid planar face".into());
+        }
+        let instance = geometry
+            .instance(entity.instance_id)
+            .ok_or("Face instance is missing")?;
+        let asset = geometry
+            .asset(entity.asset_id)
+            .ok_or("Face model is missing")?;
+        let face = asset
+            .topology
+            .faces
+            .iter()
+            .find(|f| f.id == entity.id)
+            .ok_or("Face is missing")?;
+        let cam_model::CadSurface::Plane { normal, .. } = face.surface else {
+            return Err("Select a planar face for indexing".into());
+        };
+        let n = instance.placement.transform_vector(normal);
+        let index = self
+            .rotary_index_draft
+            .as_ref()
+            .ok_or("Indexing is disabled")?;
+        index_angle_for_normal(n, index.axis, index.flip)
+    }
+
+    fn recalculate_index_face(&mut self) {
+        let Some(face) = self
+            .rotary_index_draft
+            .as_ref()
+            .and_then(|i| i.face.clone())
+        else {
+            return;
+        };
+        match self.index_face_angle(&face) {
+            Ok(angle) => {
+                if let Some(index) = &mut self.rotary_index_draft {
+                    index.angle = angle;
+                }
+                self.rotary_index_values[0] = fmt_num(angle);
+            }
+            Err(e) => {
+                if let Some(index) = &mut self.rotary_index_draft {
+                    index.face = None;
+                }
+                self.report_error(e);
+            }
+        }
+    }
     pub(super) fn rotary_cad_pick(&mut self, entity: &EntityRef) -> bool {
         let Some(pick) = self.rotary_pick else {
             return false;
         };
+        if pick == Pick::IndexFace {
+            match self.index_face_angle(entity) {
+                Ok(angle) => {
+                    if let Some(index) = &mut self.rotary_index_draft {
+                        index.face = Some(entity.clone());
+                        index.angle = angle;
+                    }
+                    self.rotary_index_values[0] = fmt_num(angle);
+                    self.rotary_pick = None;
+                    self.status = "Index face selected.".into();
+                }
+                Err(e) => self.report_error(e),
+            }
+            return true;
+        }
         let Some(mut wrap) = self
             .operation_draft
             .as_ref()

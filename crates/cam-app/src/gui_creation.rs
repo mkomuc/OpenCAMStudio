@@ -72,6 +72,7 @@ impl App {
         self.rotary_pick=None;
         self.rotary_wrap_draft=None;
         self.rotary_index_draft=None;
+        self.rotary_index_mode=rotary_view::IndexMode::Manual;
         self.seed_rotary_index_values();
         self.cutting_force_inputs
             .remove(&(self.controller.inspection_setup().id, None));

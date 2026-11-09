@@ -271,6 +271,7 @@ pub struct AppController {
     jobs: crate::jobs::JobService,
     operation_cache: cam_toolpath::OperationCache,
     toolpath_fingerprints: BTreeMap<u32, String>,
+    saved_verification: BTreeMap<u64, crate::project::StoredVerification>,
     automatic_toolpath_run: bool,
     simulation_accuracy: f32,
     operation_id_floor: u32,
@@ -584,6 +585,7 @@ impl AppController {
             jobs: Default::default(),
             operation_cache: Default::default(),
             toolpath_fingerprints: Default::default(),
+            saved_verification: Default::default(),
             automatic_toolpath_run: false,
             simulation_accuracy: 1.0,
             operation_id_floor: 0,
@@ -1367,6 +1369,7 @@ impl AppController {
         document.geometry.drawing_paths = self.open_paths.clone();
         self.operation_cache = Default::default();
         self.toolpath_fingerprints.clear();
+        self.saved_verification.clear();
         self.document = History::new(document);
         self.active_setup_id = self.setup().id;
         self.cad_selection.clear();
@@ -1391,6 +1394,7 @@ impl AppController {
         self.open_paths.clear();
         self.operation_cache = Default::default();
         self.toolpath_fingerprints.clear();
+        self.saved_verification.clear();
         self.document = History::new(Document::empty());
         self.setup_defaults = default_setup(&self.defaults);
         self.active_setup_id = 0;
@@ -1486,6 +1490,7 @@ impl AppController {
             toolpaths: crate::project::StoredToolpaths {
                 cache: self.operation_cache.clone(),
                 fingerprints: self.toolpath_fingerprints.clone(),
+                verification: self.saved_verification.clone(),
             },
             schema_version: cam_model::SCHEMA_VERSION,
             document: self.document.current().clone(),
@@ -1568,6 +1573,7 @@ impl AppController {
         };
         self.operation_cache = project.toolpaths.cache;
         self.toolpath_fingerprints = project.toolpaths.fingerprints;
+        self.saved_verification = project.toolpaths.verification;
         self.document = History::new(project.document);
         self.active_setup_id = self.document.current().active_setup().map_or(0, |s| s.id);
         self.active_origin = self.setup().origin_index;
@@ -1586,6 +1592,7 @@ impl AppController {
             self.reconcile_selection();
         }
         self.invalidate();
+        self.restore_saved_verification();
         self.mark_project_saved();
         Ok(())
     }
@@ -2733,6 +2740,7 @@ impl AppController {
         self.operation_cache = cache;
         self.outcome = Some(result);
         self.record_toolpath_fingerprints();
+        self.remember_full_verification(None);
         self.nc = None;
         self.outcome.as_ref().unwrap()
     }

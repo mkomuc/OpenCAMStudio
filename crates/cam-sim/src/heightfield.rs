@@ -66,7 +66,7 @@ pub struct SurfaceMesh {
     pub indices: Vec<u32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SurfaceLocation {
     pub step_index: usize,
     pub fraction: f64,

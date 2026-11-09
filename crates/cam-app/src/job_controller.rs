@@ -30,7 +30,8 @@ impl AppController {
         // Keep the complete validated setup graph in worker snapshots. Exclusion and
         // disabled datums are run filters applied by the planner; pruning source ops
         // here would leave pattern membership dangling.
-        let document = self.document().clone();
+        let mut document = self.document().clone();
+        document.active_setup_id = self.active_setup_id;
         let (min, max) = self.stock_box();
         let frame_error = self.validate_setup_frame(self.setup()).err().or_else(|| {
             if self.setup().stock != Stock::PreviousSetup {
@@ -64,6 +65,7 @@ impl AppController {
             preview_program: None,
             preview_resolution: None,
             toolpath_preview: false,
+            display_only: false,
             removal_analysis: false,
             stock_force_surfaces: false,
             simulation_accuracy: self.simulation_accuracy,
@@ -73,7 +75,7 @@ impl AppController {
     pub fn start_run(&mut self) -> JobStamp {
         self.automatic_toolpath_run = false;
         let inputs = self.job_inputs();
-        self.submit_run(inputs)
+        self.submit_run(inputs, None)
     }
 
     /// Apply changed operation configuration without reviewing unchanged later
@@ -81,7 +83,7 @@ impl AppController {
     pub fn start_automatic_run(&mut self) -> JobStamp {
         let inputs = self.job_inputs();
         self.automatic_toolpath_run = true;
-        self.submit_run(inputs)
+        self.submit_run(inputs, None)
     }
 
     /// Run the active setup or one of its included operations. Filtering the
@@ -145,12 +147,13 @@ impl AppController {
                     .into(),
             );
         }
-        if recompute {
-            self.operation_cache.invalidate_operations(&ids);
-            self.toolpath_fingerprints.retain(|id, _| !ids.contains(id));
-        }
+        let cache = recompute.then(|| {
+            let mut cache = self.operation_cache.clone();
+            cache.invalidate_operations(&ids);
+            cache
+        });
         self.automatic_toolpath_run = false;
-        Ok(self.submit_run(inputs))
+        Ok(self.submit_run(inputs, cache))
     }
 
     /// Run exactly one pattern, retaining every included source at each instance.
@@ -195,15 +198,16 @@ impl AppController {
         if ids.is_empty() {
             return Err("No included source operations in this pattern.".into());
         }
-        if recompute {
-            self.operation_cache.invalidate_operations(&ids);
-            self.toolpath_fingerprints.retain(|id, _| !ids.contains(id));
-        }
+        let cache = recompute.then(|| {
+            let mut cache = self.operation_cache.clone();
+            cache.invalidate_operations(&ids);
+            cache
+        });
         self.automatic_toolpath_run = false;
-        Ok(self.submit_run(inputs))
+        Ok(self.submit_run(inputs, cache))
     }
 
-    fn submit_run(&mut self, inputs: JobInputs) -> JobStamp {
+    fn verification_fingerprint(&self, inputs: &JobInputs) -> String {
         // Source blobs are represented by immutable asset revisions/content hashes,
         // not serialized again on every submit. Revisions + exact stamp equality
         // provide the publication guard; this hash is provenance, not cryptography.
@@ -214,7 +218,7 @@ impl AppController {
             .map(|a| (a.id, a.revision, &a.source_fingerprint))
             .collect();
         let bytes = serde_json::to_vec(&(
-            &inputs.document.setups,
+            (&inputs.document.setups, inputs.document.active_setup_id, &inputs.document.rotary_indexes, env!("CARGO_PKG_VERSION"), 1u32),
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,
             &geometry.bindings,
@@ -232,14 +236,18 @@ impl AppController {
             self.post_kind,
         ))
         .expect("job inputs serialize");
-        let fingerprint = cam_model::GeometryAsset::fingerprint_source(&bytes);
+        cam_model::GeometryAsset::fingerprint_source(&bytes)
+    }
+
+    fn submit_run(&mut self, inputs: JobInputs, cache: Option<cam_toolpath::OperationCache>) -> JobStamp {
+        let fingerprint = self.verification_fingerprint(&inputs);
         self.outcome = None;
         self.nc = None;
         self.jobs.start(
             self.document_epoch,
             fingerprint,
             inputs,
-            self.operation_cache.clone(),
+            cache.unwrap_or_else(|| self.operation_cache.clone()),
         )
     }
     #[cfg(test)]
@@ -251,11 +259,71 @@ impl AppController {
         let Some(result) = self.jobs.poll(self.document_epoch) else {
             return false;
         };
+        let fingerprint = result.stamp.input_fingerprint.clone();
         self.operation_cache = result.cache;
         self.outcome = Some(result.outcome);
         self.record_toolpath_fingerprints();
+        self.remember_full_verification(Some(&fingerprint));
         self.nc = None;
         true
+    }
+    pub(super) fn remember_full_verification(&mut self, submitted: Option<&str>) {
+        let inputs = self.job_inputs();
+        let fingerprint = self.verification_fingerprint(&inputs);
+        if submitted.is_some_and(|saved| saved != fingerprint) { return; }
+        let Some(outcome) = self.outcome.as_ref() else { return; };
+        if outcome.completion == JobCompletion::Failed {
+            self.saved_verification.remove(&self.active_setup_id);
+            return;
+        }
+        if outcome.completion != JobCompletion::Complete { return; }
+        self.saved_verification.insert(self.active_setup_id, crate::project::StoredVerification {
+            fingerprint,
+            program: outcome.program.clone(),
+            diagnostics: outcome.diagnostics.clone(),
+            collisions: outcome.collisions.clone(),
+            initial_stock: outcome.initial_stock.clone(),
+            stock_vertices: outcome.stock_vertices.clone(),
+            stock_indices: outcome.stock_indices.clone(),
+            stock_machined: outcome.stock_machined.clone(),
+            stock_operations: outcome.stock_operations.clone(),
+            stock_cut_sources: outcome.stock_cut_sources.clone(),
+        });
+    }
+
+    pub(super) fn restore_saved_verification(&mut self) -> bool {
+        if self.setups().is_empty() { return false; }
+        let inputs = self.job_inputs();
+        let fingerprint = self.verification_fingerprint(&inputs);
+        let Some(saved) = self.saved_verification.get(&self.active_setup_id) else { return false; };
+        let vertices_valid = |vertices: &[cam_render::MeshVertex], indices: &[u32]| {
+            indices.len() % 3 == 0 && indices.iter().all(|&i| (i as usize) < vertices.len())
+                && vertices.iter().all(|v| v.position.iter().chain(&v.normal).chain(&v.color).all(|n| n.is_finite()))
+        };
+        if saved.fingerprint != fingerprint || saved.program.validate().is_err()
+            || !vertices_valid(&saved.stock_vertices, &saved.stock_indices)
+            || saved.initial_stock.as_ref().is_some_and(|(v, i)| !vertices_valid(v, i))
+            || saved.stock_machined.len() != saved.stock_vertices.len()
+            || saved.stock_operations.len() != saved.stock_vertices.len()
+            || (!saved.stock_cut_sources.is_empty() && saved.stock_cut_sources.len() != saved.stock_vertices.len())
+            || saved.collisions.iter().any(|c| !c.fraction.is_finite() || c.at.iter().any(|v| !v.is_finite()))
+        { return false; }
+        let scene = inputs.program_scene(&saved.program, &CancelToken::new());
+        self.outcome = Some(RunOutcome {
+            completion: JobCompletion::Complete,
+            stamp: Some(JobStamp { request_id: 0, revision: self.document_epoch, input_fingerprint: fingerprint }),
+            program: saved.program.clone(), diagnostics: saved.diagnostics.clone(), scene,
+            initial_stock: saved.initial_stock.clone(), stock_vertices: saved.stock_vertices.clone(),
+            stock_machined: saved.stock_machined.clone(), stock_operations: saved.stock_operations.clone(),
+            stock_cut_sources: saved.stock_cut_sources.clone(), stock_indices: saved.stock_indices.clone(),
+            collisions: saved.collisions.clone(), ..Default::default()
+        });
+        true
+    }
+
+    #[cfg(feature = "gui")]
+    pub(crate) fn run_preview(&self) -> Option<&RunOutcome> {
+        self.jobs.preview()
     }
     pub fn run_pending(&self) -> bool {
         self.jobs.pending()
@@ -503,6 +571,100 @@ mod tests {
         }));
         (receiver, release)
     }
+    #[test]
+    fn completed_full_setup_verification_is_saved_restored_and_invalidated() {
+        let mut app = app();
+        let original = app.run(&CancelToken::new()).clone();
+        assert_eq!(original.completion, JobCompletion::Complete);
+        let path = std::env::temp_dir().join(format!("saved-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        let restored = reopened.outcome().expect("verification restored on open");
+        assert_eq!(restored.program, original.program);
+        assert_eq!(restored.collisions, original.collisions);
+        assert_eq!(restored.stock_indices, original.stock_indices);
+        assert_eq!(restored.stock_vertices, original.stock_vertices);
+        assert!(!reopened.run_pending());
+        assert_eq!(reopened.export_nc().is_ok(), app.export_nc().is_ok());
+        reopened.edit_operation(0, |op| {
+            if let Operation::Drill(d) = op { d.depth = 1.; }
+        });
+        assert!(!reopened.restore_saved_verification());
+        assert!(reopened.outcome().is_none());
+        let mut different_machine = AppController::new(crate::default_machine());
+        different_machine.edit_machine(|m| m.envelope.max.z += 1.);
+        different_machine.open_project(&path).unwrap();
+        assert!(different_machine.outcome().is_none());
+        let mut different_index = AppController::new(crate::default_machine());
+        different_index.open_project(&path).unwrap();
+        different_index.edit_document(|doc| { doc.rotary_indexes.insert(0, cam_model::RotaryIndex { angle: 30., ..Default::default() }); });
+        assert!(!different_index.restore_saved_verification());
+        let mut different_accuracy = AppController::new(crate::default_machine());
+        different_accuracy.set_simulation_accuracy(0.5);
+        different_accuracy.open_project(&path).unwrap();
+        assert!(different_accuracy.outcome().is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restored_collision_still_blocks_export() {
+        let mut app = app();
+        app.run(&CancelToken::new());
+        app.outcome.as_mut().unwrap().collisions.push(cam_sim::Collision {
+            kind: cam_sim::CollisionKind::RapidThroughStock,
+            at: [1., 2., 3.], message: "saved collision".into(), op_id: Some(0),
+            pattern_id: None, instance_index: None, step_index: Some(1), fraction: 0.5,
+        });
+        app.remember_full_verification(None);
+        let path = std::env::temp_dir().join(format!("collision-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        assert_eq!(reopened.outcome().unwrap().collisions[0].message, "saved collision");
+        assert!(matches!(reopened.export_nc(), Err(ExportError::RapidThroughStock(_))));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_is_restored_per_setup_and_rejects_invalid_saved_mesh() {
+        let mut app = app();
+        let first = app.active_setup_id();
+        let second = app.add_setup();
+        app.activate_setup(first).unwrap();
+        let first_program = app.run(&CancelToken::new()).program.clone();
+        app.activate_setup(second).unwrap();
+        let second_program = app.run(&CancelToken::new()).program.clone();
+        let path = std::env::temp_dir().join(format!("setup-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, first_program);
+        reopened.activate_setup(second).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, second_program);
+        reopened.activate_setup(first).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, first_program);
+        reopened.saved_verification.get_mut(&first).unwrap().stock_indices.push(u32::MAX);
+        reopened.cancel_run();
+        assert!(!reopened.restore_saved_verification());
+        assert!(reopened.outcome().is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scoped_verification_does_not_replace_full_setup_result() {
+        let mut app = app();
+        let full = app.run(&CancelToken::new()).program.clone();
+        app.start_toolpath_run(Some(0), true).unwrap();
+        drain(&mut app);
+        let path = std::env::temp_dir().join(format!("scoped-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, full);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn toolpaths_and_status_survive_reopen_without_recalculation() {
         let mut app = app();
@@ -824,6 +986,23 @@ mod tests {
             "late cancelled result cannot publish"
         );
         assert!(!app.run_pending());
+    }
+    #[test]
+    fn cancelling_forced_recompute_preserves_existing_paths_and_statuses() {
+        let mut app = app();
+        app.run(&CancelToken::new());
+        let (entered, release) = gate(&mut app);
+        app.start_toolpath_run(Some(1), true).unwrap();
+        let token = entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(app.toolpath_is_up_to_date(0));
+        assert!(app.toolpath_is_up_to_date(1));
+        app.cancel_run();
+        assert!(token.is_cancelled());
+        release.send(()).unwrap();
+        drain(&mut app);
+        app.run(&CancelToken::new());
+        assert_eq!(app.cache_stats().reused, 2);
+        assert_eq!(app.cache_stats().computed, 0);
     }
     #[test]
     fn replacement_job_is_latest_and_only_it_can_publish() {

@@ -12,6 +12,9 @@ pub struct RotaryIndex {
     pub center: [f64; 3],
     pub angle: f64,
     pub tolerance: f64,
+    /// Optional planar face used to choose the index angle.
+    pub face: Option<EntityRef>,
+    pub flip: bool,
 }
 impl Default for RotaryIndex {
     fn default() -> Self {
@@ -20,6 +23,8 @@ impl Default for RotaryIndex {
             center: [0.; 3],
             angle: 0.,
             tolerance: 0.01,
+            face: None,
+            flip: false,
         }
     }
 }

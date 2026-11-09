@@ -2152,6 +2152,7 @@ struct App {
     rotary_pick: Option<rotary_view::Pick>,
     rotary_wrap_draft: Option<cam_model::RotaryWrap>,
     rotary_index_draft: Option<cam_model::RotaryIndex>,
+    rotary_index_mode: rotary_view::IndexMode,
     rotary_index_values: [String; 4],
     creation_edited_fields: BTreeSet<Field>,
     thread_parameters: thread_parameters::ThreadParameters,
@@ -3379,8 +3380,7 @@ impl App {
     fn begin_operation_draft(&mut self, id: u32) {
         self.rotary_pick=None;
         self.rotary_wrap_draft=None;
-        self.rotary_index_draft=self.controller.document().rotary_indexes.get(&id).cloned();
-        self.seed_rotary_index_values();
+        self.seed_rotary_index_draft(id);
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
         self.profile_contour_selection = 0;
@@ -3418,6 +3418,12 @@ impl App {
         self.operation_tools.clear();
         self.fields.clear();
         self.refresh_fields();
+    }
+
+    fn seed_rotary_index_draft(&mut self, id: u32) {
+        self.rotary_index_draft = self.controller.document().rotary_indexes.get(&id).cloned();
+        self.rotary_index_mode = if self.rotary_index_draft.as_ref().is_some_and(|i| i.face.is_some()) { rotary_view::IndexMode::Face } else { rotary_view::IndexMode::Manual };
+        self.seed_rotary_index_values();
     }
 
     fn stage_operation_tool(&mut self, mut tool: cam_model::Tool) -> u32 {
@@ -3766,6 +3772,7 @@ impl App {
             rotary_pick: None,
             rotary_wrap_draft: None,
             rotary_index_draft: None,
+            rotary_index_mode: rotary_view::IndexMode::Manual,
             rotary_index_values: Default::default(),
             creation_edited_fields: BTreeSet::new(),
             thread_parameters: Default::default(),
@@ -4080,8 +4087,14 @@ impl App {
                 | Message::OperationProjectToolPicked(_)
         );
         let previous_status = self.status.clone();
+        let previous_result = self.controller.outcome().and_then(|o| o.stamp.clone());
         let context = self.output_context();
         let task = self.update_message(message);
+        if self.controller.outcome().and_then(|o| o.stamp.as_ref())
+            .is_some_and(|stamp| stamp.request_id == 0 && Some(stamp) != previous_result.as_ref())
+        {
+            self.record_status_messages();
+        }
         if sync_thread {
             self.sync_thread_standard();
         }
@@ -4288,11 +4301,11 @@ impl App {
                 "Confirm or Cancel geometry selection before changing the editing context.".into();
             return iced::Task::none();
         }
-        let operation_settings_dirty =
-            matches!(self.controller.selection(), Selection::Operation(_))
-                && (self.inspector_dirty()
-                    || self.any_field_invalid()
-                    || !self.operation_height_overrides_valid());
+        let operation_settings_dirty = self.inspector_active
+            && matches!(self.controller.selection(), Selection::Operation(_))
+            && (self.inspector_dirty()
+                || self.any_field_invalid()
+                || !self.operation_height_overrides_valid());
         if (self.setup_draft_dirty() || operation_settings_dirty)
             && matches!(
                 &message,
@@ -5815,6 +5828,7 @@ impl App {
                 self.controller.select(selection);
                 self.inspector_active = matches!(selection, Selection::Operation(_));
                 if let Selection::Operation(id) = selection {
+                    self.inspector_enabled = true;
                     self.begin_operation_draft(id);
                 } else {
                     self.operation_draft = None;
@@ -5862,6 +5876,7 @@ impl App {
                     Selection::Setup
                 };
                 self.controller.select(sel);
+                self.inspector_active = false;
                 self.end_setup_draft();
                 self.operation_draft = None;
                 self.operation_position_markers = [None; 2];
@@ -8731,6 +8746,7 @@ impl App {
             }
             Message::RenumberConfirmed(false) => {}
             Message::OpMenu(id) => {
+                self.inspector_active = false;
                 self.pending_simulation = None;
                 self.pending_processing_time = None;
                 // Context-clicking a member of the current highlight set keeps the
@@ -10482,6 +10498,12 @@ impl App {
         self.focus_ops.clear();
         self.end_setup_draft();
         self.restore_project_view();
+        self.operation_draft = None;
+        if let Selection::Operation(id) = self.controller.selection() {
+            self.seed_rotary_index_draft(id);
+        } else {
+            self.rotary_index_draft = None;
+        }
         // Establish a baseline for legacy files too, using their default opening view.
         self.controller
             .set_project_view(Some(self.capture_project_view()));
@@ -10490,7 +10512,7 @@ impl App {
         // Opening a stale/legacy project must not initiate a recalculation.
         let statuses = self.controller.toolpath_statuses();
         let document = self.controller.document();
-        if document.active_setup().is_some_and(|setup| {
+        if self.controller.outcome().is_none() && document.active_setup().is_some_and(|setup| {
             setup
                 .operations
                 .iter()
@@ -10498,6 +10520,8 @@ impl App {
                 .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
         }) {
             self.rerun();
+        } else if self.controller.outcome().is_some() {
+            self.record_status_messages();
         }
         self.status = match report.summary() {
             Some(summary) => format!("Opened {}. Tools: {summary}.", path.display()),
@@ -14090,6 +14114,12 @@ impl Viewport {
             None
         } else {
             preview
+                .or_else(|| controller.run_preview())
+                .or_else(|| controller.outcome().filter(|verified| {
+                    !focus_ops.is_empty() && focus_ops.iter().all(|id| {
+                        verified.scene.strips.iter().any(|strip| strip.op == Some(*id))
+                    })
+                }))
                 .or(operation_preview)
                 .or_else(|| controller.outcome())
         };
@@ -14318,7 +14348,7 @@ impl Viewport {
         } else if focus_ops.is_empty() || editor_geometry.is_some() {
             None
         } else {
-            operation_preview.or_else(|| {
+            operation_preview.filter(|result| !result.stock_indices.is_empty()).or_else(|| {
                 let operations = &controller.inspection_setup().operations;
                 let through = operations
                     .iter()
@@ -14332,7 +14362,7 @@ impl Viewport {
                     })
                     .map(Operation::id)
                     .collect();
-                outcome.filter(|result| {
+                controller.outcome().filter(|result| {
                     let actual: BTreeSet<_> = result
                         .program
                         .steps()
@@ -17741,5 +17771,36 @@ mod ribbon_tests {
             assert!(t <= prev || prev == 0, "tightness rose as width grew");
             prev = t;
         }
+    }
+}
+
+
+#[cfg(test)]
+mod indexed_project_restore_tests {
+    use super::*;
+
+    #[test]
+    fn restored_indexed_operation_is_clean_and_can_simulate() {
+        let path = std::env::temp_dir().join(format!("indexed-restore-{}.ocam", std::process::id()));
+        let (mut app, _) = App::new();
+        app.controller.open_dxf(SAMPLE_DXF, "profiles.dxf").unwrap();
+        app.controller.new_operation(OpKind::Pocket);
+        let id = app.controller.inspection_setup().operations[0].id();
+        let index = cam_model::RotaryIndex { angle: -90.0, ..Default::default() };
+        app.controller.set_operation_rotary_index(id, Some(index.clone())).unwrap();
+        app.controller.select(Selection::Operation(id));
+        app.controller.set_project_view(Some(app.capture_project_view()));
+        app.controller.save_project(&path).unwrap();
+        app.open_project(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(app.rotary_index_draft.as_ref(), Some(&index));
+        assert!(!app.inspector_dirty());
+        let _ = app.toolpath_command(TreeNode::Operation(id), ToolpathAction::Simulate);
+        assert!(!app.status.contains("Apply or cancel inspector changes"));
+        assert_eq!(app.rotary_index_draft.as_ref(), Some(&index));
+        app.rotary_index_draft.as_mut().unwrap().angle = 45.0;
+        assert!(app.inspector_dirty());
+        let _ = app.toolpath_command(TreeNode::Operation(id), ToolpathAction::Simulate);
+        assert!(app.status.contains("Apply or cancel inspector changes"));
     }
 }
