@@ -2613,8 +2613,15 @@ mod tests {
                             result.diagnostics
                         );
                         assert_eq!(doc, original, "planning must preserve the selected entry");
-                        assert_eq!(progress, vec![0, 1]);
                         let variants = if indices.len() > 1 { 4 } else { 2 };
+                        let expected_progress: &[u32] = if run > 0 {
+                            &[]
+                        } else if variants == 4 {
+                            &[0, 0, 1, 1]
+                        } else {
+                            &[0, 1]
+                        };
+                        assert_eq!(progress, expected_progress);
                         assert_eq!(
                             (cache.stats.computed, cache.stats.reused),
                             if run == 0 {
