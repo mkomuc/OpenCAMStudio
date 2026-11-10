@@ -990,13 +990,17 @@ impl App {
             viewport.cad_filter_explicit=true;
             viewport.cad_silhouette=false;
             if let Some(pick) = self.rotary_pick {
+                if matches!(pick, rotary_view::Pick::IndexFace | rotary_view::Pick::IndexLoop | rotary_view::Pick::IndexEdge) {
+                    // Index references may lie in any plane, not just setup XY.
+                    viewport.cad_operation_kind = None;
+                }
                 // A pending drawing operation otherwise intercepts the click as a
                 // planar pick before the CAD face can be hit-tested.
                 viewport.picking = false;
                 viewport.cad_filter = match pick {
                     rotary_view::Pick::Cylinder | rotary_view::Pick::Faces | rotary_view::Pick::IndexFace => EntityKind::Face,
-                    rotary_view::Pick::Edges => EntityKind::Edge,
-                    rotary_view::Pick::Loops => EntityKind::Loop,
+                    rotary_view::Pick::Edges | rotary_view::Pick::IndexEdge => EntityKind::Edge,
+                    rotary_view::Pick::Loops | rotary_view::Pick::IndexLoop => EntityKind::Loop,
                 };
             }
         }

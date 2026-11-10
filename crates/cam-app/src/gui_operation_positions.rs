@@ -81,11 +81,8 @@ impl App {
                         .width(100)
                         .height(32)
                         .style(move |theme, status| {
-                            let mut style = inspector_secondary(theme, status);
-                            if picking {
-                                style.border.color = palette::ACCENT_BLUE;
-                                style.background = Some(Background::Color(Color::from_rgb(0.19, 0.29, 0.40)));
-                            } else if point.is_some() {
+                            let mut style = inspector_pick_style(theme, status, picking);
+                            if point.is_some() && !picking {
                                 style.border.color = INSPECTOR_MUTED;
                             }
                             style

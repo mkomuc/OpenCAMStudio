@@ -297,7 +297,7 @@ impl App {
                 section = section.push(
                     row![
                         help_wrap(
-                            text("From").size(12).width(50),
+                            text("From").size(12).width(70),
                             illustrated_help::height_help(plane),
                             self.tooltips
                         ),
@@ -320,7 +320,7 @@ impl App {
                     section = section.push(
                         row![
                             help_wrap(
-                                text("Offset").size(12).width(50),
+                                text("Offset (mm)").size(12).width(70),
                                 illustrated_help::height_help(plane),
                                 self.tooltips
                             ),
@@ -337,7 +337,6 @@ impl App {
                                     }
                                     style
                                 }),
-                            text("mm").size(11)
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
@@ -380,11 +379,11 @@ impl App {
                     if needs_geometry {
                         section = section.push(
                             row![
-                                inspector_button(if self.height_reference_pick == Some(plane) {
+                                inspector_pick_button(if self.height_reference_pick == Some(plane) {
                                     "Done picking"
                                 } else {
                                     "Pick reference geometry"
-                                })
+                                }, self.height_reference_pick == Some(plane))
                                 .on_press(Message::HeightPickToggle(plane)),
                                 inspector_button("Clear")
                                     .on_press(Message::HeightSelectionClear(plane))

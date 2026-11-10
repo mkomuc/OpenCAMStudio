@@ -632,9 +632,7 @@ impl App {
             .align_y(Alignment::Center),
             row![
                 text("Name").size(12).width(90),
-                text_input("Entry name", &entry.name)
-                    .size(12)
-                    .padding([7, 8])
+                inspector_input("Entry name", &entry.name)
                     .on_input(|v| Message::ProfileEntry(EntryMessage::Name(v)))
                     .width(Length::Fill)
             ]
@@ -647,11 +645,11 @@ impl App {
                 })
                 .size(12)
                 .width(90),
-                inspector_button(if editor.picking {
+                inspector_pick_button(if editor.picking {
                     "Selecting…"
                 } else {
                     "Select"
-                })
+                }, editor.picking)
                 .on_press(Message::ProfileEntry(EntryMessage::Pick)),
                 inspector_button("Clear")
                     .on_press(Message::ProfileEntry(EntryMessage::ClearSource))
@@ -722,9 +720,7 @@ impl App {
                 body = body.push(
                     row![
                         text("Tolerance (mm)").size(12).width(90),
-                        text_input("0.010", &editor.tolerance)
-                            .size(12)
-                            .padding([7, 8])
+                        inspector_input("0.010", &editor.tolerance)
                             .on_input(|v| Message::ProfileEntry(EntryMessage::Tolerance(v)))
                             .width(Length::Fill)
                     ]

@@ -348,6 +348,52 @@ thread_local! {
     static TOPOLOGY_FINGERPRINTS: std::cell::RefCell<Vec<CachedTopologyFingerprint>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Direction used to index a planar face, closed planar CAD loop, or straight edge.
+/// The input state is expressed in setup coordinates.
+pub fn index_selection_direction(state: &GeometryState, reference: &EntityRef) -> Result<[f64; 3], String> {
+    let view = View::for_path(state, std::slice::from_ref(reference))?;
+    let dot = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| a[i] * b[i]).sum::<f64>();
+    match reference.kind {
+        EntityKind::Face => {
+            let face = view.asset.topology.faces.iter().find(|f| f.id == reference.id).ok_or("Face is missing")?;
+            match face.surface {
+                CadSurface::Plane { normal, .. } => Ok(view.instance.placement.transform_vector(normal)),
+                _ => Err("Select a planar face for indexing".into()),
+            }
+        }
+        EntityKind::Edge => {
+            let edge = view.edge(reference.id)?;
+            match edge.curve {
+                CadCurve::Line { start, end } => Ok(view.instance.placement.transform_vector(std::array::from_fn(|i| end[i] - start[i]))),
+                _ => Err("Select a straight edge to define the Z axis".into()),
+            }
+        }
+        EntityKind::Loop => {
+            let wire = view.asset.topology.loops.iter().find(|w| w.id == reference.id).ok_or("Chain is missing")?;
+            if wire.edge_uses.is_empty() { return Err("Select a closed planar chain".into()); }
+            let mut points: Vec<[f64; 3]> = Vec::new();
+            let mut support = Vec::new();
+            for usage in &wire.edge_uses {
+                let edge = view.edge(usage.edge_id)?;
+                let segment = view.curve_points(edge, usage.reversed, MACHINING_CHORD_TOLERANCE)?;
+                if points.last().is_some_and(|p| distance(*p, segment[0]) > T) { return Err("Chain is not connected".into()); }
+                support.extend(view.curve_support_points(edge)?);
+                points.extend(segment);
+            }
+            if distance(points[0], *points.last().unwrap()) > T { return Err("Select a closed chain".into()); }
+            let origin = points[0];
+            let a = points.iter().map(|p| std::array::from_fn::<_, 3, _>(|i| p[i] - origin[i])).max_by(|a,b| dot(*a,*a).total_cmp(&dot(*b,*b))).unwrap();
+            let n = points.iter().map(|p| cross(a, std::array::from_fn(|i| p[i]-origin[i]))).max_by(|a,b| dot(*a,*a).total_cmp(&dot(*b,*b))).unwrap();
+            let length = dot(n,n).sqrt();
+            if length < 1e-10 { return Err("Chain does not define a plane".into()); }
+            let n = n.map(|v| v / length);
+            if support.iter().any(|p| dot(std::array::from_fn(|i| p[i]-origin[i]), n).abs() > T) { return Err("Select a planar chain".into()); }
+            Ok(n)
+        }
+        _ => Err("Select a planar face, closed chain, or straight edge".into()),
+    }
+}
+
 struct View<'a> {
     asset: &'a GeometryAsset,
     instance: &'a GeometryInstance,

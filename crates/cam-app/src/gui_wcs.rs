@@ -240,9 +240,8 @@ impl App {
                             .size(12)
                             .color(INSPECTOR_TEXT)
                             .width(80),
-                        inspector_button(label)
+                        inspector_pick_button(label, picking)
                             .width(Length::Fill)
-                            .style(move |theme, status| inspector_tab(theme, status, picking))
                             .on_press(Message::SetupAxisPick(axis)),
                     ]
                     .spacing(8)
@@ -349,9 +348,8 @@ impl App {
                     .size(12)
                     .color(INSPECTOR_TEXT)
                     .width(80),
-                    inspector_button(label)
+                    inspector_pick_button(label, picking)
                         .width(Length::Fill)
-                        .style(move |theme, status| inspector_tab(theme, status, picking))
                         .on_press(if origin == SetupOriginMode::TwoPoints {
                             Message::ToggleSetOrigin2pt
                         } else {

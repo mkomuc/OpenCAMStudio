@@ -29,11 +29,11 @@ impl App {
         if op.tabs.manual {
             header = header
                 .push(
-                    inspector_button(if self.profile_tab_picking {
+                    inspector_pick_button(if self.profile_tab_picking {
                         "Done"
                     } else {
                         "Select"
-                    })
+                    }, self.profile_tab_picking)
                     .on_press(Message::ProfileTabPickToggle),
                 )
                 .push(inspector_button("Clear").on_press_maybe(
@@ -714,6 +714,39 @@ mod tests {
         // Hidden model instances do not draw an orientation marker.
         let hidden = cam_render::CadScene::from_geometry(app.controller.geometry_state(), &BTreeSet::from([1]));
         assert!(app.index_face_overlay(&hidden).strips.is_empty());
+    }
+
+    #[test]
+    fn indexed_selection_accepts_chain_and_straight_edge() {
+        let (mut app, _) = selected_cad_profile();
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        app.rotary_action(rotary_view::Action::IndexMode(rotary_view::IndexMode::Face));
+        let geometry = app.controller.setup_geometry_state().unwrap();
+        let reference = |kind, id| EntityRef {
+            asset_id: 1, revision: 1, instance_id: 1, body_id: 1, kind, id,
+        };
+        let chain = reference(EntityKind::Loop, 202);
+        let direction = cam_geometry3d::index_selection_direction(&geometry, &chain).unwrap();
+        assert!(direction[1].abs() > 0.99);
+        app.rotary_action(rotary_view::Action::Pick(rotary_view::Pick::IndexLoop));
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Loop);
+        assert!(app.rotary_cad_pick(&chain));
+        assert_eq!(app.rotary_index_draft.as_ref().unwrap().face.as_ref(), Some(&chain));
+        assert!((app.rotary_index_draft.as_ref().unwrap().angle.abs() - 90.).abs() < 1e-6);
+        assert!(!app.index_face_overlay(&app.machining_viewport().cad_scene).strips.is_empty());
+
+        let edge_id = geometry.asset(1).unwrap().topology.edges.iter().find(|edge| {
+            matches!(edge.curve, cam_model::CadCurve::Line { start, end }
+                if (end[2] - start[2]).abs() > 1. && (end[0] - start[0]).abs() < 1e-6 && (end[1] - start[1]).abs() < 1e-6)
+        }).unwrap().id;
+        let edge = reference(EntityKind::Edge, edge_id);
+        app.rotary_action(rotary_view::Action::Pick(rotary_view::Pick::IndexEdge));
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Edge);
+        assert!(app.rotary_cad_pick(&edge));
+        assert_eq!(app.rotary_index_draft.as_ref().unwrap().face.as_ref(), Some(&edge));
+        let angle = app.rotary_index_draft.as_ref().unwrap().angle;
+        app.rotary_action(rotary_view::Action::IndexFlip(true));
+        assert!((app.rotary_index_draft.as_ref().unwrap().angle - angle - 180.).abs() < 1e-6);
     }
 
     #[test]

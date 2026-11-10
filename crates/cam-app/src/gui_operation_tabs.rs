@@ -489,7 +489,7 @@ impl App {
                     );
                     list = list.push(
                         row![
-                            inspector_button("Select…")
+                            inspector_pick_button("Select…", false)
                                 .on_press(Message::OperationGeometry(GeometryMessage::SelectStock)),
                             inspector_button("Use setup stock")
                                 .on_press(Message::OperationGeometry(GeometryMessage::ResetStock)),

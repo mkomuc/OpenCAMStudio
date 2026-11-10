@@ -21,3 +21,8 @@ Crate dependency boundaries and optional GUI dependencies are enforced by
 [`scripts/check_architecture.py`](scripts/check_architecture.py) in CI. Behavioral
 contracts are checked by the Rust tests; crate responsibilities and APIs live
 with their source rather than in a separate architecture specification.
+
+GUI combos with icons use `gui_icon_picker.rs` through `icon_picker::picker`.
+This shared component defines the default arrow, trigger, popup styling and
+keyboard navigation for height references, machining modes and stock types.
+Use it for new icon combos instead of building separate dropdown triggers.

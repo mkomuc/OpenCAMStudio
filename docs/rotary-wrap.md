@@ -82,7 +82,11 @@ processing-time estimates omit those constraints.
 ## Indexed 3+1 machining
 
 On an operation's **Multi-axis** tab choose **3+1 Indexed**, select A (X) or B (Y),
-and enter the rotary centre and absolute angle in degrees. This mode is available
+and enter the rotary centre and absolute angle in degrees. Alternatively, choose **Selection**
+for the angle and pick a planar face, a closed planar chain, or a straight edge.
+The face or chain is aligned perpendicular to Z; the edge is aligned with Z.
+Use Flip to choose the opposite direction. The selected direction must be reachable
+with the chosen rotary axis. This mode is available
 for every ordinary machining operation. It locks the angle during cutting; Wrap
 continues to vary the angle along developed contours. Use computed compensation.
 CAD selections are resolved after rotating their placements to the indexed machine

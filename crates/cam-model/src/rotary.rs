@@ -12,7 +12,7 @@ pub struct RotaryIndex {
     pub center: [f64; 3],
     pub angle: f64,
     pub tolerance: f64,
-    /// Optional planar face used to choose the index angle.
+    /// Optional planar face, closed loop, or straight edge used to choose the index angle.
     pub face: Option<EntityRef>,
     pub flip: bool,
 }

@@ -43,6 +43,8 @@ use inspector_style::*;
 mod height_editor;
 #[path = "gui_height_planes.rs"]
 mod height_planes;
+#[path = "gui_icon_picker.rs"]
+mod icon_picker;
 #[path = "gui_height_reference.rs"]
 mod height_reference;
 #[path = "gui_inspector.rs"]
@@ -2191,7 +2193,6 @@ struct App {
     /// Tools selected by an operation draft but not yet published to the setup.
     operation_tools: Vec<cam_model::Tool>,
     setup_tab: SetupEditorTab,
-    stock_kind_open: bool,
     /// An armed edge-reference field. Viewport picks are routed here until cleared.
     setup_axis_pick: Option<usize>,
     setup_orientation: Option<SetupOrientation>,
@@ -2746,7 +2747,6 @@ enum Message {
     SetupFixtureClearanceChanged(usize, String),
     SetupModelToggled(u64, bool),
     SetupStockKindChanged(StockEditorKind),
-    SetupStockKindToggle,
     SetupStockNumberChanged(usize, String),
     SetupStockSolidChanged(StockSolidChoice),
     SetupStockAxisClear,
@@ -3252,7 +3252,6 @@ impl App {
         self.inspector_enabled = true;
         self.cancel_setup_picks();
         self.setup_tab = SetupEditorTab::Setup;
-        self.stock_kind_open = false;
         self.setup_orientation = None;
         self.setup_origin_mode = None;
         self.setup_draft = self.controller.document().active_setup().cloned();
@@ -3810,7 +3809,6 @@ impl App {
             pattern_menu_y: None,
             operation_tools: Vec::new(),
             setup_tab: SetupEditorTab::Setup,
-            stock_kind_open: false,
             setup_axis_pick: None,
             setup_orientation: None,
             setup_origin_mode: None,
@@ -5194,9 +5192,7 @@ impl App {
                     }
                 }
             }
-            Message::SetupStockKindToggle => self.stock_kind_open = !self.stock_kind_open,
             Message::SetupStockKindChanged(kind) => {
-                self.stock_kind_open = false;
                 if self.setup_axis_pick == Some(3) {
                     self.setup_axis_pick = None;
                     self.cad_candidates.clear();
@@ -11281,7 +11277,7 @@ impl App {
                 .style(|_theme, status| command_button_style(status))
                 .into(),
             Some(buf) => row![
-                text_input("T#", buf)
+                inspector_input("T#", buf)
                     .on_input(Message::LibNumberInput)
                     .on_submit(Message::LibNumberCommit)
                     .width(Length::Fixed(64.0)),

@@ -34,7 +34,7 @@ impl App {
         )
         .padding([6, 8])
         .height(32)
-        .style(move |theme, status| inspector_tab(theme, status, picking))
+        .style(move |theme, status| inspector_pick_style(theme, status, picking))
         .on_press_maybe(self.controller.has_geometry().then_some(pick));
         let mut form = column![row![
             text(if fixture { "Fixture" } else { "Model" })
@@ -185,52 +185,23 @@ impl App {
                     cam_model::Stock::RelativeRound { tube: true, .. } => StockEditorKind::RelativeTube,
                     cam_model::Stock::PreviousSetup => StockEditorKind::PreviousSetup,
                 };
-                let kind_row = |entry: StockEditorKind| {
-                    row![
-                        iced::widget::svg(iced::widget::svg::Handle::from_memory(entry.icon()))
-                            .width(22)
-                            .height(22),
-                        text(entry.to_string()).size(12).width(Length::Fill),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
+                let count = if self.controller.setups().first().is_some_and(|s| s.id != draft.id) {
+                    StockEditorKind::ALL.len()
+                } else {
+                    StockEditorKind::ALL.len() - 1
                 };
-                list = list.push(
-                    button(
-                        row![
-                            kind_row(kind).width(Length::Fill),
-                            text(if self.stock_kind_open { "▴" } else { "▾" }).size(12)
-                        ]
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([6, 9])
-                    .width(Length::Fill)
-                    .style(move |theme, status| inspector_tab(theme, status, false))
-                    .on_press(Message::SetupStockKindToggle),
-                );
-                if self.stock_kind_open {
-                    let count = if self
-                        .controller
-                        .setups()
-                        .first()
-                        .is_some_and(|s| s.id != draft.id)
-                    {
-                        StockEditorKind::ALL.len()
-                    } else {
-                        StockEditorKind::ALL.len() - 1
-                    };
-                    for entry in StockEditorKind::ALL[..count].iter().copied() {
-                        list = list.push(
-                            button(kind_row(entry))
-                                .padding([5, 9])
-                                .width(Length::Fill)
-                                .style(move |theme, status| {
-                                    inspector_tab(theme, status, entry == kind)
-                                })
-                                .on_press(Message::SetupStockKindChanged(entry)),
-                        );
-                    }
-                }
+                list = list.push(icon_picker::picker(
+                    iced::advanced::widget::Id::from("stock-type-menu"),
+                    StockEditorKind::ALL[..count].to_vec(),
+                    kind,
+                    |entry| row![
+                        iced::widget::svg(iced::widget::svg::Handle::from_memory(entry.icon()))
+                            .width(22).height(22),
+                        text(entry.to_string()).size(12).width(Length::Fill),
+                    ].spacing(8).align_y(Alignment::Center).into(),
+                    |_| 0,
+                    Message::SetupStockKindChanged,
+                ));
                 if let cam_model::Stock::FixedRound { axis, .. }
                 | cam_model::Stock::RelativeRound { axis, .. } = draft.stock
                 {
@@ -263,11 +234,8 @@ impl App {
                         list = list.push(
                             row![
                                 text("Axis").size(12).color(INSPECTOR_TEXT).width(80),
-                                inspector_button(label)
+                                inspector_pick_button(label, picking)
                                     .width(Length::Fill)
-                                    .style(move |theme, status| inspector_tab(
-                                        theme, status, picking
-                                    ))
                                     .on_press(Message::SetupAxisPick(3)),
                                 inspector_button("×").on_press(Message::SetupStockAxisClear),
                             ]
