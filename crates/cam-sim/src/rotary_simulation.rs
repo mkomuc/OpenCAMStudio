@@ -1332,8 +1332,8 @@ mod tests {
             let mut samples = Vec::new();
             for (positions, normals) in mesh
                 .positions
-                .chunks_exact(4)
-                .zip(mesh.normals.chunks_exact(4))
+                .as_chunks::<4>().0.iter()
+                .zip(mesh.normals.as_chunks::<4>().0.iter())
             {
                 let p: [f32; 3] =
                     std::array::from_fn(|i| positions.iter().map(|p| p[i]).sum::<f32>() * 0.25);

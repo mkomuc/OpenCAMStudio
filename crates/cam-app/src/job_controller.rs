@@ -337,7 +337,7 @@ impl AppController {
             return false;
         };
         let vertices_valid = |vertices: &[cam_render::MeshVertex], indices: &[u32]| {
-            indices.len() % 3 == 0
+            indices.len().is_multiple_of(3)
                 && indices.iter().all(|&i| (i as usize) < vertices.len())
                 && vertices.iter().all(|v| {
                     v.position

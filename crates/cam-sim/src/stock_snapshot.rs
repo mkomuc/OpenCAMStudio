@@ -241,6 +241,105 @@ impl StockSnapshot {
     }
 }
 
+
+fn valid_tool(tool: ToolProfile) -> bool {
+    if !tool.radius.is_finite() || tool.radius <= 0. {
+        return false;
+    }
+    match tool.shape {
+        crate::ProfileShape::Flat | crate::ProfileShape::Ball => true,
+        crate::ProfileShape::BullNose { corner_radius } => {
+            corner_radius.is_finite() && corner_radius >= 0.
+        }
+        crate::ProfileShape::Cone {
+            half_angle_rad,
+            flat_radius,
+        } => half_angle_rad.is_finite() && flat_radius.is_finite() && flat_radius >= 0.,
+        crate::ProfileShape::VTip {
+            half_angle_rad,
+            tip_radius,
+        } => half_angle_rad.is_finite() && tip_radius.is_finite() && tip_radius >= 0.,
+        crate::ProfileShape::Thread {
+            root_radius,
+            tooth_height,
+            pitch,
+            tooth_count,
+        } => {
+            root_radius.is_finite()
+                && root_radius >= 0.
+                && tooth_height.is_finite()
+                && tooth_height > 0.
+                && pitch.is_finite()
+                && pitch > 0.
+                && tooth_count > 0
+        }
+    }
+}
+
+fn put_count(out: &mut Vec<u8>, value: usize) -> Result<(), String> {
+    out.extend_from_slice(
+        &u32::try_from(value)
+            .map_err(|_| "Stock cache too large")?
+            .to_le_bytes(),
+    );
+    Ok(())
+}
+fn put_option(out: &mut Vec<u8>, value: Option<u32>) {
+    out.push(u8::from(value.is_some()));
+    if let Some(v) = value {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+struct Input<'a>(&'a [u8]);
+impl<'a> Input<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        if n > self.0.len() {
+            return Err("Truncated stock cache".into());
+        }
+        let (a, b) = self.0.split_at(n);
+        self.0 = b;
+        Ok(a)
+    }
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn f32(&mut self) -> Result<f32, String> {
+        let v = f32::from_bits(self.u32()?);
+        if !v.is_finite() {
+            return Err("Non-finite cached stock height".into());
+        }
+        Ok(v)
+    }
+    fn count(&mut self, stride: usize) -> Result<usize, String> {
+        let n = self.u32()? as usize;
+        if n > self.0.len() / stride {
+            return Err("Invalid stock cache array length".into());
+        }
+        Ok(n)
+    }
+    fn floats(&mut self, cells: usize, optional: bool) -> Result<Vec<f32>, String> {
+        let n = self.count(4)?;
+        if n != cells && !(optional && n == 0) {
+            return Err("Stock grid/array mismatch".into());
+        }
+        (0..n).map(|_| self.f32()).collect()
+    }
+    fn integers(&mut self, cells: usize) -> Result<Vec<u32>, String> {
+        let n = self.count(4)?;
+        if n != cells {
+            return Err("Stock grid/array mismatch".into());
+        }
+        (0..n).map(|_| self.u32()).collect()
+    }
+    fn option(&mut self) -> Result<Option<u32>, String> {
+        match self.take(1)?[0] {
+            0 => Ok(None),
+            1 => self.u32().map(Some),
+            _ => Err("Invalid cached optional ID".into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,103 +456,5 @@ mod tests {
         assert!(
             StockSnapshot::from_bytes(invalid.snapshot(0.).unwrap().as_bytes().to_vec()).is_err()
         );
-    }
-}
-
-fn valid_tool(tool: ToolProfile) -> bool {
-    if !tool.radius.is_finite() || tool.radius <= 0. {
-        return false;
-    }
-    match tool.shape {
-        crate::ProfileShape::Flat | crate::ProfileShape::Ball => true,
-        crate::ProfileShape::BullNose { corner_radius } => {
-            corner_radius.is_finite() && corner_radius >= 0.
-        }
-        crate::ProfileShape::Cone {
-            half_angle_rad,
-            flat_radius,
-        } => half_angle_rad.is_finite() && flat_radius.is_finite() && flat_radius >= 0.,
-        crate::ProfileShape::VTip {
-            half_angle_rad,
-            tip_radius,
-        } => half_angle_rad.is_finite() && tip_radius.is_finite() && tip_radius >= 0.,
-        crate::ProfileShape::Thread {
-            root_radius,
-            tooth_height,
-            pitch,
-            tooth_count,
-        } => {
-            root_radius.is_finite()
-                && root_radius >= 0.
-                && tooth_height.is_finite()
-                && tooth_height > 0.
-                && pitch.is_finite()
-                && pitch > 0.
-                && tooth_count > 0
-        }
-    }
-}
-
-fn put_count(out: &mut Vec<u8>, value: usize) -> Result<(), String> {
-    out.extend_from_slice(
-        &u32::try_from(value)
-            .map_err(|_| "Stock cache too large")?
-            .to_le_bytes(),
-    );
-    Ok(())
-}
-fn put_option(out: &mut Vec<u8>, value: Option<u32>) {
-    out.push(u8::from(value.is_some()));
-    if let Some(v) = value {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-}
-struct Input<'a>(&'a [u8]);
-impl<'a> Input<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-        if n > self.0.len() {
-            return Err("Truncated stock cache".into());
-        }
-        let (a, b) = self.0.split_at(n);
-        self.0 = b;
-        Ok(a)
-    }
-    fn u32(&mut self) -> Result<u32, String> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn f32(&mut self) -> Result<f32, String> {
-        let v = f32::from_bits(self.u32()?);
-        if !v.is_finite() {
-            return Err("Non-finite cached stock height".into());
-        }
-        Ok(v)
-    }
-    fn count(&mut self, stride: usize) -> Result<usize, String> {
-        let n = self.u32()? as usize;
-        if n > self.0.len() / stride {
-            return Err("Invalid stock cache array length".into());
-        }
-        Ok(n)
-    }
-    fn floats(&mut self, cells: usize, optional: bool) -> Result<Vec<f32>, String> {
-        let n = self.count(4)?;
-        if n != cells && !(optional && n == 0) {
-            return Err("Stock grid/array mismatch".into());
-        }
-        (0..n).map(|_| self.f32()).collect()
-    }
-    fn integers(&mut self, cells: usize) -> Result<Vec<u32>, String> {
-        let n = self.count(4)?;
-        if n != cells {
-            return Err("Stock grid/array mismatch".into());
-        }
-        (0..n).map(|_| self.u32()).collect()
-    }
-    fn option(&mut self) -> Result<Option<u32>, String> {
-        match self.take(1)?[0] {
-            0 => Ok(None),
-            1 => self.u32().map(Some),
-            _ => Err("Invalid cached optional ID".into()),
-        }
     }
 }

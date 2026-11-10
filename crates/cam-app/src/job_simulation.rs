@@ -308,6 +308,7 @@ impl JobInputs {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn simulate_field(
         &self,
         program: &mut Program,

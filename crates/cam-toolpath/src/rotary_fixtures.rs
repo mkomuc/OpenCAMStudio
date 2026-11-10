@@ -220,8 +220,8 @@ mod tests {
         };
         let hits = super::super::verify_fixture_clearance(
             &program,
-            &[tool.clone()],
-            &[fixture.clone()],
+            std::slice::from_ref(&tool),
+            std::slice::from_ref(&fixture),
             &CancelToken::new(),
         )
         .unwrap();

@@ -509,6 +509,7 @@ impl JobService {
         self.queued = None;
         self.preview = None;
     }
+    #[cfg(any(feature = "gui", test))]
     pub fn preview(&self) -> Option<&RunOutcome> {
         self.preview.as_ref()
     }

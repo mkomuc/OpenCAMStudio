@@ -45,7 +45,7 @@ struct LegacyMesh {
 impl LegacyMesh {
     fn validate(&self) -> Result<(), String> {
         let valid = |vertices: &[cam_render::MeshVertex], indices: &[u32]| {
-            indices.len() % 3 == 0
+            indices.len().is_multiple_of(3)
                 && indices.iter().all(|&i| (i as usize) < vertices.len())
                 && vertices.iter().all(|v| {
                     v.position
@@ -211,7 +211,7 @@ pub(super) fn read<R: Read + Seek>(reader: R, strict: bool) -> Result<OcamFile, 
     if zip.len() > 100_000 || !zip.file_names().all(|name| names.insert(name.to_owned())) {
         return Err(error("Duplicate or excessive archive entries".into()));
     }
-    let metadata = entry(&mut zip, "project.json").map_err(&error)?;
+    let metadata = entry(&mut zip, "project.json").map_err(error)?;
     let manifest: ReadManifest = serde_json::from_slice(&metadata)?;
     if manifest.archive_version != VERSION {
         return Err(error(format!(
@@ -276,6 +276,30 @@ pub(super) fn read<R: Read + Seek>(reader: R, strict: bool) -> Result<OcamFile, 
     }
     project.validate().map_err(LoadError::Json)?;
     Ok(OcamFile::Project(project))
+}
+
+
+impl OcamFile {
+    /// Read either a versioned project archive or legacy tagged/untagged JSON.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, LoadError> {
+        if bytes.starts_with(b"PK") {
+            read(std::io::Cursor::new(bytes), false)
+        } else {
+            Self::from_json(std::str::from_utf8(bytes).map_err(|e| LoadError::Json(e.to_string()))?)
+        }
+    }
+
+    pub fn read(path: impl AsRef<std::path::Path>) -> Result<Self, LoadError> {
+        let bytes = std::fs::read(path).map_err(|e| LoadError::Json(e.to_string()))?;
+        Self::from_bytes(&bytes)
+    }
+}
+
+impl Project {
+    /// Encode the optimized project container. Library files remain JSON.
+    pub fn to_archive(&self) -> Result<Vec<u8>, String> {
+        write(std::io::Cursor::new(Vec::new()), self).map(|c| c.into_inner())
+    }
 }
 
 #[cfg(test)]
@@ -429,28 +453,5 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), previous);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-}
-
-impl OcamFile {
-    /// Read either a versioned project archive or legacy tagged/untagged JSON.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, LoadError> {
-        if bytes.starts_with(b"PK") {
-            read(std::io::Cursor::new(bytes), false)
-        } else {
-            Self::from_json(std::str::from_utf8(bytes).map_err(|e| LoadError::Json(e.to_string()))?)
-        }
-    }
-
-    pub fn read(path: impl AsRef<std::path::Path>) -> Result<Self, LoadError> {
-        let bytes = std::fs::read(path).map_err(|e| LoadError::Json(e.to_string()))?;
-        Self::from_bytes(&bytes)
-    }
-}
-
-impl Project {
-    /// Encode the optimized project container. Library files remain JSON.
-    pub fn to_archive(&self) -> Result<Vec<u8>, String> {
-        write(std::io::Cursor::new(Vec::new()), self).map(|c| c.into_inner())
     }
 }

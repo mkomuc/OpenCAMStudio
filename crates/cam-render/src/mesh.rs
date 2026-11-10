@@ -231,7 +231,7 @@ mod tests {
                             let mut nearest = f32::INFINITY;
                             let mut last = f32::INFINITY;
                             let mut hits = 0;
-                            for triangle in order.chunks_exact(3) {
+                            for triangle in order.as_chunks::<3>().0 {
                                 let [a, b, c] = [
                                     projected[triangle[0] as usize],
                                     projected[triangle[1] as usize],
