@@ -94,7 +94,9 @@ fn real_cut(path: &LinkedFrontier, index: usize) -> bool {
     path.moves[index].1 && !path.air[index] && !path.feed_links[index]
 }
 
-fn sections(path: &LinkedFrontier) -> (Vec<Vec<Point>>, Vec<(Vec<Point>, bool)>) {
+type SectionGap = (Vec<Point>, bool);
+
+fn sections(path: &LinkedFrontier) -> (Vec<Vec<Point>>, Vec<SectionGap>) {
     let mut cuts = Vec::new();
     let mut gaps = Vec::new();
     let mut i = 1;
@@ -280,7 +282,7 @@ pub(crate) fn prepare(
                 &mut before[i],
                 &mut after[0],
                 2. * job.radius,
-                job.simplification_tolerance.min(0.02).max(cam_geo::GRID_MM),
+                job.simplification_tolerance.clamp(cam_geo::GRID_MM, 0.02),
             );
         }
     }

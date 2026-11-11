@@ -101,7 +101,7 @@ mod tests {
         let (vertices, _) = path_cone_mesh(&cones, 2.);
         for (i, cone) in cones.iter().enumerate() {
             let mesh = &vertices[i * 16 * 6..(i + 1) * 16 * 6];
-            for sector in mesh.chunks_exact(6) {
+            for sector in mesh.as_chunks::<6>().0 {
                 assert_eq!(
                     sector[2].position, at,
                     "the arrow tip must not be visually displaced"
