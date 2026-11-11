@@ -1218,6 +1218,11 @@ pub(crate) fn selection_height_defaults(
     operation: &Operation,
 ) -> OperationHeightSettings {
     let mut settings = OperationHeightSettings::default();
+    // Pocket floors, loops and closed edge chains all describe the target
+    // bottom plane. Start at stock top, including after geometry replacement.
+    if matches!(operation, Operation::Pocket(_)) {
+        return settings;
+    }
     if matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)) {
         *settings.definition_mut(HeightPlaneKind::Top) =
             HeightDefinition::new(HeightReference::StockTop, 0.);

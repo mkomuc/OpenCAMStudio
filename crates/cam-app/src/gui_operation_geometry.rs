@@ -343,10 +343,24 @@ impl App {
         }
         let defaults_for = |recipe: &cam_model::ExtractionRecipe| {
             if *recipe == cam_model::ExtractionRecipe::PocketBoundary {
-                crate::cad_operations::selection_height_defaults(
-                    self.controller.document(),
-                    operation,
-                )
+                // Recognize defaults saved by older versions, which treated
+                // the boundary as the top and cut the old depth below it.
+                let mut settings = cam_model::OperationHeightSettings::default();
+                *settings.definition_mut(cam_model::HeightPlaneKind::Top) =
+                    cam_model::HeightDefinition::new(
+                        cam_model::HeightReference::SelectedContours,
+                        0.,
+                    );
+                *settings.definition_mut(cam_model::HeightPlaneKind::Bottom) =
+                    cam_model::HeightDefinition::new(
+                        cam_model::HeightReference::Plane(cam_model::HeightPlaneKind::Top),
+                        -self
+                            .controller
+                            .document()
+                            .operation_base_cutting_heights(operation)
+                            .depth(),
+                    );
+                settings
             } else {
                 cam_model::OperationHeightSettings::default()
             }
@@ -1012,7 +1026,7 @@ impl App {
             "Select cylindrical faces, closed loops, or connected edges. Select the wrap cylinder on the Multi-axis tab. Faces at different radii require separate operations."
         } else {
             match kind {
-            OpKind::Pocket => "Select planar pocket floors with their islands, closed boundary loops, or closed edge chains. Multiple pockets share the operation cutting heights. For chains, set the cutting depth in Heights.",
+            OpKind::Pocket => "Select planar pocket floors with their islands, closed boundary loops, or closed edge chains. Multiple pockets must share one floor height. Default heights cut from stock top down to the selected geometry.",
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",

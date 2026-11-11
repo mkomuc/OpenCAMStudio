@@ -154,17 +154,7 @@ impl App {
                 document.setup_mut().tools.push(tool.clone());
             }
         }
-        let defaults = if self.cad_pending_kind == Some(OpKind::Pocket)
-            && !self
-                .controller
-                .cad_selection()
-                .first()
-                .is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge))
-        {
-            cam_model::OperationHeightSettings::default()
-        } else {
-            crate::cad_operations::selection_height_defaults(&document, &operation)
-        };
+        let defaults = crate::cad_operations::selection_height_defaults(&document, &operation);
         let previous = self
             .creation_geometry_height_defaults
             .clone()

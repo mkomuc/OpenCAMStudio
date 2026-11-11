@@ -2933,6 +2933,140 @@ mod tests {
     }
 
     #[test]
+    fn pocket_creation_replacing_a_face_with_a_contour_matches_use_defaults() {
+        use cam_model::HeightPlaneKind as P;
+        for custom_offset in [0., -1.5] {
+            let (mut app, face_id) = linked_face_app_at_heights(25., 0., 75.);
+            app.setup_draft = None;
+            let source = app.controller.geometry_state().bindings[&face_id].selected[0].clone();
+            let before = app.controller.document().clone();
+            let _ = app.update(Message::BeginOp(OpKind::Pocket));
+            let _ = app.update(Message::CadSelect(source.clone()));
+            let _ = app.update(Message::HeightOffsetChanged(
+                P::Bottom,
+                fmt_num(custom_offset),
+            ));
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+            assert!(app.controller.cad_selection().is_empty());
+            let _ = app.update(Message::GeometryFilterChanged(CadFilter::Loop));
+            let _ = app.update(Message::CadSelect(EntityRef {
+                kind: EntityKind::Loop,
+                id: 5,
+                ..source
+            }));
+            assert_eq!(app.controller.document(), &before);
+            let _ = app.update(Message::ConfirmOp);
+            assert!(!app.creating_operation(), "{}", app.status);
+            let Selection::Operation(id) = app.controller.selection() else {
+                panic!("pocket selected: {}", app.status)
+            };
+            let heights = app.resolve_height_editor(id).unwrap();
+            assert_eq!(heights.top, 76.);
+            assert_eq!(heights.bottom, 25. + custom_offset);
+            assert_eq!(heights.feed, Some(81.));
+            assert_eq!(heights.retract, 81.);
+            assert_eq!(heights.clearance, 91.);
+            if custom_offset == 0. {
+                let _ = app.update(Message::HeightDefaults);
+                assert_eq!(app.resolve_height_editor(id).unwrap(), heights);
+            }
+            assert!(app.controller.undo());
+            assert_eq!(app.controller.document(), &before);
+        }
+    }
+
+    #[test]
+    fn multiple_pocket_selections_share_heights_and_reject_different_floors() {
+        for kind in [EntityKind::Face, EntityKind::Loop] {
+            for dz in [0., 5.] {
+                let (mut app, _) = linked_face_app_at_heights(25., 0., 75.);
+                app.setup_draft = None;
+                let asset = app.controller.geometry_state().assets[0].clone();
+                let mut instance = app.controller.geometry_state().instances[0].clone();
+                instance.placement.translation = [20., 0., dz];
+                app.controller.add_cad_asset(asset, vec![instance]).unwrap();
+                app.controller
+                    .edit_setup(|setup| setup.model_instances = vec![1, 2]);
+                let selected: Vec<_> = [1, 2]
+                    .into_iter()
+                    .map(|instance_id| EntityRef {
+                        asset_id: instance_id,
+                        revision: 1,
+                        instance_id,
+                        body_id: 1,
+                        kind,
+                        id: if kind == EntityKind::Face { 2 } else { 3 },
+                    })
+                    .collect();
+                let before = app.controller.document().clone();
+                let _ = app.update(Message::BeginOp(OpKind::Pocket));
+                app.controller.try_set_cad_selection(selected).unwrap();
+                app.sync_creation_geometry_heights();
+                if dz != 0. {
+                    let error = app.creation_operation().unwrap_err();
+                    assert!(error.contains("different floor heights"), "{error}");
+                    let _ = app.update(Message::ConfirmOp);
+                    assert!(app.creating_operation());
+                    assert_eq!(app.controller.document(), &before);
+                    continue;
+                }
+                let _ = app.update(Message::ConfirmOp);
+                assert!(!app.creating_operation(), "{}", app.status);
+                let Selection::Operation(id) = app.controller.selection() else {
+                    panic!("pocket selected: {}", app.status)
+                };
+                let heights = app.resolve_height_editor(id).unwrap();
+                assert_eq!((heights.top, heights.bottom), (76., 25.));
+                assert!(matches!(app.controller.operation(id), Some(Operation::Pocket(p))
+                    if p.additional_regions.len() == 1));
+                let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+                assert!(app.geometry_editor.is_none(), "{}", app.status);
+                assert_eq!(app.resolve_height_editor(id).unwrap(), heights);
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_a_legacy_pocket_boundary_refreshes_its_height_defaults() {
+        use cam_model::{HeightDefinition, HeightPlaneKind as P, HeightReference as R};
+        let (mut app, face_id) = linked_face_app_at_heights(25., 0., 75.);
+        app.setup_draft = None;
+        let source = app.controller.geometry_state().bindings[&face_id].selected[0].clone();
+        let id = app
+            .controller
+            .create_cad_operation(
+                OpKind::Pocket,
+                vec![EntityRef {
+                    kind: EntityKind::Loop,
+                    id: 3,
+                    ..source.clone()
+                }],
+            )
+            .unwrap();
+        app.begin_operation_draft(id);
+        let depth = app
+            .controller
+            .document()
+            .operation_base_cutting_heights(app.controller.operation(id).unwrap())
+            .depth();
+        // Simulate the defaults persisted by the version that created cnc_test.ocam.
+        let settings = app.height_draft.as_mut().unwrap();
+        *settings.definition_mut(P::Top) = HeightDefinition::new(R::SelectedContours, 0.);
+        *settings.definition_mut(P::Bottom) = HeightDefinition::new(R::Plane(P::Top), -depth);
+        app.height_offsets.insert(P::Bottom, fmt_num(-depth));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        let _ = app.update(Message::CadSelect(EntityRef {
+            kind: EntityKind::Loop,
+            id: 5,
+            ..source
+        }));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        let heights = app.resolve_height_editor(id).unwrap();
+        assert_eq!((heights.top, heights.bottom), (76., 25.));
+    }
+
+    #[test]
     fn pocket_floor_replaced_with_loop_uses_default_heights() {
         // A floor and its boundary lie at Z25, beneath a model top at Z75
         // and stock top at Z76. Reusing the old pocket depth below the loop
@@ -3131,7 +3265,7 @@ mod tests {
                 app.controller.operation(id).unwrap(),
             )
             .unwrap();
-        assert_eq!(heights.top, -1.);
+        assert_eq!(heights.top, 0.);
         assert_eq!(heights.bottom, -2.5);
     }
 
@@ -3164,7 +3298,10 @@ mod tests {
                 "{kind:?}: {:?}",
                 app.creation_operation()
             );
-            assert_eq!(app.resolve_height_editor(0).unwrap().top, -1.);
+            assert_eq!(
+                app.resolve_height_editor(0).unwrap().top,
+                if kind == OpKind::Pocket { 0. } else { -1. }
+            );
             let _ = app.update(Message::FieldChanged(Field::Feed, "321".into()));
             if kind == OpKind::Engrave {
                 let _ = app.update(Message::HeightOffsetChanged(

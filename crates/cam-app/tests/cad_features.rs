@@ -2125,7 +2125,7 @@ fn bore_cad_selection_regeneration_save_reopen_and_all_posts() {
 }
 
 #[test]
-fn pocket_boundary_chains_generate_at_the_selected_plane_and_survive_reopen() {
+fn pocket_boundary_chains_cut_from_stock_to_selection_and_survive_reopen() {
     for edges in [false, true] {
         let mut app = controller();
         let floor = install_pocket(&mut app);
@@ -2161,6 +2161,10 @@ fn pocket_boundary_chains_generate_at_the_selected_plane_and_survive_reopen() {
             ExtractionRecipe::PocketBoundary
         );
         assert_eq!(app.geometry_state().bindings[&id].heights.top, 7.);
+        let defaults = app.document().setup().height_settings[&id]
+            .resolve(app.document(), app.operation(id).unwrap())
+            .unwrap();
+        assert_eq!((defaults.top, defaults.bottom), (11., 7.));
         assert!(matches!(app.operation(id), Some(Operation::Pocket(op)) if op.islands.is_empty()));
         app.edit_operation(id, |op| {
             if let Operation::Pocket(p) = op {
@@ -2178,7 +2182,7 @@ fn pocket_boundary_chains_generate_at_the_selected_plane_and_survive_reopen() {
         let heights = app.document().setup().height_settings[&id]
             .resolve(app.document(), app.operation(id).unwrap())
             .unwrap();
-        assert_eq!(heights.top, 7.);
+        assert_eq!(heights.top, 11.);
         assert_eq!(heights.bottom, 5.);
         let outcome = app.run(&CancelToken::new());
         assert_eq!(
