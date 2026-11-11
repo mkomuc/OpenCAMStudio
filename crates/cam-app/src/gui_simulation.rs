@@ -1446,10 +1446,21 @@ mod tests {
         player.options.show_leads = false;
         player.refresh_display();
         assert_eq!(displayed_bounds(&player, 0), (0., 40.));
-        assert!(player.preview.scene.path_cones.is_empty());
+        // Direct cutting entries have main-path markers even without leads.
+        // Hiding leads must not remove markers for the visible cutting moves.
+        assert_eq!(
+            player.preview.scene.path_cones.iter()
+                .map(|cone| (cone.op, cone.at, cone.color))
+                .collect::<Vec<_>>(),
+            vec![
+                (7, [0., 0., 0.], cam_render::PATH_IN),
+                (8, [40., 0., 0.], cam_render::PATH_IN),
+            ]
+        );
         player.options.show_cutting = false;
         player.refresh_display();
         assert!(player.preview.scene.strips.is_empty());
+        assert!(player.preview.scene.path_cones.is_empty());
         player.options.show_leads = true;
         player.refresh_display();
         assert_eq!(displayed_bounds(&player, 2), (-5., 0.));
@@ -1461,6 +1472,7 @@ mod tests {
         player.options.show_toolpath = false;
         player.refresh_display();
         assert!(player.preview.scene.strips.is_empty());
+        assert!(player.preview.scene.path_cones.is_empty());
     }
     #[test]
     fn leading_and_trailing_arc_paths_meet_at_the_helical_tip() {
