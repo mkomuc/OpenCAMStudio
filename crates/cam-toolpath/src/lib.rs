@@ -26,6 +26,7 @@ mod bore;
 pub use bore::BoreStrategy;
 mod adaptive_safety;
 mod adaptive_strategy;
+mod adaptive_linking;
 mod carve;
 mod chamfer;
 mod clearing;

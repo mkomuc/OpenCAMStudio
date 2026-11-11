@@ -6,26 +6,13 @@ pub const PATH_IN: Color = [0.95, 0.12, 0.10, 1.0];
 /// Withdrawal from a cut.
 pub const PATH_OUT: Color = [0.10, 0.90, 0.20, 1.0];
 
-/// A toolpath marker in world space, pointing along its motion.
+/// A toolpath marker with its tip at `at`, pointing along its motion.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathCone {
     pub at: [f32; 3],
     pub direction: [f32; 3],
     pub color: Color,
     pub op: u32,
-}
-
-impl PathCone {
-    pub(crate) fn on_segment(a: [f32; 3], b: [f32; 3], color: Color, op: u32) -> Option<Self> {
-        let delta: [f32; 3] = std::array::from_fn(|i| b[i] - a[i]);
-        let length = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
-        (length.is_finite() && length > 1e-6).then(|| Self {
-            at: std::array::from_fn(|i| (a[i] + b[i]) * 0.5),
-            direction: delta.map(|v| v / length),
-            color,
-            op,
-        })
-    }
 }
 
 /// Filled cones pointing along travel, with a cap so they read from either end.
@@ -45,16 +32,7 @@ pub fn path_cone_mesh(cones: &[PathCone], height: f32) -> (Vec<MeshVertex>, Vec<
     };
     for cone in cones {
         let d = cone.direction;
-        let at = if cone.color == PATH_OUT {
-            cones
-                .iter()
-                .find(|other| other.color == PATH_IN && other.at == cone.at)
-                .map_or(cone.at, |entry| {
-                    std::array::from_fn(|i| cone.at[i] + entry.direction[i] * height * 1.75)
-                })
-        } else {
-            cone.at
-        };
+        let at = cone.at;
         let axis = if d[2].abs() < 0.9 {
             [0., 0., 1.]
         } else {
@@ -65,8 +43,8 @@ pub fn path_cone_mesh(cones: &[PathCone], height: f32) -> (Vec<MeshVertex>, Vec<
         let u = u.map(|v| v / len);
         let v = cross(d, u);
         let radius = height * 0.3;
-        let tip = std::array::from_fn(|i| at[i] + d[i] * height * 0.5);
-        let base: [f32; 3] = std::array::from_fn(|i| at[i] - d[i] * height * 0.5);
+        let tip = at;
+        let base: [f32; 3] = std::array::from_fn(|i| at[i] - d[i] * height);
         for sector in 0..SECTORS {
             let radial = [sector, sector + 1].map(|s| {
                 let (sin, cos) = (s as f32 * std::f32::consts::TAU / SECTORS as f32).sin_cos();
@@ -104,6 +82,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn coincident_entry_and_exit_tips_stay_on_the_travel_endpoint() {
+        let at = [4., 5., 6.];
+        let cones = [
+            PathCone {
+                at,
+                direction: [0., 0., -1.],
+                color: PATH_IN,
+                op: 7,
+            },
+            PathCone {
+                at,
+                direction: [0., 0., 1.],
+                color: PATH_OUT,
+                op: 7,
+            },
+        ];
+        let (vertices, _) = path_cone_mesh(&cones, 2.);
+        for (i, cone) in cones.iter().enumerate() {
+            let mesh = &vertices[i * 16 * 6..(i + 1) * 16 * 6];
+            for sector in mesh.chunks_exact(6) {
+                assert_eq!(
+                    sector[2].position, at,
+                    "the arrow tip must not be visually displaced"
+                );
+                let base = sector[5].position;
+                assert_eq!(
+                    base,
+                    std::array::from_fn(|j| at[j] - 2. * cone.direction[j])
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cones_have_outward_faces_and_point_along_travel_in_any_orientation() {
         for direction in [
             [0., 0., 1.],
@@ -136,10 +148,9 @@ mod tests {
                 let axial: f32 = (0..3)
                     .map(|i| (vertex.position[i] - cone.at[i]) * direction[i])
                     .sum();
-                assert!((axial.abs() - 1.).abs() < 1e-5);
+                assert!(axial.abs() < 1e-5 || (axial + 2.).abs() < 1e-5);
                 assert!((vertex.normal.iter().map(|n| n * n).sum::<f32>() - 1.).abs() < 1e-5);
             }
         }
-        assert!(PathCone::on_segment([0.; 3], [0.; 3], PATH_IN, 0).is_none());
     }
 }

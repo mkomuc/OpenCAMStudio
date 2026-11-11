@@ -1487,7 +1487,7 @@ impl Field {
     fn help(self) -> &'static str {
         match self {
             Field::Wrap(_) => "Cylindrical wrap in millimetres. Radius plus offset defines the development circumference. Surface Z is the flat drawing's radial reference; the seam sets rotary zero. Cylinder selection derives radius and axis centre from CAD.",
-            Field::LiftHeight => "Distance above the cutting level for local linking moves, in millimetres. 0 keeps transitions at depth. Lifts are limited to clearance; distant links still retract fully.",
+            Field::LiftHeight => "Distance above the cutting level for local linking moves, in millimetres. Adaptive links that withdraw from walls lift at least 0.2 mm. Other zero-height links remain at depth. Lifts are limited to clearance; distant links still retract fully.",
             Field::BoreDiameter => "Finished feature diameter at the top height.",
             Field::BoreTaper => "Positive narrows downward; negative widens downward. Undercuts are rejected.",
             Field::BorePitch => "Axial travel per revolution of the bore helix.",
@@ -1754,7 +1754,8 @@ impl Field {
             }
             Field::LeadOverlap => {
                 "How far the tool keeps cutting past the start point before leaving, to \
-                 erase the entry/exit witness mark (mm)."
+                 erase the entry/exit witness mark (mm). Adjoining adaptive cuts repeat this \
+                 distance from their shared seam; 0 uses one exact junction."
             }
             Field::FaceStartOffset => {
                 "Height of the first facing cut above the drawing reference (mm) — start \
@@ -1823,7 +1824,8 @@ impl Field {
             }
             Field::ClearLeadOverlap => {
                 "How far each clearing ring keeps cutting past its start before leaving \
-                 (mm), to erase the entry/exit witness mark."
+                 (mm), to erase the entry/exit witness mark. Adjoining adaptive cuts repeat \
+                 this distance from their shared seam; 0 uses one exact junction."
             }
             Field::ClearLeadInSize => {
                 "Size of the clearing pass's lead-in onto the flat area's edge -- arc \
@@ -1901,10 +1903,10 @@ mod help {
         "Which side of the chain the tool runs. Outside retains the enclosed part. Inside finishes the wall and can leave an uncut core: clear the pocket separately. On centers the tool on the line. Open left/right sides follow the selected chain direction.";
     pub const LEAD_IN: &str =
         "None starts on the contour. Linear approaches along a tangent line; Arc approaches \
-         along a tangent arc. Leads are horizontal moves into the start of the cut.";
+         along a tangent arc. Adaptive re-entries descend from the linking height along the lead.";
     pub const LEAD_OUT: &str =
         "None ends on the contour. Linear departs along a tangent line; Arc departs \
-         along a tangent arc. Leads are horizontal moves away from the end of the cut.";
+         along a tangent arc. Adaptive departures lift to the linking height along the lead.";
     pub const PLUNGE: &str =
         "How the tool enters downward at each level. Straight drops vertically (needs a \
          centre-cutting tool or pre-drilled hole); Ramp descends along the toolpath itself, \

@@ -175,13 +175,10 @@ pub(crate) fn clear_validated(
     //   change every shipped toolpath and regenerate every golden — a decision to take on its
     //   own evidence rather than as a side effect of adding islands. See `ADAPTIVE_PLAN.md`
     //   §10.
-    // - **No finishing leads.** Front-advance is a *roughing* engine: it emits its frontier
-    //   spiral with no wall lead-on, because a lead onto a spiral loop has no clean
-    //   wall-hugging ring to ease onto. If the operator asked for a finishing lead
-    //   (`lead_in`/`lead_out`), the concentric path lays it on the wall ring and we must not
-    //   silently drop it — so a leaded pocket keeps the proven concentric clear. (Profile
-    //   roughing always passes `Lead::None`, so it is never held back by this.) A proper
-    //   front-advance-rough + separate leaded finish-wall pass is a later increment.
+    // - **Configured leads must fit.** Hole-free frontiers use `adaptive_linking`
+    //   to preserve adjoining seams and fit the requested leads into cleared
+    //   stock. An unsafe lead layout falls back to leaded concentric clearing.
+    //   Island steering still uses concentric clearing when leads are requested.
     //
     // **The gate is the exact oracle, never the raster.** Until 2026-07-17 an earlier
     // adaptive dispatch (the spiral-morph) gated on `raster.rs`, which is blind to slots —
@@ -247,8 +244,6 @@ pub(crate) fn clear_validated(
         && !matches!(job.plunge, Plunge::Ramp { .. })
         && job.adaptive_may_run()
         && region.holes().is_empty()
-        && job.lead_in == Lead::None
-        && job.lead_out == Lead::None
     {
         if let Some(moves) = crate::frontadvance::front_advance_certified(
             region,
@@ -259,8 +254,40 @@ pub(crate) fn clear_validated(
             job.simplification_tolerance,
         ) {
             let mut candidate = Program::new();
-            emit_adaptive_moves(&mut candidate, &moves, &[], job, heights, levels);
-            if accept(&candidate) {
+            if let Some(linked) = crate::frontadvance::link_cleared_travel(
+                &moves,
+                region,
+                job.radius,
+                job.finish,
+                job.clearing.engagement,
+            ) {
+                let configured = job.lead_in != Lead::None
+                    || job.lead_out != Lead::None
+                    || job.lead_overlap > 0.;
+                match crate::adaptive_linking::prepare(&linked, region, job) {
+                    Ok(Some(prepared)) => prepared.emit(&mut candidate, job, heights, levels),
+                    Err(_) if configured => {} // The leaded concentric fallback remains available.
+                    _ => emit_adaptive_moves_with_travel(
+                        &mut candidate,
+                        &linked.moves,
+                        AdaptiveTravel {
+                            air: &linked.air,
+                            feed_links: &linked.feed_links,
+                            minimum_lift: 0.2,
+                            guarded: true,
+                        },
+                        job,
+                        heights,
+                        levels,
+                    ),
+                }
+            } else if job.lead_in == Lead::None
+                && job.lead_out == Lead::None
+                && job.lead_overlap == 0.
+            {
+                emit_adaptive_moves(&mut candidate, &moves, &[], job, heights, levels);
+            }
+            if !candidate.steps().is_empty() && accept(&candidate) {
                 if !prefer_stay_down || clearance_lifts(&candidate, heights) <= levels.len() {
                     prog.extend(candidate);
                     return Ok(ClearResult {
@@ -436,6 +463,37 @@ fn emit_adaptive_moves(
     h: &Heights,
     levels: &[f64],
 ) {
+    emit_adaptive_moves_with_travel(
+        prog,
+        moves,
+        AdaptiveTravel {
+            air,
+            feed_links: &[],
+            minimum_lift: 0.,
+            guarded: false,
+        },
+        job,
+        h,
+        levels,
+    );
+}
+
+struct AdaptiveTravel<'a> {
+    air: &'a [bool],
+    feed_links: &'a [bool],
+    minimum_lift: f64,
+    /// Includes radial withdrawal from walls and reserved finishing stock.
+    guarded: bool,
+}
+
+fn emit_adaptive_moves_with_travel(
+    prog: &mut Program,
+    moves: &[(Point, bool)],
+    travel: AdaptiveTravel<'_>,
+    job: &ClearJob,
+    h: &Heights,
+    levels: &[f64],
+) {
     if moves.len() < 2 {
         return;
     }
@@ -498,15 +556,20 @@ fn emit_adaptive_moves(
             ),
         }
 
-        let link_z = (z + job.lift_height).min(h.clearance);
+        let lift_height = job.lift_height.max(travel.minimum_lift);
+        let link_z = (z + lift_height).min(h.clearance);
         let mut lifted = false;
         for i in 1..moves.len() {
             let (p, is_cut) = moves[i];
             // Air flags certify the clearing region. With wall stock reserved,
             // the cutter can still graze material just outside that region, so
             // these transitions must remain feed moves rather than rapids.
-            let is_air = is_cut && job.finish == 0.0 && air.get(i).copied().unwrap_or(false);
-            if lifted && !is_air {
+            let is_air = is_cut
+                && (job.finish == 0.0 || travel.guarded)
+                && travel.air.get(i).copied().unwrap_or(false);
+            let is_feed_link = is_cut && travel.feed_links.get(i).copied().unwrap_or(false);
+            let is_travel = is_air || is_feed_link;
+            if lifted && !is_travel {
                 if is_cut {
                     let from = moves[i - 1].0;
                     prog.push(Step::Linear {
@@ -517,7 +580,7 @@ fn emit_adaptive_moves(
                 }
                 lifted = false;
             }
-            if is_air {
+            if is_travel {
                 // **A move that removes nothing is a traverse, not a cut.** A third of a
                 // steered path is the tool crossing stock it has already removed to reach the
                 // next front, and feeding it at cutting rate is the single largest remaining
@@ -531,7 +594,7 @@ fn emit_adaptive_moves(
                 // way put 776 `RapidThroughStock` collisions past this line. Nor is a
                 // *starving* step enough: it may still shave a fraction of the target, and
                 // that is a cut.
-                if job.lift_height > 0.0 && !lifted {
+                if lift_height > 0.0 && !lifted {
                     let from = moves[i - 1].0;
                     prog.push(Step::Rapid {
                         to: Point3::new(from.x, from.y, link_z),
@@ -539,10 +602,16 @@ fn emit_adaptive_moves(
                     });
                     lifted = true;
                 }
-                prog.push(Step::Rapid {
-                    to: Point3::new(p.x, p.y, if lifted { link_z } else { z }),
-                    tag: link,
-                });
+                let to = Point3::new(p.x, p.y, if lifted { link_z } else { z });
+                if is_air {
+                    prog.push(Step::Rapid { to, tag: link });
+                } else {
+                    prog.push(Step::Linear {
+                        to,
+                        feed: job.feed,
+                        tag: link,
+                    });
+                }
             } else if is_cut {
                 prog.push(Step::Linear {
                     to: Point3::new(p.x, p.y, z),
@@ -772,6 +841,116 @@ mod tests {
                         Step::Rapid { to, .. } if *to == Point3::new(12., 10., raised)));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn cleared_stock_rapids_save_time_including_their_lifts() {
+        let region = Polygon::new(Contour::new(vec![
+            Point::new(10., -10.),
+            Point::new(40., -10.),
+            Point::new(40., 10.),
+            Point::new(10., 10.),
+        ]))
+        .unwrap();
+        let job = frame_clearjob(Clearing {
+            engagement: 2.4,
+            climb: true,
+        });
+        let heights = Heights::new(5., 2., 0.);
+        let moves = crate::frontadvance::front_advance_certified(
+            &region,
+            3.,
+            0.,
+            2.4,
+            None,
+            crate::frontadvance::SIMPLIFY_EPS,
+        )
+        .unwrap();
+        let mut cutting_links = Program::new();
+        emit_adaptive_moves(&mut cutting_links, &moves, &[], &job, &heights, &[-6.]);
+        let mut rapid_links = Program::new();
+        clear(
+            &mut rapid_links,
+            &region,
+            &job,
+            &heights,
+            &[-6.],
+            &CancelToken::new(),
+        )
+        .unwrap();
+        let before = cutting_links
+            .processing_time(4000., 0., 100.)
+            .unwrap()
+            .total_seconds();
+        let after = rapid_links
+            .processing_time(4000., 0., 100.)
+            .unwrap()
+            .total_seconds();
+        eprintln!("cutting links {before:.2}s, lifted rapid links {after:.2}s");
+        assert!(
+            after < before - 5.,
+            "lifts and re-approaches must not erase the travel saving"
+        );
+    }
+
+    #[test]
+    fn guarded_wall_links_lift_before_withdrawal_and_feed_back_before_cutting() {
+        let moves = [
+            (Point::new(10., 10.), false),
+            (Point::new(10., 9.4), true),
+            (Point::new(20., 9.4), true),
+            (Point::new(20., 10.), true),
+            (Point::new(21., 10.), true),
+        ];
+        let air = [false, false, true, false, false];
+        let feed_links = [false, true, false, true, false];
+        let h = Heights::new(5., 2., 0.);
+        for requested in [0., 0.8, 100.] {
+            let mut job = frame_clearjob(frame_job());
+            job.lift_height = requested;
+            let mut program = Program::new();
+            emit_adaptive_moves_with_travel(
+                &mut program,
+                &moves,
+                AdaptiveTravel {
+                    air: &air,
+                    feed_links: &feed_links,
+                    minimum_lift: 0.2,
+                    guarded: true,
+                },
+                &job,
+                &h,
+                &[-3.],
+            );
+            let raised = (-3. + requested.max(0.2)).min(5.);
+            assert!(program
+                .steps()
+                .iter()
+                .any(|s| matches!(s, Step::Linear { to, tag, .. }
+                if tag.kind == MoveKind::Link && *to == Point3::new(10., 9.4, raised))));
+            assert!(program
+                .steps()
+                .iter()
+                .any(|s| matches!(s, Step::Rapid { to, tag }
+                if tag.kind == MoveKind::Link && *to == Point3::new(20., 9.4, raised))));
+            assert!(program
+                .steps()
+                .iter()
+                .any(|s| matches!(s, Step::Linear { to, tag, .. }
+                if tag.kind == MoveKind::Link && *to == Point3::new(20., 10., raised))));
+            let cutting = program
+                .steps()
+                .iter()
+                .position(|s| {
+                    matches!(s, Step::Linear { to, tag, .. }
+                if tag.kind == MoveKind::Cutting && *to == Point3::new(21., 10., -3.))
+                })
+                .unwrap();
+            assert!(
+                matches!(&program.steps()[cutting - 1], Step::Linear { to, tag, .. }
+                if tag.kind == MoveKind::Plunge && *to == Point3::new(20., 10., -3.))
+            );
         }
     }
 

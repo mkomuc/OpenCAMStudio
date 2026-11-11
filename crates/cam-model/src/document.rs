@@ -1053,7 +1053,8 @@ pub struct ClearParams {
     #[serde(default)]
     pub keep_tool_down: bool,
     /// Vertical lift above the cutting level during local linking moves, mm.
-    /// Zero keeps transitions at depth; distant links still use clearance.
+    /// Zero keeps normal transitions at depth; adaptive wall withdrawals lift
+    /// at least 0.2 mm. Distant links still use clearance.
     #[serde(default)]
     pub lift_height: f64,
     /// Maximum depth removed per pass, mm. `0` clears the full depth in one pass.
@@ -1082,14 +1083,16 @@ pub struct ClearParams {
     /// How the tool enters the material in Z at each pass.
     #[serde(default)]
     pub plunge: Plunge,
-    /// Lead-in onto the finished walls, eased from the cleared interior.
+    /// Lead-in from cleared stock onto a wall or an adaptive cutting section.
     #[serde(default)]
     pub lead_in: Lead,
-    /// Lead-out off the walls after the finishing pass.
+    /// Lead-out from a wall or an adaptive cutting section into cleared stock.
     #[serde(default)]
     pub lead_out: Lead,
     /// Distance each ring keeps cutting past its start before retracting, mm, so the
     /// loop-closure junction leaves no witness dent.
+    /// Adjoining adaptive cuts overlap by this distance along the next cut;
+    /// zero uses exactly the same departure and re-entry point at their seam.
     #[serde(default)]
     pub lead_overlap: f64,
     /// Constant-engagement clearing parameters (engagement cap + climb).
@@ -1245,6 +1248,7 @@ pub struct AdaptiveOp {
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveParams {
     /// Vertical lift above the cutting level during stay-down transitions, mm.
+    /// Adaptive wall withdrawals use a minimum 0.2 mm lift.
     #[serde(default)]
     pub lift_height: f64,
     /// Preferred entry and exit locations in setup XY.

@@ -16,6 +16,7 @@ mod camera;
 mod gizmo;
 mod mesh;
 mod path_cone;
+mod path_markers;
 mod rotary_view;
 mod scene;
 mod tool;

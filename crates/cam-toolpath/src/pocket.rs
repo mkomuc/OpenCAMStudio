@@ -259,7 +259,7 @@ impl Strategy for PocketStrategy {
         let mut program = Program::new();
         // Clear through the shared engine: engagement-spaced, climb-oriented,
         // stay-down inside-out rings. Explicit finishing owns the wall leads;
-        // otherwise keep the existing clearing-wall leads.
+        // adaptive departures and re-entries still use the configured leads.
         let job = crate::clearing::ClearJob {
             lift_height: op.clear.lift_height,
             id: op.id,
@@ -274,12 +274,12 @@ impl Strategy for PocketStrategy {
             plunge_feed: op.clear.plunge_feed,
             entry_feeds: op.entry_feeds,
             lead_overlap: op.clear.lead_overlap,
-            lead_in: if op.finishing.enabled {
+            lead_in: if op.finishing.enabled && op.clear.clearing.engagement <= 0. {
                 cam_model::Lead::None
             } else {
                 op.clear.lead_in
             },
-            lead_out: if op.finishing.enabled {
+            lead_out: if op.finishing.enabled && op.clear.clearing.engagement <= 0. {
                 cam_model::Lead::None
             } else {
                 op.clear.lead_out
