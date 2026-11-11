@@ -12,7 +12,11 @@ fn stock_to_machine_view(
     vector: bool,
 ) -> [f32; 3] {
     let p = frame.to_setup_vector(point.map(f64::from));
-    let origin = if vector { cam_cldata::Point3::new(0., 0., 0.) } else { center };
+    let origin = if vector {
+        cam_cldata::Point3::new(0., 0., 0.)
+    } else {
+        center
+    };
     let p = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), origin, -angle);
     frame.to_world_vector([p.x, p.y, p.z]).map(|v| v as f32)
 }
@@ -479,6 +483,10 @@ impl App {
         let labels = grid_view::GridLabels {
             camera: viewport.camera(),
             grid_size: viewport.grid_size,
+            measurement: grid_view::selection_measurement(
+                self.controller.geometry_state(),
+                self.controller.cad_selection(),
+            ),
         };
         let height_preview = self.height_preview(viewport.camera(), viewport.browser_overlay_width);
         let viewport_camera = viewport.camera();
@@ -634,7 +642,9 @@ impl App {
             origin: self.controller.active_origin(),
             selection: self.controller.selection(),
             pending: self.controller.pending_op(),
-            outcome: self.controller.outcome()
+            outcome: self
+                .controller
+                .outcome()
                 .or_else(|| self.controller.run_preview())
                 .and_then(|o| o.stamp.clone()),
             verifying_preview: self.controller.run_preview().is_some(),
@@ -770,14 +780,22 @@ impl App {
                 self.setup_draft.as_ref(),
             );
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
-                if player.options.rotary_view == crate::settings::SimulationRotaryView::RotatingStock {
+                if player.options.rotary_view
+                    == crate::settings::SimulationRotaryView::RotatingStock
+                {
                     if let Some((axis, center, angle)) = player.rotary_pose() {
                         let frame = &self.controller.inspection_setup().frame;
-                        let rotate = cam_render::RotaryStockTransform::new(frame, axis, center, angle);
-                        rotate.apply_mesh(Arc::make_mut(&mut viewport.mesh_vertices).as_mut_slice());
-                        rotate.apply_mesh(Arc::make_mut(&mut viewport.transparent_stock_vertices).as_mut_slice());
-                        for vertex in Arc::make_mut(&mut viewport.vertices).iter_mut()
-                            .chain(Arc::make_mut(&mut viewport.cad_edges).iter_mut()) {
+                        let rotate =
+                            cam_render::RotaryStockTransform::new(frame, axis, center, angle);
+                        rotate
+                            .apply_mesh(Arc::make_mut(&mut viewport.mesh_vertices).as_mut_slice());
+                        rotate.apply_mesh(
+                            Arc::make_mut(&mut viewport.transparent_stock_vertices).as_mut_slice(),
+                        );
+                        for vertex in Arc::make_mut(&mut viewport.vertices)
+                            .iter_mut()
+                            .chain(Arc::make_mut(&mut viewport.cad_edges).iter_mut())
+                        {
                             vertex.position = rotate.point(vertex.position);
                         }
                         for cone in Arc::make_mut(&mut viewport.path_cones).iter_mut() {
@@ -986,11 +1004,16 @@ impl App {
             viewport.cad_operation_kind = None;
         }
         if self.rotary_pick.is_some() || self.wrapped_pocket_geometry_editor() {
-            viewport.cad_operation_kind=Some(OpKind::Engrave);
-            viewport.cad_filter_explicit=true;
-            viewport.cad_silhouette=false;
+            viewport.cad_operation_kind = Some(OpKind::Engrave);
+            viewport.cad_filter_explicit = true;
+            viewport.cad_silhouette = false;
             if let Some(pick) = self.rotary_pick {
-                if matches!(pick, rotary_view::Pick::IndexFace | rotary_view::Pick::IndexLoop | rotary_view::Pick::IndexEdge) {
+                if matches!(
+                    pick,
+                    rotary_view::Pick::IndexFace
+                        | rotary_view::Pick::IndexLoop
+                        | rotary_view::Pick::IndexEdge
+                ) {
                     // Index references may lie in any plane, not just setup XY.
                     viewport.cad_operation_kind = None;
                 }
@@ -998,7 +1021,9 @@ impl App {
                 // planar pick before the CAD face can be hit-tested.
                 viewport.picking = false;
                 viewport.cad_filter = match pick {
-                    rotary_view::Pick::Cylinder | rotary_view::Pick::Faces | rotary_view::Pick::IndexFace => EntityKind::Face,
+                    rotary_view::Pick::Cylinder
+                    | rotary_view::Pick::Faces
+                    | rotary_view::Pick::IndexFace => EntityKind::Face,
                     rotary_view::Pick::Edges | rotary_view::Pick::IndexEdge => EntityKind::Edge,
                     rotary_view::Pick::Loops | rotary_view::Pick::IndexLoop => EntityKind::Loop,
                 };
@@ -1591,10 +1616,14 @@ mod tests {
         let machine = cam_cldata::Point3::new(8., 9., 10.);
         for axis in [cam_cldata::RotaryAxis::A, cam_cldata::RotaryAxis::B] {
             let material = axis.material_point(machine, center, 37.);
-            let world_material = frame.to_world_vector([material.x, material.y, material.z]).map(|v| v as f32);
+            let world_material = frame
+                .to_world_vector([material.x, material.y, material.z])
+                .map(|v| v as f32);
             let result = stock_to_machine_view(&frame, axis, center, 37., world_material, false);
             let expected = frame.to_world_vector([machine.x, machine.y, machine.z]);
-            for i in 0..3 { assert!((f64::from(result[i]) - expected[i]).abs() < 1e-5); }
+            for i in 0..3 {
+                assert!((f64::from(result[i]) - expected[i]).abs() < 1e-5);
+            }
         }
     }
 
@@ -2691,7 +2720,8 @@ mod performance_tests {
             for vertex in &mut reference {
                 vertex.position =
                     stock_to_machine_view(&frame, axis, center, angle, vertex.position, false);
-                vertex.normal = stock_to_machine_view(&frame, axis, center, angle, vertex.normal, true);
+                vertex.normal =
+                    stock_to_machine_view(&frame, axis, center, angle, vertex.normal, true);
             }
             scalar_seconds += start.elapsed().as_secs_f64();
             black_box(&reference);
@@ -2731,7 +2761,8 @@ mod performance_tests {
         let (mut app, _) = App::new();
         app.settings = crate::Settings::default();
         app.controller = AppController::new(crate::default_machine());
-        let path = std::env::temp_dir().join(format!("rotary-stock-view-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("rotary-stock-view-{}.ocam", std::process::id()));
         std::fs::write(&path, include_str!("../tests/fixtures/stepped_rotary.ocam")).unwrap();
         app.controller.open_project(&path).unwrap();
         std::fs::remove_file(path).unwrap();
@@ -2760,12 +2791,20 @@ mod performance_tests {
         assert_eq!(app.machining_viewport().mesh_indices, model.mesh_indices);
         app.show_stock = true;
         app.controller.edit_stock(|stock| {
-            if let cam_model::Stock::RelativeRound { tube, inner_diameter, .. } = stock {
+            if let cam_model::Stock::RelativeRound {
+                tube,
+                inner_diameter,
+                ..
+            } = stock
+            {
                 *tube = true;
                 *inner_diameter = 10.;
             }
         });
-        assert!(!app.machining_viewport().transparent_stock_convex, "hollow stock is not convex");
+        assert!(
+            !app.machining_viewport().transparent_stock_convex,
+            "hollow stock is not convex"
+        );
     }
 
     #[test]

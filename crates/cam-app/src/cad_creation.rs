@@ -86,7 +86,14 @@ impl AppController {
         tools: Vec<Tool>,
         stock_to_leave: cam_model::StockToLeave,
     ) -> Result<u32, String> {
-        self.commit_operation_creation_with_index(operation,binding,settings,tools,stock_to_leave,None)
+        self.commit_operation_creation_with_index(
+            operation,
+            binding,
+            settings,
+            tools,
+            stock_to_leave,
+            None,
+        )
     }
 
     pub fn commit_operation_creation_with_index(
@@ -106,7 +113,15 @@ impl AppController {
         operation.set_id(id);
         operation.set_work_offset(self.active_origin);
         let mut document = self.document().clone();
-        if let Some(index)=index {index.validate()?;if operation.rotary_wrap().is_some(){return Err("An operation cannot be both indexed and wrapped".into());}document.rotary_indexes.insert(id,index);}else{document.rotary_indexes.remove(&id);}
+        if let Some(index) = index {
+            index.validate()?;
+            if operation.rotary_wrap().is_some() {
+                return Err("An operation cannot be both indexed and wrapped".into());
+            }
+            document.rotary_indexes.insert(id, index);
+        } else {
+            document.rotary_indexes.remove(&id);
+        }
 
         for tool in tools {
             if let Some(existing) = document

@@ -188,11 +188,20 @@ impl App {
     }
 
     pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
-        if let Some(wrap) = self.operation_draft.as_ref().and_then(Operation::rotary_wrap) {
+        if let Some(wrap) = self
+            .operation_draft
+            .as_ref()
+            .and_then(Operation::rotary_wrap)
+        {
             if self.wrapped_pocket_geometry_editor() {
                 return self.controller.cad_selection().to_vec();
             }
-            return wrap.geometry.iter().chain(wrap.cylinder.iter()).cloned().collect();
+            return wrap
+                .geometry
+                .iter()
+                .chain(wrap.cylinder.iter())
+                .cloned()
+                .collect();
         }
         if let Some(draft) = &self.pattern_draft {
             return draft
@@ -263,8 +272,12 @@ impl App {
             return scene;
         };
         if op.rotary_wrap().is_some() {
-            if let Ok(geometry)=crate::cad_operations::geometry_for_setup(self.controller.document()) {
-                if crate::cad_operations::resolve_wrapped_operation(&geometry,&mut op).is_err(){return scene;}
+            if let Ok(geometry) =
+                crate::cad_operations::geometry_for_setup(self.controller.document())
+            {
+                if crate::cad_operations::resolve_wrapped_operation(&geometry, &mut op).is_err() {
+                    return scene;
+                }
             }
         }
         // The saved binding and cached operation contours still describe the old
@@ -369,21 +382,36 @@ impl App {
                 Operation::Profile(_) | Operation::Adaptive(_) | Operation::Parallel(_) => {}
             }
         }
-        if let Some(wrap)=op.rotary_wrap() {
-            let mut program=cam_cldata::Program::new();
-            let tag=cam_cldata::Tag::new(op.id(),cam_cldata::MoveKind::Cutting);
-            for (mut points,closed) in outlines {
-                if closed {if let Some(first)=points.first().copied(){points.push(first);}}
-                for (i,point) in points.iter().enumerate() {
-                    let to=cam_cldata::Point3::new(point.x,point.y,wrap.surface_z);
-                    program.push(if i==0 {cam_cldata::Step::Rapid{to,tag}}else{cam_cldata::Step::Linear{to,feed:1.,tag}});
+        if let Some(wrap) = op.rotary_wrap() {
+            let mut program = cam_cldata::Program::new();
+            let tag = cam_cldata::Tag::new(op.id(), cam_cldata::MoveKind::Cutting);
+            for (mut points, closed) in outlines {
+                if closed {
+                    if let Some(first) = points.first().copied() {
+                        points.push(first);
+                    }
+                }
+                for (i, point) in points.iter().enumerate() {
+                    let to = cam_cldata::Point3::new(point.x, point.y, wrap.surface_z);
+                    program.push(if i == 0 {
+                        cam_cldata::Step::Rapid { to, tag }
+                    } else {
+                        cam_cldata::Step::Linear { to, feed: 1., tag }
+                    });
                 }
             }
-            if let Ok(wrapped)=cam_toolpath::wrap_program(&program,wrap,&cam_toolpath::CancelToken::new()) {
-                scene=Scene::from_program(&wrapped);
+            if let Ok(wrapped) =
+                cam_toolpath::wrap_program(&program, wrap, &cam_toolpath::CancelToken::new())
+            {
+                scene = Scene::from_program(&wrapped);
                 for strip in &mut scene.strips {
-                    strip.color=PICK_BOUNDARY;strip.width=3.;
-                    for point in &mut strip.points {*point=frame.to_world_vector(point.map(f64::from)).map(|n|n as f32);}
+                    strip.color = PICK_BOUNDARY;
+                    strip.width = 3.;
+                    for point in &mut strip.points {
+                        *point = frame
+                            .to_world_vector(point.map(f64::from))
+                            .map(|n| n as f32);
+                    }
                 }
             }
             return scene;
@@ -442,14 +470,24 @@ impl App {
                 }
             }
         }
-        let index=if self.operation_draft.is_some(){self.rotary_index_draft.as_ref()}else{self.controller.document().rotary_indexes.get(&op.id())};
-        if let Some(index)=index {
-            let center=cam_cldata::Point3::new(index.center[0],index.center[1],index.center[2]);
-            for strip in &mut scene.strips {for point in &mut strip.points {
-                let p=frame.to_setup_vector(point.map(f64::from));
-                let p=index.axis.material_point(cam_cldata::Point3::new(p[0],p[1],p[2]),center,index.angle);
-                *point=frame.to_world_vector([p.x,p.y,p.z]).map(|v|v as f32);
-            }}
+        let index = if self.operation_draft.is_some() {
+            self.rotary_index_draft.as_ref()
+        } else {
+            self.controller.document().rotary_indexes.get(&op.id())
+        };
+        if let Some(index) = index {
+            let center = cam_cldata::Point3::new(index.center[0], index.center[1], index.center[2]);
+            for strip in &mut scene.strips {
+                for point in &mut strip.points {
+                    let p = frame.to_setup_vector(point.map(f64::from));
+                    let p = index.axis.material_point(
+                        cam_cldata::Point3::new(p[0], p[1], p[2]),
+                        center,
+                        index.angle,
+                    );
+                    *point = frame.to_world_vector([p.x, p.y, p.z]).map(|v| v as f32);
+                }
+            }
         }
         scene
     }
@@ -589,10 +627,17 @@ impl App {
                 } else {
                     normal
                 };
-                vertices.extend(quad.map(|corner| MeshVertex {
-                    position: rotary_view::index_point_to_world(frame, self.rotary_index_draft.as_ref(), corners[corner]).map(|v| v as f32),
-                    normal: frame.to_world_vector(normal).map(|v| v as f32),
-                    color,
+                vertices.extend(quad.map(|corner| {
+                    MeshVertex {
+                        position: rotary_view::index_point_to_world(
+                            frame,
+                            self.rotary_index_draft.as_ref(),
+                            corners[corner],
+                        )
+                        .map(|v| v as f32),
+                        normal: frame.to_world_vector(normal).map(|v| v as f32),
+                        color,
+                    }
                 }));
                 indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
             }

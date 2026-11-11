@@ -15,9 +15,9 @@ mod test_fixture;
 mod config;
 mod controller;
 mod geometry_verification;
-mod stock_shape;
 mod import_jobs;
 mod jobs;
+mod stock_shape;
 pub use jobs::{JobPhase, JobProgress, JobStamp};
 mod cad_operations;
 // Where per-user files live. One resolver, shared by the tool library and the

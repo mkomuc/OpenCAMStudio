@@ -69,10 +69,10 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
-        self.rotary_pick=None;
-        self.rotary_wrap_draft=None;
-        self.rotary_index_draft=None;
-        self.rotary_index_mode=rotary_view::IndexMode::Manual;
+        self.rotary_pick = None;
+        self.rotary_wrap_draft = None;
+        self.rotary_index_draft = None;
+        self.rotary_index_mode = rotary_view::IndexMode::Manual;
         self.seed_rotary_index_values();
         self.cutting_force_inputs
             .remove(&(self.controller.inspection_setup().id, None));
@@ -214,10 +214,13 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
-        if draft.rotary_wrap().is_some_and(|wrap|!wrap.geometry.is_empty()) {
-            let geometry=crate::cad_operations::geometry_for_setup(self.controller.document())?;
-            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut draft)?;
-            return Ok((draft,None));
+        if draft
+            .rotary_wrap()
+            .is_some_and(|wrap| !wrap.geometry.is_empty())
+        {
+            let geometry = crate::cad_operations::geometry_for_setup(self.controller.document())?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry, &mut draft)?;
+            return Ok((draft, None));
         }
         if self.cad_pending_kind.is_some() && draft.rotary_wrap().is_some() {
             return Err("Select machining geometry on the Geometry tab".into());

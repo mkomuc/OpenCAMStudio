@@ -64,7 +64,10 @@ impl SimulationOption {
 
 pub(super) fn motion_tag(step: &Step) -> Option<Tag> {
     match step {
-        Step::Rotary { tag, .. } | Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => Some(*tag),
+        Step::Rotary { tag, .. }
+        | Step::Rapid { tag, .. }
+        | Step::Linear { tag, .. }
+        | Step::Arc { tag, .. } => Some(*tag),
         _ => None,
     }
 }
@@ -78,12 +81,38 @@ pub(super) fn endpoint(step: &Step) -> Option<Point3> {
 impl TimedStep {
     pub(super) fn at(&self, fraction: f64) -> Step {
         let mut step = self.step.clone();
+        // Preserve the exact stored endpoint: interpolating at 1 can introduce
+        // rounding noise and split a continuous path into spurious entries.
+        if fraction >= 1.0 {
+            return step;
+        }
         if let Some(a) = self.from {
+            if fraction <= 0.0 {
+                match &mut step {
+                    Step::Rotary {
+                        to, angle, length, ..
+                    } => {
+                        *to = a;
+                        *angle = self.rotary_from;
+                        *length = 0.0;
+                    }
+                    Step::Rapid { to, .. } | Step::Linear { to, .. } => *to = a,
+                    Step::Arc { end, .. } => *end = a,
+                    _ => {}
+                }
+                return step;
+            }
             match &mut step {
-                Step::Rotary {to,angle,length,..}=> {
-                    *to=Point3::new(a.x+(to.x-a.x)*fraction,a.y+(to.y-a.y)*fraction,a.z+(to.z-a.z)*fraction);
-                    *angle=self.rotary_from+(*angle-self.rotary_from)*fraction;
-                    *length*=fraction;
+                Step::Rotary {
+                    to, angle, length, ..
+                } => {
+                    *to = Point3::new(
+                        a.x + (to.x - a.x) * fraction,
+                        a.y + (to.y - a.y) * fraction,
+                        a.z + (to.z - a.z) * fraction,
+                    );
+                    *angle = self.rotary_from + (*angle - self.rotary_from) * fraction;
+                    *length *= fraction;
                 }
                 Step::Rapid { to, .. } | Step::Linear { to, .. } => {
                     *to = Point3::new(
@@ -111,7 +140,7 @@ impl TimedStep {
     }
     fn length(&self) -> f64 {
         match (&self.step, self.from) {
-            (Step::Rotary{length,..},_)=>*length,
+            (Step::Rotary { length, .. }, _) => *length,
             (
                 Step::Arc {
                     end, center, dir, ..
@@ -282,15 +311,29 @@ impl SimulationPlayer {
             let clipped = step.at((hi - step.start) / duration);
             if previous_end != Some(a) {
                 flush(&mut run, &mut scene);
-                let link_tag = Tag { kind: MoveKind::Link, ..tag };
+                let link_tag = Tag {
+                    kind: MoveKind::Link,
+                    ..tag
+                };
                 if let Some((axis, center)) = step.rotary_frame {
                     let angle = match step.at((lo - step.start) / duration) {
                         Step::Rotary { angle, .. } => angle,
                         _ => step.rotary_from,
                     };
-                    run.steps.push(Step::Rotary { to: a, axis, center, angle, feed: None, length: 0., tag: link_tag });
+                    run.steps.push(Step::Rotary {
+                        to: a,
+                        axis,
+                        center,
+                        angle,
+                        feed: None,
+                        length: 0.,
+                        tag: link_tag,
+                    });
                 } else {
-                    run.steps.push(Step::Rapid { to: a, tag: link_tag });
+                    run.steps.push(Step::Rapid {
+                        to: a,
+                        tag: link_tag,
+                    });
                 }
             }
             previous_end = endpoint(&clipped);
@@ -522,8 +565,18 @@ impl SimulationPlayer {
             .width(Length::Fill)
         };
         let mut list = column![section(0, "Tool")].spacing(10);
-        if self.timeline.steps.iter().any(|step| matches!(step.step, Step::Rotary { .. })) {
-            list = list.push(picker("Rotary view", SimulationRotaryView::ALL, p.rotary_view, SimulationOption::RotaryView));
+        if self
+            .timeline
+            .steps
+            .iter()
+            .any(|step| matches!(step.step, Step::Rotary { .. }))
+        {
+            list = list.push(picker(
+                "Rotary view",
+                SimulationRotaryView::ALL,
+                p.rotary_view,
+                SimulationOption::RotaryView,
+            ));
         }
         if self.sections[0] {
             list = list.push(check("Show tool", p.show_tool, SimulationOption::Tool));

@@ -1949,6 +1949,30 @@ impl AppController {
     /// Edit operation `id` in place (undoable). Used where the target is explicit
     /// rather than whatever is selected — e.g. changing an operation's tool from the
     /// inspector.
+    pub fn rename_operation(&mut self, id: u32, name: String) {
+        if !self
+            .document()
+            .setups
+            .iter()
+            .any(|s| s.operations.iter().any(|op| op.id() == id))
+        {
+            return;
+        }
+        let name = name.trim().to_owned();
+        if self.document().operation_names.get(&id).map(String::as_str) == Some(name.as_str())
+            || (name.is_empty() && !self.document().operation_names.contains_key(&id))
+        {
+            return;
+        }
+        self.edit_document(move |doc| {
+            if name.is_empty() {
+                doc.operation_names.remove(&id);
+            } else {
+                doc.operation_names.insert(id, name);
+            }
+        });
+    }
+
     pub fn edit_operation(&mut self, id: u32, f: impl FnOnce(&mut Operation)) {
         if self.operation(id).is_none() {
             return;
@@ -2066,7 +2090,12 @@ impl AppController {
         let new_id = self.next_op_id();
         set_op_id(&mut copy, new_id);
         self.edit_document(move |doc| {
-            if let Some(index)=doc.rotary_indexes.get(&sel).cloned(){doc.rotary_indexes.insert(new_id,index);}
+            if let Some(name) = doc.operation_names.get(&sel).cloned() {
+                doc.operation_names.insert(new_id, name);
+            }
+            if let Some(index) = doc.rotary_indexes.get(&sel).cloned() {
+                doc.rotary_indexes.insert(new_id, index);
+            }
             if let Some(binding) = doc.geometry.bindings.get(&sel).cloned() {
                 doc.geometry.bindings.insert(new_id, binding);
             }
@@ -3196,7 +3225,13 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
     for step in program.steps() {
         match step {
             Step::ToolChange { tool } => current = Some(*tool),
-            Step::Linear { to, tag, .. } | Step::Rotary {to,tag,feed:Some(_),..} if tag.kind == MoveKind::Cutting => {
+            Step::Linear { to, tag, .. }
+            | Step::Rotary {
+                to,
+                tag,
+                feed: Some(_),
+                ..
+            } if tag.kind == MoveKind::Cutting => {
                 if let Some(n) = current {
                     let e = deepest.entry(n).or_insert(f64::INFINITY);
                     *e = e.min(to.z);
@@ -3250,12 +3285,23 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
 /// Translate a document [`Tool`] into the simulator's [`ToolProfile`] — how its
 /// bottom removes material (flat, ball, bull-nose corner, or a chamfer/drill cone).
 pub(crate) fn sim_profile(tool: &Tool) -> ToolProfile {
-    let radius = tool.radius();
+    let radius = tool.radius()
+        + match tool.kind {
+            ToolKind::RadiusMill { corner_radius, .. } => corner_radius.max(0.0),
+            _ => 0.0,
+        };
     let shape = match tool.kind {
         ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::FaceMill => ProfileShape::Flat,
         ToolKind::BallMill => ProfileShape::Ball,
         ToolKind::BullNose { corner_radius } => ProfileShape::BullNose {
             corner_radius: corner_radius.clamp(0.0, radius),
+        },
+        ToolKind::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => ProfileShape::RadiusMill {
+            corner_radius,
+            tip_length,
         },
         ToolKind::ChamferMill {
             included_angle_deg,
@@ -4057,6 +4103,25 @@ mod tests {
             app.duplicate_operation_groups().is_empty(),
             "different work"
         );
+    }
+
+    #[test]
+    fn operation_names_persist_and_are_undoable() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        app.rename_operation(0, "  Roughing  ".into());
+        assert_eq!(
+            app.document().operation_names.get(&0).map(String::as_str),
+            Some("Roughing")
+        );
+        let saved = serde_json::to_string(app.document()).unwrap();
+        let restored: Document = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.operation_names.get(&0).map(String::as_str),
+            Some("Roughing")
+        );
+        assert!(app.undo());
+        assert!(!app.document().operation_names.contains_key(&0));
     }
 
     #[test]

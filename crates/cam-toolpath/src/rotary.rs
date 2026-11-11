@@ -4,7 +4,7 @@ use cam_cldata::{arc_sweep, ArcDir, Point3, Program, Step, Tag};
 use cam_model::RotaryWrap;
 
 /// Invalidates cached planar wrap fragments after radial-height/seam fixes.
-pub const ROTARY_WRAP_REVISION:u32=2;
+pub const ROTARY_WRAP_REVISION: u32 = 2;
 
 /// Lock the workpiece at one angle for an ordinary three-axis operation.
 /// Arcs and drill cycles are expanded before attaching the fixed rotary pose.

@@ -1223,7 +1223,19 @@ mod tests {
             );
         }
         let _ = app.update(Message::SetupCommit);
-        assert!(matches!(app.controller.inspection_setup().stock, cam_model::Stock::RelativeRound { axis: Some(cam_model::StockAxis::Origin { origin_axis: cam_model::StockOriginAxis::Z }), .. }), "{}", app.status);
+        assert!(
+            matches!(
+                app.controller.inspection_setup().stock,
+                cam_model::Stock::RelativeRound {
+                    axis: Some(cam_model::StockAxis::Origin {
+                        origin_axis: cam_model::StockOriginAxis::Z
+                    }),
+                    ..
+                }
+            ),
+            "{}",
+            app.status
+        );
         app.begin_setup_draft();
         let _ = app.update(Message::SetupStockAxisClear);
         assert!(matches!(

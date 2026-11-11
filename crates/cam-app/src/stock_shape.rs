@@ -195,7 +195,9 @@ mod tests {
         let source = round_mesh(blank, [-5., -5., -4.], [5., 5., 0.]).unwrap();
         let triangles: Vec<[u32; 3]> = source
             .indices
-            .as_chunks::<3>().0.iter()
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect();
         document.geometry.assets.push(GeometryAsset {

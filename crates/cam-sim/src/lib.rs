@@ -14,15 +14,18 @@
 
 mod collision;
 mod heightfield;
+mod rotary_simulation;
 mod simulation;
 mod sweep;
-mod rotary_simulation;
 pub use rotary_simulation::{analyze_rotary_removal_controlled, RotarySimulationCache, RotaryTool};
 pub use simulation::{
     analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache,
 };
 
-pub use heightfield::{CylindricalStock, Heightfield, StockMeshCache, StockSnapshot, SurfaceDiff, SurfaceLocation, SurfaceMesh};
+pub use heightfield::{
+    CylindricalStock, Heightfield, StockMeshCache, StockSnapshot, SurfaceDiff, SurfaceLocation,
+    SurfaceMesh,
+};
 
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use cam_geo::{Arc, Point};
@@ -55,6 +58,8 @@ pub enum ProfileShape {
     Ball,
     /// Flat centre with a rounded corner of `corner_radius` mm (bull-nose).
     BullNose { corner_radius: f64 },
+    /// Concave quarter-round cutter with a cylindrical tip.
+    RadiusMill { corner_radius: f64, tip_length: f64 },
     /// Conical point (chamfer/V mill, drill): the surface rises as `d/tan(α)`
     /// outside an optional flat tip, where `half_angle_rad` (α) is measured from
     /// the tool axis.
@@ -125,6 +130,18 @@ impl ToolProfile {
                 } else {
                     let x = d - flat; // distance into the corner arc
                     corner_radius - (corner_radius * corner_radius - x * x).max(0.0).sqrt()
+                }
+            }
+            ProfileShape::RadiusMill {
+                corner_radius,
+                tip_length,
+            } => {
+                let cr = corner_radius.max(0.0);
+                let tip_radius = (self.radius - cr).max(0.0);
+                if d <= tip_radius || cr == 0.0 {
+                    0.0
+                } else {
+                    tip_length.max(0.0) + (cr * cr - (self.radius - d).powi(2)).max(0.0).sqrt()
                 }
             }
             ProfileShape::Cone {
@@ -772,5 +789,25 @@ mod cancellation_tests {
             })
             .is_none());
         assert_eq!(polls.get(), 3);
+    }
+}
+
+#[cfg(test)]
+mod radius_mill_tests {
+    use super::{ProfileShape, ToolProfile};
+
+    #[test]
+    fn concave_radius_profile_matches_tool_geometry() {
+        let profile = ToolProfile {
+            radius: 12.0,
+            shape: ProfileShape::RadiusMill {
+                corner_radius: 6.0,
+                tip_length: 2.0,
+            },
+        };
+        assert_eq!(profile.offset(3.0), 0.0);
+        assert_eq!(profile.offset(6.0), 0.0);
+        assert!((profile.offset(9.0) - (2.0 + 27.0_f64.sqrt())).abs() < 1e-9);
+        assert_eq!(profile.offset(12.0), 8.0);
     }
 }

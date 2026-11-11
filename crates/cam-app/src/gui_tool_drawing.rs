@@ -48,6 +48,7 @@ impl ToolCanvas {
             draw_flutes: !matches!(
                 tool.kind,
                 ToolKind::VBit { .. }
+                    | ToolKind::RadiusMill { .. }
                     | ToolKind::ChamferMill { .. }
                     | ToolKind::FaceMill
                     | ToolKind::ThreadMill { .. }
@@ -306,6 +307,7 @@ pub(super) fn is_parameter(field: Field) -> bool {
             | Field::NeckLength
             | Field::NeckDiameter
             | Field::CornerRadius
+            | Field::TipLength
             | Field::TipRadius
             | Field::TipDiameter
             | Field::PointAngle
@@ -464,6 +466,35 @@ fn dimensions(tool: &cam_model::Tool) -> Vec<Dimension> {
         }
     }
     match tool.kind {
+        ToolKind::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => {
+            let t = std::f64::consts::FRAC_1_SQRT_2;
+            add(
+                CornerRadius,
+                "R",
+                corner_radius,
+                Leader {
+                    radius: r + corner_radius * (1.0 - t),
+                    z: tip_length + corner_radius * t,
+                },
+            );
+            if tip_length > 0.0 {
+                add(
+                    TipLength,
+                    "Tip length",
+                    tip_length,
+                    Vertical {
+                        radius: r,
+                        from: 0.0,
+                        to: tip_length,
+                        left: false,
+                        lane: 48.0,
+                    },
+                );
+            }
+        }
         ToolKind::BullNose { corner_radius } => {
             let t = std::f64::consts::FRAC_1_SQRT_2;
             add(

@@ -115,13 +115,16 @@ impl App {
             draft.options.axis.is_some()
         };
         let picking = draft.picking == Some(axis);
-        let mut controls = row![inspector_pick_button(if picking {
-            "Selecting…"
-        } else if selected {
-            "Edge selected"
-        } else {
-            "Select edge"
-        }, picking)
+        let mut controls = row![inspector_pick_button(
+            if picking {
+                "Selecting…"
+            } else if selected {
+                "Edge selected"
+            } else {
+                "Select edge"
+            },
+            picking
+        )
         .on_press(reference_action(draft, axis))]
         .spacing(6);
         if selected {

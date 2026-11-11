@@ -43,10 +43,10 @@ use inspector_style::*;
 mod height_editor;
 #[path = "gui_height_planes.rs"]
 mod height_planes;
-#[path = "gui_icon_picker.rs"]
-mod icon_picker;
 #[path = "gui_height_reference.rs"]
 mod height_reference;
+#[path = "gui_icon_picker.rs"]
+mod icon_picker;
 #[path = "gui_inspector.rs"]
 mod inspector_view;
 #[path = "gui_jobs.rs"]
@@ -69,12 +69,12 @@ mod operation_metadata;
 mod operation_sections;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
-#[path = "gui_rotary.rs"]
-mod rotary_view;
 #[path = "gui_operation_tool_selector.rs"]
 mod operation_tool_selector;
 #[path = "gui_pattern_editor.rs"]
 mod pattern_editor_view;
+#[path = "gui_rotary.rs"]
+mod rotary_view;
 #[path = "gui_setup_editor.rs"]
 mod setup_editor_view;
 #[path = "gui_thread_parameters.rs"]
@@ -725,9 +725,14 @@ enum StockEditorKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StockSolidChoice { id: u64, name: String }
+struct StockSolidChoice {
+    id: u64,
+    name: String,
+}
 impl std::fmt::Display for StockSolidChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.name) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -767,19 +772,32 @@ impl std::fmt::Display for BoxAnchor {
 }
 
 impl StockEditorKind {
-    const ALL: [Self; 8] = [Self::FixedBox, Self::RelativeBox, Self::FixedCylinder, Self::RelativeCylinder, Self::FixedTube, Self::RelativeTube, Self::FromSolid, Self::PreviousSetup];
+    const ALL: [Self; 8] = [
+        Self::FixedBox,
+        Self::RelativeBox,
+        Self::FixedCylinder,
+        Self::RelativeCylinder,
+        Self::FixedTube,
+        Self::RelativeTube,
+        Self::FromSolid,
+        Self::PreviousSetup,
+    ];
 }
 
 impl StockEditorKind {
     fn icon(self) -> &'static [u8] {
         match self {
             Self::FixedBox => include_bytes!("../assets/icons/stock/fixed_box.svg"),
-            Self::RelativeBox | Self::LegacyBox => include_bytes!("../assets/icons/stock/relative_box.svg"),
+            Self::RelativeBox | Self::LegacyBox => {
+                include_bytes!("../assets/icons/stock/relative_box.svg")
+            }
             Self::FixedCylinder => include_bytes!("../assets/icons/stock/fixed_cylinder.svg"),
             Self::RelativeCylinder => include_bytes!("../assets/icons/stock/relative_cylinder.svg"),
             Self::FixedTube => include_bytes!("../assets/icons/stock/fixed_tube.svg"),
             Self::RelativeTube => include_bytes!("../assets/icons/stock/relative_tube.svg"),
-            Self::FromSolid | Self::PreviousSetup => include_bytes!("../assets/icons/stock/solid.svg"),
+            Self::FromSolid | Self::PreviousSetup => {
+                include_bytes!("../assets/icons/stock/solid.svg")
+            }
         }
     }
 }
@@ -1014,6 +1032,7 @@ impl std::fmt::Display for ThreadForm {
 fn tool_kind_fields(kind: ToolKind) -> Vec<Field> {
     match kind {
         ToolKind::BullNose { .. } => vec![Field::CornerRadius],
+        ToolKind::RadiusMill { .. } => vec![Field::CornerRadius, Field::TipLength],
         ToolKind::ChamferMill { .. } => vec![Field::ChamferAngle, Field::TipDiameter],
         ToolKind::Drill { .. } => vec![Field::PointAngle],
         ToolKind::ThreadMill { .. } => vec![Field::ToolThreadPitch],
@@ -1027,7 +1046,11 @@ fn tool_kind_fields(kind: ToolKind) -> Vec<Field> {
 /// Read a tool's kind-specific parameter for a field, if it applies.
 fn tool_kind_field(kind: ToolKind, field: Field) -> Option<f64> {
     match (kind, field) {
-        (ToolKind::BullNose { corner_radius }, Field::CornerRadius) => Some(corner_radius),
+        (
+            ToolKind::BullNose { corner_radius } | ToolKind::RadiusMill { corner_radius, .. },
+            Field::CornerRadius,
+        ) => Some(corner_radius),
+        (ToolKind::RadiusMill { tip_length, .. }, Field::TipLength) => Some(tip_length),
         (
             ToolKind::ChamferMill {
                 included_angle_deg, ..
@@ -1107,6 +1130,17 @@ fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
         ToolKind::BullNose { corner_radius } => {
             if let Some(v) = get(Field::CornerRadius) {
                 *corner_radius = v;
+            }
+        }
+        ToolKind::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => {
+            if let Some(v) = get(Field::CornerRadius) {
+                *corner_radius = v;
+            }
+            if let Some(v) = get(Field::TipLength) {
+                *tip_length = v;
             }
         }
         ToolKind::ChamferMill {
@@ -1212,6 +1246,7 @@ enum Field {
     NominalPlungeFeed,
     /// Bull-nose corner radius (mm).
     CornerRadius,
+    TipLength,
     /// Chamfer/V mill included point angle (deg).
     ChamferAngle,
     /// Chamfer/V mill flat-tip diameter (mm).
@@ -1355,7 +1390,9 @@ fn set_machine_z_limits(envelope: &mut cam_model::Envelope, travel: f64, max_z: 
 
 impl Field {
     fn label(self) -> &'static str {
-        if let Self::Wrap(number)=self {return number.label();}
+        if let Self::Wrap(number) = self {
+            return number.label();
+        }
         match self {
             Self::Wrap(_) => unreachable!(),
             Field::OperationTop => "Cutting top Z (mm)",
@@ -1394,6 +1431,7 @@ impl Field {
             Field::NominalFeed => "Nominal feed (mm/min)",
             Field::NominalPlungeFeed => "Nominal plunge (mm/min)",
             Field::CornerRadius => "Corner radius (mm)",
+            Field::TipLength => "Tip length (mm)",
             Field::ChamferAngle => "Point angle (deg)",
             Field::TipDiameter => "Tip ⌀ (mm)",
             Field::TipRadius => "Tip radius (mm)",
@@ -1613,6 +1651,7 @@ impl Field {
                 "Default plunge (Z-entry) feed for this tool (mm/min). Seeds a new \
                  operation's plunge feed; the operation can override it. 0 = unset."
             }
+            Field::TipLength => "Length of the cylindrical tip below the rounded cutting edge.",
             Field::CornerRadius => {
                 "Corner radius of the rounded-edge (bull-nose) end mill — the fillet \
                  between the flat bottom and the side. Must be smaller than the tool \
@@ -1734,13 +1773,13 @@ impl Field {
                  chamfer the rim of a pocket or a step that an earlier operation cut."
             }
             Field::ChamferWidth => {
-                "Horizontal width of the chamfer from the selected edge. Together with the tool angle it determines the bevel depth."
+                "Horizontal width of the chamfer from the selected edge. For a radius mill, the tool corner radius determines the roundover width instead."
             }
             Field::ChamferDepth => {
                 "How far below the top edge the tool tip rides (mm), which picks where \
                  on the tool's flank the cut lands. 0 = cut at the tip."
             }
-            Field::ChamferTipOffset => "Additional distance below the chamfer edge. The tool moves outward by the corresponding amount to keep the cutting flank on the same bevel.",
+            Field::ChamferTipOffset => "Additional distance below the chamfer edge. The tool moves outward by the corresponding amount to keep the cutting flank on the same bevel. Radius mills require zero tip offset.",
             Field::ChamferStep => {
                 "Chamfer width added per pass (mm) for a multi-pass chamfer. 0 = cut the \
                  whole chamfer in a single pass."
@@ -2189,6 +2228,7 @@ struct App {
     show_project_browser: bool,
     planar_selection: Vec<LoopRef>,
     tree_drag: Option<TreeDrag>,
+    operation_rename: Option<(u32, String)>,
     tree_hover: Option<(TreeNode, bool)>,
     tree_menu: Option<TreeNode>,
     pattern_menu_y: Option<f32>,
@@ -2806,6 +2846,8 @@ enum Message {
     HeightEntityRemove(cam_model::HeightPlaneKind, usize),
     HeightDefaults,
     CheckHeightFocus,
+    CheckOperationRenameFocus,
+    OperationRenameFocus(u32, bool),
     HeightFocus(String, bool),
     /// Rename the machine.
     MachineNameChanged(String),
@@ -3379,8 +3421,8 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
-        self.rotary_pick=None;
-        self.rotary_wrap_draft=None;
+        self.rotary_pick = None;
+        self.rotary_wrap_draft = None;
         self.seed_rotary_index_draft(id);
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
@@ -3423,7 +3465,15 @@ impl App {
 
     fn seed_rotary_index_draft(&mut self, id: u32) {
         self.rotary_index_draft = self.controller.document().rotary_indexes.get(&id).cloned();
-        self.rotary_index_mode = if self.rotary_index_draft.as_ref().is_some_and(|i| i.face.is_some()) { rotary_view::IndexMode::Face } else { rotary_view::IndexMode::Manual };
+        self.rotary_index_mode = if self
+            .rotary_index_draft
+            .as_ref()
+            .is_some_and(|i| i.face.is_some())
+        {
+            rotary_view::IndexMode::Face
+        } else {
+            rotary_view::IndexMode::Manual
+        };
         self.seed_rotary_index_values();
     }
 
@@ -3474,7 +3524,9 @@ impl App {
         let Selection::Operation(id) = self.controller.selection() else {
             return false;
         };
-        if self.rotary_index_draft.as_ref()!=self.controller.document().rotary_indexes.get(&id) {return true;}
+        if self.rotary_index_draft.as_ref() != self.controller.document().rotary_indexes.get(&id) {
+            return true;
+        }
         if self.height_rules_dirty() {
             return true;
         }
@@ -3548,7 +3600,9 @@ impl App {
         match &mut candidate.stock {
             cam_model::Stock::FixedRound { axis, .. }
             | cam_model::Stock::RelativeRound { axis, .. } => {
-                *axis = Some(cam_model::StockAxis::Edge(cam_model::StockAxisReference::from(&entity)))
+                *axis = Some(cam_model::StockAxis::Edge(
+                    cam_model::StockAxisReference::from(&entity),
+                ))
             }
             _ => return false,
         }
@@ -3806,6 +3860,7 @@ impl App {
             show_project_browser: true,
             planar_selection: Vec::new(),
             tree_drag: None,
+            operation_rename: None,
             tree_hover: None,
             tree_menu: None,
             pattern_menu_y: None,
@@ -3988,6 +4043,10 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
+        if matches!(message, Message::CadEscape) && self.operation_rename.is_some() {
+            self.operation_rename = None;
+            return iced::Task::none();
+        }
         if let Message::DiscardConfirmed = message {
             if let Some(action) = self.pending_discard.take() {
                 self.discarding_confirmed = true;
@@ -4090,7 +4149,10 @@ impl App {
         let previous_result = self.controller.outcome().and_then(|o| o.stamp.clone());
         let context = self.output_context();
         let task = self.update_message(message);
-        if self.controller.outcome().and_then(|o| o.stamp.as_ref())
+        if self
+            .controller
+            .outcome()
+            .and_then(|o| o.stamp.as_ref())
             .is_some_and(|stamp| stamp.request_id == 0 && Some(stamp) != previous_result.as_ref())
         {
             self.record_status_messages();
@@ -5314,15 +5376,22 @@ impl App {
             Message::SetupStockAxisClear => {
                 if let Some(draft) = &mut self.setup_draft {
                     match &mut draft.stock {
-                        cam_model::Stock::FixedRound { axis, .. } | cam_model::Stock::RelativeRound { axis, .. } => *axis = None,
+                        cam_model::Stock::FixedRound { axis, .. }
+                        | cam_model::Stock::RelativeRound { axis, .. } => *axis = None,
                         _ => {}
                     }
                 }
-                if self.setup_axis_pick == Some(3) { self.setup_axis_pick = None; }
+                if self.setup_axis_pick == Some(3) {
+                    self.setup_axis_pick = None;
+                }
                 self.cad_candidates.clear();
             }
             Message::SetupStockSolidChanged(choice) => {
-                if let Some(draft) = &mut self.setup_draft { draft.stock = cam_model::Stock::FromSolid { instance: Some(choice.id) }; }
+                if let Some(draft) = &mut self.setup_draft {
+                    draft.stock = cam_model::Stock::FromSolid {
+                        instance: Some(choice.id),
+                    };
+                }
             }
             Message::SetupStockNumberChanged(index, value) => {
                 self.setup_values.insert(20 + index, value.clone());
@@ -5344,8 +5413,32 @@ impl App {
                                 offsets[index / 3][index % 3] = v;
                             }
                         }
-                        cam_model::Stock::FixedRound { diameter, inner_diameter, length, position, .. } => match index { 0 => *diameter = v, 1 => *inner_diameter = v, 2 => *length = v, 3 => *position = v, _ => {} },
-                        cam_model::Stock::RelativeRound { radial, inner_diameter, bottom, top, .. } => match index { 0 => *radial = v, 1 => *inner_diameter = v, 2 => *bottom = v, 3 => *top = v, _ => {} },
+                        cam_model::Stock::FixedRound {
+                            diameter,
+                            inner_diameter,
+                            length,
+                            position,
+                            ..
+                        } => match index {
+                            0 => *diameter = v,
+                            1 => *inner_diameter = v,
+                            2 => *length = v,
+                            3 => *position = v,
+                            _ => {}
+                        },
+                        cam_model::Stock::RelativeRound {
+                            radial,
+                            inner_diameter,
+                            bottom,
+                            top,
+                            ..
+                        } => match index {
+                            0 => *radial = v,
+                            1 => *inner_diameter = v,
+                            2 => *bottom = v,
+                            3 => *top = v,
+                            _ => {}
+                        },
                         cam_model::Stock::BoundingBox {
                             x_offset,
                             y_offset,
@@ -5382,7 +5475,10 @@ impl App {
                 self.status = if axis == 3 {
                     "Select a straight model edge or an origin axis for the stock.".into()
                 } else {
-                    format!("Select a straight model or stock edge for {}.", ["X", "Y", "Z"][axis])
+                    format!(
+                        "Select a straight model or stock edge for {}.",
+                        ["X", "Y", "Z"][axis]
+                    )
                 };
             }
             Message::PatternTabChanged(tab) => self.pattern_tab = tab,
@@ -5993,6 +6089,25 @@ impl App {
                     self.selected_tool_parameter = Some(field);
                 }
             }
+            Message::CheckOperationRenameFocus => {
+                if let Some((id, _)) = &self.operation_rename {
+                    let id = *id;
+                    return iced::widget::operation::is_focused("operation-rename")
+                        .map(move |focused| Message::OperationRenameFocus(id, focused));
+                }
+            }
+            Message::OperationRenameFocus(id, focused) => {
+                if !focused
+                    && self
+                        .operation_rename
+                        .as_ref()
+                        .is_some_and(|(editing, _)| *editing == id)
+                {
+                    if let Some((id, name)) = self.operation_rename.take() {
+                        self.controller.rename_operation(id, name);
+                    }
+                }
+            }
             Message::CheckHeightFocus => {
                 if self.library_mode() {
                     return iced::Task::batch(self.inspector_fields().into_iter().map(|field| {
@@ -6117,7 +6232,7 @@ impl App {
                 }
             }
             Message::CancelOperationDraft => {
-                self.rotary_pick=None;
+                self.rotary_pick = None;
                 self.drawing_editing_op = None;
                 self.controller.cancel_operation();
                 if let Selection::Operation(id) = self.controller.selection() {
@@ -6583,8 +6698,16 @@ impl App {
                     return iced::Task::none();
                 }
                 if let (Some(axis), [candidate]) = (self.setup_axis_pick, candidates.as_slice()) {
-                    let selected = if axis == 3 { self.set_round_stock_axis(candidate.entity.clone()) } else { self.set_setup_axis_reference(axis, Some(candidate.entity.clone())); true };
-                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
+                    let selected = if axis == 3 {
+                        self.set_round_stock_axis(candidate.entity.clone())
+                    } else {
+                        self.set_setup_axis_reference(axis, Some(candidate.entity.clone()));
+                        true
+                    };
+                    if selected {
+                        self.setup_axis_pick = None;
+                        self.cad_candidates.clear();
+                    }
                 } else if self.setup_axis_pick.is_some() && candidates.len() > 1 {
                     self.cad_candidates = candidates.clone();
                     self.status = "Choose the intended overlapping edge in the right panel.".into();
@@ -6650,8 +6773,16 @@ impl App {
                     return iced::Task::none();
                 }
                 if let Some(axis) = self.setup_axis_pick {
-                    let selected = if axis == 3 { self.set_round_stock_axis(entity) } else { self.set_setup_axis_reference(axis, Some(entity)); true };
-                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
+                    let selected = if axis == 3 {
+                        self.set_round_stock_axis(entity)
+                    } else {
+                        self.set_setup_axis_reference(axis, Some(entity));
+                        true
+                    };
+                    if selected {
+                        self.setup_axis_pick = None;
+                        self.cad_candidates.clear();
+                    }
                 } else {
                     self.select_cad_entity(entity);
                 }
@@ -6680,7 +6811,10 @@ impl App {
                 }
             }
             Message::CadEscape => {
-                if self.rotary_pick.take().is_some() {self.status="Rotary geometry selection finished.".into();return iced::Task::none();}
+                if self.rotary_pick.take().is_some() {
+                    self.status = "Rotary geometry selection finished.".into();
+                    return iced::Task::none();
+                }
                 if self
                     .pattern_draft
                     .as_mut()
@@ -7253,7 +7387,7 @@ impl App {
                 }
             }
             Message::CancelOp => {
-                self.rotary_pick=None;
+                self.rotary_pick = None;
                 self.cad_selected_project_tool = None;
                 self.cutting_force_inputs
                     .remove(&(self.controller.inspection_setup().id, None));
@@ -7554,8 +7688,11 @@ impl App {
                 if let Some(axis) = self.setup_axis_pick.take() {
                     if axis == 3 {
                         self.setup_axis_pick = Some(3);
-                        self.status = "Select a straight model edge or an origin axis for the stock.".into();
-                    } else { self.set_setup_stock_axis(axis, direction); }
+                        self.status =
+                            "Select a straight model edge or an origin axis for the stock.".into();
+                    } else {
+                        self.set_setup_stock_axis(axis, direction);
+                    }
                 }
                 self.setup_hover = SetupHover::default();
                 self.cad_candidates.clear();
@@ -8873,6 +9010,12 @@ impl App {
             iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
+                )) => Some(Message::CheckOperationRenameFocus),
+                _ => None,
+            }),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
                 )) => Some(Message::ToolColumnRelease),
                 _ => None,
             }),
@@ -9430,6 +9573,7 @@ impl App {
     /// diameter" there.
     fn field_label(&self, field: Field) -> &'static str {
         match (self.inspected_tool_kind(), field) {
+            (Some(ToolKind::RadiusMill { .. }), Field::ToolDiameter) => "Tip diameter (mm)",
             // V-bit and chamfer mill: the single transverse ⌀ is the shaft they flare to.
             (Some(ToolKind::VBit { .. } | ToolKind::ChamferMill { .. }), Field::ToolDiameter) => {
                 "Shank diameter (mm)"
@@ -9473,6 +9617,8 @@ impl App {
         }
         use ToolKind::*;
         match (self.inspected_tool_kind(), field) {
+            (Some(RadiusMill { .. }), Field::ToolDiameter) => "Diameter of the cylindrical tip. The maximum cutting diameter is this value plus twice the corner radius.",
+            (Some(RadiusMill { .. }), Field::CornerRadius) => "Radius of the concave cutting edge, measured from the tip to the outer cutting diameter.",
             // Cutting/flute diameter — the meaning turns on the kind.
             (Some(EndMill | RoughingMill | BallMill | BullNose { .. }), Field::ToolDiameter) => {
                 "Diameter across the flutes — the end mill's cutting diameter."
@@ -9586,7 +9732,18 @@ impl App {
                         && buf(Field::MachineMinSpindleRpm).is_some_and(|min| min > value))
             }
             Field::MachineToolChangeSeconds => value < 0.0,
+            Field::TipLength => {
+                value < 0.0
+                    || matches!((buf(Field::FluteLength), buf(Field::CornerRadius)), (Some(fl), Some(cr)) if value + cr > fl + 1e-9)
+            }
             Field::CornerRadius => {
+                if matches!(
+                    self.inspected_tool_kind(),
+                    Some(ToolKind::RadiusMill { .. })
+                ) {
+                    return value <= 0.0
+                        || matches!((buf(Field::FluteLength), buf(Field::TipLength)), (Some(fl), Some(tip)) if value + tip > fl + 1e-9);
+                }
                 matches!((buf(Field::CornerRadius), buf(Field::ToolDiameter)),
                     (Some(cr), Some(d)) if cr > d * 0.5 + 1e-9)
             }
@@ -9662,6 +9819,9 @@ impl App {
                     return true; // flute length cannot be 0 (anywhere)
                 }
                 match self.inspected_tool_kind() {
+                    Some(ToolKind::RadiusMill { .. }) => {
+                        matches!((buf(Field::CornerRadius), buf(Field::TipLength)), (Some(cr), Some(tip)) if fl < cr + tip - 1e-9)
+                    }
                     Some(ToolKind::BullNose { .. }) => {
                         matches!(buf(Field::CornerRadius), Some(cr) if fl < cr - 1e-9)
                     }
@@ -9683,11 +9843,24 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
-        if let Some(op)=self.operation_draft.as_ref().filter(|op|op.rotary_wrap().is_some()) {
-            let mut op=op.clone();
-            let values=self.fields.iter().filter_map(|(f,v)|v.parse::<f64>().ok().map(|v|(*f,v))).collect();
-            apply_op_fields(&mut op,&values);
-            if op.rotary_wrap().is_some_and(|wrap|wrap.validate().is_err()) {return true;}
+        if let Some(op) = self
+            .operation_draft
+            .as_ref()
+            .filter(|op| op.rotary_wrap().is_some())
+        {
+            let mut op = op.clone();
+            let values = self
+                .fields
+                .iter()
+                .filter_map(|(f, v)| v.parse::<f64>().ok().map(|v| (*f, v)))
+                .collect();
+            apply_op_fields(&mut op, &values);
+            if op
+                .rotary_wrap()
+                .is_some_and(|wrap| wrap.validate().is_err())
+            {
+                return true;
+            }
         }
         if self.profile_parameter_error().is_some() {
             return true;
@@ -9886,6 +10059,16 @@ impl App {
                 Some(ToolKind::BullNose { .. }) => vec![
                     Field::ToolDiameter,
                     Field::CornerRadius,
+                    Field::FluteLength,
+                    Field::ShankDiameter,
+                    Field::ShankLength,
+                    Field::ToolLength,
+                    Field::Flutes,
+                ],
+                Some(ToolKind::RadiusMill { .. }) => vec![
+                    Field::ToolDiameter,
+                    Field::CornerRadius,
+                    Field::TipLength,
                     Field::FluteLength,
                     Field::ShankDiameter,
                     Field::ShankLength,
@@ -10328,7 +10511,10 @@ impl App {
                 None
             };
             let used_tools = operation.tools();
-            if let Err(reason)=self.validate_rotary_index_draft() {self.report_error(reason);return;}
+            if let Err(reason) = self.validate_rotary_index_draft() {
+                self.report_error(reason);
+                return;
+            }
             let tools = self
                 .operation_tools
                 .iter()
@@ -10344,15 +10530,17 @@ impl App {
                     .contains_key(&id)
             {
                 match self.edited_height_settings() {
-                    Ok(settings) => self.controller.apply_operation_height_settings_and_stock_and_index(
-                        operation,
-                        overrides,
-                        tools,
-                        self.operation_geometry.clone(),
-                        settings,
-                        self.stock_to_leave_with_fields(),
-                        self.rotary_index_draft.clone(),
-                    ),
+                    Ok(settings) => self
+                        .controller
+                        .apply_operation_height_settings_and_stock_and_index(
+                            operation,
+                            overrides,
+                            tools,
+                            self.operation_geometry.clone(),
+                            settings,
+                            self.stock_to_leave_with_fields(),
+                            self.rotary_index_draft.clone(),
+                        ),
                     Err(reason) => Err(reason),
                 }
             } else {
@@ -10513,13 +10701,15 @@ impl App {
         // Opening a stale/legacy project must not initiate a recalculation.
         let statuses = self.controller.toolpath_statuses();
         let document = self.controller.document();
-        if self.controller.outcome().is_none() && document.active_setup().is_some_and(|setup| {
-            setup
-                .operations
-                .iter()
-                .filter(|op| document.operation_is_included(document.setup().id, op.id()))
-                .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
-        }) {
+        if self.controller.outcome().is_none()
+            && document.active_setup().is_some_and(|setup| {
+                setup
+                    .operations
+                    .iter()
+                    .filter(|op| document.operation_is_included(document.setup().id, op.id()))
+                    .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
+            })
+        {
             self.rerun();
         } else if self.controller.outcome().is_some() {
             self.record_status_messages();
@@ -11809,7 +11999,8 @@ impl App {
         if self.rotary_cad_pick(&entity) {
             return;
         }
-        let wrapped_pocket = matches!(self.operation_draft.as_ref(), Some(Operation::Pocket(p)) if p.wrap.is_some());
+        let wrapped_pocket =
+            matches!(self.operation_draft.as_ref(), Some(Operation::Pocket(p)) if p.wrap.is_some());
         if wrapped_pocket
             && self.operation_tab == OperationTab::Geometry
             && self.geometry_editor.is_none()
@@ -11913,7 +12104,8 @@ impl App {
             && self.profile_coplanar
             && entity.kind == EntityKind::Face
         {
-            let result = self.indexed_draft_geometry()
+            let result = self
+                .indexed_draft_geometry()
                 .and_then(|geometry| cam_geometry3d::coplanar_profile_faces(&geometry, &entity));
             match result {
                 Ok(references) => {
@@ -13016,7 +13208,9 @@ fn op_kind(op: &Operation) -> &'static str {
 
 /// Read an operation's value for a given field, if the op has it.
 fn op_field(op: &Operation, field: Field) -> Option<f64> {
-    if let Field::Wrap(number)=field {return op.rotary_wrap().map(|w|number.get(w));}
+    if let Field::Wrap(number) = field {
+        return op.rotary_wrap().map(|w| number.get(w));
+    }
     match (op, field) {
         (Operation::Pocket(o), Field::LiftHeight) => Some(o.clear.lift_height),
         (Operation::Adaptive(o), Field::LiftHeight) => Some(o.params.lift_height),
@@ -13166,11 +13360,15 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
 
 /// Write the parsed inspector fields onto an operation.
 fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
-    if let Some(mut wrap)=op.rotary_wrap().cloned() {
-        for (field,value) in parsed {if let Field::Wrap(number)=field {
-            if number.cylinder_dimension() && (number.get(&wrap)-value).abs()>1e-9 {wrap.cylinder=None;}
-            number.set(&mut wrap,*value);
-        }}
+    if let Some(mut wrap) = op.rotary_wrap().cloned() {
+        for (field, value) in parsed {
+            if let Field::Wrap(number) = field {
+                if number.cylinder_dimension() && (number.get(&wrap) - value).abs() > 1e-9 {
+                    wrap.cylinder = None;
+                }
+                number.set(&mut wrap, *value);
+            }
+        }
         op.set_rotary_wrap(Some(wrap));
     }
     let get = |f: Field| parsed.get(&f).copied();
@@ -13665,6 +13863,12 @@ fn library_extra(t: &cam_model::Tool) -> Option<String> {
             flute_count(t.flutes),
             dir(t.cutting_direction)
         )),
+        ToolKind::RadiusMill { corner_radius, .. } => Some(format!(
+            "({}, D{}, R{})",
+            flute_count(t.flutes),
+            t.diameter,
+            corner_radius
+        )),
         ToolKind::BullNose { corner_radius } => Some(format!(
             "{}, {}, r{}",
             flute_count(t.flutes),
@@ -13710,6 +13914,7 @@ fn kind_order(kind: ToolKind) -> u8 {
         ToolKind::RoughingMill => 1,
         ToolKind::BallMill => 2,
         ToolKind::BullNose { .. } => 3,
+        ToolKind::RadiusMill { .. } => 9,
         ToolKind::FaceMill => 4,
         ToolKind::ChamferMill { .. } => 5,
         ToolKind::VBit { .. } => 6,
@@ -14116,11 +14321,18 @@ impl Viewport {
         } else {
             preview
                 .or_else(|| controller.run_preview())
-                .or_else(|| controller.outcome().filter(|verified| {
-                    !focus_ops.is_empty() && focus_ops.iter().all(|id| {
-                        verified.scene.strips.iter().any(|strip| strip.op == Some(*id))
+                .or_else(|| {
+                    controller.outcome().filter(|verified| {
+                        !focus_ops.is_empty()
+                            && focus_ops.iter().all(|id| {
+                                verified
+                                    .scene
+                                    .strips
+                                    .iter()
+                                    .any(|strip| strip.op == Some(*id))
+                            })
                     })
-                }))
+                })
                 .or(operation_preview)
                 .or_else(|| controller.outcome())
         };
@@ -14349,31 +14561,33 @@ impl Viewport {
         } else if focus_ops.is_empty() || editor_geometry.is_some() {
             None
         } else {
-            operation_preview.filter(|result| !result.stock_indices.is_empty()).or_else(|| {
-                let operations = &controller.inspection_setup().operations;
-                let through = operations
-                    .iter()
-                    .rposition(|op| focus_ops.contains(&op.id()))?;
-                let expected: BTreeSet<_> = operations[..=through]
-                    .iter()
-                    .filter(|op| {
-                        controller
-                            .document()
-                            .operation_is_included(controller.active_setup_id(), op.id())
-                    })
-                    .map(Operation::id)
-                    .collect();
-                controller.outcome().filter(|result| {
-                    let actual: BTreeSet<_> = result
-                        .program
-                        .steps()
+            operation_preview
+                .filter(|result| !result.stock_indices.is_empty())
+                .or_else(|| {
+                    let operations = &controller.inspection_setup().operations;
+                    let through = operations
                         .iter()
-                        .filter_map(Step::tag)
-                        .map(|tag| tag.op_id)
+                        .rposition(|op| focus_ops.contains(&op.id()))?;
+                    let expected: BTreeSet<_> = operations[..=through]
+                        .iter()
+                        .filter(|op| {
+                            controller
+                                .document()
+                                .operation_is_included(controller.active_setup_id(), op.id())
+                        })
+                        .map(Operation::id)
                         .collect();
-                    actual == expected
+                    controller.outcome().filter(|result| {
+                        let actual: BTreeSet<_> = result
+                            .program
+                            .steps()
+                            .iter()
+                            .filter_map(Step::tag)
+                            .map(|tag| tag.op_id)
+                            .collect();
+                        actual == expected
+                    })
                 })
-            })
         };
         let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_draft, stock_outcome) {
             (true, Some(draft), _) => workspace_view::uncut_stock_mesh_for_setup(controller, draft),
@@ -14395,7 +14609,9 @@ impl Viewport {
         let transparent_stock_convex = preview.is_none()
             && (stock_draft.is_some() || stock_outcome.is_none())
             && matches!(
-                stock_draft.unwrap_or_else(|| controller.inspection_setup()).stock,
+                stock_draft
+                    .unwrap_or_else(|| controller.inspection_setup())
+                    .stock,
                 cam_model::Stock::BoundingBox { .. }
                     | cam_model::Stock::FixedBox { .. }
                     | cam_model::Stock::RelativeBox { .. }
@@ -14441,7 +14657,11 @@ impl Viewport {
         // geometry is loaded.
         let frame_bounds = if controller.has_geometry() {
             union_bounds(
-                stock_draft.and_then(|setup| workspace_view::stock_world_bounds_for_setup(controller, setup)).or_else(|| workspace_view::stock_world_bounds(controller)),
+                stock_draft
+                    .and_then(|setup| {
+                        workspace_view::stock_world_bounds_for_setup(controller, setup)
+                    })
+                    .or_else(|| workspace_view::stock_world_bounds(controller)),
                 cad_scene.bounds(),
             )
         } else {
@@ -15418,8 +15638,7 @@ impl shader::Primitive for ScenePrimitive {
             ) || !Arc::ptr_eq(
                 &p.transparent_stock_indices,
                 &self.transparent_stock_indices,
-            )
-                || p.transparent_stock_convex != self.transparent_stock_convex
+            ) || p.transparent_stock_convex != self.transparent_stock_convex
         }) {
             let upload = if self.transparent_stock_convex {
                 cam_render::MeshRenderer::upload_transparent_convex
@@ -15995,53 +16214,94 @@ mod multi_setup_draft_tests {
 
     #[test]
     fn rotary_wrap_editor_stages_numbers_and_commits_all_tabs_in_one_undo_step() {
-        let (mut app,id)=stock_profile_app();
+        let (mut app, id) = stock_profile_app();
         // The proposed radius plus offset must fit inside a physical blank.
-        app.controller.edit_stock(|stock| *stock = cam_model::Stock::FixedRound {
-            diameter: 200., inner_diameter: 0., length: 60., position: 0.5,
-            tube: false,
-            axis: Some(cam_model::StockAxis::Origin { origin_axis: cam_model::StockOriginAxis::X }),
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::FixedRound {
+                diameter: 200.,
+                inner_diameter: 0.,
+                length: 60.,
+                position: 0.5,
+                tube: false,
+                axis: Some(cam_model::StockAxis::Origin {
+                    origin_axis: cam_model::StockOriginAxis::X,
+                }),
+            }
         });
-        let before=app.controller.document().clone();
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        let field=Field::Wrap(rotary_view::Number::Offset);
+        let before = app.controller.document().clone();
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        let field = Field::Wrap(rotary_view::Number::Offset);
         assert!(app.inspector_fields().contains(&field));
-        send(&mut app,Message::FieldChanged(field,"40".into()));
-        assert!(app.controller.operation(id).unwrap().rotary_wrap().is_none());
-        assert!(!app.any_field_invalid(),"{}",app.status);
-        send(&mut app,Message::Apply);
-        assert_eq!(app.controller.operation(id).unwrap().rotary_wrap().unwrap().offset,40.,"{}",app.status);
+        send(&mut app, Message::FieldChanged(field, "40".into()));
+        assert!(app
+            .controller
+            .operation(id)
+            .unwrap()
+            .rotary_wrap()
+            .is_none());
+        assert!(!app.any_field_invalid(), "{}", app.status);
+        send(&mut app, Message::Apply);
+        assert_eq!(
+            app.controller
+                .operation(id)
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .offset,
+            40.,
+            "{}",
+            app.status
+        );
         assert!(app.controller.undo());
-        assert_eq!(*app.controller.document(),before);
+        assert_eq!(*app.controller.document(), before);
         app.begin_operation_draft(id);
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        send(&mut app,Message::CancelOperationDraft);
-        assert_eq!(*app.controller.document(),before);
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app, Message::CancelOperationDraft);
+        assert_eq!(*app.controller.document(), before);
     }
 
     #[test]
     fn rotary_mode_switch_preserves_wrap_and_existing_tab_settings() {
-        let (mut app,_)=stock_profile_app();
-        let heights=app.height_draft.clone();
-        let offsets=app.height_offsets.clone();
-        app.edit_operation_draft(|op|op.set_rotary_wrap(Some(cam_model::RotaryWrap{radius:100.,unwrap_geometry:false,..Default::default()})));
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(false)));
-        assert!(app.operation_draft.as_ref().unwrap().rotary_wrap().is_none());
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        let wrap=app.operation_draft.as_ref().unwrap().rotary_wrap().unwrap();
-        assert_eq!(wrap.radius,100.);assert!(!wrap.unwrap_geometry);
-        assert_eq!(app.height_draft,heights);assert_eq!(app.height_offsets,offsets);
+        let (mut app, _) = stock_profile_app();
+        let heights = app.height_draft.clone();
+        let offsets = app.height_offsets.clone();
+        app.edit_operation_draft(|op| {
+            op.set_rotary_wrap(Some(cam_model::RotaryWrap {
+                radius: 100.,
+                unwrap_geometry: false,
+                ..Default::default()
+            }))
+        });
+        send(
+            &mut app,
+            Message::Rotary(rotary_view::Action::Enable(false)),
+        );
+        assert!(app
+            .operation_draft
+            .as_ref()
+            .unwrap()
+            .rotary_wrap()
+            .is_none());
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        let wrap = app.operation_draft.as_ref().unwrap().rotary_wrap().unwrap();
+        assert_eq!(wrap.radius, 100.);
+        assert!(!wrap.unwrap_geometry);
+        assert_eq!(app.height_draft, heights);
+        assert_eq!(app.height_offsets, offsets);
     }
 
     #[test]
     fn rotary_wrap_creation_requires_real_boundaries_and_rejects_invalid_offset() {
-        let (mut app,_)=stock_profile_app();
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        send(&mut app,Message::FieldChanged(Field::Wrap(rotary_view::Number::Offset),"-25".into()));
+        let (mut app, _) = stock_profile_app();
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::Wrap(rotary_view::Number::Offset), "-25".into()),
+        );
         assert!(app.any_field_invalid());
-        app.cad_pending_kind=Some(OpKind::Pocket);
+        app.cad_pending_kind = Some(OpKind::Pocket);
         app.seed_creation_editor(OpKind::Pocket);
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
         assert!(!app.creation_ready());
     }
 
@@ -17560,10 +17820,17 @@ mod ribbon_tests {
             OpKind::Engrave,
             OpKind::Adaptive,
         ] {
-            assert_eq!(families_for(kind), &F::ALL, "{kind:?}");
+            let expected: Vec<_> = F::ALL
+                .into_iter()
+                .filter(|family| *family != F::RadiusMill)
+                .collect();
+            assert_eq!(families_for(kind), expected.as_slice(), "{kind:?}");
         }
         assert_eq!(families_for(OpKind::Thread), &[F::ThreadMill]);
-        assert_eq!(families_for(OpKind::Chamfer), &[F::ChamferMill, F::VBit]);
+        assert_eq!(
+            families_for(OpKind::Chamfer),
+            &[F::ChamferMill, F::VBit, F::RadiusMill]
+        );
         assert_eq!(families_for(OpKind::Carve), &[F::VBit]);
     }
 
@@ -17676,7 +17943,10 @@ mod ribbon_tests {
         assert!(families_for(OpKind::Bore).contains(&F::BallMill));
         assert!(families_for(OpKind::Bore).contains(&F::VBit));
         assert_eq!(families_for(OpKind::Thread), &[F::ThreadMill]);
-        assert_eq!(families_for(OpKind::Chamfer), &[F::ChamferMill, F::VBit]);
+        assert_eq!(
+            families_for(OpKind::Chamfer),
+            &[F::ChamferMill, F::VBit, F::RadiusMill]
+        );
         assert_eq!(families_for(OpKind::Carve), &[F::VBit]);
     }
 
@@ -17775,22 +18045,28 @@ mod ribbon_tests {
     }
 }
 
-
 #[cfg(test)]
 mod indexed_project_restore_tests {
     use super::*;
 
     #[test]
     fn restored_indexed_operation_is_clean_and_can_simulate() {
-        let path = std::env::temp_dir().join(format!("indexed-restore-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("indexed-restore-{}.ocam", std::process::id()));
         let (mut app, _) = App::new();
         app.controller.open_dxf(SAMPLE_DXF, "profiles.dxf").unwrap();
         app.controller.new_operation(OpKind::Pocket);
         let id = app.controller.inspection_setup().operations[0].id();
-        let index = cam_model::RotaryIndex { angle: -90.0, ..Default::default() };
-        app.controller.set_operation_rotary_index(id, Some(index.clone())).unwrap();
+        let index = cam_model::RotaryIndex {
+            angle: -90.0,
+            ..Default::default()
+        };
+        app.controller
+            .set_operation_rotary_index(id, Some(index.clone()))
+            .unwrap();
         app.controller.select(Selection::Operation(id));
-        app.controller.set_project_view(Some(app.capture_project_view()));
+        app.controller
+            .set_project_view(Some(app.capture_project_view()));
         app.controller.save_project(&path).unwrap();
         app.open_project(&path).unwrap();
         std::fs::remove_file(&path).unwrap();

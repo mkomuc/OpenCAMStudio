@@ -46,7 +46,8 @@ pub use document::{
     ExecutionItem, FaceOp, Hand, Heights, Lead, LinearPatternDirection, Operation,
     OperationPattern, Origin, ParallelOp, PatternDirection, PatternKind, PatternOptions,
     PatternOrder, PatternSpacing, Plunge, PocketOp, ProfileContour, ProfileOp, ProfileTabs, Setup,
-    Side, Stock, StockAxis, StockAxisReference, StockOriginAxis, StockToLeave, ThreadOp, SCHEMA_VERSION,
+    Side, Stock, StockAxis, StockAxisReference, StockOriginAxis, StockToLeave, ThreadOp,
+    SCHEMA_VERSION,
 };
 pub use geometry::*;
 pub use history::History;
@@ -250,6 +251,8 @@ pub enum ToolKind {
         /// Corner radius, mm.
         corner_radius: f64,
     },
+    /// Concave quarter-round cutter, with a cylindrical tip below the radius.
+    RadiusMill { corner_radius: f64, tip_length: f64 },
     /// Chamfer / V mill: a point of `included_angle_deg` (full included angle),
     /// optionally with a flat tip of `tip_diameter` mm (0 for a true V).
     ChamferMill {
@@ -290,6 +293,7 @@ impl std::fmt::Display for ToolKind {
             ToolKind::RoughingMill => "Roughing End Mill",
             ToolKind::BallMill => "Ball Nose End Mill",
             ToolKind::BullNose { .. } => "Rounded-Edge End Mill",
+            ToolKind::RadiusMill { .. } => "Radius mill",
             ToolKind::ChamferMill { .. } => "Chamfer mill",
             ToolKind::Drill { .. } => "Drill bit",
             ToolKind::FaceMill => "Face mill",
@@ -562,6 +566,13 @@ impl Tool {
             | ToolKind::ThreadMill { .. } => BottomShape::Flat,
             ToolKind::BallMill => BottomShape::Ball,
             ToolKind::BullNose { corner_radius } => BottomShape::BullNose { corner_radius },
+            ToolKind::RadiusMill {
+                corner_radius,
+                tip_length,
+            } => BottomShape::RadiusMill {
+                corner_radius,
+                tip_length,
+            },
             ToolKind::ChamferMill {
                 included_angle_deg,
                 tip_diameter,
@@ -765,6 +776,39 @@ mod tests {
         };
         let back: Tool = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(t, back);
+    }
+
+    #[test]
+    fn radius_mill_profile_and_identity_round_trip() {
+        use cam_geo::{Point, SegShape};
+        let tool = Tool {
+            diameter: 12.0,
+            length: 72.0,
+            flute_length: 12.0,
+            shank_diameter: 24.0,
+            kind: ToolKind::RadiusMill {
+                corner_radius: 6.0,
+                tip_length: 2.0,
+            },
+            ..Default::default()
+        };
+        let profile = tool.profile();
+        assert_eq!(profile.segs[0].end, Point::new(6.0, 0.0));
+        assert_eq!(profile.segs[1].end, Point::new(6.0, 2.0));
+        assert_eq!(profile.segs[2].end, Point::new(12.0, 8.0));
+        assert!(
+            matches!(profile.segs[2].shape, SegShape::Arc { center, ccw: false } if center == Point::new(12.0, 2.0))
+        );
+        assert_eq!(profile.max_radius(), 12.0);
+        let loaded: Tool = serde_json::from_str(&serde_json::to_string(&tool).unwrap()).unwrap();
+        assert_eq!(tool, loaded);
+        assert_eq!(tool.identity(), loaded.identity());
+        let mut different = tool.clone();
+        different.kind = ToolKind::RadiusMill {
+            corner_radius: 6.0,
+            tip_length: 1.0,
+        };
+        assert_ne!(tool.identity(), different.identity());
     }
 
     #[test]

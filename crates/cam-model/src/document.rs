@@ -104,7 +104,8 @@ use crate::{BoreOp, Tool};
 /// v43: optional edge-aligned round stock.
 /// v44: round stock supports axes through the setup origin.
 /// v45: fixed fourth-axis indexes on individual operations.
-pub const SCHEMA_VERSION: u32 = 45;
+/// v46: concave radius mill tool geometry.
+pub const SCHEMA_VERSION: u32 = 46;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -635,17 +636,35 @@ impl Stock {
                 });
                 (lo, std::array::from_fn(|i| lo[i] + size[i]))
             }
-            Self::FixedRound { diameter, length, position, .. } => {
+            Self::FixedRound {
+                diameter,
+                length,
+                position,
+                ..
+            } => {
                 let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
                 let z = min[2] - position * (length - (max[2] - min[2]));
-                ([center[0] - diameter / 2., center[1] - diameter / 2., z],
-                 [center[0] + diameter / 2., center[1] + diameter / 2., z + length])
+                (
+                    [center[0] - diameter / 2., center[1] - diameter / 2., z],
+                    [
+                        center[0] + diameter / 2.,
+                        center[1] + diameter / 2.,
+                        z + length,
+                    ],
+                )
             }
-            Self::RelativeRound { radial, bottom, top, .. } => {
+            Self::RelativeRound {
+                radial,
+                bottom,
+                top,
+                ..
+            } => {
                 let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
                 let radius = ((max[0] - min[0]).hypot(max[1] - min[1])) * 0.5 + radial;
-                ([center[0] - radius, center[1] - radius, min[2] - bottom],
-                 [center[0] + radius, center[1] + radius, max[2] + top])
+                (
+                    [center[0] - radius, center[1] - radius, min[2] - bottom],
+                    [center[0] + radius, center[1] + radius, max[2] + top],
+                )
             }
             Self::FromSolid { .. } | Self::PreviousSetup => (min, max),
             Self::RelativeBox { offsets } => (
@@ -2501,6 +2520,9 @@ fn default_origin_index() -> u32 {
 /// The top-level document: shared geometry and an ordered collection of setups.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Document {
+    /// User-defined browser names, keyed by stable operation ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub operation_names: std::collections::BTreeMap<u32, String>,
     /// Per-operation 3+1 indexing; stable operation IDs are document-wide.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub rotary_indexes: std::collections::BTreeMap<u32, crate::RotaryIndex>,
@@ -2543,7 +2565,8 @@ pub struct Document {
 // format and therefore must not make otherwise identical saved documents unequal.
 impl PartialEq for Document {
     fn eq(&self, other: &Self) -> bool {
-        self.schema_version == other.schema_version
+        self.operation_names == other.operation_names
+            && self.schema_version == other.schema_version
             && self.rotary_indexes == other.rotary_indexes
             && self.setups == other.setups
             && self.geometry == other.geometry
@@ -2601,6 +2624,7 @@ impl Document {
     pub fn empty() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            operation_names: Default::default(),
             rotary_indexes: Default::default(),
             active_setup_id: 0,
             setups: Vec::new(),
@@ -3135,7 +3159,14 @@ mod tests {
 
     #[test]
     fn round_stock_resolves_and_round_trips() {
-        let stock = Stock::RelativeRound { radial: 2., inner_diameter: 4., bottom: 1., top: 3., tube: true, axis: None };
+        let stock = Stock::RelativeRound {
+            radial: 2.,
+            inner_diameter: 4.,
+            bottom: 1.,
+            top: 3.,
+            tube: true,
+            axis: None,
+        };
         let (lo, hi) = stock.resolve_bounds([-3., -4., 2.], [3., 4., 12.]);
         assert_eq!((lo, hi), ([-7., -7., 1.], [7., 7., 15.]));
         let json = serde_json::to_string(&stock).unwrap();

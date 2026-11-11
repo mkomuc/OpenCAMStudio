@@ -10,12 +10,12 @@ use crate::{sweep::Sweep, ToolProfile};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "bounded.rs"]
 mod bounded;
-#[path = "stock_transfer.rs"]
-mod stock_transfer;
 #[path = "rotary_stock.rs"]
 mod rotary_stock;
-pub use rotary_stock::CylindricalStock;
+#[path = "stock_transfer.rs"]
+mod stock_transfer;
 use bounded::RemovedSpan;
+pub use rotary_stock::CylindricalStock;
 #[path = "interval_columns.rs"]
 mod interval_columns;
 use interval_columns::IntervalColumns;
@@ -119,7 +119,8 @@ impl RemovalInterval {
         let void = spans
             .iter()
             .map(|span| {
-                (self.upper.min(f64::from(span.upper)) - self.lower.max(f64::from(span.lower))).max(0.)
+                (self.upper.min(f64::from(span.upper)) - self.lower.max(f64::from(span.lower)))
+                    .max(0.)
             })
             .sum::<f64>();
         // Keep the summation and multiplication order of the reference traversal.
@@ -206,9 +207,14 @@ impl Heightfield {
     pub(crate) fn top(&self) -> f32 {
         self.top
     }
-    pub(super) fn top_is_cut(&self,index:usize)->bool {
-        self.z[index]<self.uncut_z.get(index).copied().unwrap_or(self.top)
-            || self.inherited_operations.get(index).copied().flatten().is_some()
+    pub(super) fn top_is_cut(&self, index: usize) -> bool {
+        self.z[index] < self.uncut_z.get(index).copied().unwrap_or(self.top)
+            || self
+                .inherited_operations
+                .get(index)
+                .copied()
+                .flatten()
+                .is_some()
     }
 
     pub(crate) fn set_surface_tracking(&mut self, enabled: bool) {

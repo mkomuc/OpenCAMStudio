@@ -17,14 +17,21 @@ impl App {
         let work_offset = self
             .current_operation(id)
             .map_or(self.controller.active_origin(), Operation::work_offset);
-        let value = if let Some(wrap)=self.current_operation(id).and_then(Operation::rotary_wrap) {
-            let offset=self.fields.get(&Field::Wrap(super::rotary_view::Number::Offset)).and_then(|s|s.parse::<f64>().ok()).unwrap_or(wrap.offset);
-            wrap.radius+offset+value-wrap.surface_z
-        }else{value
-            - self
-                .controller
-                .inspection_setup()
-                .origin_position(work_offset)[2]};
+        let value = if let Some(wrap) = self.current_operation(id).and_then(Operation::rotary_wrap)
+        {
+            let offset = self
+                .fields
+                .get(&Field::Wrap(super::rotary_view::Number::Offset))
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(wrap.offset);
+            wrap.radius + offset + value - wrap.surface_z
+        } else {
+            value
+                - self
+                    .controller
+                    .inspection_setup()
+                    .origin_position(work_offset)[2]
+        };
         fn precision(text: &str) -> usize {
             let (mantissa, exponent) = text
                 .trim()
@@ -185,9 +192,9 @@ impl App {
             .collect();
         apply_op_fields(&mut op, &parsed);
         if op.rotary_wrap().is_some() {
-            let geometry=crate::cad_operations::geometry_for_setup(&document)?;
-            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut op)?;
-            return self.edited_height_settings()?.resolve(&document,&op);
+            let geometry = crate::cad_operations::geometry_for_setup(&document)?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry, &mut op)?;
+            return self.edited_height_settings()?.resolve(&document, &op);
         }
         if let Operation::Profile(profile) = &mut op {
             if profile.selections.is_some() {
@@ -221,7 +228,8 @@ impl App {
                     }
                 }
                 let geometry = crate::cad_operations::geometry_for_operation(&document, id)?;
-                binding.heights = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?.heights;
+                binding.heights =
+                    cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?.heights;
                 binding.overrides = cam_model::GeometryOverrides::default();
                 document.geometry.bindings.insert(id, binding);
             }
@@ -379,11 +387,14 @@ impl App {
                     if needs_geometry {
                         section = section.push(
                             row![
-                                inspector_pick_button(if self.height_reference_pick == Some(plane) {
-                                    "Done picking"
-                                } else {
-                                    "Pick reference geometry"
-                                }, self.height_reference_pick == Some(plane))
+                                inspector_pick_button(
+                                    if self.height_reference_pick == Some(plane) {
+                                        "Done picking"
+                                    } else {
+                                        "Pick reference geometry"
+                                    },
+                                    self.height_reference_pick == Some(plane)
+                                )
                                 .on_press(Message::HeightPickToggle(plane)),
                                 inspector_button("Clear")
                                     .on_press(Message::HeightSelectionClear(plane))
@@ -452,19 +463,6 @@ impl App {
                                     ))
                                 ]
                                 .spacing(6),
-                            );
-                        }
-                    }
-                    if let Ok(heights) = resolved {
-                        if let Some(z) = heights.plane(plane) {
-                            section = section.push(
-                                text(format!(
-                                    "{} {} mm",
-                                    if self.current_operation(id).and_then(Operation::rotary_wrap).is_some(){"Radius"}else{"WCS Z"},
-                                    self.height_display_value(id, plane, z)
-                                ))
-                                .size(11)
-                                .color(INSPECTOR_MUTED),
                             );
                         }
                     }

@@ -284,6 +284,7 @@ impl AppController {
             setup.stock_to_leave.remove(&id);
             doc.geometry.bindings.remove(&id);
             doc.rotary_indexes.remove(&id);
+            doc.operation_names.remove(&id);
             doc.excluded_operations.remove(&id);
             doc.cad_linked_operations.remove(&id);
         });

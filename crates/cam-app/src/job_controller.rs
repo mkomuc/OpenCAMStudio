@@ -218,7 +218,13 @@ impl AppController {
             .map(|a| (a.id, a.revision, &a.source_fingerprint))
             .collect();
         let bytes = serde_json::to_vec(&(
-            (&inputs.document.setups, inputs.document.active_setup_id, &inputs.document.rotary_indexes, env!("CARGO_PKG_VERSION"), 1u32),
+            (
+                &inputs.document.setups,
+                inputs.document.active_setup_id,
+                &inputs.document.rotary_indexes,
+                env!("CARGO_PKG_VERSION"),
+                1u32,
+            ),
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,
             &geometry.bindings,
@@ -239,7 +245,11 @@ impl AppController {
         cam_model::GeometryAsset::fingerprint_source(&bytes)
     }
 
-    fn submit_run(&mut self, inputs: JobInputs, cache: Option<cam_toolpath::OperationCache>) -> JobStamp {
+    fn submit_run(
+        &mut self,
+        inputs: JobInputs,
+        cache: Option<cam_toolpath::OperationCache>,
+    ) -> JobStamp {
         let fingerprint = self.verification_fingerprint(&inputs);
         self.outcome = None;
         self.nc = None;
@@ -497,7 +507,11 @@ impl AppController {
         for setup in &document.setups {
             // Common machining configuration; omit names and view state.
             let stock_axis_instance = match setup.stock {
-                Stock::FixedRound { axis, .. } | Stock::RelativeRound { axis, .. } => axis.and_then(|axis| match axis { cam_model::StockAxis::Edge(edge) => Some(edge.instance_id), cam_model::StockAxis::Origin { .. } => None }),
+                Stock::FixedRound { axis, .. } | Stock::RelativeRound { axis, .. } => axis
+                    .and_then(|axis| match axis {
+                        cam_model::StockAxis::Edge(edge) => Some(edge.instance_id),
+                        cam_model::StockAxis::Origin { .. } => None,
+                    }),
                 _ => None,
             };
             let models: Vec<_> = document
@@ -582,7 +596,9 @@ impl AppController {
                         &cam_toolpath::ParallelStrategy::DOMAIN_REVISION.to_le_bytes(),
                     );
                 }
-                if op.rotary_wrap().is_some() {bytes.extend_from_slice(&cam_toolpath::ROTARY_WRAP_REVISION.to_le_bytes());}
+                if op.rotary_wrap().is_some() {
+                    bytes.extend_from_slice(&cam_toolpath::ROTARY_WRAP_REVISION.to_le_bytes());
+                }
                 if matches!(op, Operation::Adaptive(_)) {
                     bytes.extend_from_slice(
                         &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),
@@ -701,7 +717,8 @@ mod tests {
         let mut app = app();
         let original = app.run(&CancelToken::new()).clone();
         assert_eq!(original.completion, JobCompletion::Complete);
-        let path = std::env::temp_dir().join(format!("saved-verification-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("saved-verification-{}.ocam", std::process::id()));
         app.save_project(&path).unwrap();
         let mut reopened = AppController::new(crate::default_machine());
         reopened.open_project(&path).unwrap();
@@ -713,7 +730,9 @@ mod tests {
         assert!(!reopened.run_pending());
         assert_eq!(reopened.export_nc().is_ok(), app.export_nc().is_ok());
         reopened.edit_operation(0, |op| {
-            if let Operation::Drill(d) = op { d.depth = 1.; }
+            if let Operation::Drill(d) = op {
+                d.depth = 1.;
+            }
         });
         assert!(!reopened.restore_saved_verification());
         assert!(reopened.outcome().is_none());
@@ -723,7 +742,15 @@ mod tests {
         assert!(different_machine.outcome().is_none());
         let mut different_index = AppController::new(crate::default_machine());
         different_index.open_project(&path).unwrap();
-        different_index.edit_document(|doc| { doc.rotary_indexes.insert(0, cam_model::RotaryIndex { angle: 30., ..Default::default() }); });
+        different_index.edit_document(|doc| {
+            doc.rotary_indexes.insert(
+                0,
+                cam_model::RotaryIndex {
+                    angle: 30.,
+                    ..Default::default()
+                },
+            );
+        });
         assert!(!different_index.restore_saved_verification());
         let mut different_accuracy = AppController::new(crate::default_machine());
         different_accuracy.set_simulation_accuracy(0.5);
@@ -764,18 +791,36 @@ mod tests {
     fn restored_collision_still_blocks_export() {
         let mut app = app();
         app.run(&CancelToken::new());
-        app.outcome.as_mut().unwrap().collisions.push(cam_sim::Collision {
-            kind: cam_sim::CollisionKind::RapidThroughStock,
-            at: [1., 2., 3.], message: "saved collision".into(), op_id: Some(0),
-            pattern_id: None, instance_index: None, step_index: Some(1), fraction: 0.5,
-        });
+        app.outcome
+            .as_mut()
+            .unwrap()
+            .collisions
+            .push(cam_sim::Collision {
+                kind: cam_sim::CollisionKind::RapidThroughStock,
+                at: [1., 2., 3.],
+                message: "saved collision".into(),
+                op_id: Some(0),
+                pattern_id: None,
+                instance_index: None,
+                step_index: Some(1),
+                fraction: 0.5,
+            });
         app.remember_full_verification(None);
-        let path = std::env::temp_dir().join(format!("collision-verification-{}.ocam", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "collision-verification-{}.ocam",
+            std::process::id()
+        ));
         app.save_project(&path).unwrap();
         let mut reopened = AppController::new(crate::default_machine());
         reopened.open_project(&path).unwrap();
-        assert_eq!(reopened.outcome().unwrap().collisions[0].message, "saved collision");
-        assert!(matches!(reopened.export_nc(), Err(ExportError::RapidThroughStock(_))));
+        assert_eq!(
+            reopened.outcome().unwrap().collisions[0].message,
+            "saved collision"
+        );
+        assert!(matches!(
+            reopened.export_nc(),
+            Err(ExportError::RapidThroughStock(_))
+        ));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -788,7 +833,8 @@ mod tests {
         let first_program = app.run(&CancelToken::new()).program.clone();
         app.activate_setup(second).unwrap();
         let second_program = app.run(&CancelToken::new()).program.clone();
-        let path = std::env::temp_dir().join(format!("setup-verification-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("setup-verification-{}.ocam", std::process::id()));
         app.save_project(&path).unwrap();
         let mut reopened = AppController::new(crate::default_machine());
         reopened.open_project(&path).unwrap();
@@ -797,7 +843,12 @@ mod tests {
         assert_eq!(reopened.outcome().unwrap().program, second_program);
         reopened.activate_setup(first).unwrap();
         assert_eq!(reopened.outcome().unwrap().program, first_program);
-        reopened.saved_verification.get_mut(&first).unwrap().stock_indices.push(u32::MAX);
+        reopened
+            .saved_verification
+            .get_mut(&first)
+            .unwrap()
+            .stock_indices
+            .push(u32::MAX);
         reopened.cancel_run();
         assert!(!reopened.restore_saved_verification());
         assert!(reopened.outcome().is_none());
@@ -810,7 +861,8 @@ mod tests {
         let full = app.run(&CancelToken::new()).program.clone();
         app.start_toolpath_run(Some(0), true).unwrap();
         drain(&mut app);
-        let path = std::env::temp_dir().join(format!("scoped-verification-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("scoped-verification-{}.ocam", std::process::id()));
         app.save_project(&path).unwrap();
         let mut reopened = AppController::new(crate::default_machine());
         reopened.open_project(&path).unwrap();

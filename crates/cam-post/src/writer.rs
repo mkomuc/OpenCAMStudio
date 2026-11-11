@@ -173,25 +173,51 @@ impl<'a> Writer<'a> {
     pub(crate) fn restore_feed_mode(&mut self) {
         if self.inverse_time {
             self.line("G94".into());
-            self.inverse_time=false;
+            self.inverse_time = false;
             self.reset_modal();
         }
     }
 
-    pub(crate) fn rotary(&mut self, to: Point3, angle:f64, axis:cam_cldata::RotaryAxis, feed:Option<f64>, length:f64) -> Result<(),PostError> {
-        let p=self.precision;
-        let mut line=format!("G{} X{} Y{} Z{} {}{}",if feed.is_some(){1}else{0},num(to.x,p),num(to.y,p),num(to.z,p),axis.word(),num(angle,p.max(6)));
-        if let Some(feed)=feed {
+    pub(crate) fn rotary(
+        &mut self,
+        to: Point3,
+        angle: f64,
+        axis: cam_cldata::RotaryAxis,
+        feed: Option<f64>,
+        length: f64,
+    ) -> Result<(), PostError> {
+        let p = self.precision;
+        let mut line = format!(
+            "G{} X{} Y{} Z{} {}{}",
+            if feed.is_some() { 1 } else { 0 },
+            num(to.x, p),
+            num(to.y, p),
+            num(to.z, p),
+            axis.word(),
+            num(angle, p.max(6))
+        );
+        if let Some(feed) = feed {
             self.check_feed(feed)?;
-            let inverse=feed/length;
-            if !inverse.is_finite() || inverse<=0. || crate::words::compact(inverse,6).parse::<f64>().unwrap_or(0.)<=0. {
-                return Err(PostError::Unsupported("Rotary block duration cannot be represented by inverse-time feed".into()));
+            let inverse = feed / length;
+            if !inverse.is_finite()
+                || inverse <= 0.
+                || crate::words::compact(inverse, 6)
+                    .parse::<f64>()
+                    .unwrap_or(0.)
+                    <= 0.
+            {
+                return Err(PostError::Unsupported(
+                    "Rotary block duration cannot be represented by inverse-time feed".into(),
+                ));
             }
-            if !self.inverse_time {self.line("G93".into());self.inverse_time=true;}
-            line.push_str(&format!(" F{}",crate::words::compact(inverse,6)));
+            if !self.inverse_time {
+                self.line("G93".into());
+                self.inverse_time = true;
+            }
+            line.push_str(&format!(" F{}", crate::words::compact(inverse, 6)));
         }
         self.line(line);
-        self.cur=Some(to);
+        self.cur = Some(to);
         self.reset_modal();
         Ok(())
     }

@@ -908,11 +908,14 @@ impl App {
             .align_y(Alignment::Center),
             row![
                 text("Selection").size(12).width(90),
-                inspector_pick_button(if self.geometry_additive {
-                    "Selecting…"
-                } else {
-                    "Select"
-                }, self.geometry_additive)
+                inspector_pick_button(
+                    if self.geometry_additive {
+                        "Selecting…"
+                    } else {
+                        "Select"
+                    },
+                    self.geometry_additive
+                )
                 .on_press(Message::GeometryPick),
                 inspector_button("Clear")
                     .on_press_maybe((!labels.is_empty()).then_some(Message::GeometryClear)),

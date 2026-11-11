@@ -178,7 +178,9 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
 /// used for automatic/full-depth settings. Cross-field geometry gates remain in
 /// the job resolver; an inspector never relaxes those gates.
 pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) -> bool {
-    if let Field::Wrap(number)=field {return number.invalid(value);}
+    if let Field::Wrap(number) = field {
+        return number.invalid(value);
+    }
     if !value.is_finite() {
         return true;
     }
@@ -594,7 +596,9 @@ impl App {
             list = list.push(self.operation_linking_controls(op, linked.is_some()));
         }
         for field in self.geometry_operation_fields(op) {
-            if matches!(field,Field::Wrap(_)) {continue;}
+            if matches!(field, Field::Wrap(_)) {
+                continue;
+            }
             if tab == OperationTab::Linking {
                 continue; // Rendered once in the grouped linking sections.
             }
@@ -830,6 +834,21 @@ impl App {
                     ));
                 }
                 if tab == OperationTab::Passes {
+                    let radius_tool = self
+                        .operation_tools
+                        .iter()
+                        .chain(self.controller.inspection_setup().tools.iter())
+                        .find(|tool| tool.number == c.tool)
+                        .and_then(|tool| match tool.kind {
+                            ToolKind::RadiusMill {
+                                corner_radius,
+                                tip_length,
+                            } => Some((corner_radius, tip_length)),
+                            _ => None,
+                        });
+                    if let Some((radius, tip_length)) = radius_tool {
+                        list = list.push(text(format!("Radius mill: R{radius:.3} mm roundover, tip depth {:.3} mm. Width and depth are set by the tool; use zero tip offset.", radius + tip_length)).size(12).color(palette::GROUP_LABEL));
+                    }
                     let field = Field::ChamferWidth;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
                     list = list.section("Chamfer").push(field_row_labeled(
@@ -2789,7 +2808,11 @@ mod tests {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
-        app.controller.edit_stock(|s|*s=cam_model::Stock::RelativeBox{offsets:[[1.,1.,0.];2]});
+        app.controller.edit_stock(|s| {
+            *s = cam_model::Stock::RelativeBox {
+                offsets: [[1., 1., 0.]; 2],
+            }
+        });
         app.operation_tab = OperationTab::Heights;
         app.setup_draft = None;
         app.controller.select(Selection::Setup);
@@ -3017,8 +3040,10 @@ mod tests {
                 };
                 let heights = app.resolve_height_editor(id).unwrap();
                 assert_eq!((heights.top, heights.bottom), (76., 25.));
-                assert!(matches!(app.controller.operation(id), Some(Operation::Pocket(p))
-                    if p.additional_regions.len() == 1));
+                assert!(
+                    matches!(app.controller.operation(id), Some(Operation::Pocket(p))
+                    if p.additional_regions.len() == 1)
+                );
                 let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
                 assert!(app.geometry_editor.is_none(), "{}", app.status);
                 assert_eq!(app.resolve_height_editor(id).unwrap(), heights);

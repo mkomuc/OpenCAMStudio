@@ -359,12 +359,12 @@ impl Heightfield {
         let mut sum = 0.;
         let mut count = 0.;
         let mut cut = false;
-        for (i,v) in h.into_iter().enumerate() {
-            if let Some(v)=v {
+        for (i, v) in h.into_iter().enumerate() {
+            if let Some(v) = v {
                 sum += v;
                 count += 1.;
-                let (cx,cy)=[(x-1,y-1),(x,y-1),(x,y),(x-1,y)][i];
-                cut |= self.top_is_cut(cy as usize*self.nx+cx as usize);
+                let (cx, cy) = [(x - 1, y - 1), (x, y - 1), (x, y), (x - 1, y)][i];
+                cut |= self.top_is_cut(cy as usize * self.nx + cx as usize);
             }
         }
         let derivative = |edges: [(usize, usize); 2]| {
@@ -498,7 +498,7 @@ impl Heightfield {
                         [a[0], b[1], z],
                     ],
                     up,
-                    self.top_is_cut(y*self.nx+x),
+                    self.top_is_cut(y * self.nx + x),
                     op,
                 );
                 mesh.quad(
@@ -580,19 +580,23 @@ impl Heightfield {
                     };
                     let top = [p[a], p[b]];
                     let mut bottom = [[p[a][0], p[a][1], lower(a)], [p[b][0], p[b][1], lower(b)]];
-                    let neighbour_cut=nb.is_some() && self.top_is_cut((y as isize+dy) as usize*self.nx+(x as isize+dx) as usize);
-                    let mut wall = |upper: [[f32; 3]; 2], lower: [[f32; 3]; 2], op:Option<u32>, cut:u32| {
-                        if (0..2).any(|i| upper[i][2] - lower[i][2] > 1e-5) {
-                            let first = mesh.positions.len();
-                            mesh.quad(
-                                [upper[0], upper[1], lower[1], lower[0]],
-                                [n(a), n(b), n(b), n(a)],
-                                neighbour_cut || op.is_some() || cut!=u32::MAX,
-                                op,
-                            );
-                            mesh.stamp_source(first, self, cut);
-                        }
-                    };
+                    let neighbour_cut = nb.is_some()
+                        && self.top_is_cut(
+                            (y as isize + dy) as usize * self.nx + (x as isize + dx) as usize,
+                        );
+                    let mut wall =
+                        |upper: [[f32; 3]; 2], lower: [[f32; 3]; 2], op: Option<u32>, cut: u32| {
+                            if (0..2).any(|i| upper[i][2] - lower[i][2] > 1e-5) {
+                                let first = mesh.positions.len();
+                                mesh.quad(
+                                    [upper[0], upper[1], lower[1], lower[0]],
+                                    [n(a), n(b), n(b), n(a)],
+                                    neighbour_cut || op.is_some() || cut != u32::MAX,
+                                    op,
+                                );
+                                mesh.stamp_source(first, self, cut);
+                            }
+                        };
                     let mut op = None;
                     let mut cut = u32::MAX;
                     if nb.is_some() {

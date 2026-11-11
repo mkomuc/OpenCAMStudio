@@ -316,15 +316,23 @@ mod tests {
             wait.lock().unwrap().recv().unwrap();
         }));
         app.controller.start_run();
-        let token = receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let token = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         focus(&mut app, ids[1]);
         focus(&mut app, ids[0]);
-        assert!(!token.is_cancelled(), "selection must not cancel verification");
+        assert!(
+            !token.is_cancelled(),
+            "selection must not cancel verification"
+        );
         app.controller.edit_operation(ids[0], |op| {
             let Operation::Drill(op) = op else { panic!() };
             op.depth = 1.;
         });
-        assert!(token.is_cancelled(), "toolpath edits cancel obsolete verification");
+        assert!(
+            token.is_cancelled(),
+            "toolpath edits cancel obsolete verification"
+        );
         release.send(()).unwrap();
     }
 
