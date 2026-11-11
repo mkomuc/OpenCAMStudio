@@ -17,6 +17,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile(id: u32, chain: Contour, side: Side, spindle_rpm: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -55,6 +56,8 @@ fn doc(ops: Vec<Operation>) -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "spindle".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
@@ -161,6 +164,7 @@ fn estlcam_mms_uses_selected_outputs_and_none_never_turns_them_on() {
         name: "Cooling test".into(),
         rapid_rate: 2000.,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10000.,
         max_feed: 1000.,
         envelope: Envelope::new(Point3::new(0., 0., -50.), Point3::new(200., 200., 100.)),

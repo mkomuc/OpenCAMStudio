@@ -5,6 +5,7 @@ use cam_sim::{Heightfield, SimResult};
 #[derive(Default)]
 pub(crate) struct StockSimulationCache {
     current: SimulationCache,
+    rotary: cam_sim::RotarySimulationCache,
     mesh: cam_sim::StockMeshCache,
     previous: Option<(String, Heightfield)>,
 }
@@ -12,6 +13,8 @@ pub(crate) struct StockSimulationCache {
 #[derive(Default)]
 pub(super) struct StockSimulation {
     pub initial: Option<(Vec<MeshVertex>, Vec<u32>)>,
+    pub snapshot: Option<cam_sim::StockSnapshot>,
+    pub initial_snapshot: Option<cam_sim::StockSnapshot>,
     pub vertices: Vec<MeshVertex>,
     pub indices: Vec<u32>,
     pub machined: Vec<bool>,
@@ -20,6 +23,62 @@ pub(super) struct StockSimulation {
     pub collisions: Vec<Collision>,
 }
 impl JobInputs {
+    pub(super) fn fixture_collisions(
+        &self,
+        program: &Program,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Collision>, Diagnostic> {
+        let setup = self.document.setup();
+        let error = |reason| Diagnostic::error(reason).for_setup(setup.id);
+        setup
+            .validate_fixtures(&self.document.geometry)
+            .map_err(error)?;
+        if setup.fixture_instances.is_empty() {
+            return Ok(Vec::new());
+        }
+        let geometry = self
+            .document
+            .geometry
+            .geometry_in_setup(&setup.frame)
+            .map_err(error)?;
+        self.fixture_collisions_against(program, &geometry, cancel)
+    }
+
+    /// Predecessor snapshots have already been rotated for planning. Accept their
+    /// geometry explicitly so inherited-stock verification never rotates it twice.
+    fn fixture_collisions_against(
+        &self,
+        program: &Program,
+        geometry: &cam_model::GeometryState,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Collision>, Diagnostic> {
+        let setup = self.document.setup();
+        let check = || -> Result<_, String> {
+            let fixtures = setup.fixture_envelopes(geometry)?;
+            cam_toolpath::verify_fixture_clearance(program, &setup.tools, &fixtures, cancel)
+        };
+        check()
+            .map(|contacts| {
+                contacts
+                    .into_iter()
+                    .map(|contact| Collision {
+                        kind: cam_sim::CollisionKind::Fixture,
+                        at: contact.at,
+                        message: format!(
+                            "Tool or shank enters the clearance envelope of fixture {}",
+                            contact.fixture_name
+                        ),
+                        op_id: Some(contact.tag.op_id),
+                        pattern_id: contact.tag.pattern_id,
+                        instance_index: contact.tag.instance_index,
+                        step_index: Some(contact.step_index),
+                        fraction: contact.fraction,
+                    })
+                    .collect()
+            })
+            .map_err(|reason| Diagnostic::error(reason).for_setup(setup.id))
+    }
+
     pub(super) fn analyze_stock_removal(
         &self,
         cancel: &CancelToken,
@@ -49,7 +108,7 @@ impl JobInputs {
             }
             Some(self.previous_stock(resolution, cancel, cache, progress)?)
         } else {
-            None
+            self.defined_round_stock(resolution, cancel)?
         };
         let tools: Vec<_> = self
             .document
@@ -69,7 +128,15 @@ impl JobInputs {
                 }
             })
             .collect();
-        cam_sim::analyze_removal_controlled(
+        let fixture_contacts = self.fixture_collisions(program, cancel)?;
+        let mut samples = if self.uses_rotary_stock(program) {
+            cam_sim::analyze_rotary_removal_controlled(
+                program, self.min, self.max,
+                &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
+                &self.rotary_sim_tools(), initial.as_ref(), &|| cancel.is_cancelled(),
+                |done,total| progress.set(JobPhase::Verification,done,total,None),
+            )
+        } else { cam_sim::analyze_removal_controlled(
             program,
             self.min,
             self.max,
@@ -82,7 +149,19 @@ impl JobInputs {
             &|| cancel.is_cancelled(),
             |done, total| progress.set(JobPhase::Verification, done, total, None),
         )
-        .map_err(Diagnostic::error)
+        }
+        .map_err(Diagnostic::error)?;
+        if let Some(first) = fixture_contacts
+            .iter()
+            .filter_map(|c| c.step_index.map(|i| (i, c.fraction)))
+            .min_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))
+        {
+            for sample in &mut samples {
+                sample.collision |= sample.step_index > first.0
+                    || (sample.step_index == first.0 && sample.end_fraction >= first.1);
+            }
+        }
+        Ok(samples)
     }
 
     pub(crate) fn stock_resolution(&self, program: &Program) -> f64 {
@@ -93,7 +172,7 @@ impl JobInputs {
             if let cam_model::Operation::Thread(thread) = operation {
                 let included = program.steps().iter().any(|step| {
                     matches!(step,
-                    cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
+                    cam_cldata::Step::Rotary { tag,feed:Some(_),.. } | cam_cldata::Step::Linear { tag, .. } | cam_cldata::Step::Arc { tag, .. }
                         if tag.op_id == thread.id)
                 });
                 if included {
@@ -129,6 +208,7 @@ impl JobInputs {
             .with_code(DiagnosticCode::InvalidInput)
             .for_setup(self.document.setup().id));
         }
+        self.document.round_stock_geometry(self.document.setup()).map_err(Diagnostic::error)?;
         let (min, max) = (self.min, self.max);
         if min[0] >= max[0] || min[1] >= max[1] {
             return Ok(StockSimulation::default());
@@ -136,6 +216,9 @@ impl JobInputs {
         let resolution = self
             .preview_resolution
             .unwrap_or_else(|| self.stock_resolution(program));
+        let round = self.defined_round_stock(resolution, cancel)?;
+        let assets: Vec<_> = self.document.geometry.assets.iter().map(|a| (a.id, a.revision, &a.source_fingerprint)).collect();
+        let round_key = serde_json::to_string(&(self.document.setup().stock, self.min, self.max, resolution, &self.document.setup().frame, &self.document.geometry.instances, assets)).unwrap();
         let key = self.previous_stock_key(resolution);
         if let Some(key) = &key {
             if simulation
@@ -152,11 +235,15 @@ impl JobInputs {
         } else {
             simulation.previous = None;
         }
-        let initial = key.as_ref().and(simulation.previous.as_ref());
+        let initial = key.as_ref().and(simulation.previous.as_ref()).map(|(k, f)| (k.as_str(), f))
+            .or_else(|| round.as_ref().map(|f| (round_key.as_str(), f)));
         // Setup selection shows the input blank, while operation selection and
         // playback show the material remaining after the destination's cuts.
+        let inherited = self.document.setup().stock == cam_model::Stock::PreviousSetup;
+        let initial_snapshot = initial.filter(|_| inherited && self.preview_program.is_none())
+            .map(|(_, field)| field.snapshot(min[2]).map_err(Diagnostic::error)).transpose()?;
         let input_mesh = if let Some((_, field)) =
-            initial.filter(|_| self.preview_program.is_none())
+            initial.filter(|_| inherited && self.preview_program.is_none())
         {
             let Some(surface) = field.to_solid_mesh_controlled(min[2], &|| cancel.is_cancelled())
             else {
@@ -172,17 +259,19 @@ impl JobInputs {
         simulation
             .current
             .set_surface_sources(self.stock_force_surfaces);
-        let Some(sim) = self.simulate_field(
+        let sim = self.simulate_field(
             program,
             resolution,
-            initial.map(|(k, f)| (k.as_str(), f)),
+            initial,
             cancel,
             progress,
             &mut simulation.current,
-        ) else {
-            return Ok(StockSimulation::default());
-        };
+            &mut simulation.rotary,
+        )?;
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
+        let snapshot = if self.preview_program.is_none() {
+            Some(sim.field.snapshot(min[2]).map_err(Diagnostic::error)?)
+        } else { None };
         // Render the stock as a watertight solid down to its floor, so the full
         // thickness shows and cut walls shade crisply (not a smooth top sheet).
         let Some(surface) = simulation
@@ -196,6 +285,8 @@ impl JobInputs {
         };
         Ok(StockSimulation {
             initial: input_mesh,
+            snapshot,
+            initial_snapshot,
             vertices,
             indices: surface.indices,
             machined: surface.machined,
@@ -217,6 +308,7 @@ impl JobInputs {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn simulate_field(
         &self,
         program: &mut Program,
@@ -225,7 +317,20 @@ impl JobInputs {
         cancel: &CancelToken,
         progress: &Progress,
         simulation: &mut SimulationCache,
-    ) -> Option<SimResult> {
+        rotary: &mut cam_sim::RotarySimulationCache,
+    ) -> Result<SimResult, Diagnostic> {
+        if self.uses_rotary_stock(program) {
+            // This lane consumes geometry and contacts. Force analysis traverses
+            // separately with volume accounting enabled in cam-sim.
+            rotary.set_volume_tracking(false);
+            return rotary.simulate_controlled(
+                program, self.min, self.max,
+                &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
+                &self.rotary_sim_tools(), initial, self.stock_force_surfaces,
+                &|| cancel.is_cancelled(),
+                |done,total| progress.set(JobPhase::Verification,done,total,None),
+            ).map_err(Diagnostic::error);
+        }
         let tools = &self.document.setup().tools;
         let sim_tools: Vec<SimTool> = tools
             .iter()
@@ -260,7 +365,8 @@ impl JobInputs {
                 )
             }
         };
-        let mut result = verify(program, simulation)?;
+        let stopped = || Diagnostic::error("Stock simulation cancelled");
+        let mut result = verify(program, simulation).ok_or_else(stopped)?;
         if self.preview_program.is_none() {
             if let Some(repaired) =
                 self.reroute_parallel_stock_links(program, &result.collisions, cancel)
@@ -269,10 +375,28 @@ impl JobInputs {
                 // Re-run the unchanged collision checks on the actual output.
                 // Clearance entries can only remove additional stock, so a
                 // previously clear link cannot become blocked by this rewrite.
-                result = verify(program, simulation)?;
+                result = verify(program, simulation).ok_or_else(stopped)?;
             }
         }
-        (!cancelled()).then_some(result)
+        if cancelled() { Err(stopped()) } else { Ok(result) }
+    }
+
+    fn uses_rotary_stock(&self, program: &Program) -> bool {
+        program.has_rotary_motion() || self.document.setup().operations.iter().any(|op|
+            self.document.operation_is_included(self.document.setup().id,op.id()) && (op.rotary_wrap().is_some() || self.document.rotary_indexes.contains_key(&op.id())))
+    }
+
+    fn rotary_sim_tools(&self) -> Vec<cam_sim::RotaryTool> {
+        self.document.setup().tools.iter().map(|t| {
+            let outline=t.profile();
+            let flute=outline.segs.iter().filter(|s|s.cutting).map(|s|s.end.y).fold(0.,f64::max).max(1e-6);
+            cam_sim::RotaryTool {
+                tool: SimTool { number:t.number, profile:sim_profile(t),
+                    noncutting_tip_radius:outline.segs.first().filter(|s|!s.cutting && s.end.y.abs()<1e-9).map(|s|s.end.x) },
+                flute_length:flute, length:t.length.max(flute), neck_length:if matches!(t.kind,cam_model::ToolKind::ThreadMill{..}){t.neck_length.max(t.flute_len())}else{t.neck_length},
+                neck_radius:t.neck_dia()/2., shank_radius:t.shank_dia()/2.,
+            }
+        }).collect()
     }
 
     /// CAD clearance is not proof of cleared stock: a ball nose leaves scallops
@@ -369,6 +493,33 @@ impl JobInputs {
         changed.then_some(output)
     }
 
+    fn defined_round_stock(&self, resolution: f64, cancel: &CancelToken) -> Result<Option<Heightfield>, Diagnostic> {
+        let stock = self.document.setup().stock;
+        if !matches!(stock, cam_model::Stock::FixedRound { .. } | cam_model::Stock::RelativeRound { .. } | cam_model::Stock::FromSolid { .. }) { return Ok(None); }
+        if cancel.is_cancelled() {return Err(Diagnostic::error("Stock calculation cancelled"));}
+        let setup=self.document.setup();
+        if let Some((frame,min,max))=self.document.round_stock_geometry(setup).map_err(Diagnostic::error)? {
+            let direction=setup.frame.to_setup_vector(frame.to_world_vector([0.,0.,1.]));
+            if let Some(axis)=(0..3).find(|&i|direction[i].abs()>1.-1e-9) {
+                let center=setup.frame.to_setup_vector(frame.to_world_vector([(min[0]+max[0])*0.5,(min[1]+max[1])*0.5,0.]));
+                let a=center[axis]+direction[axis]*min[2];
+                let b=center[axis]+direction[axis]*max[2];
+                let inner=match stock {
+                    cam_model::Stock::FixedRound{tube:true,inner_diameter,..}|cam_model::Stock::RelativeRound{tube:true,inner_diameter,..}=>inner_diameter*0.5,
+                    _=>0.,
+                };
+                return cam_sim::CylindricalStock::new_controlled(axis,center,[a.min(b),a.max(b)],(max[0]-min[0])*0.5,inner,resolution,&||cancel.is_cancelled())
+                    .map(|s|Some(s.field)).map_err(Diagnostic::error);
+            }
+        }
+        let mesh = crate::stock_shape::oriented_round_mesh(&self.document, self.document.setup())
+            .map_err(Diagnostic::error)?
+            .or_else(|| crate::stock_shape::solid_mesh(&self.document, self.document.setup()))
+            .ok_or_else(|| Diagnostic::error("Invalid stock dimensions or unavailable solid mesh"))?;
+        Heightfield::from_stock_mesh_controlled(&mesh, self.min, self.max, resolution, &|| cancel.is_cancelled())
+            .map(Some).ok_or_else(|| Diagnostic::error("Stock calculation cancelled"))
+    }
+
     fn previous_stock_key(&self, resolution: f64) -> Option<String> {
         if self.document.setup().stock != cam_model::Stock::PreviousSetup {
             return None;
@@ -388,6 +539,7 @@ impl JobInputs {
             &self.document.setups[..at],
             &self.document.setup().frame,
             &self.document.excluded_operations,
+            &self.document.rotary_indexes,
             &self.document.disabled_origins,
             &geometry.bindings,
             &geometry.instances,
@@ -485,7 +637,7 @@ impl JobInputs {
                     setup.name
                 )));
             }
-            let mut job = build_job_cached(
+            let mut job = cam_toolpath::build_job_cached(
                 PlanRequest {
                     document: &document,
                     spindle_rpm: self.spindle_rpm,
@@ -523,9 +675,17 @@ impl JobInputs {
                     transfer(field, frame, *floor, &source, res)
                         .ok_or_else(|| failure("Stock transfer cancelled".into()))?,
                 ),
-                None => None,
+                None => {
+                    // Planning geometry has already been rotated into setup axes.
+                    // The input solid must instead come from the original document.
+                    let mut input = source.clone();
+                    let mut original = (*self.document).clone();
+                    original.active_setup_id = setup.id;
+                    input.document = Arc::new(original);
+                    input.defined_round_stock(res, cancel)?
+                },
             };
-            let result = source
+            let mut result = source
                 .simulate_field(
                     &mut job.program,
                     res,
@@ -533,8 +693,14 @@ impl JobInputs {
                     cancel,
                     progress,
                     &mut SimulationCache::default(),
+                    &mut cam_sim::RotarySimulationCache::default(),
                 )
-                .ok_or_else(|| failure("Stock simulation cancelled".into()))?;
+                ?;
+            result.collisions.extend(source.fixture_collisions_against(
+                &job.program,
+                &source.document.geometry,
+                cancel,
+            )?);
             if !result.collisions.is_empty() {
                 return Err(failure(format!(
                     "Cannot use stock from {}: resolve its simulation collisions first",
@@ -560,6 +726,10 @@ fn simulation_resolution(span: f64, feature: f64, accuracy: f32) -> f64 {
         .clamp(0.02, 2.0)
         .max(span / MAX_SIM_CELLS_ACROSS)
 }
+
+#[cfg(test)]
+#[path = "project_cache_bench.rs"]
+mod cache_bench;
 
 #[cfg(test)]
 mod tests {
@@ -598,6 +768,285 @@ mod tests {
             }));
         });
         app
+    }
+
+    fn add_fixture(app: &mut AppController, bounds: [[f64; 3]; 2]) -> u64 {
+        use cam_model::*;
+        app.add_cad_asset(
+            GeometryAsset {
+                id: 1,
+                revision: 1,
+                name: "Vise".into(),
+                source_format: CadFormat::Step,
+                source_data: Vec::new().into(),
+                source_units: SourceUnits::Millimetres,
+                backend: "analytic fixture".into(),
+                import_options: None,
+                import_diagnostics: vec![],
+                source_fingerprint: String::new(),
+                topology: TopologySnapshot {
+                    bodies: vec![CadBody {
+                        id: 1,
+                        name: "Jaw".into(),
+                        valid_solid: true,
+                        bounds,
+                    }],
+                    ..Default::default()
+                }
+                .into(),
+            },
+            vec![GeometryInstance {
+                id: 1,
+                asset_id: 1,
+                body_id: 1,
+                name: "Jaw".into(),
+                placement: Default::default(),
+                visible: true,
+            }],
+        )
+        .unwrap();
+        let id = app.geometry_state().instances.last().unwrap().id;
+        let mut setup = app.inspection_setup().clone();
+        setup.fixture_instances = vec![id];
+        setup.fixture_clearance = FixtureClearance {
+            radial: 0.5,
+            axial: 2.0,
+        };
+        app.apply_setup_settings(setup).unwrap();
+        id
+    }
+
+    #[test]
+    fn fixtures_raise_travel_planes_without_becoming_stock_and_survive_project_history() {
+        let mut app = drilled_blank();
+        let id = add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        assert_eq!(app.setup_model_bounds(), ([0.; 3], [0.; 3]));
+        assert!(app.setup_geometry_state().unwrap().instances.is_empty());
+        let result = app.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(result.collisions.is_empty());
+        assert!(result
+            .program
+            .steps()
+            .iter()
+            .any(|s| matches!(s, cam_cldata::Step::Drill(c) if c.retract >= 17.)));
+        assert!(app.export_nc().is_ok());
+        let path = std::env::temp_dir().join(format!("fixture-setup-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(default_machine());
+        reopened.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reopened.inspection_setup().fixture_instances, vec![id]);
+        assert_eq!(
+            reopened.inspection_setup().fixture_clearance,
+            app.inspection_setup().fixture_clearance
+        );
+        let copy = reopened
+            .duplicate_setup(reopened.active_setup_id())
+            .unwrap();
+        assert_eq!(reopened.inspection_setup().id, copy);
+        assert_eq!(reopened.inspection_setup().fixture_instances, vec![id]);
+        reopened.add_setup();
+        assert!(reopened.inspection_setup().fixture_instances.is_empty());
+    }
+
+    #[test]
+    fn fixtures_block_generation_and_export_and_changes_invalidate_dependencies() {
+        let mut app = drilled_blank();
+        let id = add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        let before = app.current_toolpath_fingerprints();
+        let mut setup = app.inspection_setup().clone();
+        setup.fixture_clearance.radial = 1.;
+        app.apply_setup_settings(setup).unwrap();
+        let after = app.current_toolpath_fingerprints();
+        assert_ne!(before, after);
+        app.place_cad_instance(
+            id,
+            cam_model::RigidTransform {
+                translation: [-15., 0., 0.],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(after, app.current_toolpath_fingerprints());
+        let result = app.run(&CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("fixture Jaw")));
+        assert!(result
+            .collisions
+            .iter()
+            .any(|c| c.kind == cam_sim::CollisionKind::Fixture && c.op_id == Some(1)));
+        assert!(app.export_nc().is_err());
+        assert!(app.undo());
+        assert_eq!(
+            app.run(&CancelToken::new()).completion,
+            JobCompletion::Complete
+        );
+    }
+
+    #[test]
+    fn fixture_playback_checks_no_stock_and_uses_setup_axes() {
+        use cam_cldata::{MoveKind, Point3, Step, Tag};
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        app.edit_setup(|s| {
+            s.frame = cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()
+        });
+        let mut inputs = app.job_inputs();
+        inputs.min = [0.; 3];
+        inputs.max = [0.; 3];
+        let tag = Tag::new(1, MoveKind::Cutting);
+        inputs.preview_program = Some(Program {
+            steps: vec![
+                Step::Rapid {
+                    to: Point3::new(5., -15., 0.),
+                    tag,
+                },
+                Step::Linear {
+                    to: Point3::new(5., -25., 0.),
+                    feed: 100.,
+                    tag,
+                },
+            ],
+        });
+        let result = inputs.execute(
+            &CancelToken::new(),
+            &mut OperationCache::default(),
+            &Progress::default(),
+            &mut StockSimulationCache::default(),
+        );
+        assert_eq!(result.completion, JobCompletion::Complete);
+        assert!(result.stock_vertices.is_empty());
+        assert_eq!(result.collisions.len(), 1);
+        assert_eq!(result.collisions[0].kind, cam_sim::CollisionKind::Fixture);
+        assert_eq!(result.collisions[0].step_index, Some(1));
+        assert!(result.collisions[0].fraction > 0. && result.collisions[0].fraction < 1.);
+    }
+
+    #[test]
+    fn inherited_stock_respects_rotated_predecessor_fixtures() {
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[-6., -6., -3.], [-4., -4., 15.]]);
+        app.edit_setup(|s| {
+            s.frame = cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap()
+        });
+        inherited_setup(&mut app);
+        let result = app.run(&CancelToken::new());
+        assert_eq!(
+            result.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(result.collisions.is_empty());
+    }
+
+    #[test]
+    fn radial_and_axial_fixture_clearances_are_applied_independently() {
+        use cam_cldata::{MoveKind, Point3, Step, Tag};
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[8., 4., 0.], [9., 6., 1.]]);
+        let program = Program {
+            steps: vec![Step::Rapid {
+                to: Point3::new(5., 5., 2.),
+                tag: Tag::new(1, MoveKind::Link),
+            }],
+        };
+        for (radial, axial, expected) in [(0., 2., 0), (3.1, 0., 0), (3.1, 2., 1)] {
+            app.edit_setup(|s| s.fixture_clearance = cam_model::FixtureClearance { radial, axial });
+            assert_eq!(
+                app.job_inputs()
+                    .fixture_collisions(&program, &CancelToken::new())
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_contacts_taint_force_samples_from_contact_onward() {
+        use cam_cldata::{MoveKind, Point3, Step, Tag};
+        let mut app = drilled_blank();
+        add_fixture(&mut app, [[5., 4., -2.], [6., 6., 1.]]);
+        let mut inputs = app.job_inputs();
+        let tag = Tag::new(1, MoveKind::Cutting);
+        inputs.preview_program = Some(Program {
+            steps: vec![
+                Step::Rapid {
+                    to: Point3::new(0., 5., -1.),
+                    tag,
+                },
+                Step::Linear {
+                    to: Point3::new(10., 5., -1.),
+                    feed: 100.,
+                    tag,
+                },
+            ],
+        });
+        let samples = inputs
+            .analyze_stock_removal(
+                &CancelToken::new(),
+                &mut OperationCache::default(),
+                &Progress::default(),
+            )
+            .unwrap();
+        assert!(samples.first().is_some_and(|s| !s.collision));
+        assert!(samples.last().is_some_and(|s| s.collision));
+    }
+
+    #[test]
+    fn legacy_setup_defaults_to_no_fixtures_with_five_mm_clearances() {
+        let app = drilled_blank();
+        let mut value = serde_json::to_value(app.document()).unwrap();
+        let setup = value["setups"][0].as_object_mut().unwrap();
+        setup.remove("fixture_instances");
+        setup.remove("fixture_clearance");
+        value["schema_version"] = serde_json::json!(36);
+        cam_model::migrate::document(&mut value, 36).unwrap();
+        let restored: cam_model::Document = serde_json::from_value(value).unwrap();
+        assert!(restored.setup().fixture_instances.is_empty());
+        assert_eq!(
+            restored.setup().fixture_clearance,
+            cam_model::FixtureClearance {
+                radial: 5.,
+                axial: 5.
+            }
+        );
+    }
+
+    #[test]
+    fn fixture_settings_reject_invalid_values_missing_bodies_and_dual_roles() {
+        let mut app = drilled_blank();
+        let id = add_fixture(&mut app, [[20., 0., -3.], [21., 10., 15.]]);
+        let before = app.document().clone();
+        for value in [-1., f64::NAN, f64::INFINITY] {
+            let mut draft = app.inspection_setup().clone();
+            draft.fixture_clearance.axial = value;
+            assert!(app.apply_setup_settings(draft).is_err());
+            assert_eq!(app.document(), &before);
+        }
+        let mut draft = app.inspection_setup().clone();
+        draft.model_instances.push(id);
+        assert!(app.apply_setup_settings(draft).is_err());
+        let mut draft = app.inspection_setup().clone();
+        draft.fixture_instances.push(999);
+        assert!(app.apply_setup_settings(draft).is_err());
+        assert!(app.remove_cad_asset(app.geometry_state().instance(id).unwrap().asset_id));
+        let result = app.run(&CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Fixture body")));
     }
 
     fn inherited_setup(app: &mut AppController) -> u64 {
@@ -683,6 +1132,9 @@ mod tests {
                 thickness: 17.,
             };
             setup.operations = vec![Operation::Pocket(PocketOp {
+                wrap: None,
+                additional_regions: Vec::new(),
+                stock_contours: Default::default(),
                 finishing: Default::default(),
                 id: 1,
                 tool: 1,
@@ -825,6 +1277,7 @@ mod tests {
                     &cancel,
                     &Progress::default(),
                     &mut SimulationCache::default(),
+                    &mut cam_sim::RotarySimulationCache::default(),
                 )
                 .unwrap()
         };

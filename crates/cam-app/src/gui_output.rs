@@ -74,9 +74,18 @@ impl App {
     }
 
     pub(super) fn log_geometry_validation(&mut self) {
+        if self.stock_contour_editor() {
+            // Stock uses its own footprint resolver, not the pocket-floor recipe.
+            self.output_last_geometry_error = None;
+            return;
+        }
         use cam_model::{ExtractionRecipe, ProfileGeometrySource};
         let kind = self.geometry_operation_kind().or(self.cad_pending_kind);
-        let geometry = crate::cad_operations::geometry_for_setup(self.controller.document());
+        let geometry = if kind == Some(OpKind::Profile) {
+            self.indexed_draft_geometry()
+        } else {
+            crate::cad_operations::geometry_for_setup(self.controller.document())
+        };
         let (selected, entry, recipe, result) = if let Some(editor) = &self.profile_entry_editor {
             let selected = match &editor.draft.source {
                 ProfileGeometrySource::Cad(selected) => selected.clone(),
@@ -265,10 +274,14 @@ impl App {
             lines.push(self.status.clone());
         }
         if let Some(progress) = self.controller.run_progress() {
-            lines.push(format!(
-                "{:?}: {} / {}",
-                progress.phase, progress.completed, progress.total
-            ));
+            if progress.phase == crate::JobPhase::Generation {
+                lines.push(format!("Generation: {} fragments calculated", progress.completed));
+            } else {
+                lines.push(format!(
+                    "{:?}: {} / {}",
+                    progress.phase, progress.completed, progress.total
+                ));
+            }
         }
         if let Some(outcome) = self.controller.outcome() {
             lines.push("Toolpath diagnostics:".into());

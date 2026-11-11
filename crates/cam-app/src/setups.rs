@@ -42,6 +42,17 @@ pub(crate) fn validate_stock_to_leave(
 }
 
 impl AppController {
+    /// Set a fixed fourth-axis pose for any ordinary machining operation.
+    pub fn set_operation_rotary_index(&mut self,id:u32,index:Option<cam_model::RotaryIndex>)->Result<(),String> {
+        let operation=self.document().setup().operations.iter().find(|op|op.id()==id).ok_or("Operation does not exist")?;
+        if let Some(index)=&index {
+            index.validate()?;
+            if operation.rotary_wrap().is_some(){return Err("An operation cannot be both indexed and wrapped".into());}
+        }
+        if self.document().rotary_indexes.get(&id)==index.as_ref(){return Ok(());}
+        self.edit_document(move|doc|{if let Some(index)=index{doc.rotary_indexes.insert(id,index);}else{doc.rotary_indexes.remove(&id);}});
+        self.invalidate();Ok(())
+    }
     pub fn active_setup_id(&self) -> u64 {
         self.active_setup_id
     }
@@ -63,6 +74,7 @@ impl AppController {
         self.selection = Selection::Setup;
         self.cad_selection.clear();
         self.invalidate();
+        self.restore_saved_verification();
         Ok(())
     }
 
@@ -94,12 +106,13 @@ impl AppController {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        setup.fixture_instances.clear();
         setup.operations.clear();
         setup.patterns.clear();
         setup.operation_heights.clear();
         setup.height_settings.clear();
         setup.stock_to_leave.clear();
-        setup.stock = default_stock(self.defaults.top_of_stock, self.defaults.depth);
+        setup.stock = default_stock();
         setup.extra_origins.clear();
         let id = setup.id;
         self.edit_document(move |doc| doc.setups.push(setup));
@@ -171,7 +184,9 @@ impl AppController {
             .filter_map(|old| operation_ids.get(old).copied())
             .collect();
         let disabled_origins = self.document().disabled_origins.get(&id).cloned();
+        let indexes:Vec<_>=operation_ids.iter().filter_map(|(old,new)|self.document().rotary_indexes.get(old).cloned().map(|index|(*new,index))).collect();
         self.edit_document(move |doc| {
+            doc.rotary_indexes.extend(indexes);
             let at = doc.setups.iter().position(|s| s.id == id).unwrap() + 1;
             doc.setups.insert(at, copy);
             doc.geometry.bindings.extend(bindings);
@@ -207,6 +222,7 @@ impl AppController {
             doc.disabled_origins.remove(&id);
             doc.geometry.bindings.retain(|op, _| !ids.contains(op));
             doc.cad_linked_operations.retain(|op| !ids.contains(op));
+            doc.rotary_indexes.retain(|op,_| !ids.contains(op));
         });
         self.restore_active_setup_view();
         self.active_origin = self.setup().origin_index;
@@ -569,6 +585,9 @@ impl AppController {
         {
             return Err("An operation with explicit planar geometry needs the same setup axes; create a linked CAD operation for another orientation".into());
         }
+        if self.document().rotary_indexes.contains_key(&id) && source.frame.world_from_setup != target.frame.world_from_setup {
+            return Err("Clear the rotary index before transferring to different setup axes, then define the index in the destination setup".into());
+        }
         let source_id = source.id;
         let mut definition = source.clone();
         definition.operations.retain(|op| op.id() == id);
@@ -612,6 +631,7 @@ impl AppController {
         operation.set_work_offset(target.origin_index);
         let mut document = self.document().clone();
         if copy {
+            if let Some(index)=document.rotary_indexes.get(&id).cloned(){document.rotary_indexes.insert(new_id,index);}
             if document.cad_linked_operations.contains(&id) {
                 document.cad_linked_operations.insert(new_id);
             }
@@ -725,7 +745,7 @@ impl AppController {
         heights: Option<Heights>,
     ) -> Result<(), String> {
         let document =
-            self.prepare_operation_settings(operation, overrides, tools, geometry, heights)?;
+            self.prepare_operation_settings(operation, overrides, tools, geometry, heights, None)?;
         if document == *self.document() {
             return Ok(());
         }
@@ -744,9 +764,24 @@ impl AppController {
         heights: Option<Heights>,
         stock_to_leave: cam_model::StockToLeave,
     ) -> Result<(), String> {
+        let index=self.document().rotary_indexes.get(&operation.id()).cloned();
+        self.apply_operation_settings_with_heights_and_stock_and_index(operation,overrides,tools,geometry,heights,stock_to_leave,index)
+    }
+
+    #[allow(clippy::too_many_arguments)] // One atomic edit across the operation tabs.
+    pub fn apply_operation_settings_with_heights_and_stock_and_index(
+        &mut self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
+        heights: Option<Heights>,
+        stock_to_leave: cam_model::StockToLeave,
+        index: Option<cam_model::RotaryIndex>,
+    ) -> Result<(), String> {
         let id = operation.id();
         let mut document =
-            self.prepare_operation_settings(operation, overrides, tools, geometry, heights)?;
+            self.prepare_operation_settings(operation, overrides, tools, geometry, heights, Some(index))?;
         if stock_to_leave.enabled {
             let operation = document
                 .setup()
@@ -783,7 +818,7 @@ impl AppController {
         settings.resolved = None;
         let id = operation.id();
         let mut document =
-            self.prepare_operation_settings(operation, overrides, tools, geometry, None)?;
+            self.prepare_operation_settings(operation, overrides, tools, geometry, None, None)?;
         settings.resolve(
             &document,
             document
@@ -808,13 +843,28 @@ impl AppController {
         overrides: Option<cam_model::GeometryOverrides>,
         tools: Vec<Tool>,
         geometry: Option<Vec<EntityRef>>,
+        settings: cam_model::OperationHeightSettings,
+        stock_to_leave: cam_model::StockToLeave,
+    ) -> Result<(), String> {
+        let index=self.document().rotary_indexes.get(&operation.id()).cloned();
+        self.apply_operation_height_settings_and_stock_and_index(operation,overrides,tools,geometry,settings,stock_to_leave,index)
+    }
+
+    #[allow(clippy::too_many_arguments)] // One atomic edit across the operation tabs.
+    pub fn apply_operation_height_settings_and_stock_and_index(
+        &mut self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        geometry: Option<Vec<EntityRef>>,
         mut settings: cam_model::OperationHeightSettings,
         stock_to_leave: cam_model::StockToLeave,
+        index: Option<cam_model::RotaryIndex>,
     ) -> Result<(), String> {
         settings.resolved = None;
         let id = operation.id();
         let mut document =
-            self.prepare_operation_settings(operation, overrides, tools, geometry, None)?;
+            self.prepare_operation_settings(operation, overrides, tools, geometry, None, Some(index))?;
         settings.resolve(
             &document,
             document
@@ -854,6 +904,7 @@ impl AppController {
         tools: Vec<Tool>,
         geometry: Option<Vec<EntityRef>>,
         safety_heights: Option<Heights>,
+        index_override: Option<Option<cam_model::RotaryIndex>>,
     ) -> Result<Document, String> {
         let id = operation.id();
         let old = self
@@ -865,6 +916,9 @@ impl AppController {
             return Err("Linked CAD geometry is missing; repair the geometry before applying operation settings".into());
         }
         let mut document = self.document().clone();
+        if let Some(index)=index_override {
+            if let Some(index)=index {index.validate()?;if operation.rotary_wrap().is_some(){return Err("An operation cannot be both indexed and wrapped".into());}document.rotary_indexes.insert(id,index);}else{document.rotary_indexes.remove(&id);}
+        }
         for tool in tools {
             if let Some(existing) = document
                 .setup()
@@ -905,6 +959,15 @@ impl AppController {
             }
         }
         let heights = document.setup().heights_for(id);
+        if operation.rotary_wrap().is_some() {
+            let geometry=crate::cad_operations::geometry_for_operation(&document, id)?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut operation)?;
+            document.geometry.bindings.remove(&id);
+            document.cad_linked_operations.remove(&id);
+            let saved=document.setup_mut().operations.iter_mut().find(|op|op.id()==id).ok_or("Operation missing")?;
+            *saved=operation;
+            return Ok(document);
+        }
         let geometry = geometry
             .filter(|_| !matches!(&operation,Operation::Profile(p) if p.selections.is_some()));
         if let Some(selected) = &geometry {
@@ -914,7 +977,7 @@ impl AppController {
                 crate::cad_operations::validate_selection(&document.geometry, selected)?;
             }
             let profile_recipe = if matches!(operation, Operation::Profile(_)) {
-                let geometry = crate::cad_operations::geometry_for_setup(&document)?;
+                let geometry = crate::cad_operations::geometry_for_operation(&document, id)?;
                 let recipe = if let Some(binding) = document
                     .geometry
                     .bindings
@@ -973,7 +1036,7 @@ impl AppController {
                 }
                 Some(recipe)
             } else {
-                let geometry = crate::cad_operations::geometry_for_setup(&document)?;
+                let geometry = crate::cad_operations::geometry_for_operation(&document, id)?;
                 Some(crate::cad_operations::recipe(
                     Self::operation_kind(&operation),
                     &geometry,
@@ -1070,7 +1133,7 @@ impl AppController {
     ) -> Result<cam_model::GeometryBinding, String> {
         let id = operation.id();
         let document =
-            self.prepare_operation_settings(operation, overrides, tools, Some(selected), None)?;
+            self.prepare_operation_settings(operation, overrides, tools, Some(selected), None, None)?;
         Ok(document.geometry.bindings[&id].clone())
     }
 
@@ -1090,7 +1153,7 @@ impl AppController {
     ) -> Result<cam_model::GeometryBinding, String> {
         let operation = self.operation(id).cloned().ok_or("Operation unavailable")?;
         let document =
-            self.prepare_operation_settings(operation, None, Vec::new(), Some(selected), None)?;
+            self.prepare_operation_settings(operation, None, Vec::new(), Some(selected), None, None)?;
         Ok(document.geometry.bindings[&id].clone())
     }
 
@@ -1112,6 +1175,7 @@ impl AppController {
             return Err("Enter a setup name".into());
         }
         self.validate_setup_frame(&setup)?;
+        setup.validate_fixtures(self.geometry_state())?;
         if !setup.origin.iter().all(|v| v.is_finite()) {
             return Err("Origin must contain finite coordinates".into());
         }
@@ -1159,6 +1223,9 @@ impl AppController {
         }
         let (min, max) = self.pending_setup_model_bounds(&setup);
         match setup.stock {
+            Stock::FromSolid { instance } if instance.and_then(|id| self.geometry_state().instance(id)).and_then(|i| self.geometry_state().asset(i.asset_id).and_then(|a| a.topology.bodies.iter().find(|b| b.id == i.body_id && b.valid_solid))).is_none() => {
+                return Err("Select an available solid body for stock".into());
+            }
             Stock::PreviousSetup if self.setups()[0].id == setup.id => {
                 return Err("The first setup has no previous setup; choose box stock".into());
             }
@@ -1179,6 +1246,18 @@ impl AppController {
             {
                 return Err("Stock allowances must be finite and non-negative".into())
             }
+            Stock::FixedRound { diameter, inner_diameter, length, position, tube, .. }
+                if !diameter.is_finite() || diameter <= 0. || !length.is_finite() || length <= 0.
+                    || !position.is_finite() || !(0. ..=1.).contains(&position)
+                    || !inner_diameter.is_finite() || inner_diameter < 0.
+                    || (tube && (inner_diameter <= 0. || inner_diameter >= diameter)) => {
+                return Err("Choose positive round stock dimensions and an inner diameter smaller than the outer diameter".into());
+            }
+            Stock::RelativeRound { radial, inner_diameter, bottom, top, tube, .. }
+                if ![radial, inner_diameter, bottom, top].iter().all(|v| v.is_finite() && *v >= 0.)
+                    || (tube && inner_diameter <= 0.) => {
+                return Err("Choose non-negative allowances and a valid inner diameter".into());
+            }
             Stock::BoundingBox {
                 x_offset,
                 y_offset,
@@ -1192,6 +1271,11 @@ impl AppController {
                 return Err("Stock dimensions must be finite and thickness positive".into())
             }
             _ => {}
+        }
+        if let Some((_, lo, hi)) = self.document().round_stock_geometry(&setup)? {
+            if let Stock::RelativeRound { inner_diameter, tube: true, .. } = setup.stock {
+                if inner_diameter >= hi[0] - lo[0] { return Err("The inner diameter must be smaller than the outer diameter".into()); }
+            }
         }
         let (stock_min, stock_max) = self.pending_setup_stock_bounds(&setup);
         if (0..3).any(|i| {
@@ -1267,6 +1351,7 @@ impl AppController {
 
     pub(super) fn validate_setup_frame(&self, setup: &Setup) -> Result<(), String> {
         setup.frame.validate()?;
+        self.document().round_stock_geometry(setup)?;
         let refs = &setup.frame.references;
         let linked = if refs.x.is_some()
             || refs.y.is_some()

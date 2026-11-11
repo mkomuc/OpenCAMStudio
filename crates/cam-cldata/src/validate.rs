@@ -135,6 +135,7 @@ pub fn validate_program(program: &Program) -> Result<Option<MotionBounds>, Valid
     let mut current: Option<Point3> = None;
     for (index, step) in program.steps().iter().enumerate() {
         let op = match step {
+            Step::Rotary { tag, .. } => Some(tag.op_id),
             Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
                 Some(tag.op_id)
             }
@@ -147,6 +148,18 @@ pub fn validate_program(program: &Program) -> Result<Option<MotionBounds>, Valid
             kind,
         };
         match step {
+            Step::Rotary { to, center, angle, length, feed, .. } => {
+                point(*to).map_err(fail)?;
+                point(*center).map_err(fail)?;
+                finite("rotary angle",*angle).map_err(fail)?;
+                nonnegative("rotary path length",*length).map_err(fail)?;
+                if let Some(feed) = feed {
+                    positive("rotary feed",*feed).map_err(fail)?;
+                    positive("rotary path length",*length).map_err(fail)?;
+                }
+                MotionBounds::include(&mut bounds,*to);
+                current = Some(*to);
+            }
             Step::Rapid { to, .. } | Step::Linear { to, .. } => {
                 point(*to).map_err(fail)?;
                 if let Step::Linear { feed, .. } = step {

@@ -43,6 +43,8 @@ use inspector_style::*;
 mod height_editor;
 #[path = "gui_height_planes.rs"]
 mod height_planes;
+#[path = "gui_icon_picker.rs"]
+mod icon_picker;
 #[path = "gui_height_reference.rs"]
 mod height_reference;
 #[path = "gui_inspector.rs"]
@@ -67,6 +69,8 @@ mod operation_metadata;
 mod operation_sections;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
+#[path = "gui_rotary.rs"]
+mod rotary_view;
 #[path = "gui_operation_tool_selector.rs"]
 mod operation_tool_selector;
 #[path = "gui_pattern_editor.rs"]
@@ -711,8 +715,19 @@ impl std::fmt::Display for SetupEditorTab {
 enum StockEditorKind {
     FixedBox,
     RelativeBox,
+    FixedCylinder,
+    RelativeCylinder,
+    FixedTube,
+    RelativeTube,
+    FromSolid,
     LegacyBox,
     PreviousSetup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StockSolidChoice { id: u64, name: String }
+impl std::fmt::Display for StockSolidChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.name) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -752,19 +767,33 @@ impl std::fmt::Display for BoxAnchor {
 }
 
 impl StockEditorKind {
-    const ALL: [Self; 4] = [
-        Self::RelativeBox,
-        Self::FixedBox,
-        Self::LegacyBox,
-        Self::PreviousSetup,
-    ];
+    const ALL: [Self; 8] = [Self::FixedBox, Self::RelativeBox, Self::FixedCylinder, Self::RelativeCylinder, Self::FixedTube, Self::RelativeTube, Self::FromSolid, Self::PreviousSetup];
+}
+
+impl StockEditorKind {
+    fn icon(self) -> &'static [u8] {
+        match self {
+            Self::FixedBox => include_bytes!("../assets/icons/stock/fixed_box.svg"),
+            Self::RelativeBox | Self::LegacyBox => include_bytes!("../assets/icons/stock/relative_box.svg"),
+            Self::FixedCylinder => include_bytes!("../assets/icons/stock/fixed_cylinder.svg"),
+            Self::RelativeCylinder => include_bytes!("../assets/icons/stock/relative_cylinder.svg"),
+            Self::FixedTube => include_bytes!("../assets/icons/stock/fixed_tube.svg"),
+            Self::RelativeTube => include_bytes!("../assets/icons/stock/relative_tube.svg"),
+            Self::FromSolid | Self::PreviousSetup => include_bytes!("../assets/icons/stock/solid.svg"),
+        }
+    }
 }
 
 impl std::fmt::Display for StockEditorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::FixedBox => "Fixed-size box",
-            Self::RelativeBox => "Relative to model bounds",
+            Self::FixedBox => "Fixed size box",
+            Self::RelativeBox => "Relative size box",
+            Self::FixedCylinder => "Fixed size cylinder",
+            Self::RelativeCylinder => "Relative size cylinder",
+            Self::FixedTube => "Fixed size tube",
+            Self::RelativeTube => "Relative size tube",
+            Self::FromSolid => "From solid",
             Self::LegacyBox => "Legacy box (existing project)",
             Self::PreviousSetup => "From previous setup",
         })
@@ -1123,6 +1152,7 @@ fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
 /// An editable inspector field, keyed independently of which node owns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Field {
+    Wrap(rotary_view::Number),
     LiftHeight,
     OperationTop,
     StartX,
@@ -1144,7 +1174,11 @@ enum Field {
     MachineTravelX,
     MachineTravelY,
     MachineTravelZ,
+    MachineMaxZ,
     MachineRapidRate,
+    MachineMinSpindleRpm,
+    MachineMaxSpindleRpm,
+    MachineMaxFeed,
     MachineToolChangeSeconds,
     /// Workpiece origin (datum) X / Y / Z, part-space mm.
     OriginX,
@@ -1314,9 +1348,16 @@ enum Field {
     Scallop,
 }
 
+fn set_machine_z_limits(envelope: &mut cam_model::Envelope, travel: f64, max_z: f64) {
+    envelope.max.z = max_z;
+    envelope.min.z = max_z - travel;
+}
+
 impl Field {
     fn label(self) -> &'static str {
+        if let Self::Wrap(number)=self {return number.label();}
         match self {
+            Self::Wrap(_) => unreachable!(),
             Field::OperationTop => "Cutting top Z (mm)",
             Field::StartX => "Start X (mm)",
             Field::StartY => "Start Y (mm)",
@@ -1331,7 +1372,11 @@ impl Field {
             Field::MachineTravelX => "X travel (mm)",
             Field::MachineTravelY => "Y travel (mm)",
             Field::MachineTravelZ => "Z travel (mm)",
+            Field::MachineMaxZ => "Maximum Z from base WCS (mm)",
             Field::MachineRapidRate => "Rapid rate (mm/min)",
+            Field::MachineMinSpindleRpm => "Minimum spindle speed (rpm)",
+            Field::MachineMaxSpindleRpm => "Maximum spindle speed (rpm)",
+            Field::MachineMaxFeed => "Maximum cutting feed (mm/min)",
             Field::MachineToolChangeSeconds => "Tool change time (s)",
             Field::OriginX => "Origin X (mm)",
             Field::OriginY => "Origin Y (mm)",
@@ -1441,7 +1486,8 @@ impl Field {
     /// shown as a hover tooltip on its label in the inspector.
     fn help(self) -> &'static str {
         match self {
-            Field::LiftHeight => "Distance above the cutting level for local linking moves, in millimetres. 0 keeps transitions at depth. Lifts are limited to clearance; distant links still retract fully.",
+            Field::Wrap(_) => "Cylindrical wrap in millimetres. Radius plus offset defines the development circumference. Surface Z is the flat drawing's radial reference; the seam sets rotary zero. Cylinder selection derives radius and axis centre from CAD.",
+            Field::LiftHeight => "Distance above the cutting level for local linking moves, in millimetres. Adaptive links that withdraw from walls lift at least 0.2 mm. Other zero-height links remain at depth. Lifts are limited to clearance; distant links still retract fully.",
             Field::BoreDiameter => "Finished feature diameter at the top height.",
             Field::BoreTaper => "Positive narrows downward; negative widens downward. Undercuts are rejected.",
             Field::BorePitch => "Axial travel per revolution of the bore helix.",
@@ -1506,7 +1552,11 @@ impl Field {
             }
             Field::MachineTravelY => "Working-envelope size in Y (see X travel).",
             Field::MachineTravelZ => "Working-envelope size in Z (see X travel).",
-            Field::MachineRapidRate => "Maximum rapid traverse rate used for time estimates and G0 limits.",
+            Field::MachineMaxZ => "Assumed highest reachable Z relative to the setup's base work origin. Used for automatic tool-change height; measure it for the workholding and setup. Changing it preserves Z travel.",
+            Field::MachineRapidRate => "Rapid traverse rate used for time estimates.",
+            Field::MachineMinSpindleRpm => "Lowest running spindle speed allowed during G-code export. Zero disables the additional minimum.",
+            Field::MachineMaxSpindleRpm => "Highest spindle speed allowed during G-code export.",
+            Field::MachineMaxFeed => "Highest cutting, plunge, or drilling feed allowed during G-code export.",
             Field::MachineToolChangeSeconds => "Estimated seconds spent at each tool change.",
             Field::OriginX => {
                 "Part-space X of the workpiece datum — the (0,0,0) the G-code is written \
@@ -1704,7 +1754,8 @@ impl Field {
             }
             Field::LeadOverlap => {
                 "How far the tool keeps cutting past the start point before leaving, to \
-                 erase the entry/exit witness mark (mm)."
+                 erase the entry/exit witness mark (mm). Adjoining adaptive cuts repeat this \
+                 distance from their shared seam; 0 uses one exact junction."
             }
             Field::FaceStartOffset => {
                 "Height of the first facing cut above the drawing reference (mm) — start \
@@ -1773,7 +1824,8 @@ impl Field {
             }
             Field::ClearLeadOverlap => {
                 "How far each clearing ring keeps cutting past its start before leaving \
-                 (mm), to erase the entry/exit witness mark."
+                 (mm), to erase the entry/exit witness mark. Adjoining adaptive cuts repeat \
+                 this distance from their shared seam; 0 uses one exact junction."
             }
             Field::ClearLeadInSize => {
                 "Size of the clearing pass's lead-in onto the flat area's edge -- arc \
@@ -1851,10 +1903,10 @@ mod help {
         "Which side of the chain the tool runs. Outside retains the enclosed part. Inside finishes the wall and can leave an uncut core: clear the pocket separately. On centers the tool on the line. Open left/right sides follow the selected chain direction.";
     pub const LEAD_IN: &str =
         "None starts on the contour. Linear approaches along a tangent line; Arc approaches \
-         along a tangent arc. Leads are horizontal moves into the start of the cut.";
+         along a tangent arc. Adaptive re-entries descend from the linking height along the lead.";
     pub const LEAD_OUT: &str =
         "None ends on the contour. Linear departs along a tangent line; Arc departs \
-         along a tangent arc. Leads are horizontal moves away from the end of the cut.";
+         along a tangent arc. Adaptive departures lift to the linking height along the lead.";
     pub const PLUNGE: &str =
         "How the tool enters downward at each level. Straight drops vertically (needs a \
          centre-cutting tool or pre-drilled hole); Ramp descends along the toolpath itself, \
@@ -2094,11 +2146,18 @@ struct App {
     pattern_draft: Option<PatternDraft>,
     pattern_tab: pattern_editor_view::PatternTab,
     setup_model_selection: Option<InstanceId>,
+    setup_fixture_selection: Option<InstanceId>,
+    setup_fixture_pick: bool,
     setup_model_pick: bool,
     setup_values: BTreeMap<usize, String>,
     operation_draft: Option<Operation>,
     stock_to_leave_draft: Option<cam_model::StockToLeave>,
     stock_to_leave_initialized: bool,
+    rotary_pick: Option<rotary_view::Pick>,
+    rotary_wrap_draft: Option<cam_model::RotaryWrap>,
+    rotary_index_draft: Option<cam_model::RotaryIndex>,
+    rotary_index_mode: rotary_view::IndexMode,
+    rotary_index_values: [String; 4],
     creation_edited_fields: BTreeSet<Field>,
     thread_parameters: thread_parameters::ThreadParameters,
     creation_geometry_height_defaults: Option<cam_model::OperationHeightSettings>,
@@ -2168,6 +2227,7 @@ struct App {
     output_px: f32,
     /// The preferences panel is open.
     show_prefs: bool,
+    show_stock_palette: bool,
     /// Every machine this installation knows about. The **active** one is mirrored into
     /// the controller (which gates exports against it); this is the set to pick from.
     machines: crate::MachineLibrary,
@@ -2628,6 +2688,7 @@ enum BoreOption {
 
 #[derive(Debug, Clone)]
 enum Message {
+    Rotary(rotary_view::Action),
     PollMcp,
     TraverseFocus(bool),
     OutputAction(iced::widget::text_editor::Action),
@@ -2682,10 +2743,16 @@ enum Message {
     SetupToolChangeAutomatic(bool),
     SetupToolChangeHeightChanged(String),
     SetupModelPick,
-    SetupModelSelected(InstanceId),
+    SetupFixturePick,
+    SetupGeometryClear(bool),
+    SetupFixtureToggled(InstanceId, bool),
+    SetupFixtureClearanceChanged(usize, String),
     SetupModelToggled(u64, bool),
     SetupStockKindChanged(StockEditorKind),
     SetupStockNumberChanged(usize, String),
+    SetupStockSolidChanged(StockSolidChoice),
+    SetupStockAxisClear,
+    SetupStockOriginAxis(usize),
     SetupStockPositionChanged(usize, BoxAnchor),
     SetupAxisPick(usize),
     BeginPattern(bool),
@@ -2957,11 +3024,12 @@ enum Message {
     /// Snap marker size, as a multiple of the catch aperture.
     SetMarkerScale(f32),
     /// The smallest `pane` may be dragged to, logical px.
-    SetPaneMin(Pane, f32),
     /// Workpiece-origin marker size, as a multiple of the shipped size.
     SetOriginMarker(f32),
     /// Stock surface RGB channel, in the range 0–1.
-    SetStockColor(usize, f32),
+    ToggleStockPalette,
+    SetStockColor([f32; 3]),
+    SetStockTransparency(f32),
     SetSimulationAccuracy(f32),
     /// Put every preference back to its shipped value.
     RestoreDefaults,
@@ -3165,6 +3233,21 @@ fn initial_panes() -> pane_grid::State<Pane> {
 }
 
 impl App {
+    fn toggle_setup_body_pick(&mut self, instance: InstanceId) -> iced::Task<Message> {
+        let included = self.setup_draft.as_ref().is_some_and(|draft| {
+            if self.setup_fixture_pick {
+                draft.fixture_instances.contains(&instance)
+            } else {
+                draft.model_instances.contains(&instance)
+            }
+        });
+        self.update(if self.setup_fixture_pick {
+            Message::SetupFixtureToggled(instance, !included)
+        } else {
+            Message::SetupModelToggled(instance, !included)
+        })
+    }
+
     fn begin_setup_draft(&mut self) {
         self.model_view = None;
         self.inspector_active = true;
@@ -3176,6 +3259,7 @@ impl App {
         self.setup_draft = self.controller.document().active_setup().cloned();
         self.setup_values.clear();
         self.setup_model_selection = None;
+        self.setup_fixture_selection = None;
         self.operation_draft = None;
         self.operation_tools.clear();
         self.operation_geometry = None;
@@ -3186,6 +3270,7 @@ impl App {
         self.setup_draft = None;
         self.setup_values.clear();
         self.setup_model_selection = None;
+        self.setup_fixture_selection = None;
         self.cancel_setup_picks();
         self.inspector_active = false;
     }
@@ -3205,6 +3290,7 @@ impl App {
             .cloned();
         self.setup_values.clear();
         self.setup_model_selection = None;
+        self.setup_fixture_selection = None;
         self.setup_orientation = None;
         self.setup_origin_mode = None;
     }
@@ -3239,6 +3325,7 @@ impl App {
             self.cad_candidates.clear();
         }
         self.setup_model_pick = false;
+        self.setup_fixture_pick = false;
         self.setup_hover = SetupHover::default();
         self.setup_axis_pick = None;
         self.setting_origin = false;
@@ -3292,6 +3379,9 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
+        self.rotary_pick=None;
+        self.rotary_wrap_draft=None;
+        self.seed_rotary_index_draft(id);
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
         self.profile_contour_selection = 0;
@@ -3329,6 +3419,12 @@ impl App {
         self.operation_tools.clear();
         self.fields.clear();
         self.refresh_fields();
+    }
+
+    fn seed_rotary_index_draft(&mut self, id: u32) {
+        self.rotary_index_draft = self.controller.document().rotary_indexes.get(&id).cloned();
+        self.rotary_index_mode = if self.rotary_index_draft.as_ref().is_some_and(|i| i.face.is_some()) { rotary_view::IndexMode::Face } else { rotary_view::IndexMode::Manual };
+        self.seed_rotary_index_values();
     }
 
     fn stage_operation_tool(&mut self, mut tool: cam_model::Tool) -> u32 {
@@ -3378,6 +3474,7 @@ impl App {
         let Selection::Operation(id) = self.controller.selection() else {
             return false;
         };
+        if self.rotary_index_draft.as_ref()!=self.controller.document().rotary_indexes.get(&id) {return true;}
         if self.height_rules_dirty() {
             return true;
         }
@@ -3437,6 +3534,31 @@ impl App {
                 self.fields.insert(field, value);
             }
         }
+    }
+
+    fn set_round_stock_axis(&mut self, entity: EntityRef) -> bool {
+        let Some(draft) = &self.setup_draft else {
+            return false;
+        };
+        if entity.kind != EntityKind::Edge {
+            self.status = "Select a straight model edge or an origin axis for the stock.".into();
+            return false;
+        }
+        let mut candidate = draft.clone();
+        match &mut candidate.stock {
+            cam_model::Stock::FixedRound { axis, .. }
+            | cam_model::Stock::RelativeRound { axis, .. } => {
+                *axis = Some(cam_model::StockAxis::Edge(cam_model::StockAxisReference::from(&entity)))
+            }
+            _ => return false,
+        }
+        if let Err(error) = self.controller.document().round_stock_geometry(&candidate) {
+            self.status = error;
+            return false;
+        }
+        self.setup_draft = Some(candidate);
+        self.status = format!("Stock axis set from edge {}.", entity.id);
+        true
     }
 
     fn set_setup_axis_reference(&mut self, axis: usize, entity: Option<EntityRef>) {
@@ -3516,12 +3638,8 @@ impl App {
             refs.model_instance = None;
         }
         draft.origin = draft.frame.to_setup_vector(world_origin);
-        if matches!(
-            draft.frame.references.origin,
-            cam_model::FrameOrigin::Explicit(_)
-        ) {
-            draft.frame.references.origin = cam_model::FrameOrigin::Explicit(draft.origin);
-        }
+        draft.frame.references.origin =
+            draft.frame.references.origin.with_coordinates(draft.origin);
         self.resolve_setup_axes();
     }
 
@@ -3537,9 +3655,7 @@ impl App {
             Ok(mut frame) => {
                 let origin = draft.frame.to_world_vector(draft.origin);
                 draft.origin = frame.to_setup_vector(origin);
-                if matches!(frame.references.origin, cam_model::FrameOrigin::Explicit(_)) {
-                    frame.references.origin = cam_model::FrameOrigin::Explicit(draft.origin);
-                }
+                frame.references.origin = frame.references.origin.with_coordinates(draft.origin);
                 draft.frame = frame;
                 self.setup_values.retain(|key, _| *key > 2);
                 self.status = "WCS edge reference updated in the setup draft.".into();
@@ -3647,11 +3763,18 @@ impl App {
             pattern_draft: None,
             pattern_tab: pattern_editor_view::PatternTab::Placement,
             setup_model_selection: None,
+            setup_fixture_selection: None,
+            setup_fixture_pick: false,
             setup_model_pick: false,
             setup_values: BTreeMap::new(),
             operation_draft: None,
             stock_to_leave_draft: None,
             stock_to_leave_initialized: false,
+            rotary_pick: None,
+            rotary_wrap_draft: None,
+            rotary_index_draft: None,
+            rotary_index_mode: rotary_view::IndexMode::Manual,
+            rotary_index_values: Default::default(),
             creation_edited_fields: BTreeSet::new(),
             thread_parameters: Default::default(),
             creation_geometry_height_defaults: None,
@@ -3708,6 +3831,7 @@ impl App {
             inspector_enabled: true,
             show_license: false,
             show_prefs: false,
+            show_stock_palette: false,
             window: iced::Size::new(1280.0, 800.0),
             project_px: settings.panes.project_px,
             inspector_px: settings.panes.inspector_px,
@@ -3963,8 +4087,14 @@ impl App {
                 | Message::OperationProjectToolPicked(_)
         );
         let previous_status = self.status.clone();
+        let previous_result = self.controller.outcome().and_then(|o| o.stamp.clone());
         let context = self.output_context();
         let task = self.update_message(message);
+        if self.controller.outcome().and_then(|o| o.stamp.as_ref())
+            .is_some_and(|stamp| stamp.request_id == 0 && Some(stamp) != previous_result.as_ref())
+        {
+            self.record_status_messages();
+        }
         if sync_thread {
             self.sync_thread_standard();
         }
@@ -4171,11 +4301,11 @@ impl App {
                 "Confirm or Cancel geometry selection before changing the editing context.".into();
             return iced::Task::none();
         }
-        let operation_settings_dirty =
-            matches!(self.controller.selection(), Selection::Operation(_))
-                && (self.inspector_dirty()
-                    || self.any_field_invalid()
-                    || !self.operation_height_overrides_valid());
+        let operation_settings_dirty = self.inspector_active
+            && matches!(self.controller.selection(), Selection::Operation(_))
+            && (self.inspector_dirty()
+                || self.any_field_invalid()
+                || !self.operation_height_overrides_valid());
         if (self.setup_draft_dirty() || operation_settings_dirty)
             && matches!(
                 &message,
@@ -4690,6 +4820,7 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::Rotary(action) => self.rotary_action(action),
             Message::StockToLeaveToggled(enabled) => {
                 let mut stock = self.stock_to_leave_with_fields();
                 if enabled
@@ -4879,8 +5010,13 @@ impl App {
                             };
                             frame.references.origin = if mode == SetupOriginMode::Model {
                                 cam_model::FrameOrigin::ModelOrigin
-                            } else {
+                            } else if matches!(
+                                draft.frame.references.origin,
+                                cam_model::FrameOrigin::ModelOrigin
+                            ) {
                                 cam_model::FrameOrigin::Explicit(origin)
+                            } else {
+                                draft.frame.references.origin.with_coordinates(origin)
                             };
                             draft.frame = frame;
                             draft.origin = origin;
@@ -4944,23 +5080,88 @@ impl App {
             }
             Message::SetupModelPick => {
                 if self.setup_draft.is_some() {
-                    let picking = !self.setup_model_pick;
+                    let picking = !self.setup_model_pick || self.setup_fixture_pick;
                     self.cancel_setup_picks();
                     self.setup_model_pick = picking;
                     self.cad_hover = None;
                     self.cad_candidates.clear();
                     self.status = if picking {
-                        "Click bodies in the view to add them to this setup. Click Done when finished."
+                        "Click bodies to select or deselect setup models. Click the selection button when finished."
                     } else { "Setup body selection finished." }.into();
                 }
             }
-            Message::SetupModelSelected(instance) => {
-                if self
-                    .setup_draft
-                    .as_ref()
-                    .is_some_and(|draft| draft.model_instances.contains(&instance))
+            Message::SetupFixturePick => {
+                if self.setup_draft.is_some() {
+                    let picking = !(self.setup_model_pick && self.setup_fixture_pick);
+                    self.cancel_setup_picks();
+                    self.setup_model_pick = picking;
+                    self.setup_fixture_pick = picking;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                    self.status = if picking {
+                        "Click bodies to select or deselect fixtures. Click the selection button when finished."
+                    } else {
+                        "Fixture selection finished."
+                    }
+                    .into();
+                }
+            }
+            Message::SetupGeometryClear(fixture) => {
+                if let Some(draft) = &mut self.setup_draft {
+                    if fixture {
+                        draft.fixture_instances.clear();
+                        self.setup_fixture_selection = None;
+                    } else {
+                        draft.model_instances.clear();
+                        self.setup_model_selection = None;
+                    }
+                }
+            }
+            Message::SetupFixtureToggled(instance, included) => {
+                if included
+                    && self
+                        .controller
+                        .geometry_state()
+                        .instance(instance)
+                        .is_none()
                 {
-                    self.setup_model_selection = Some(instance);
+                    return iced::Task::none();
+                }
+                if let Some(draft) = &mut self.setup_draft {
+                    if included {
+                        if !draft.fixture_instances.contains(&instance) {
+                            draft.fixture_instances.push(instance);
+                        }
+                        draft.model_instances.retain(|id| *id != instance);
+                        if self.setup_model_selection == Some(instance) {
+                            self.setup_model_selection = None;
+                        }
+                        self.setup_fixture_selection = Some(instance);
+                        if let Some(body) = self.controller.geometry_state().instance(instance) {
+                            self.collapsed_assets.remove(&body.asset_id);
+                        }
+                    } else {
+                        draft.fixture_instances.retain(|id| *id != instance);
+                        if self.setup_fixture_selection == Some(instance) {
+                            self.setup_fixture_selection = draft.fixture_instances.last().copied();
+                        }
+                    }
+                }
+            }
+            Message::SetupFixtureClearanceChanged(axis, value) => {
+                if axis < 2 {
+                    self.setup_values.insert(42 + axis, value.clone());
+                    if let (Some(draft), Ok(v)) =
+                        (&mut self.setup_draft, value.trim().parse::<f64>())
+                    {
+                        if v.is_finite() {
+                            if axis == 0 {
+                                draft.fixture_clearance.radial = v;
+                            } else {
+                                draft.fixture_clearance.axial = v;
+                            }
+                        }
+                    }
                 }
             }
             Message::SetupModelToggled(instance, included) => {
@@ -4978,6 +5179,10 @@ impl App {
                             draft.model_instances.push(instance);
                         }
                         self.setup_model_selection = Some(instance);
+                        draft.fixture_instances.retain(|id| *id != instance);
+                        if self.setup_fixture_selection == Some(instance) {
+                            self.setup_fixture_selection = None;
+                        }
                         if let Some(body) = self.controller.geometry_state().instance(instance) {
                             self.collapsed_assets.remove(&body.asset_id);
                         }
@@ -4990,7 +5195,16 @@ impl App {
                 }
             }
             Message::SetupStockKindChanged(kind) => {
+                if self.setup_axis_pick == Some(3) {
+                    self.setup_axis_pick = None;
+                    self.cad_candidates.clear();
+                }
                 if let Some(draft) = &mut self.setup_draft {
+                    let stock_axis = match draft.stock {
+                        cam_model::Stock::FixedRound { axis, .. }
+                        | cam_model::Stock::RelativeRound { axis, .. } => axis,
+                        _ => None,
+                    };
                     let stock = match kind {
                         StockEditorKind::PreviousSetup => cam_model::Stock::PreviousSetup,
                         StockEditorKind::FixedBox => match draft.stock {
@@ -5006,13 +5220,72 @@ impl App {
                                 offsets: [[1.0; 3]; 2],
                             },
                         },
+                        StockEditorKind::FromSolid => match draft.stock {
+                            cam_model::Stock::FromSolid { .. } => draft.stock,
+                            _ => cam_model::Stock::FromSolid { instance: None },
+                        },
+                        StockEditorKind::FixedCylinder | StockEditorKind::FixedTube => {
+                            let tube = kind == StockEditorKind::FixedTube;
+                            if let cam_model::Stock::FixedRound { tube: existing, .. } = draft.stock
+                            {
+                                if existing == tube {
+                                    return iced::Task::none();
+                                }
+                            }
+                            let mut oriented = draft.clone();
+                            let round = self
+                                .controller
+                                .document()
+                                .round_stock_geometry(draft)
+                                .ok()
+                                .flatten();
+                            if let Some((frame, _, _)) = &round {
+                                oriented.frame = frame.clone();
+                            }
+                            let (min, max) = self.controller.pending_setup_model_bounds(&oriented);
+                            let diameter = round
+                                .as_ref()
+                                .map(|(_, lo, hi)| hi[0] - lo[0])
+                                .unwrap_or_else(|| {
+                                    (max[0] - min[0]).hypot(max[1] - min[1]).max(1.) + 2.
+                                });
+                            let length = round
+                                .as_ref()
+                                .map(|(_, lo, hi)| hi[2] - lo[2])
+                                .unwrap_or_else(|| (max[2] - min[2]).max(1.) + 2.);
+                            cam_model::Stock::FixedRound {
+                                diameter,
+                                inner_diameter: if tube { diameter / 2. } else { 0. },
+                                length,
+                                position: 0.5,
+                                tube,
+                                axis: stock_axis,
+                            }
+                        }
+                        StockEditorKind::RelativeCylinder | StockEditorKind::RelativeTube => {
+                            let tube = kind == StockEditorKind::RelativeTube;
+                            if let cam_model::Stock::RelativeRound { tube: existing, .. } =
+                                draft.stock
+                            {
+                                if existing == tube {
+                                    return iced::Task::none();
+                                }
+                            }
+                            cam_model::Stock::RelativeRound {
+                                radial: 1.,
+                                inner_diameter: if tube { 1. } else { 0. },
+                                bottom: 1.,
+                                top: 1.,
+                                tube,
+                                axis: stock_axis,
+                            }
+                        }
                         StockEditorKind::LegacyBox => match draft.stock {
                             cam_model::Stock::BoundingBox { .. } => draft.stock,
                             _ => draft.stock,
                         },
                     };
-                    let changed =
-                        std::mem::discriminant(&draft.stock) != std::mem::discriminant(&stock);
+                    let changed = draft.stock != stock;
                     draft.stock = stock;
                     if changed {
                         self.setup_values
@@ -5020,11 +5293,42 @@ impl App {
                     }
                 }
             }
+            Message::SetupStockOriginAxis(index) => {
+                if let (Some(draft), Some(origin_axis)) = (
+                    &mut self.setup_draft,
+                    cam_model::StockOriginAxis::from_index(index),
+                ) {
+                    match &mut draft.stock {
+                        cam_model::Stock::FixedRound { axis, .. }
+                        | cam_model::Stock::RelativeRound { axis, .. } => {
+                            *axis = Some(cam_model::StockAxis::Origin { origin_axis });
+                            self.status =
+                                format!("Stock axis set to origin {}.", ["X", "Y", "Z"][index]);
+                        }
+                        _ => {}
+                    }
+                }
+                self.setup_axis_pick = None;
+                self.cad_candidates.clear();
+            }
+            Message::SetupStockAxisClear => {
+                if let Some(draft) = &mut self.setup_draft {
+                    match &mut draft.stock {
+                        cam_model::Stock::FixedRound { axis, .. } | cam_model::Stock::RelativeRound { axis, .. } => *axis = None,
+                        _ => {}
+                    }
+                }
+                if self.setup_axis_pick == Some(3) { self.setup_axis_pick = None; }
+                self.cad_candidates.clear();
+            }
+            Message::SetupStockSolidChanged(choice) => {
+                if let Some(draft) = &mut self.setup_draft { draft.stock = cam_model::Stock::FromSolid { instance: Some(choice.id) }; }
+            }
             Message::SetupStockNumberChanged(index, value) => {
                 self.setup_values.insert(20 + index, value.clone());
                 if let (Some(draft), Ok(v)) = (&mut self.setup_draft, value.parse::<f64>()) {
                     match &mut draft.stock {
-                        cam_model::Stock::PreviousSetup => {}
+                        cam_model::Stock::PreviousSetup | cam_model::Stock::FromSolid { .. } => {}
                         cam_model::Stock::FixedBox {
                             size,
                             model_position,
@@ -5036,10 +5340,12 @@ impl App {
                             }
                         }
                         cam_model::Stock::RelativeBox { offsets } => {
-                            if index < 4 {
+                            if index < 6 {
                                 offsets[index / 3][index % 3] = v;
                             }
                         }
+                        cam_model::Stock::FixedRound { diameter, inner_diameter, length, position, .. } => match index { 0 => *diameter = v, 1 => *inner_diameter = v, 2 => *length = v, 3 => *position = v, _ => {} },
+                        cam_model::Stock::RelativeRound { radial, inner_diameter, bottom, top, .. } => match index { 0 => *radial = v, 1 => *inner_diameter = v, 2 => *bottom = v, 3 => *top = v, _ => {} },
                         cam_model::Stock::BoundingBox {
                             x_offset,
                             y_offset,
@@ -5073,10 +5379,11 @@ impl App {
                 self.setup_axis_pick = Some(axis);
                 self.cad_candidates.clear();
                 self.cad_filter = CadFilter::Edge;
-                self.status = format!(
-                    "Select a straight model or stock edge for {}.",
-                    ["X", "Y", "Z"][axis]
-                );
+                self.status = if axis == 3 {
+                    "Select a straight model edge or an origin axis for the stock.".into()
+                } else {
+                    format!("Select a straight model or stock edge for {}.", ["X", "Y", "Z"][axis])
+                };
             }
             Message::PatternTabChanged(tab) => self.pattern_tab = tab,
             Message::BeginPattern(circular) => {
@@ -5411,6 +5718,9 @@ impl App {
             }
             Message::SetupAxisFlip(axis, flipped) => self.set_setup_axis_flip(axis, flipped),
             Message::SetupAxisToggle(axis) => {
+                if self.setup_axis_pick == Some(3) {
+                    return self.update(Message::SetupStockOriginAxis(axis));
+                }
                 if let Some(draft) = &self.setup_draft {
                     if axis < 3 {
                         let refs = &draft.frame.references;
@@ -5516,6 +5826,7 @@ impl App {
                 self.controller.select(selection);
                 self.inspector_active = matches!(selection, Selection::Operation(_));
                 if let Selection::Operation(id) = selection {
+                    self.inspector_enabled = true;
                     self.begin_operation_draft(id);
                 } else {
                     self.operation_draft = None;
@@ -5563,6 +5874,7 @@ impl App {
                     Selection::Setup
                 };
                 self.controller.select(sel);
+                self.inspector_active = false;
                 self.end_setup_draft();
                 self.operation_draft = None;
                 self.operation_position_markers = [None; 2];
@@ -5805,6 +6117,7 @@ impl App {
                 }
             }
             Message::CancelOperationDraft => {
+                self.rotary_pick=None;
                 self.drawing_editing_op = None;
                 self.controller.cancel_operation();
                 if let Selection::Operation(id) = self.controller.selection() {
@@ -6014,24 +6327,21 @@ impl App {
                     }
                     return iced::Task::none();
                 }
-                self.status = match std::fs::read_to_string(&path) {
-                    Ok(text) => match OcamFile::from_json(&text) {
-                        Ok(OcamFile::Library(lib)) => {
-                            let n = lib.tools.len();
-                            let base = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Imported library");
-                            let name = self.libraries.unique_name(base);
-                            self.libraries.libraries.insert(name.clone(), lib);
-                            self.switch_tool_library(name);
-                            format!("Imported {n} tool(s) from {}.", path.display())
-                        }
-                        Ok(OcamFile::Project(_)) => {
-                            "That .ocam is a project, not a tool library.".to_string()
-                        }
-                        Err(e) => format!("Library import failed: {e}"),
-                    },
+                self.status = match OcamFile::read(&path) {
+                    Ok(OcamFile::Library(lib)) => {
+                        let n = lib.tools.len();
+                        let base = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Imported library");
+                        let name = self.libraries.unique_name(base);
+                        self.libraries.libraries.insert(name.clone(), lib);
+                        self.switch_tool_library(name);
+                        format!("Imported {n} tool(s) from {}.", path.display())
+                    }
+                    Ok(OcamFile::Project(_)) => {
+                        "That .ocam is a project, not a tool library.".to_string()
+                    }
                     Err(e) => format!("Library import failed: {e}"),
                 };
             }
@@ -6202,6 +6512,16 @@ impl App {
                 self.status = "CAD import cancelled.".into();
             }
             Message::GeometryFilterChanged(filter) => {
+                if self.stock_contour_editor() {
+                    if self.cad_filter != filter {
+                        self.controller.set_cad_selection(vec![]);
+                    }
+                    self.cad_filter = filter;
+                    self.cad_filter_explicit = true;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                    return iced::Task::none();
+                }
                 let _ = self.pick_operation_geometry();
                 if self.cad_filter != filter
                     && !matches!(
@@ -6224,6 +6544,12 @@ impl App {
             }
             Message::CadHover(entity) => self.cad_hover = entity,
             Message::CadPicked(candidates) => {
+                if self.rotary_pick.is_some() {
+                    if let Some(candidate) = candidates.first() {
+                        self.rotary_cad_pick(&candidate.entity);
+                    }
+                    return iced::Task::none();
+                }
                 if self
                     .pattern_draft
                     .as_ref()
@@ -6246,10 +6572,7 @@ impl App {
                 }
                 if self.setup_model_pick {
                     if let Some(candidate) = candidates.first() {
-                        return self.update(Message::SetupModelToggled(
-                            candidate.entity.instance_id,
-                            true,
-                        ));
+                        return self.toggle_setup_body_pick(candidate.entity.instance_id);
                     }
                     return iced::Task::none();
                 }
@@ -6260,9 +6583,8 @@ impl App {
                     return iced::Task::none();
                 }
                 if let (Some(axis), [candidate]) = (self.setup_axis_pick, candidates.as_slice()) {
-                    self.set_setup_axis_reference(axis, Some(candidate.entity.clone()));
-                    self.setup_axis_pick = None;
-                    self.cad_candidates.clear();
+                    let selected = if axis == 3 { self.set_round_stock_axis(candidate.entity.clone()) } else { self.set_setup_axis_reference(axis, Some(candidate.entity.clone())); true };
+                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
                 } else if self.setup_axis_pick.is_some() && candidates.len() > 1 {
                     self.cad_candidates = candidates.clone();
                     self.status = "Choose the intended overlapping edge in the right panel.".into();
@@ -6321,16 +6643,15 @@ impl App {
                     return iced::Task::none();
                 }
                 if self.setup_model_pick {
-                    return self.update(Message::SetupModelToggled(entity.instance_id, true));
+                    return self.toggle_setup_body_pick(entity.instance_id);
                 }
                 if self.height_reference_pick.is_some() {
                     self.height_geometry_selected(entity);
                     return iced::Task::none();
                 }
                 if let Some(axis) = self.setup_axis_pick {
-                    self.set_setup_axis_reference(axis, Some(entity));
-                    self.setup_axis_pick = None;
-                    self.cad_candidates.clear();
+                    let selected = if axis == 3 { self.set_round_stock_axis(entity) } else { self.set_setup_axis_reference(axis, Some(entity)); true };
+                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
                 } else {
                     self.select_cad_entity(entity);
                 }
@@ -6359,6 +6680,7 @@ impl App {
                 }
             }
             Message::CadEscape => {
+                if self.rotary_pick.take().is_some() {self.status="Rotary geometry selection finished.".into();return iced::Task::none();}
                 if self
                     .pattern_draft
                     .as_mut()
@@ -6414,6 +6736,11 @@ impl App {
                     match self.preview_geometry_draft(id, selected.clone()) {
                         Ok(binding) => {
                             let previous_operation = self.operation_draft.clone();
+                            let geometry_changed = self
+                                .operation_binding_preview
+                                .as_ref()
+                                .or_else(|| self.controller.geometry_state().bindings.get(&id))
+                                .is_some_and(|previous| previous.selected != selected);
                             if let Some(profile) = profile_geometry {
                                 self.edit_operation_draft(|operation| {
                                     if let Operation::Profile(draft) = operation {
@@ -6462,11 +6789,14 @@ impl App {
                                     Operation::Pocket(cam_model::PocketOp {
                                         boundary,
                                         islands,
+                                        additional_regions,
                                         ..
                                     }) => {
                                         if let Some(region) = input.regions.first() {
                                             *boundary = region.outer().clone();
                                             *islands = region.holes().to_vec();
+                                            *additional_regions =
+                                                input.regions.iter().skip(1).cloned().collect();
                                         }
                                     }
                                     Operation::Carve(op) => {
@@ -6499,6 +6829,14 @@ impl App {
                             }
                             self.sync_pocket_geometry_height_defaults(&binding);
                             self.sync_chamfer_face_height_defaults(previous_operation.as_ref());
+                            if geometry_changed
+                                && !matches!(
+                                    previous_operation.as_ref(),
+                                    Some(Operation::Pocket(_) | Operation::Chamfer(_))
+                                )
+                            {
+                                self.refresh_geometry_height_defaults(previous_operation.as_ref());
+                            }
                             self.sync_chamfer_geometry_fields();
                             self.operation_binding_preview = Some(binding);
                             self.operation_geometry = Some(selected);
@@ -6764,10 +7102,14 @@ impl App {
                 self.snap_hover = None;
                 self.hover_loop = None;
                 if self.setting_origin {
+                    let mode = self.setup_origin_mode();
                     if let Some(draft) = &mut self.setup_draft {
                         draft.origin = p;
-                        draft.frame.references.origin =
-                            cam_model::FrameOrigin::Explicit(draft.origin);
+                        draft.frame.references.origin = match mode {
+                            SetupOriginMode::StockBox => cam_model::FrameOrigin::StockBoxPoint(p),
+                            SetupOriginMode::ModelBox => cam_model::FrameOrigin::ModelBoxPoint(p),
+                            _ => cam_model::FrameOrigin::SelectedPoint(p),
+                        };
                     }
                     self.setting_origin = false;
                     self.status = format!(
@@ -6778,7 +7120,7 @@ impl App {
                     let origin = [first[0], p[1], (first[2] + p[2]) / 2.0];
                     if let Some(draft) = &mut self.setup_draft {
                         draft.origin = origin;
-                        draft.frame.references.origin = cam_model::FrameOrigin::Explicit(origin);
+                        draft.frame.references.origin = cam_model::FrameOrigin::TwoPoints(origin);
                     }
                     self.setting_origin_2pt = false;
                     self.status = format!(
@@ -6911,6 +7253,7 @@ impl App {
                 }
             }
             Message::CancelOp => {
+                self.rotary_pick=None;
                 self.cad_selected_project_tool = None;
                 self.cutting_force_inputs
                     .remove(&(self.controller.inspection_setup().id, None));
@@ -6933,13 +7276,15 @@ impl App {
             Message::ConfirmOp => {
                 if self.creating_operation() {
                     let result = self.creation_operation().and_then(|(operation, binding)| {
+                        self.validate_rotary_index_draft()?;
                         let settings = self.edited_height_settings()?;
-                        self.controller.commit_operation_creation(
+                        self.controller.commit_operation_creation_with_index(
                             operation,
                             binding,
                             settings,
                             self.operation_tools.clone(),
                             self.stock_to_leave_with_fields(),
+                            self.rotary_index_draft.clone(),
                         )
                     });
                     match result {
@@ -7207,7 +7552,10 @@ impl App {
                     return iced::Task::none();
                 }
                 if let Some(axis) = self.setup_axis_pick.take() {
-                    self.set_setup_stock_axis(axis, direction);
+                    if axis == 3 {
+                        self.setup_axis_pick = Some(3);
+                        self.status = "Select a straight model edge or an origin axis for the stock.".into();
+                    } else { self.set_setup_stock_axis(axis, direction); }
                 }
                 self.setup_hover = SetupHover::default();
                 self.cad_candidates.clear();
@@ -7462,6 +7810,7 @@ impl App {
             Message::ShowPrefs => self.show_prefs = true,
             Message::ClosePrefs => {
                 self.show_prefs = false;
+                self.show_stock_palette = false;
                 self.remember();
             }
             Message::SetPickbox(v) => {
@@ -7483,25 +7832,17 @@ impl App {
                     player.options.accuracy = self.settings.simulation.accuracy;
                 }
             }
-            Message::SetStockColor(channel, value) => {
-                if let Some(component) = self.settings.view.stock_color.get_mut(channel) {
-                    *component = value.clamp(0.0, 1.0);
+            Message::ToggleStockPalette => self.show_stock_palette = !self.show_stock_palette,
+            Message::SetStockColor(color) => {
+                self.settings.view.stock_color = color;
+                if let Some(player) = &mut self.simulation {
+                    player.configure(&self.settings.simulation, color);
                 }
+                self.show_stock_palette = false;
+                self.remember();
             }
-            Message::SetPaneMin(pane, v) => {
-                let (lo, hi) = crate::PANE_MIN_RANGE;
-                let v = v.clamp(lo, hi);
-                let p = &mut self.settings.panes;
-                match pane {
-                    Pane::Project => p.min_project_px = v,
-                    Pane::Library => p.min_library_px = v,
-                    Pane::Viewport => p.min_viewport_px = v,
-                    Pane::Inspector => p.min_inspector_px = v,
-                    Pane::Output => p.min_output_px = v,
-                }
-                // Live-apply: a minimum only means something once the layout obeys it,
-                // and the point of the control is to *see* the pane stop shrinking.
-                self.apply_fixed_layout();
+            Message::SetStockTransparency(value) => {
+                self.settings.view.stock_transparency = value.clamp(0.0, 1.0);
             }
             Message::RestoreDefaults => {
                 // The only escape from a layout the user cannot otherwise undo, so it
@@ -8406,6 +8747,7 @@ impl App {
             }
             Message::RenumberConfirmed(false) => {}
             Message::OpMenu(id) => {
+                self.inspector_active = false;
                 self.pending_simulation = None;
                 self.pending_processing_time = None;
                 // Context-clicking a member of the current highlight set keeps the
@@ -8795,6 +9137,7 @@ impl App {
                 show_stock: self.show_stock,
                 transparent_stock: self.settings.view.transparent_stock,
                 stock_color: self.settings.view.stock_color,
+                stock_transparency: self.settings.view.stock_transparency,
                 show_gizmo: self.show_gizmo,
                 show_origin: self.show_origin,
                 show_envelope: self.show_envelope,
@@ -9231,7 +9574,17 @@ impl App {
         }
         let buf = |f: Field| self.fields.get(&f).and_then(|s| s.parse::<f64>().ok());
         match field {
-            Field::MachineRapidRate => value <= 0.0,
+            Field::MachineTravelX | Field::MachineTravelY | Field::MachineTravelZ => value <= 0.0,
+            Field::MachineMaxZ => buf(Field::MachineTravelZ)
+                .is_some_and(|travel| !(value - travel).is_finite() || value - travel >= value),
+            Field::MachineMinSpindleRpm => {
+                value < 0.0 || buf(Field::MachineMaxSpindleRpm).is_some_and(|max| value > max)
+            }
+            Field::MachineRapidRate | Field::MachineMaxSpindleRpm | Field::MachineMaxFeed => {
+                value <= 0.0
+                    || (field == Field::MachineMaxSpindleRpm
+                        && buf(Field::MachineMinSpindleRpm).is_some_and(|min| min > value))
+            }
             Field::MachineToolChangeSeconds => value < 0.0,
             Field::CornerRadius => {
                 matches!((buf(Field::CornerRadius), buf(Field::ToolDiameter)),
@@ -9330,6 +9683,12 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
+        if let Some(op)=self.operation_draft.as_ref().filter(|op|op.rotary_wrap().is_some()) {
+            let mut op=op.clone();
+            let values=self.fields.iter().filter_map(|(f,v)|v.parse::<f64>().ok().map(|v|(*f,v))).collect();
+            apply_op_fields(&mut op,&values);
+            if op.rotary_wrap().is_some_and(|wrap|wrap.validate().is_err()) {return true;}
+        }
         if self.profile_parameter_error().is_some() {
             return true;
         }
@@ -9640,7 +9999,11 @@ impl App {
                 Field::MachineTravelX,
                 Field::MachineTravelY,
                 Field::MachineTravelZ,
+                Field::MachineMaxZ,
                 Field::MachineRapidRate,
+                Field::MachineMinSpindleRpm,
+                Field::MachineMaxSpindleRpm,
+                Field::MachineMaxFeed,
                 Field::MachineToolChangeSeconds,
             ],
             Selection::Origin => vec![
@@ -9727,8 +10090,20 @@ impl App {
                 _ => z,
             });
         }
+        if field == Field::MachineMaxZ {
+            return Some(self.controller.machine().envelope.max.z);
+        }
         if field == Field::MachineRapidRate {
             return Some(self.controller.machine().rapid_rate);
+        }
+        if field == Field::MachineMinSpindleRpm {
+            return Some(self.controller.machine().min_spindle_rpm);
+        }
+        if field == Field::MachineMaxSpindleRpm {
+            return Some(self.controller.machine().max_spindle_rpm);
+        }
+        if field == Field::MachineMaxFeed {
+            return Some(self.controller.machine().max_feed);
         }
         if field == Field::MachineToolChangeSeconds {
             return Some(self.controller.machine().tool_change_seconds);
@@ -9953,6 +10328,7 @@ impl App {
                 None
             };
             let used_tools = operation.tools();
+            if let Err(reason)=self.validate_rotary_index_draft() {self.report_error(reason);return;}
             let tools = self
                 .operation_tools
                 .iter()
@@ -9968,25 +10344,27 @@ impl App {
                     .contains_key(&id)
             {
                 match self.edited_height_settings() {
-                    Ok(settings) => self.controller.apply_operation_height_settings_and_stock(
+                    Ok(settings) => self.controller.apply_operation_height_settings_and_stock_and_index(
                         operation,
                         overrides,
                         tools,
                         self.operation_geometry.clone(),
                         settings,
                         self.stock_to_leave_with_fields(),
+                        self.rotary_index_draft.clone(),
                     ),
                     Err(reason) => Err(reason),
                 }
             } else {
                 self.controller
-                    .apply_operation_settings_with_heights_and_stock(
+                    .apply_operation_settings_with_heights_and_stock_and_index(
                         operation,
                         overrides,
                         tools,
                         self.operation_geometry.clone(),
                         Some(heights),
                         self.stock_to_leave_with_fields(),
+                        self.rotary_index_draft.clone(),
                     )
             };
             match result {
@@ -10016,8 +10394,8 @@ impl App {
                 }
             }),
             Selection::Machine => self.controller.edit_machine(|m| {
-                // Travel is the working-volume extent; keep the min corner and set
-                // the max to min + travel (clamped positive).
+                // Travel is the working-volume extent. Z is anchored at its
+                // separately editable maximum relative to the base work origin.
                 let e = &mut m.envelope;
                 if let Some(&v) = parsed.get(&Field::MachineTravelX) {
                     e.max.x = e.min.x + v.max(0.0);
@@ -10025,11 +10403,23 @@ impl App {
                 if let Some(&v) = parsed.get(&Field::MachineTravelY) {
                     e.max.y = e.min.y + v.max(0.0);
                 }
-                if let Some(&v) = parsed.get(&Field::MachineTravelZ) {
-                    e.max.z = e.min.z + v.max(0.0);
-                }
+                let z_travel = parsed
+                    .get(&Field::MachineTravelZ)
+                    .copied()
+                    .unwrap_or(e.max.z - e.min.z);
+                let max_z = parsed.get(&Field::MachineMaxZ).copied().unwrap_or(e.max.z);
+                set_machine_z_limits(e, z_travel, max_z);
                 if let Some(&v) = parsed.get(&Field::MachineRapidRate) {
                     m.rapid_rate = v;
+                }
+                if let Some(&v) = parsed.get(&Field::MachineMinSpindleRpm) {
+                    m.min_spindle_rpm = v;
+                }
+                if let Some(&v) = parsed.get(&Field::MachineMaxSpindleRpm) {
+                    m.max_spindle_rpm = v;
+                }
+                if let Some(&v) = parsed.get(&Field::MachineMaxFeed) {
+                    m.max_feed = v;
                 }
                 if let Some(&v) = parsed.get(&Field::MachineToolChangeSeconds) {
                     m.tool_change_seconds = v;
@@ -10085,7 +10475,7 @@ impl App {
             }),
         }
         // The machine library snapshot was synced before numeric fields were applied.
-        // Sync once more now so rapid rate and tool-change time persist with the edit.
+        // Sync once more now so the numeric machine settings persist with the edit.
         if self.controller.selection() == Selection::Machine {
             self.sync_active_machine();
         }
@@ -10109,6 +10499,12 @@ impl App {
         self.focus_ops.clear();
         self.end_setup_draft();
         self.restore_project_view();
+        self.operation_draft = None;
+        if let Selection::Operation(id) = self.controller.selection() {
+            self.seed_rotary_index_draft(id);
+        } else {
+            self.rotary_index_draft = None;
+        }
         // Establish a baseline for legacy files too, using their default opening view.
         self.controller
             .set_project_view(Some(self.capture_project_view()));
@@ -10117,7 +10513,7 @@ impl App {
         // Opening a stale/legacy project must not initiate a recalculation.
         let statuses = self.controller.toolpath_statuses();
         let document = self.controller.document();
-        if document.active_setup().is_some_and(|setup| {
+        if self.controller.outcome().is_none() && document.active_setup().is_some_and(|setup| {
             setup
                 .operations
                 .iter()
@@ -10125,6 +10521,8 @@ impl App {
                 .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
         }) {
             self.rerun();
+        } else if self.controller.outcome().is_some() {
+            self.record_status_messages();
         }
         self.status = match report.summary() {
             Some(summary) => format!("Opened {}. Tools: {summary}.", path.display()),
@@ -10350,7 +10748,7 @@ impl App {
     /// toggles stock/cube/origin/tips and sizes the cube, and the snap buttons arm the
     /// object snaps — duplicating those would create two places to change one thing and
     /// the inevitable question of which is authoritative. What has no home anywhere
-    /// else is the picking tolerances and the pane minimums, so that is what this is.
+    /// else includes picking tolerances and stock appearance.
     ///
     /// **Live-apply, not Apply-on-dirty.** The two-commit-class convention governs edits
     /// to the *model* — the thing that becomes G-code. These are not that, and a
@@ -10422,31 +10820,103 @@ impl App {
         .spacing(6);
 
         let [r, g, b] = self.settings.view.stock_color;
-        let swatch =
-            container(Space::new().width(28).height(22)).style(move |_| container::Style {
+        let swatch = button(Space::new().width(42).height(22))
+            .padding(2)
+            .style(move |_, _| iced::widget::button::Style {
                 background: Some(Background::Color(Color::from_rgb(r, g, b))),
+                border: Border {
+                    color: Color::WHITE,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
                 ..Default::default()
-            });
-        let mut stock = column![row![heading("Stock color"), swatch]
+            })
+            .on_press(Message::ToggleStockPalette);
+        let mut stock = column![
+            row![
+                heading("Stock color"),
+                swatch,
+                text("Click to choose a color").size(11)
+            ]
             .spacing(12)
-            .align_y(Alignment::Center)]
+            .align_y(Alignment::Center),
+            row_for(
+                "Transparency",
+                (0.0, 1.0),
+                self.settings.view.stock_transparency,
+                0.01,
+                format!("{:.0}%", self.settings.view.stock_transparency * 100.0),
+                Message::SetStockTransparency,
+            ),
+            note("Used when transparent stock is enabled.".into()),
+        ]
         .spacing(6);
-        for (channel, label) in ["Red", "Green", "Blue"].into_iter().enumerate() {
-            let value = self.settings.view.stock_color[channel];
-            stock = stock.push(
-                row![
-                    text(label).size(12).width(150),
-                    slider(0.0..=1.0, value, move |v| Message::SetStockColor(
-                        channel, v
-                    ))
-                    .step(1.0 / 255.0_f32)
-                    .on_release(Message::SettingsSettled)
-                    .width(190),
-                    text(format!("{:.0}", value * 255.0)).size(12).width(64),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            );
+        if self.show_stock_palette {
+            // A grid of hue, saturation and brightness choices, plus neutral grays.
+            for level in 0..6 {
+                let mut colors = row![].spacing(3);
+                for hue in 0..12 {
+                    let h = hue as f32 / 2.0;
+                    let c = if level < 3 {
+                        1.0 - level as f32 * 0.25
+                    } else {
+                        1.0
+                    };
+                    let value = if level < 3 {
+                        1.0
+                    } else {
+                        1.0 - (level - 2) as f32 * 0.22
+                    };
+                    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+                    let (rr, gg, bb) = match hue / 2 {
+                        0 => (c, x, 0.0),
+                        1 => (x, c, 0.0),
+                        2 => (0.0, c, x),
+                        3 => (0.0, x, c),
+                        4 => (x, 0.0, c),
+                        _ => (c, 0.0, x),
+                    };
+                    let m = 1.0 - c;
+                    let color = [(rr + m) * value, (gg + m) * value, (bb + m) * value];
+                    colors = colors.push(
+                        button(Space::new().width(26).height(20))
+                            .padding(0)
+                            .style(move |_, _| iced::widget::button::Style {
+                                background: Some(Background::Color(Color::from_rgb(
+                                    color[0], color[1], color[2],
+                                ))),
+                                border: Border {
+                                    color: Color::from_rgb(0.4, 0.4, 0.4),
+                                    width: 1.0,
+                                    radius: 2.0.into(),
+                                },
+                                ..Default::default()
+                            })
+                            .on_press(Message::SetStockColor(color)),
+                    );
+                }
+                stock = stock.push(colors);
+            }
+            let mut grays = row![].spacing(3);
+            for n in 0..12 {
+                let v = n as f32 / 11.0;
+                let color = [v, v, v];
+                grays = grays.push(
+                    button(Space::new().width(26).height(20))
+                        .padding(0)
+                        .style(move |_, _| iced::widget::button::Style {
+                            background: Some(Background::Color(Color::from_rgb(v, v, v))),
+                            border: Border {
+                                color: Color::from_rgb(0.4, 0.4, 0.4),
+                                width: 1.0,
+                                radius: 2.0.into(),
+                            },
+                            ..Default::default()
+                        })
+                        .on_press(Message::SetStockColor(color)),
+                );
+            }
+            stock = stock.push(grays);
         }
 
         let simulation = column![
@@ -10461,55 +10931,6 @@ impl App {
             ),
             note("Higher accuracy resolves finer cuts and uses more time and memory. Rebuilds the simulation when released; also applies to playback.".into()),
         ].spacing(6);
-
-        let p = &self.settings.panes;
-        let pane_row = |pane: Pane, value: f32| -> Element<'_, Message> {
-            // Project / Library / Viewport / Inspector are docked left, centre and
-            // right, so their minimum is a **width**; Output is docked along the
-            // bottom, so its minimum is a **height**. Same number, different axis —
-            // and nothing on screen says so unless the label does.
-            let axis = if pane == Pane::Output {
-                "height"
-            } else {
-                "width"
-            };
-            row![
-                text(format!("{} ({axis})", pane.name()))
-                    .size(12)
-                    .width(Length::Fixed(150.0)),
-                slider(
-                    crate::PANE_MIN_RANGE.0..=crate::PANE_MIN_RANGE.1,
-                    value,
-                    move |v| { Message::SetPaneMin(pane, v) }
-                )
-                .step(5.0_f32)
-                .on_release(Message::SettingsSettled)
-                .width(Length::Fixed(190.0)),
-                text(format!("{value:.0} px"))
-                    .size(12)
-                    .width(Length::Fixed(64.0)),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into()
-        };
-
-        let panes = column![
-            heading("Smallest a pane may be"),
-            note(
-                "Widths for the side panes, height for Output. These are logical pixels, \
-                 so a high-DPI screen with display scaling is already handled. Raise them \
-                 on a large screen; lower them on a small or unscaled one, where the \
-                 shipped values can leave the viewport too narrow to work in."
-                    .to_string()
-            ),
-            pane_row(Pane::Project, p.min_project_px),
-            pane_row(Pane::Library, p.min_library_px),
-            pane_row(Pane::Viewport, p.min_viewport_px),
-            pane_row(Pane::Inspector, p.min_inspector_px),
-            pane_row(Pane::Output, p.min_output_px),
-        ]
-        .spacing(6);
 
         let btn = |label: &'static str, msg: Message| {
             button(
@@ -10552,8 +10973,7 @@ impl App {
                         .spacing(6),
                         snapping,
                         stock,
-                        simulation,
-                        panes
+                        simulation
                     ]
                     .spacing(12)
                 )
@@ -10639,6 +11059,15 @@ impl App {
             ),
         ]
         .spacing(6);
+        #[cfg(feature = "occt")]
+        let credits = credits.push(body(
+            "STEP/IGES import uses Open CASCADE Technology (OCCT), \
+             Copyright © Open CASCADE SAS and contributors. OCCT is licensed under \
+             LGPL 2.1 with the Open CASCADE exception. The licence and exception are \
+             included in the package's licences directory and are available at \
+             https://occt3d.com/dev/doc/overview/html/occt_public_license.html."
+                .to_string(),
+        ));
 
         let card = container(
             column![
@@ -10850,7 +11279,7 @@ impl App {
                 .style(|_theme, status| command_button_style(status))
                 .into(),
             Some(buf) => row![
-                text_input("T#", buf)
+                inspector_input("T#", buf)
                     .on_input(Message::LibNumberInput)
                     .on_submit(Message::LibNumberCommit)
                     .width(Length::Fixed(64.0)),
@@ -11377,6 +11806,52 @@ impl App {
     }
 
     fn select_cad_entity(&mut self, entity: EntityRef) {
+        if self.rotary_cad_pick(&entity) {
+            return;
+        }
+        let wrapped_pocket = matches!(self.operation_draft.as_ref(), Some(Operation::Pocket(p)) if p.wrap.is_some());
+        if wrapped_pocket
+            && self.operation_tab == OperationTab::Geometry
+            && self.geometry_editor.is_none()
+            && (self.geometry_auto_pick || self.cad_pending_kind.is_some())
+        {
+            let filter = match entity.kind {
+                EntityKind::Face => Some(CadFilter::Face),
+                EntityKind::Loop => Some(CadFilter::Loop),
+                EntityKind::Edge => Some(CadFilter::Edge),
+                _ => None,
+            };
+            if let Some(filter) = filter {
+                self.operation_geometry_message(GeometryMessage::Add(filter));
+            }
+        }
+        if self.wrapped_pocket_geometry_editor() {
+            let additive = (self.geometry_additive && entity.kind == EntityKind::Edge)
+                || (self.modifiers.command() && !self.modifiers.control())
+                || self.modifiers.shift();
+            match self.controller.toggle_cad_selection(entity, additive) {
+                Ok(()) => {
+                    self.geometry_row_selection = None;
+                    self.status =
+                        "Select geometry in the viewport, then use OK to stage it.".into();
+                }
+                Err(error) => self.report_error(error),
+            }
+            return;
+        }
+        if self.stock_contour_editor() {
+            let additive = entity.kind != EntityKind::Silhouette
+                && !self
+                    .controller
+                    .cad_selection()
+                    .iter()
+                    .any(|r| r.kind == EntityKind::Silhouette);
+            match self.controller.toggle_cad_selection(entity, additive) {
+                Ok(()) => self.status = "Stock contour selected; close the chain, then OK.".into(),
+                Err(reason) => self.status = reason,
+            }
+            return;
+        }
         if self.profile_entry_cad_pick(entity.clone()) {
             return;
         }
@@ -11438,7 +11913,7 @@ impl App {
             && self.profile_coplanar
             && entity.kind == EntityKind::Face
         {
-            let result = crate::cad_operations::geometry_for_setup(self.controller.document())
+            let result = self.indexed_draft_geometry()
                 .and_then(|geometry| cam_geometry3d::coplanar_profile_faces(&geometry, &entity));
             match result {
                 Ok(references) => {
@@ -12541,6 +13016,7 @@ fn op_kind(op: &Operation) -> &'static str {
 
 /// Read an operation's value for a given field, if the op has it.
 fn op_field(op: &Operation, field: Field) -> Option<f64> {
+    if let Field::Wrap(number)=field {return op.rotary_wrap().map(|w|number.get(w));}
     match (op, field) {
         (Operation::Pocket(o), Field::LiftHeight) => Some(o.clear.lift_height),
         (Operation::Adaptive(o), Field::LiftHeight) => Some(o.params.lift_height),
@@ -12690,6 +13166,13 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
 
 /// Write the parsed inspector fields onto an operation.
 fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
+    if let Some(mut wrap)=op.rotary_wrap().cloned() {
+        for (field,value) in parsed {if let Field::Wrap(number)=field {
+            if number.cylinder_dimension() && (number.get(&wrap)-value).abs()>1e-9 {wrap.cylinder=None;}
+            number.set(&mut wrap,*value);
+        }}
+        op.set_rotary_wrap(Some(wrap));
+    }
     let get = |f: Field| parsed.get(&f).copied();
     if let Some(value) = get(Field::LiftHeight) {
         match op {
@@ -13523,8 +14006,11 @@ impl std::fmt::Display for CadFilter {
 
 #[derive(Clone)]
 struct Viewport {
+    stock_contour_picking: bool,
+    stock_contour_setup_selected: bool,
     setup_geometry: Arc<SetupPickGeometry>,
     setup_axis: bool,
+    stock_axis_model_only: bool,
     operation_position_picking: bool,
     operation_position_color: [f32; 4],
     setup_hover: SetupHover,
@@ -13541,6 +14027,7 @@ struct Viewport {
     mesh_indices: Arc<Vec<u32>>,
     transparent_stock_vertices: Arc<Vec<MeshVertex>>,
     transparent_stock_indices: Arc<Vec<u32>>,
+    transparent_stock_convex: bool,
     show_stock: bool,
     cad_edges: Arc<Vec<Vertex>>,
     cad_scene: Arc<CadScene>,
@@ -13558,6 +14045,7 @@ struct Viewport {
     /// appear to resize the design.
     frame_bounds: Option<([f32; 3], [f32; 3])>,
     controls: ViewControls,
+    grid_size: [f32; 3],
     show_gizmo: bool,
     /// On-screen cube size, logical px (fixed; independent of window size).
     gizmo_size: f32,
@@ -13609,6 +14097,7 @@ impl Viewport {
         editor_geometry: Option<&[EntityRef]>,
         silhouette_bottom: Option<f64>,
         cached_cad_scene: Option<Arc<CadScene>>,
+        stock_draft: Option<&cam_model::Setup>,
     ) -> Self {
         let cad_hover = cad_hover.filter(|reference| {
             preview.is_none()
@@ -13626,6 +14115,12 @@ impl Viewport {
             None
         } else {
             preview
+                .or_else(|| controller.run_preview())
+                .or_else(|| controller.outcome().filter(|verified| {
+                    !focus_ops.is_empty() && focus_ops.iter().all(|id| {
+                        verified.scene.strips.iter().any(|strip| strip.op == Some(*id))
+                    })
+                }))
                 .or(operation_preview)
                 .or_else(|| controller.outcome())
         };
@@ -13854,7 +14349,7 @@ impl Viewport {
         } else if focus_ops.is_empty() || editor_geometry.is_some() {
             None
         } else {
-            operation_preview.or_else(|| {
+            operation_preview.filter(|result| !result.stock_indices.is_empty()).or_else(|| {
                 let operations = &controller.inspection_setup().operations;
                 let through = operations
                     .iter()
@@ -13868,7 +14363,7 @@ impl Viewport {
                     })
                     .map(Operation::id)
                     .collect();
-                outcome.filter(|result| {
+                controller.outcome().filter(|result| {
                     let actual: BTreeSet<_> = result
                         .program
                         .steps()
@@ -13880,8 +14375,9 @@ impl Viewport {
                 })
             })
         };
-        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_outcome) {
-            (true, Some(outcome))
+        let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_draft, stock_outcome) {
+            (true, Some(draft), _) => workspace_view::uncut_stock_mesh_for_setup(controller, draft),
+            (true, None, Some(outcome))
                 if outcome.completion == JobCompletion::Complete
                     || !outcome.stock_indices.is_empty() =>
             {
@@ -13890,9 +14386,22 @@ impl Viewport {
                     outcome.stock_indices.clone(),
                 )
             }
-            (true, _) => workspace_view::uncut_stock_mesh(controller),
+            (true, None, _) => workspace_view::uncut_stock_mesh(controller),
             _ => (Vec::new(), Vec::new()),
         };
+        // The initial box or solid cylinder is convex. Its front and rear
+        // triangles need separate ordering when stock is translucent; a
+        // simulated or hollow blank can be non-convex and uses depth sorting.
+        let transparent_stock_convex = preview.is_none()
+            && (stock_draft.is_some() || stock_outcome.is_none())
+            && matches!(
+                stock_draft.unwrap_or_else(|| controller.inspection_setup()).stock,
+                cam_model::Stock::BoundingBox { .. }
+                    | cam_model::Stock::FixedBox { .. }
+                    | cam_model::Stock::RelativeBox { .. }
+                    | cam_model::Stock::FixedRound { tube: false, .. }
+                    | cam_model::Stock::RelativeRound { tube: false, .. }
+            );
         let [r, g, b] = prefs.view.stock_color;
         for (index, vertex) in mesh_vertices.iter_mut().enumerate() {
             if preview.is_none()
@@ -13906,7 +14415,7 @@ impl Viewport {
         let (transparent_stock_vertices, transparent_stock_indices) =
             if prefs.view.transparent_stock {
                 for vertex in &mut mesh_vertices {
-                    vertex.color[3] = 0.25;
+                    vertex.color[3] = 1.0 - prefs.view.stock_transparency;
                 }
                 (
                     std::mem::take(&mut mesh_vertices),
@@ -13915,10 +14424,13 @@ impl Viewport {
             } else {
                 (Vec::new(), Vec::new())
             };
-        // A nominal CAD bore would cover grooves cut into its wall. During
-        // stock playback keep the model's reference edges, and draw its solid
-        // faces when stock is hidden.
-        if preview.is_none() || !show_stock {
+        // Opaque stock views retain only CAD reference edges to avoid hiding
+        // gouges or fighting coincident cut faces. Transparent stock needs the
+        // solid model behind it for comparison.
+        if !show_stock
+            || prefs.view.transparent_stock
+            || (mesh_indices.is_empty() && transparent_stock_indices.is_empty())
+        {
             let (cad_vertices, cad_indices) = cad_scene.mesh(&cad_selected, cad_hover);
             let offset = mesh_vertices.len() as u32;
             mesh_vertices.extend(cad_vertices);
@@ -13929,19 +14441,22 @@ impl Viewport {
         // geometry is loaded.
         let frame_bounds = if controller.has_geometry() {
             union_bounds(
-                workspace_view::stock_world_bounds(controller),
+                stock_draft.and_then(|setup| workspace_view::stock_world_bounds_for_setup(controller, setup)).or_else(|| workspace_view::stock_world_bounds(controller)),
                 cad_scene.bounds(),
             )
         } else {
             Some(([-50., -50., 0.], [50., 50., 0.]))
         };
         Self {
+            stock_contour_picking: false,
+            stock_contour_setup_selected: false,
             setup_geometry: Arc::new(SetupPickGeometry::new(
                 controller,
                 controller.inspection_setup(),
                 cad_hidden,
             )),
             setup_axis: false,
+            stock_axis_model_only: false,
             operation_position_picking: false,
             operation_position_color: operation_positions::PositionKind::Entry.color(),
             setup_hover: SetupHover::default(),
@@ -13980,6 +14495,7 @@ impl Viewport {
             mesh_indices: Arc::new(mesh_indices),
             transparent_stock_vertices: Arc::new(transparent_stock_vertices),
             transparent_stock_indices: Arc::new(transparent_stock_indices),
+            transparent_stock_convex,
             show_stock,
             cad_edges,
             cad_scene,
@@ -13992,6 +14508,10 @@ impl Viewport {
             bounds,
             frame_bounds,
             controls,
+            grid_size: {
+                let (x, y, z) = controller.machine().envelope.extent();
+                [x as f32, y as f32, z as f32]
+            },
             show_gizmo,
             gizmo_size,
             snap_catch_px: prefs.snapping.pickbox_px * crate::SNAP_CATCH_MULTIPLE,
@@ -14013,6 +14533,7 @@ impl Viewport {
             pos,
             &self.setup_snaps,
             self.setup_axis,
+            self.stock_axis_model_only,
             &self.cad_scene,
             self.cad_select_through,
             0.5 * self.snap_catch_px,
@@ -14071,6 +14592,15 @@ impl Viewport {
         let ray = camera.pick_ray(u, v, aspect);
         if self.cad_silhouette && !self.setup_axis {
             return self.cad_scene.pick_silhouette_candidates(
+                ray,
+                aperture as f64,
+                self.cad_select_through,
+            );
+        }
+        if self.stock_contour_picking && self.cad_filter == EntityKind::Loop {
+            // Stock loops must be planar in setup XY. A cylindrical wall loop
+            // includes its axial seam and must not win over the adjacent rim.
+            return self.cad_scene.pick_pocket_loop_candidates(
                 ray,
                 aperture as f64,
                 self.cad_select_through,
@@ -14373,6 +14903,21 @@ impl shader::Program<Message> for Viewport {
                         None => shader::Action::capture(),
                     });
                 }
+                if matches!(button, Button::Left)
+                    && self.stock_contour_picking
+                    && self.show_stock
+                    && matches!(
+                        self.setup_hover_at(pos, bounds).edge,
+                        Some(SetupFeature::Stock(_))
+                    )
+                {
+                    return Some(
+                        shader::Action::publish(Message::OperationGeometry(
+                            GeometryMessage::ResetStock,
+                        ))
+                        .and_capture(),
+                    );
+                }
                 if matches!(button, Button::Left) && self.set_origin {
                     return Some(match self.origin_point_at(pos, bounds) {
                         Some(point) => {
@@ -14619,7 +15164,11 @@ impl shader::Program<Message> for Viewport {
             for (_, edge) in self.setup_geometry.stock_lines() {
                 setup_scene.add_strip(
                     edge.iter().map(|p| p.map(|v| v as f32)).collect(),
-                    [0.45, 0.49, 0.54, 1.],
+                    if self.stock_contour_setup_selected {
+                        PICK_BOUNDARY
+                    } else {
+                        [0.45, 0.49, 0.54, 1.]
+                    },
                 );
             }
         }
@@ -14678,7 +15227,7 @@ impl shader::Program<Message> for Viewport {
             cone_vertices: Arc::new(cone_vertices),
             cone_indices: Arc::new(cone_indices),
             grid_vertices: Arc::new(
-                grid_view::GridLayout::new(self.camera(), bounds.size()).vertices(),
+                grid_view::GridLayout::new(self.camera(), bounds.size(), self.grid_size).vertices(),
             ),
             vertices: self.vertices.clone(),
             overlay_vertices: Arc::new(overlays),
@@ -14686,6 +15235,7 @@ impl shader::Program<Message> for Viewport {
             mesh_indices: self.mesh_indices.clone(),
             transparent_stock_vertices: self.transparent_stock_vertices.clone(),
             transparent_stock_indices: self.transparent_stock_indices.clone(),
+            transparent_stock_convex: self.transparent_stock_convex,
             cad_edges: self.cad_edges.clone(),
             view_proj: self.camera().view_proj(aspect),
             view_rotation: self.camera().orient,
@@ -14804,6 +15354,7 @@ struct ScenePrimitive {
     mesh_indices: Arc<Vec<u32>>,
     transparent_stock_vertices: Arc<Vec<MeshVertex>>,
     transparent_stock_indices: Arc<Vec<u32>>,
+    transparent_stock_convex: bool,
     cad_edges: Arc<Vec<Vertex>>,
     view_proj: [[f32; 4]; 4],
     /// World-to-view rotation for camera-fixed illumination of the part and cube.
@@ -14868,8 +15419,15 @@ impl shader::Primitive for ScenePrimitive {
                 &p.transparent_stock_indices,
                 &self.transparent_stock_indices,
             )
+                || p.transparent_stock_convex != self.transparent_stock_convex
         }) {
-            pipeline.transparent_stock.upload_transparent(
+            let upload = if self.transparent_stock_convex {
+                cam_render::MeshRenderer::upload_transparent_convex
+            } else {
+                cam_render::MeshRenderer::upload_transparent
+            };
+            upload(
+                &mut pipeline.transparent_stock,
                 device,
                 &self.transparent_stock_vertices,
                 &self.transparent_stock_indices,
@@ -14878,7 +15436,13 @@ impl shader::Primitive for ScenePrimitive {
         } else if !self.transparent_stock_indices.is_empty()
             && previous.is_some_and(|p| p.view_proj != self.view_proj)
         {
-            pipeline.transparent_stock.resort_transparent(
+            let resort = if self.transparent_stock_convex {
+                cam_render::MeshRenderer::resort_transparent_convex
+            } else {
+                cam_render::MeshRenderer::resort_transparent
+            };
+            resort(
+                &mut pipeline.transparent_stock,
                 device,
                 &self.transparent_stock_vertices,
                 &self.transparent_stock_indices,
@@ -15430,6 +15994,58 @@ mod multi_setup_draft_tests {
     }
 
     #[test]
+    fn rotary_wrap_editor_stages_numbers_and_commits_all_tabs_in_one_undo_step() {
+        let (mut app,id)=stock_profile_app();
+        // The proposed radius plus offset must fit inside a physical blank.
+        app.controller.edit_stock(|stock| *stock = cam_model::Stock::FixedRound {
+            diameter: 200., inner_diameter: 0., length: 60., position: 0.5,
+            tube: false,
+            axis: Some(cam_model::StockAxis::Origin { origin_axis: cam_model::StockOriginAxis::X }),
+        });
+        let before=app.controller.document().clone();
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        let field=Field::Wrap(rotary_view::Number::Offset);
+        assert!(app.inspector_fields().contains(&field));
+        send(&mut app,Message::FieldChanged(field,"40".into()));
+        assert!(app.controller.operation(id).unwrap().rotary_wrap().is_none());
+        assert!(!app.any_field_invalid(),"{}",app.status);
+        send(&mut app,Message::Apply);
+        assert_eq!(app.controller.operation(id).unwrap().rotary_wrap().unwrap().offset,40.,"{}",app.status);
+        assert!(app.controller.undo());
+        assert_eq!(*app.controller.document(),before);
+        app.begin_operation_draft(id);
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app,Message::CancelOperationDraft);
+        assert_eq!(*app.controller.document(),before);
+    }
+
+    #[test]
+    fn rotary_mode_switch_preserves_wrap_and_existing_tab_settings() {
+        let (mut app,_)=stock_profile_app();
+        let heights=app.height_draft.clone();
+        let offsets=app.height_offsets.clone();
+        app.edit_operation_draft(|op|op.set_rotary_wrap(Some(cam_model::RotaryWrap{radius:100.,unwrap_geometry:false,..Default::default()})));
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(false)));
+        assert!(app.operation_draft.as_ref().unwrap().rotary_wrap().is_none());
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        let wrap=app.operation_draft.as_ref().unwrap().rotary_wrap().unwrap();
+        assert_eq!(wrap.radius,100.);assert!(!wrap.unwrap_geometry);
+        assert_eq!(app.height_draft,heights);assert_eq!(app.height_offsets,offsets);
+    }
+
+    #[test]
+    fn rotary_wrap_creation_requires_real_boundaries_and_rejects_invalid_offset() {
+        let (mut app,_)=stock_profile_app();
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app,Message::FieldChanged(Field::Wrap(rotary_view::Number::Offset),"-25".into()));
+        assert!(app.any_field_invalid());
+        app.cad_pending_kind=Some(OpKind::Pocket);
+        app.seed_creation_editor(OpKind::Pocket);
+        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        assert!(!app.creation_ready());
+    }
+
+    #[test]
     fn parallel_editor_updates_scan_controls_and_preserves_draft_cancel() {
         let mut app = blank_app();
         let operation = app.controller.operation_template(OpKind::Parallel, 1);
@@ -15874,6 +16490,155 @@ mod multi_setup_draft_tests {
     }
 
     #[test]
+    fn fixture_body_picking_clearances_and_role_changes_share_the_setup_draft() {
+        let mut app = model_list_app();
+        send(&mut app, Message::SetupModelToggled(1, true));
+        send(&mut app, Message::SetupCommit);
+        app.begin_setup_draft();
+        let before = app.controller.document().clone();
+        send(&mut app, Message::SetupFixturePick);
+        assert!(app.setup_fixture_pick && app.setup_model_pick);
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Body);
+        for instance in [1, 2, 2, 2] {
+            send(
+                &mut app,
+                Message::CadPicked(vec![PickCandidate {
+                    entity: EntityRef {
+                        asset_id: 1,
+                        revision: 1,
+                        instance_id: instance,
+                        body_id: instance,
+                        kind: EntityKind::Body,
+                        id: instance,
+                    },
+                    depth: 0.,
+                    occluded: false,
+                }]),
+            );
+        }
+        let draft = app.setup_draft.as_ref().unwrap();
+        assert_eq!(draft.fixture_instances, vec![1, 2]);
+        assert!(draft.model_instances.is_empty());
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(0, "2.5".into()),
+        );
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(1, "0".into()),
+        );
+        send(&mut app, Message::CadEscape);
+        assert!(!app.setup_fixture_pick && !app.setup_model_pick);
+        assert_eq!(app.controller.document(), &before);
+        send(&mut app, Message::SetupCancel);
+        assert_eq!(app.controller.document(), &before);
+        app.begin_setup_draft();
+        send(&mut app, Message::SetupFixtureToggled(2, true));
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(0, "2.5".into()),
+        );
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(1, "0".into()),
+        );
+        send(&mut app, Message::SetupCommit);
+        assert_eq!(app.controller.inspection_setup().fixture_instances, vec![2]);
+        assert_eq!(
+            app.controller.inspection_setup().fixture_clearance.radial,
+            2.5
+        );
+        assert_eq!(
+            app.controller.inspection_setup().fixture_clearance.axial,
+            0.
+        );
+        assert!(!app.viewport_hidden_instances().contains(&2));
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document(), &before);
+        assert!(app.controller.redo());
+        app.begin_setup_draft();
+        send(&mut app, Message::SetupModelToggled(2, true));
+        assert!(app
+            .setup_draft
+            .as_ref()
+            .unwrap()
+            .fixture_instances
+            .is_empty());
+    }
+
+    #[test]
+    fn invalid_fixture_clearance_keeps_draft_open_and_missing_fixtures_can_be_removed() {
+        let mut app = model_list_app();
+        let before = app.controller.document().clone();
+        send(&mut app, Message::SetupFixtureToggled(2, true));
+        for invalid in ["-1", "NaN", "", "-"] {
+            send(
+                &mut app,
+                Message::SetupFixtureClearanceChanged(0, invalid.into()),
+            );
+            send(&mut app, Message::SetupCommit);
+            assert!(app.setup_draft.is_some());
+            assert_eq!(app.controller.document(), &before);
+        }
+        send(
+            &mut app,
+            Message::SetupFixtureClearanceChanged(0, "0".into()),
+        );
+        send(&mut app, Message::SetupCommit);
+        assert!(app.setup_draft.is_none());
+        app.begin_setup_draft();
+        app.setup_draft
+            .as_mut()
+            .unwrap()
+            .fixture_instances
+            .push(999);
+
+        let _ = app.setup_editor();
+        send(&mut app, Message::SetupFixtureToggled(999, false));
+        assert_eq!(app.setup_draft.as_ref().unwrap().fixture_instances, vec![2]);
+    }
+
+    #[test]
+    fn relative_stock_defaults_to_one_and_all_sides_are_editable() {
+        let mut app = model_list_app();
+        let _ = app.update(Message::SetupStockKindChanged(StockEditorKind::FixedBox));
+        let _ = app.update(Message::SetupStockKindChanged(StockEditorKind::RelativeBox));
+        assert_eq!(
+            app.setup_draft.as_ref().unwrap().stock,
+            cam_model::Stock::RelativeBox {
+                offsets: [[1.0; 3]; 2]
+            }
+        );
+        for index in 0..6 {
+            let _ = app.update(Message::SetupStockNumberChanged(
+                index,
+                (index + 2).to_string(),
+            ));
+        }
+        assert_eq!(
+            app.setup_draft.as_ref().unwrap().stock,
+            cam_model::Stock::RelativeBox {
+                offsets: [[2., 3., 4.], [5., 6., 7.]]
+            }
+        );
+    }
+
+    #[test]
+    fn setup_geometry_clear_removes_only_the_chosen_role_in_the_draft() {
+        let mut app = model_list_app();
+        send(&mut app, Message::SetupModelToggled(1, true));
+        send(&mut app, Message::SetupFixtureToggled(2, true));
+        let committed = app.controller.document().clone();
+        send(&mut app, Message::SetupGeometryClear(true));
+        let draft = app.setup_draft.as_ref().unwrap();
+        assert_eq!(draft.model_instances, vec![1]);
+        assert!(draft.fixture_instances.is_empty());
+        send(&mut app, Message::SetupGeometryClear(false));
+        assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
+        assert_eq!(app.controller.document(), &committed);
+    }
+
+    #[test]
     fn model_list_add_remove_and_cancel_are_staged_in_one_setup_draft() {
         let mut app = model_list_app();
         let before = app.controller.document().clone();
@@ -15881,7 +16646,7 @@ mod multi_setup_draft_tests {
         send(&mut app, Message::SetupModelPick);
         assert!(app.setup_model_pick);
         assert_eq!(app.machining_viewport().cad_filter, EntityKind::Body);
-        for instance in [1, 3, 2, 2] {
+        for instance in [1, 3, 2, 2, 2] {
             send(
                 &mut app,
                 Message::CadPicked(vec![PickCandidate {
@@ -15913,7 +16678,7 @@ mod multi_setup_draft_tests {
             app.setup_draft_dirty(),
             "Escape finishes picking without losing draft edits"
         );
-        send(&mut app, Message::SetupModelSelected(2));
+
         send(&mut app, Message::SetupModelToggled(2, false));
         assert_eq!(
             app.setup_draft.as_ref().unwrap().model_instances,
@@ -15921,7 +16686,7 @@ mod multi_setup_draft_tests {
         );
         send(&mut app, Message::SetupCancel);
         assert_eq!(app.controller.document(), &before);
-        assert!(app.setup_model_selection.is_none());
+
         assert!(!app.setup_draft_dirty());
     }
 
@@ -15930,7 +16695,7 @@ mod multi_setup_draft_tests {
         let mut app = model_list_app();
         send(&mut app, Message::SetupModelToggled(1, true));
         send(&mut app, Message::SetupModelToggled(99, true));
-        send(&mut app, Message::SetupModelSelected(99));
+
         assert_eq!(app.setup_draft.as_ref().unwrap().model_instances, vec![1]);
         let (min, max) = app
             .controller
@@ -15941,7 +16706,7 @@ mod multi_setup_draft_tests {
         app.begin_setup_draft();
         send(&mut app, Message::SetupModelToggled(1, false));
         assert!(app.setup_draft.as_ref().unwrap().model_instances.is_empty());
-        assert!(app.setup_model_selection.is_none());
+
         send(&mut app, Message::SetupCommit);
         assert!(app.controller.inspection_setup().model_instances.is_empty());
         assert!(app.controller.undo());
@@ -16867,8 +17632,8 @@ mod ribbon_tests {
     }
 
     #[test]
-    fn the_application_icon_carries_its_author_and_licence() {
-        // The app icon is the project's one deliberate departure from GPL-3.0-only
+    fn the_legacy_application_icon_carries_its_author_and_licence() {
+        // The legacy icon is the project's deliberate departure from GPL-3.0-only
         // (CC BY-SA 4.0, so the mark can live on Wikimedia). That exception is only
         // worth anything if the claim actually travels with the file, and the file
         // goes through editors -- Inkscape rewrote it once already -- so pin it.
@@ -17007,5 +17772,36 @@ mod ribbon_tests {
             assert!(t <= prev || prev == 0, "tightness rose as width grew");
             prev = t;
         }
+    }
+}
+
+
+#[cfg(test)]
+mod indexed_project_restore_tests {
+    use super::*;
+
+    #[test]
+    fn restored_indexed_operation_is_clean_and_can_simulate() {
+        let path = std::env::temp_dir().join(format!("indexed-restore-{}.ocam", std::process::id()));
+        let (mut app, _) = App::new();
+        app.controller.open_dxf(SAMPLE_DXF, "profiles.dxf").unwrap();
+        app.controller.new_operation(OpKind::Pocket);
+        let id = app.controller.inspection_setup().operations[0].id();
+        let index = cam_model::RotaryIndex { angle: -90.0, ..Default::default() };
+        app.controller.set_operation_rotary_index(id, Some(index.clone())).unwrap();
+        app.controller.select(Selection::Operation(id));
+        app.controller.set_project_view(Some(app.capture_project_view()));
+        app.controller.save_project(&path).unwrap();
+        app.open_project(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(app.rotary_index_draft.as_ref(), Some(&index));
+        assert!(!app.inspector_dirty());
+        let _ = app.toolpath_command(TreeNode::Operation(id), ToolpathAction::Simulate);
+        assert!(!app.status.contains("Apply or cancel inspector changes"));
+        assert_eq!(app.rotary_index_draft.as_ref(), Some(&index));
+        app.rotary_index_draft.as_mut().unwrap().angle = 45.0;
+        assert!(app.inspector_dirty());
+        let _ = app.toolpath_command(TreeNode::Operation(id), ToolpathAction::Simulate);
+        assert!(app.status.contains("Apply or cancel inspector changes"));
     }
 }

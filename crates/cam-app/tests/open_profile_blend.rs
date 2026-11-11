@@ -14,6 +14,8 @@ fn saved_rotated_setup_profiles_edge_67_with_explicit_heights_and_reopens() {
     let Operation::Profile(profile) = &mut operation else {
         panic!("profile")
     };
+    // Open chains require computed compensation regardless of the saved fixture's settings.
+    profile.comp = Comp::Computed;
     let mut entry = profile.selections.as_ref().unwrap()[0].clone();
     entry.name = "Chain 2".into();
     let ProfileGeometrySource::Cad(refs) = &mut entry.source else {

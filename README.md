@@ -25,6 +25,9 @@ A CAM application for CNC toolpath generation, built in Rust.
   concentric otherwise). Pocket operations offer optional finishing passes with
   separate radial stepover and feed, leads, a repeat pass and closure overlap;
   cutter compensation is computed in the toolpath.
+- **Pocket stock contours** — setup-stock or selected closed footprints for
+  open-pocket and 2D adaptive clearing, with cutter runout and protected islands.
+  See [selection and behavior](docs/pocket-stock-contours.md).
 - **3D Adaptive Clearing** — roughing levels with upward fine-step refinement,
   optimal load and tolerance controls, using the independent CAD machining
   tessellation. Select the bodies or faces to machine while retaining other setup
@@ -36,6 +39,11 @@ A CAM application for CNC toolpath generation, built in Rust.
 - **Stock to Leave** — shared radial and axial finishing allowances for Profile,
   Pocket, 3D Adaptive Clearing and 3D Parallel; axial allowance for Face. Disabled settings
   preserve existing toolpaths.
+- **Fourth-axis wrap milling** — cylindrical Profile, Pocket and 2D adaptive
+  toolpaths with CAD cylinder/boundary selection, continuous A/B motion, rotary
+  backplot/playback and inverse-time LinuxCNC/Fanuc/Haas output. Cylindrical
+  stock-removal and collision simulation remain unavailable; see
+  [workflow and limits](docs/rotary-wrap.md).
 - **V-carving** — the boundary outlines an *area*, not a path: the tool never
   touches it, its flanks land on it, and the depth follows from the shape's own
   width. Built on **inward offset rings, not a medial axis** — the ring at inward
@@ -182,6 +190,11 @@ cargo run -p cam-app --features gui -- --setup "testfiles/test_project.ocam"
 ```
 
 Packaged builds accept the same `--setup <path.ocam>` option.
+
+Project saves use compressed `.ocam` archives with editable JSON and lossless stock
+state; display meshes rebuild when opened. Legacy JSON projects still open and
+convert on save. Tool libraries remain JSON. See the [project cache policy](docs/project-cache-policy.md)
+for format details and measurements. New project archives require an updated build.
 
 build the distributiable app
 ```bash

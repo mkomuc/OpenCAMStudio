@@ -9,7 +9,11 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Dependencies {
     #[serde(default)]
+    pocket_stock_revision: u32,
+    #[serde(default)]
     adaptive_domain_revision: u32,
+    #[serde(default)]
+    adaptive_clearing_revision: u32,
     #[serde(default)]
     profile_lead_revision: u32,
     #[serde(default)]
@@ -103,6 +107,24 @@ impl OperationCache {
             axial,
         };
         let key = Dependencies {
+            // Frontier paths use configured leads and exact shared/overlapped seams.
+            // This also applies to 2D operations using the shared clearer.
+            adaptive_clearing_revision: 3 * u32::from(match op {
+                Operation::Adaptive(_) => true,
+                Operation::Pocket(p) => p.clear.clearing.engagement > 0.,
+                Operation::Profile(p) => p.clearing.engagement > 0.,
+                Operation::Carve(p) => p
+                    .clear
+                    .as_ref()
+                    .is_some_and(|c| c.params.clearing.engagement > 0.),
+                _ => false,
+            }),
+            pocket_stock_revision: if matches!(op, Operation::Pocket(p) if p.stock_contours.enabled)
+            {
+                crate::PocketStrategy::STOCK_CONTOUR_REVISION
+            } else {
+                0
+            },
             // Recompute persisted profiles generated before automatic lead placement.
             profile_lead_revision: u32::from(matches!(op, Operation::Profile(_))),
             // Recompute persisted profiles created before the roughing allowance fix.
@@ -243,6 +265,14 @@ mod tests {
             });
             assert_eq!(reopened.stats.reused, 1);
         }
+        let mut saved = serde_json::to_value(&cache).unwrap();
+        saved["entries"][0]["key"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adaptive_clearing_revision");
+        let mut reopened: OperationCache = serde_json::from_value(saved).unwrap();
+        reopened.compute(&adaptive, &env, &token, StrategyResult::default);
+        assert_eq!(reopened.stats.computed, 1);
     }
 
     #[test]

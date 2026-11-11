@@ -139,6 +139,9 @@ pub struct RunOutcome {
     pub scene: Scene,
     /// Processed input blank for an inherited-stock setup, before its own cuts.
     pub initial_stock: Option<(Vec<MeshVertex>, Vec<u32>)>,
+    /// Lossless material caches; render meshes are derived and need not be persisted.
+    pub stock_snapshot: Option<cam_sim::StockSnapshot>,
+    pub initial_stock_snapshot: Option<cam_sim::StockSnapshot>,
     /// Interleaved position+normal vertices of the cut stock surface.
     pub stock_vertices: Vec<MeshVertex>,
     /// Per-vertex flag distinguishing cut surfaces from original stock faces.
@@ -181,6 +184,8 @@ pub enum ExportError {
     RapidThroughStock(usize),
     /// Non-cutting feeds or cutter tips contact remaining stock.
     NonCuttingThroughStock(usize),
+    /// Tool or shank contacts a fixture clearance envelope.
+    FixtureCollision(usize),
     /// The post rejected the program.
     Post(PostError),
 }
@@ -216,6 +221,7 @@ impl std::fmt::Display for ExportError {
                 f,
                 "{n} non-cutting move(s) or cutter tips contact remaining stock — a crash hazard, so the export is blocked."
             ),
+            ExportError::FixtureCollision(n) => write!(f, "{n} fixture clearance collision(s). Move the fixture or change the toolpath before exporting."),
             ExportError::Post(e) => write!(f, "{e}."),
         }
     }
@@ -268,6 +274,7 @@ pub struct AppController {
     jobs: crate::jobs::JobService,
     operation_cache: cam_toolpath::OperationCache,
     toolpath_fingerprints: BTreeMap<u32, String>,
+    saved_verification: BTreeMap<u64, crate::project::StoredVerification>,
     automatic_toolpath_run: bool,
     simulation_accuracy: f32,
     operation_id_floor: u32,
@@ -581,6 +588,7 @@ impl AppController {
             jobs: Default::default(),
             operation_cache: Default::default(),
             toolpath_fingerprints: Default::default(),
+            saved_verification: Default::default(),
             automatic_toolpath_run: false,
             simulation_accuracy: 1.0,
             operation_id_floor: 0,
@@ -1364,6 +1372,7 @@ impl AppController {
         document.geometry.drawing_paths = self.open_paths.clone();
         self.operation_cache = Default::default();
         self.toolpath_fingerprints.clear();
+        self.saved_verification.clear();
         self.document = History::new(document);
         self.active_setup_id = self.setup().id;
         self.cad_selection.clear();
@@ -1388,6 +1397,7 @@ impl AppController {
         self.open_paths.clear();
         self.operation_cache = Default::default();
         self.toolpath_fingerprints.clear();
+        self.saved_verification.clear();
         self.document = History::new(Document::empty());
         self.setup_defaults = default_setup(&self.defaults);
         self.active_setup_id = 0;
@@ -1483,6 +1493,7 @@ impl AppController {
             toolpaths: crate::project::StoredToolpaths {
                 cache: self.operation_cache.clone(),
                 fingerprints: self.toolpath_fingerprints.clone(),
+                verification: self.saved_verification.clone(),
             },
             schema_version: cam_model::SCHEMA_VERSION,
             document: self.document.current().clone(),
@@ -1495,16 +1506,12 @@ impl AppController {
             machine: Some(self.machine.clone()),
             post: Some(self.post_kind),
         };
-        // Written through the tagged `.ocam` union (§3.1) so the file self-describes.
-        let json = OcamFile::Project(project)
-            .to_json()
-            .map_err(|e| ProjectError::Json(e.to_string()))?;
         let path = path.as_ref();
         self.document()
             .geometry
             .validate()
             .map_err(ProjectError::Json)?;
-        crate::project::atomic_save(path, &json).map_err(ProjectError::Io)?;
+        crate::project::atomic_save(path, &project).map_err(ProjectError::Io)?;
         self.current_path = Some(path.to_path_buf());
         self.mark_project_saved();
         Ok(())
@@ -1513,10 +1520,10 @@ impl AppController {
     /// Open a `.ocam` project from `path`, replacing the current session.
     pub fn open_project(&mut self, path: impl AsRef<Path>) -> Result<(), ProjectError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io(e.to_string()))?;
+        let bytes = std::fs::read(path).map_err(|e| ProjectError::Io(e.to_string()))?;
         // Route through the tagged union; a legacy untagged project still parses (§3.1)
         // and is migrated to the current schema on the way through.
-        let project = match OcamFile::from_json(&text).map_err(ProjectError::from)? {
+        let project = match OcamFile::from_bytes(&bytes).map_err(ProjectError::from)? {
             OcamFile::Project(p) => p,
             OcamFile::Library(_) => return Err(ProjectError::NotAProject),
         };
@@ -1565,6 +1572,7 @@ impl AppController {
         };
         self.operation_cache = project.toolpaths.cache;
         self.toolpath_fingerprints = project.toolpaths.fingerprints;
+        self.saved_verification = project.toolpaths.verification;
         self.document = History::new(project.document);
         self.active_setup_id = self.document.current().active_setup().map_or(0, |s| s.id);
         self.active_origin = self.setup().origin_index;
@@ -1583,6 +1591,7 @@ impl AppController {
             self.reconcile_selection();
         }
         self.invalidate();
+        self.restore_saved_verification();
         self.mark_project_saved();
         Ok(())
     }
@@ -2057,6 +2066,7 @@ impl AppController {
         let new_id = self.next_op_id();
         set_op_id(&mut copy, new_id);
         self.edit_document(move |doc| {
+            if let Some(index)=doc.rotary_indexes.get(&sel).cloned(){doc.rotary_indexes.insert(new_id,index);}
             if let Some(binding) = doc.geometry.bindings.get(&sel).cloned() {
                 doc.geometry.bindings.insert(new_id, binding);
             }
@@ -2204,6 +2214,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                wrap: None,
                 passes: cam_model::ProfilePasses {
                     lead_end_distance: 0.6,
                     lead_end_distance_enabled: Some(false),
@@ -2257,6 +2268,9 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Pocket(PocketOp {
+                    wrap: None,
+                    additional_regions: Vec::new(),
+                    stock_contours: Default::default(),
                     finishing: Default::default(),
                     id: 0,
                     tool,
@@ -2725,6 +2739,7 @@ impl AppController {
         self.operation_cache = cache;
         self.outcome = Some(result);
         self.record_toolpath_fingerprints();
+        self.remember_full_verification(None);
         self.nc = None;
         self.outcome.as_ref().unwrap()
     }
@@ -2756,6 +2771,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    wrap: None,
                     passes: cam_model::ProfilePasses {
                         lead_end_distance: 0.6,
                         lead_end_distance_enabled: Some(false),
@@ -2825,6 +2841,9 @@ impl AppController {
                         }));
                     } else {
                         operations.push(Operation::Pocket(PocketOp {
+                            wrap: None,
+                            additional_regions: Vec::new(),
+                            stock_contours: Default::default(),
                             finishing: Default::default(),
                             id,
                             tool: 1,
@@ -2865,10 +2884,12 @@ impl AppController {
             material: String::new(),
             material_id: None,
             model_instances: Vec::new(),
+            fixture_instances: Vec::new(),
+            fixture_clearance: Default::default(),
             program_name: String::new(),
             name: self.program_name(),
             heights: Heights::new(p.clearance, p.retract, p.top_of_stock),
-            stock: self.stock(p.top_of_stock, p.depth),
+            stock: default_stock(),
             tools,
             operations,
             patterns: Vec::new(),
@@ -2880,14 +2901,6 @@ impl AppController {
             stock_to_leave: Default::default(),
             tool_change_height: None,
         })
-    }
-
-    /// New stock follows all model bounds. Planar drawings retain their initial
-    /// cutting depth below Z0 and the configured allowance above it.
-    fn stock(&self, top: f64, depth: f64) -> Stock {
-        Stock::RelativeBox {
-            offsets: [[0.0, 0.0, depth.max(0.0)], [0.0, 0.0, top.max(0.0)]],
-        }
     }
 
     /// The current stock resolved to a concrete box `(min, max)` (mm), fitting the
@@ -3183,7 +3196,7 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
     for step in program.steps() {
         match step {
             Step::ToolChange { tool } => current = Some(*tool),
-            Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => {
+            Step::Linear { to, tag, .. } | Step::Rotary {to,tag,feed:Some(_),..} if tag.kind == MoveKind::Cutting => {
                 if let Some(n) = current {
                     let e = deepest.entry(n).or_insert(f64::INFINITY);
                     *e = e.min(to.z);
@@ -3312,11 +3325,10 @@ fn set_origin_index_value(setup: &mut Setup, from: u32, to: u32) {
     }
 }
 
-/// New setups grow with the model and remain non-degenerate before import.
-/// Keep room above the model for facing and below a drawing for its default cut.
-fn default_stock(top: f64, depth: f64) -> Stock {
+/// New relative stock extends one millimetre beyond each model face.
+fn default_stock() -> Stock {
     Stock::RelativeBox {
-        offsets: [[1.0, 1.0, depth.max(1.0)], [1.0, 1.0, top.max(1.0)]],
+        offsets: [[1.0; 3]; 2],
     }
 }
 
@@ -3329,10 +3341,12 @@ fn default_setup(p: &JobParams) -> Setup {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "Untitled".to_string(),
         heights: Heights::new(p.clearance, p.retract, p.top_of_stock),
-        stock: default_stock(p.top_of_stock, p.depth),
+        stock: default_stock(),
         tools: vec![Tool {
             number: 1,
             diameter: p.tool_diameter,
@@ -3425,6 +3439,7 @@ mod tests {
             name: "test".into(),
             rapid_rate: 2000.0,
             tool_change_seconds: 0.0,
+            min_spindle_rpm: 0.0,
             max_spindle_rpm: 10_000.0,
             max_feed: 800.0,
             envelope: Envelope::new(
@@ -3952,10 +3967,7 @@ mod tests {
         let mut app = AppController::new(machine());
         assert!(app.setups().is_empty());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert_eq!(app.document().setup().stock, default_stock());
         app.edit_stock(|stock| {
             *stock = Stock::FixedBox {
                 size: [100.0; 3],
@@ -3967,19 +3979,13 @@ mod tests {
         assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
         assert!(matches!(app.setups()[0].stock, Stock::FixedBox { .. }));
         app.add_setup();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert_eq!(app.document().setup().stock, default_stock());
         app.activate_setup(copy).unwrap();
         assert_eq!(app.document().setup().stock, Stock::PreviousSetup);
         app.new_project();
         assert!(app.setups().is_empty());
         app.add_setup();
-        assert!(matches!(
-            app.document().setup().stock,
-            Stock::RelativeBox { .. }
-        ));
+        assert_eq!(app.document().setup().stock, default_stock());
     }
 
     #[test]
@@ -3989,12 +3995,10 @@ mod tests {
         let (min3, max3) = app.setup_model_bounds();
         let (bmin, bmax) = ([min3[0], min3[1]], [max3[0], max3[1]]);
 
-        // Default stock snugly fits the part in XY (no offset) and hangs from the
-        // top down to the deepest cut.
+        // Default stock extends one millimetre beyond each model face.
         let (min, max) = app.stock_box();
-        assert_eq!([min[0], min[1]], bmin, "no XY offset by default");
-        assert_eq!([max[0], max[1]], bmax);
-        assert!(max[2] > min[2], "non-degenerate Z");
+        assert_eq!(min, min3.map(|v| v - 1.0));
+        assert_eq!(max, max3.map(|v| v + 1.0));
 
         // Grow it: 3 mm in X, 5 mm in Y, 25 mm thick from a top of 0.
         app.edit_stock(|s| {
@@ -4012,7 +4016,7 @@ mod tests {
         // Editing stock is one undoable step.
         assert!(app.undo());
         let (min, _) = app.stock_box();
-        assert_eq!([min[0], min[1]], bmin, "undo restores the snug fit");
+        assert_eq!([min[0], min[1]], [bmin[0] - 1.0, bmin[1] - 1.0]);
     }
 
     #[test]

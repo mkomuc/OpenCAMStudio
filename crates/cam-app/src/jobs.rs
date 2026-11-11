@@ -8,7 +8,7 @@ use cam_model::{Document, Machine};
 use cam_render::{MeshVertex, Scene, PART};
 use cam_sim::{Collision, SimOptions, SimTool, SimulationCache};
 use cam_toolpath::{
-    build_job_cached, CancelToken, Diagnostic, DiagnosticCode, JobCompletion, OperationCache,
+    build_job_cached_with_progress, CancelToken, Diagnostic, DiagnosticCode, JobCompletion, OperationCache,
     PlanRequest,
 };
 use std::sync::{mpsc, Arc, Mutex};
@@ -37,17 +37,22 @@ pub struct JobProgress {
     pub completed: usize,
     pub total: usize,
     pub operation: Option<u32>,
+    pub calculated_operations: Vec<u32>,
 }
 #[derive(Clone, Default)]
 pub(crate) struct Progress(Arc<Mutex<JobProgress>>);
 impl Progress {
     pub fn set(&self, phase: JobPhase, completed: usize, total: usize, operation: Option<u32>) {
-        *self.0.lock().unwrap() = JobProgress {
-            phase,
-            completed,
-            total,
-            operation,
-        };
+        let mut progress = self.0.lock().unwrap();
+        progress.phase = phase;
+        progress.completed = completed;
+        progress.total = total;
+        progress.operation = operation;
+    }
+    fn calculated(&self, id: u32, success: bool) {
+        let mut progress = self.0.lock().unwrap();
+        progress.calculated_operations.retain(|old| *old != id);
+        if success { progress.calculated_operations.push(id); }
     }
     fn get(&self) -> JobProgress {
         self.0.lock().unwrap().clone()
@@ -74,6 +79,8 @@ pub(crate) struct JobInputs {
     pub preview_resolution: Option<f64>,
     /// Generate editable source paths without simulating stock removal.
     pub toolpath_preview: bool,
+    /// Skip fixture verification for browser previews.
+    pub display_only: bool,
     /// Sample actual removal along an existing program, without meshing/export changes.
     pub removal_analysis: bool,
     /// Detailed cut-face provenance, only needed for force-colored stock playback.
@@ -86,6 +93,17 @@ impl JobInputs {
         cache: &mut OperationCache,
         progress: &Progress,
         simulation: &mut simulation::StockSimulationCache,
+    ) -> RunOutcome {
+        self.execute_with_preview(cancel, cache, progress, simulation, &mut |_| {})
+    }
+
+    fn execute_with_preview(
+        &self,
+        cancel: &CancelToken,
+        cache: &mut OperationCache,
+        progress: &Progress,
+        simulation: &mut simulation::StockSimulationCache,
+        publish_preview: &mut dyn FnMut(RunOutcome),
     ) -> RunOutcome {
         cache.reset_stats();
         if self.document.setups.is_empty() {
@@ -168,7 +186,7 @@ impl JobInputs {
                         .count();
                     let mut completed = 0;
                     progress.set(JobPhase::Generation, 0, total, None);
-                    let job = build_job_cached(
+                    let job = build_job_cached_with_progress(
                         PlanRequest {
                             document: &document,
                             spindle_rpm: self.spindle_rpm,
@@ -180,9 +198,16 @@ impl JobInputs {
                         },
                         cancel,
                         cache,
-                        |id| {
-                            progress.set(JobPhase::Generation, completed, total, Some(id));
-                            completed += 1;
+                        |event| match event {
+                            cam_toolpath::CalculationProgress::Started(id) => {
+                                progress.calculated(id, false);
+                                progress.set(JobPhase::Generation, completed, total, Some(id));
+                            }
+                            cam_toolpath::CalculationProgress::Finished { operation, success } => {
+                                completed += 1;
+                                progress.calculated(operation, success);
+                                progress.set(JobPhase::Generation, completed, total, None);
+                            }
                         },
                     );
                     progress.set(JobPhase::Generation, completed, total, None);
@@ -197,7 +222,30 @@ impl JobInputs {
             job
         };
         let mut completion = job.completion;
-        let stock = if !self.toolpath_preview
+        // Wrapped paths can take a long time to verify on the rotary stock grid.
+        // Publish a display-only snapshot before verification can repair links.
+        if !self.toolpath_preview
+            && self.preview_program.is_none()
+            && completion == JobCompletion::Complete
+            && !cancel.is_cancelled()
+            && self
+                .document
+                .setup()
+                .operations
+                .iter()
+                .any(|op| op.rotary_wrap().is_some())
+        {
+            let scene = self.program_scene(&job.program, cancel);
+            if !cancel.is_cancelled() {
+                publish_preview(RunOutcome {
+                    completion: JobCompletion::Incomplete,
+                    program: job.program.clone(),
+                    scene,
+                    ..Default::default()
+                });
+            }
+        }
+        let mut stock = if !self.toolpath_preview
             && completion == JobCompletion::Complete
             && !cancel.is_cancelled()
         {
@@ -212,12 +260,54 @@ impl JobInputs {
         } else {
             simulation::StockSimulation::default()
         };
+        // Verify the actual output after stock-link repairs as well as playback
+        // prefixes and pattern previews, even when there is no stock. Browser
+        // previews skip fixture verification.
+        if completion != JobCompletion::Cancelled && !self.display_only {
+            match self.fixture_collisions(&job.program, cancel) {
+                Ok(contacts) => stock.collisions.extend(contacts),
+                Err(error) => {
+                    completion = if cancel.is_cancelled() {
+                        JobCompletion::Cancelled
+                    } else {
+                        JobCompletion::Failed
+                    };
+                    job.diagnostics.push(error);
+                }
+            }
+        }
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         // Playback constructs its display scene separately with timeline clipping and
         // visibility options. Avoid rebuilding the entire growing prefix here.
-        let mut scene = if self.preview_program.is_none() && job.program.validate().is_ok() {
-            Scene::from_program_controlled(&job.program, &|| cancel.is_cancelled())
-                .unwrap_or_default()
+        let scene = self.program_scene(&job.program, cancel);
+        if cancel.is_cancelled() {
+            completion = JobCompletion::Cancelled;
+        }
+        if !cancel.is_cancelled() {
+            progress.set(JobPhase::RenderPreparation, 1, 1, None);
+        }
+        RunOutcome {
+            completion,
+            stamp: None,
+            program: job.program,
+            diagnostics: job.diagnostics,
+            scene,
+            initial_stock: stock.initial,
+            stock_snapshot: stock.snapshot,
+            initial_stock_snapshot: stock.initial_snapshot,
+            stock_vertices: stock.vertices,
+            stock_machined: stock.machined,
+            stock_operations: stock.operations,
+            stock_cut_sources: stock.cut_sources,
+            removal_samples: Arc::default(),
+            stock_indices: stock.indices,
+            collisions: stock.collisions,
+        }
+    }
+
+    pub(crate) fn program_scene(&self, program: &Program, cancel: &CancelToken) -> Scene {
+        let mut scene = if self.preview_program.is_none() && program.validate().is_ok() {
+            Scene::from_program_controlled(program, &|| cancel.is_cancelled()).unwrap_or_default()
         } else {
             Scene::new()
         };
@@ -266,27 +356,7 @@ impl JobInputs {
             }
             scene.add_open_path(path.points(), PART);
         }
-        if cancel.is_cancelled() {
-            completion = JobCompletion::Cancelled;
-        }
-        if !cancel.is_cancelled() {
-            progress.set(JobPhase::RenderPreparation, 1, 1, None);
-        }
-        RunOutcome {
-            completion,
-            stamp: None,
-            program: job.program,
-            diagnostics: job.diagnostics,
-            scene,
-            initial_stock: stock.initial,
-            stock_vertices: stock.vertices,
-            stock_machined: stock.machined,
-            stock_operations: stock.operations,
-            stock_cut_sources: stock.cut_sources,
-            removal_samples: Arc::default(),
-            stock_indices: stock.indices,
-            collisions: stock.collisions,
-        }
+        scene
     }
 }
 
@@ -298,7 +368,11 @@ struct JobRequest {
 struct Running {
     stamp: JobStamp,
     cancel: CancelToken,
-    receiver: mpsc::Receiver<JobOutput>,
+    receiver: mpsc::Receiver<JobEvent>,
+}
+enum JobEvent {
+    Preview(JobStamp, RunOutcome),
+    Finished(JobOutput),
 }
 pub(crate) struct JobOutput {
     pub stamp: JobStamp,
@@ -315,6 +389,7 @@ pub(crate) struct JobService {
     running: Option<Running>,
     queued: Option<JobRequest>,
     progress: Progress,
+    preview: Option<RunOutcome>,
     #[cfg(test)]
     hook: Option<TestHook>,
 }
@@ -354,7 +429,7 @@ impl JobService {
         let cancel = CancelToken::new();
         let token = cancel.clone();
         let progress = self.progress.clone();
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = mpsc::channel();
         #[cfg(test)]
         let hook = self.hook.clone();
         let failure_sender = sender.clone();
@@ -369,11 +444,15 @@ impl JobService {
                     if let Some(hook) = hook {
                         hook(&token);
                     }
-                    request.inputs.execute(
+                    request.inputs.execute_with_preview(
                         &token,
                         &mut cache,
                         &progress,
                         &mut simulation.lock().unwrap_or_else(|e| e.into_inner()),
+                        &mut |mut preview| {
+                            preview.stamp = Some(request.stamp.clone());
+                            let _ = sender.send(JobEvent::Preview(request.stamp.clone(), preview));
+                        },
                     )
                 }))
                 .unwrap_or_else(|_| RunOutcome {
@@ -384,14 +463,14 @@ impl JobService {
                     ..Default::default()
                 });
                 outcome.stamp = Some(request.stamp.clone());
-                let _ = sender.send(JobOutput {
+                let _ = sender.send(JobEvent::Finished(JobOutput {
                     stamp: request.stamp,
                     outcome,
                     cache,
-                });
+                }));
             });
         if let Err(error) = spawned {
-            let _ = failure_sender.send(JobOutput {
+            let _ = failure_sender.send(JobEvent::Finished(JobOutput {
                 stamp: stamp.clone(),
                 cache: OperationCache::default(),
                 outcome: RunOutcome {
@@ -404,7 +483,7 @@ impl JobService {
                     .for_setup(setup_id)],
                     ..Default::default()
                 },
-            });
+            }));
         }
         self.running = Some(Running {
             stamp,
@@ -428,11 +507,22 @@ impl JobService {
         }
         self.expected = None;
         self.queued = None;
+        self.preview = None;
+    }
+    #[cfg(any(feature = "gui", test))]
+    pub fn preview(&self) -> Option<&RunOutcome> {
+        self.preview.as_ref()
     }
     pub fn poll(&mut self, revision: u64) -> Option<JobOutput> {
         let running = self.running.as_ref()?;
         let result = match running.receiver.try_recv() {
-            Ok(result) => Some(result),
+            Ok(JobEvent::Preview(stamp, preview)) => {
+                if self.expected.as_ref() == Some(&stamp) && stamp.revision == revision {
+                    self.preview = Some(preview);
+                }
+                return None;
+            }
+            Ok(JobEvent::Finished(result)) => Some(result),
             Err(mpsc::TryRecvError::Empty) => return None,
             Err(mpsc::TryRecvError::Disconnected) => Some(JobOutput {
                 stamp: running.stamp.clone(),
@@ -453,6 +543,7 @@ impl JobService {
         });
         if result.is_some() {
             self.expected = None;
+            self.preview = None;
         } else if self
             .expected
             .as_ref()
@@ -481,6 +572,58 @@ impl Drop for JobService {
 mod tests {
     use super::*;
     #[test]
+    fn calculation_progress_keeps_successful_operations_during_verification() {
+        let progress = Progress::default();
+        progress.set(JobPhase::Generation, 0, 2, Some(1));
+        progress.calculated(1, true);
+        progress.set(JobPhase::Generation, 1, 2, Some(2));
+        progress.calculated(2, false);
+        progress.set(JobPhase::Verification, 0, 10, None);
+        assert_eq!(progress.get().calculated_operations, vec![1]);
+        progress.calculated(1, false);
+        assert!(progress.get().calculated_operations.is_empty());
+    }
+
+    #[test]
+    fn preview_is_display_only_and_discarded_on_cancel_or_replacement() {
+        let stamp = JobStamp {
+            request_id: 1,
+            revision: 7,
+            input_fingerprint: "a".into(),
+        };
+        let (sender, receiver) = mpsc::channel();
+        let mut jobs = JobService::default();
+        jobs.expected = Some(stamp.clone());
+        jobs.running = Some(Running {
+            stamp: stamp.clone(),
+            cancel: CancelToken::new(),
+            receiver,
+        });
+        sender
+            .send(JobEvent::Preview(
+                stamp.clone(),
+                RunOutcome {
+                    completion: JobCompletion::Incomplete,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        assert!(jobs.poll(7).is_none());
+        assert!(jobs.pending());
+        assert_eq!(
+            jobs.preview().unwrap().completion,
+            JobCompletion::Incomplete
+        );
+        jobs.cancel();
+        assert!(jobs.preview().is_none());
+        sender
+            .send(JobEvent::Preview(stamp, RunOutcome::default()))
+            .unwrap();
+        assert!(jobs.poll(7).is_none());
+        assert!(jobs.preview().is_none());
+    }
+
+    #[test]
     fn completed_result_requires_request_revision_and_fingerprint_match() {
         for mismatch in 0..3 {
             let stamp = JobStamp {
@@ -496,14 +639,14 @@ mod tests {
             }
             let (sender, receiver) = mpsc::channel();
             sender
-                .send(JobOutput {
+                .send(JobEvent::Finished(JobOutput {
                     stamp: wrong,
                     outcome: RunOutcome {
                         completion: JobCompletion::Complete,
                         ..Default::default()
                     },
                     cache: Default::default(),
-                })
+                }))
                 .unwrap();
             let mut jobs = JobService::default();
             jobs.serial = 3;

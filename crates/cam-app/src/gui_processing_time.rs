@@ -76,7 +76,7 @@ impl App {
             text(format!("Processing time · {}", dialog.label)).size(19),
             row![
                 text("Feed override (%)").size(13).width(Length::Fill),
-                text_input("100", &dialog.feed_override)
+                inspector_input("100", &dialog.feed_override)
                     .on_input(Message::ProcessingTimeFeedOverride)
                     .width(Length::Fixed(110.0)),
             ]

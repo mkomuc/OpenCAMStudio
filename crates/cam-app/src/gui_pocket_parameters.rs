@@ -150,6 +150,92 @@ mod tests {
     }
 
     #[test]
+    fn stock_contours_stage_independently_apply_cancel_and_undo() {
+        let (mut app, id) = editor();
+        app.operation_tab = OperationTab::Geometry;
+        let before = app.controller.operation(id).unwrap().clone();
+        let fields = app.fields.clone();
+        let message = |m| Message::OperationGeometry(m);
+        let _ = app.update(message(GeometryMessage::StockContours(true)));
+        let _ = app.update(message(GeometryMessage::SelectStock));
+        assert!(app.stock_contour_editor());
+        let _ = app.operation_geometry_settings();
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        let _ = app.update(message(GeometryMessage::Confirm));
+        assert!(!app.stock_contour_editor());
+        assert!(matches!(app.operation_draft, Some(Operation::Pocket(ref p))
+            if p.stock_contours.enabled && p.stock_contours.regions.len() == 1));
+        assert_eq!(app.controller.operation(id), Some(&before));
+        assert_eq!(app.fields, fields);
+        let selected = app.operation_draft.clone();
+        let _ = app.update(message(GeometryMessage::SelectStock));
+        let _ = app.update(Message::GeometryClear);
+        let _ = app.update(message(GeometryMessage::Cancel));
+        assert_eq!(app.operation_draft, selected);
+        let _ = app.update(Message::Apply);
+        let committed = app.controller.operation(id).unwrap().clone();
+        assert!(matches!(committed, Operation::Pocket(ref p)
+        if p.stock_contours.enabled && p.boundary == match &before {
+            Operation::Pocket(old) => old.boundary.clone(), _ => unreachable!(),
+        }));
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.operation(id), Some(&before));
+        assert!(app.controller.redo());
+        assert_eq!(app.controller.operation(id), Some(&committed));
+        app.begin_operation_draft(id);
+        let _ = app.update(message(GeometryMessage::ResetStock));
+        assert!(matches!(app.operation_draft, Some(Operation::Pocket(ref p))
+            if p.stock_contours.enabled && p.stock_contours.regions.is_empty()));
+        let _ = app.update(Message::CancelOperationDraft);
+        assert_eq!(app.controller.operation(id), Some(&committed));
+    }
+
+    #[test]
+    fn stock_contours_creation_restores_the_pocket_selection() {
+        let (mut app, _) = editor();
+        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        let pending = app.controller.pending_operation_geometry();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::StockContours(
+            true,
+        )));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::SelectStock));
+        assert!(app.controller.pending_operation_geometry().is_empty());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert_eq!(app.controller.pending_operation_geometry(), pending);
+        let (Operation::Pocket(op), _) = app.creation_operation().unwrap() else {
+            panic!("pocket")
+        };
+        assert!(op.stock_contours.enabled && op.stock_contours.regions.is_empty());
+    }
+
+    #[test]
+    fn use_setup_stock_enables_stock_and_clears_the_active_selector() {
+        let (mut app, id) = editor();
+        let before = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::ResetStock));
+        assert!(
+            matches!(&app.operation_draft, Some(Operation::Pocket(p)) if p.stock_contours.enabled)
+        );
+        assert!(app.status.contains("Setup stock selected"));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::SelectStock));
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::ResetStock));
+        assert!(app.controller.pending_operation_geometry().is_empty());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(matches!(&app.operation_draft, Some(Operation::Pocket(p))
+            if p.stock_contours.enabled && p.stock_contours.regions.is_empty() && p.stock_contours.source.is_none()));
+        assert_eq!(app.controller.operation(id), Some(&before));
+    }
+
+    #[test]
     fn keep_tool_down_draft_applies_cancels_and_undoes() {
         let (mut app, id) = editor();
         let checked = |op: &Operation| matches!(op, Operation::Pocket(p) if p.clear.keep_tool_down);

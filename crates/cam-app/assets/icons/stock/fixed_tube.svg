@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>Fixed size tube</title>
+  <g transform="rotate(-21 16 16)">
+    <path d="M6 10h20a4.5 6 0 0 1 0 12H6Z" fill="#4cc9f0"/>
+    <path d="M6 17h24c-.4 2.9-2 5-4 5H6Z" fill="#383838" fill-opacity=".2"/>
+    <ellipse cx="6" cy="16" rx="4.5" ry="6" fill="#e0e0e0"/>
+    <ellipse cx="6" cy="16" rx="2.1" ry="3.3" fill="#383838"/>
+  </g>
+</svg>

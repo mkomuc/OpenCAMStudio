@@ -154,6 +154,10 @@ impl PostKind {
             .map_or(self == Self::Okuma, |d| d.cutter_comp)
     }
 
+    pub fn supports_rotary_wrap(self) -> bool {
+        matches!(self,Self::LinuxCnc|Self::Fanuc|Self::Haas)
+    }
+
     /// Post `program` in this dialect.
     pub fn post(
         self,
@@ -336,6 +340,8 @@ pub enum PostError {
     TravelExceeded { axis: char, span: f64, travel: f64 },
     /// A requested spindle speed exceeds the machine's maximum.
     SpindleOutOfRange(f64),
+    /// A requested spindle speed is below the machine's minimum.
+    SpindleBelowMinimum(f64),
     /// A requested feed exceeds the machine's maximum.
     FeedOutOfRange(f64),
     /// An arc was encountered with no known current position to anchor `I`/`J`.
@@ -364,6 +370,9 @@ impl fmt::Display for PostError {
             }
             PostError::SpindleOutOfRange(rpm) => {
                 write!(f, "spindle speed {rpm} rpm exceeds the machine maximum")
+            }
+            PostError::SpindleBelowMinimum(rpm) => {
+                write!(f, "spindle speed {rpm} rpm is below the machine minimum")
             }
             PostError::FeedOutOfRange(feed) => {
                 write!(f, "feed {feed} mm/min exceeds the machine maximum")

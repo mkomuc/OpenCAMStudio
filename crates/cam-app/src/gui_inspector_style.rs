@@ -5,7 +5,7 @@ use iced::widget::column;
 
 pub(super) const INSPECTOR_TEXT: Color = Color::from_rgb(0.86, 0.88, 0.91);
 pub(super) const INSPECTOR_MUTED: Color = Color::from_rgb(0.61, 0.65, 0.71);
-const SURFACE: Color = Color::from_rgb(0.16, 0.18, 0.21);
+const SURFACE: Color = Color::from_rgb(0.12, 0.14, 0.17);
 const OUTLINE: Color = Color::from_rgb(0.25, 0.28, 0.32);
 pub(super) const INSPECTOR_TEXT_SIZE: f32 = 12.0;
 pub(super) const INSPECTOR_SECTION_FONT: iced::Font = iced::Font {
@@ -178,6 +178,28 @@ pub(super) fn inspector_button<'a>(label: impl Into<String>) -> iced::widget::Bu
     )
     .padding([7, 10])
     .style(inspector_secondary)
+}
+
+/// Use the regular inspector button treatment for controls that start a
+/// viewport pick, with a restrained accent while picking is active.
+pub(super) fn inspector_pick_button<'a>(
+    label: impl Into<String>,
+    picking: bool,
+) -> iced::widget::Button<'a, Message> {
+    inspector_button(label).style(move |theme, status| inspector_pick_style(theme, status, picking))
+}
+
+pub(super) fn inspector_pick_style(
+    theme: &iced::Theme,
+    status: button::Status,
+    picking: bool,
+) -> button::Style {
+    let mut style = inspector_secondary(theme, status);
+    if picking {
+        style.border.color = palette::ACCENT_BLUE;
+        style.background = Some(Background::Color(Color::from_rgb(0.15, 0.20, 0.26)));
+    }
+    style
 }
 
 pub(super) fn inspector_secondary(_: &iced::Theme, status: button::Status) -> button::Style {

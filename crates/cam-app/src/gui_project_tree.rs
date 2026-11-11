@@ -134,7 +134,9 @@ impl App {
 
     fn tree_body_selected(&self, id: InstanceId) -> bool {
         self.model_view == Some(TreeNode::Model(id))
-            || (self.setup_draft.is_some() && self.setup_model_selection == Some(id))
+            || (self.setup_draft.is_some()
+                && (self.setup_model_selection == Some(id)
+                    || self.setup_fixture_selection == Some(id)))
             || self
                 .controller
                 .cad_selection()
@@ -214,7 +216,8 @@ impl App {
             || self.cad_editing_op.is_some()
             || self.drawing_editing_op.is_some()
             || self.setup_draft_dirty()
-            || (matches!(self.controller.selection(), Selection::Operation(_))
+            || (self.inspector_active
+                && matches!(self.controller.selection(), Selection::Operation(_))
                 && self.inspector_dirty())
         {
             self.status = "Apply or cancel inspector changes before changing selection or restructuring the project.".into();
@@ -1746,6 +1749,34 @@ mod tests {
             Some(ids[0]),
             "{}",
             app.status
+        );
+        assert!(app.pane_handle(Pane::Inspector).is_some());
+    }
+
+    #[test]
+    fn browsing_with_stale_fields_can_open_operation_editor() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        send(&mut app, Message::ClickOp(ids[0]));
+        let field = app.inspector_fields().into_iter().next().unwrap();
+        app.fields.insert(field, "999999".into());
+        assert!(app.inspector_dirty());
+        assert!(!app.inspector_active);
+        app.inspector_enabled = false;
+
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Open(TreeNode::Operation(ids[0]))),
+        );
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Command(Box::new(Message::Select(
+                Selection::Operation(ids[0]),
+            )))),
+        );
+        assert_eq!(
+            app.operation_draft.as_ref().map(Operation::id),
+            Some(ids[0])
         );
         assert!(app.pane_handle(Pane::Inspector).is_some());
     }

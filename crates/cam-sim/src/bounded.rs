@@ -24,6 +24,10 @@ struct MaterialSpan {
     upper_thread: bool,
     lower_source: u32,
     upper_source: u32,
+    lower_cylinder: Option<(f64, bool)>,
+    upper_cylinder: Option<(f64, bool)>,
+    lower_radial: Option<(f64, bool)>,
+    upper_radial: Option<(f64, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -33,6 +37,8 @@ struct Boundary {
     lower_void: bool,
     operation: Option<u32>,
     cut: u32,
+    cylinder: Option<(f64, bool)>,
+    radial: Option<(f64, bool)>,
 }
 
 impl MaterialSpan {
@@ -44,6 +50,8 @@ impl MaterialSpan {
                 lower_void: false,
                 operation: self.lower_op,
                 cut: self.lower_source,
+                cylinder: self.lower_cylinder,
+                radial: self.lower_radial,
             },
             Boundary {
                 z: self.upper,
@@ -51,6 +59,8 @@ impl MaterialSpan {
                 lower_void: true,
                 operation: self.upper_op,
                 cut: self.upper_source,
+                cylinder: self.upper_cylinder,
+                radial: self.upper_radial,
             },
         ]
     }
@@ -121,7 +131,7 @@ impl Heightfield {
                     }
                     changed = true;
                     self.track_removed_interval(index, f64::from(lower), f64::from(upper));
-                    let spans = self.bounded.entry(index).or_default();
+                    let spans = self.bounded.get_or_default(index);
                     spans.push(RemovedSpan {
                         lower,
                         upper,
@@ -208,15 +218,19 @@ impl Heightfield {
                         lower_op,
                         upper_op: span.lower_op,
                         lower_cut,
-                        upper_cut: true,
+                        upper_cut: span.lower_op.is_some() || span.lower_source != u32::MAX,
                         upper_thread: true,
                         lower_source,
                         upper_source: span.lower_source,
+                        lower_cylinder: None,
+                        upper_cylinder: None,
+                        lower_radial: None,
+                        upper_radial: None,
                     });
                 }
                 lower = lower.max(span.upper);
                 lower_op = span.upper_op;
-                lower_cut = true;
+                lower_cut = span.upper_op.is_some() || span.upper_source != u32::MAX;
                 lower_source = span.upper_source;
             }
         }
@@ -227,11 +241,51 @@ impl Heightfield {
                 lower_op,
                 upper_op: self.operation_at(x, y),
                 lower_cut,
-                upper_cut: top < self.top,
+                upper_cut: self.top_is_cut(index),
                 upper_thread: false,
                 lower_source,
                 upper_source: self.winners[index],
+                lower_cylinder: None,
+                upper_cylinder: None,
+                lower_radial: None,
+                upper_radial: None,
             });
+        }
+        if let Some(cylinder) = self.horizontal_cylinder {
+            let transverse = 1 - cylinder.axis;
+            let (cx, cy) = self.center(x, y);
+            let offset = [cx, cy][transverse] - cylinder.center[transverse];
+            let classify = |height: f32, cut: bool| {
+                if cut {
+                    return None;
+                }
+                for radius in [cylinder.outer_radius, cylinder.inner_radius] {
+                    if radius <= 0. || offset.abs() > radius {
+                        continue;
+                    }
+                    let h = (radius * radius - offset * offset).max(0.).sqrt();
+                    for positive in [false, true] {
+                        let z = cylinder.center[2] + if positive { h } else { -h };
+                        if z as f32 == height {
+                            return Some((radius, positive));
+                        }
+                    }
+                }
+                None
+            };
+            for span in &mut result {
+                span.lower_cylinder = classify(span.lower, span.lower_cut);
+                span.upper_cylinder = classify(span.upper, span.upper_cut);
+                let radial = |height: f32, cut: bool, operation: Option<u32>| {
+                    if !cut || operation.is_none() {
+                        return None;
+                    }
+                    let z = f64::from(height) - cylinder.center[2];
+                    Some((offset.hypot(z), z >= 0.))
+                };
+                span.lower_radial = radial(span.lower, span.lower_cut, span.lower_op);
+                span.upper_radial = radial(span.upper, span.upper_cut, span.upper_op);
+            }
         }
         result
     }
@@ -279,6 +333,77 @@ impl Heightfield {
     /// Average matching tooth boundaries at a shared grid corner. Separate Z
     /// intervals keep opposite flanks and adjacent turns from being joined.
     fn boundary_corner(&self, x: usize, y: usize, boundary: Boundary) -> f32 {
+        if let (Some(cylinder), Some((radius, positive))) =
+            (self.horizontal_cylinder, boundary.cylinder)
+        {
+            let transverse = 1 - cylinder.axis;
+            let index = [x, y][transverse];
+            let coordinate =
+                (self.origin[transverse] + index as f64 * self.res).min(self.max[transverse]);
+            let offset = coordinate - cylinder.center[transverse];
+            let h = (radius * radius - offset * offset).max(0.).sqrt();
+            return (cylinder.center[2] + if positive { h } else { -h }) as f32;
+        }
+        // A full rotary pass creates the same radius in neighbouring columns.
+        // Interpolate that nearly constant radius at the shared corner instead
+        // of averaging Z heights, which creates radial stair-steps near the
+        // cylinder silhouette. Distinct operations and distinct radial layers
+        // remain separate; the underlying material intervals are unchanged.
+        if let (Some(cylinder), Some((radius, positive))) =
+            (self.horizontal_cylinder, boundary.radial)
+        {
+            let transverse = 1 - cylinder.axis;
+            let mut sum = 0.;
+            let mut count = 0;
+            let mut first_row = None;
+            let mut multiple_rows = false;
+            for dy in [-1isize, 0] {
+                for dx in [-1isize, 0] {
+                    let (nx, ny) = (x as isize + dx, y as isize + dy);
+                    if nx < 0 || ny < 0 || nx >= self.nx as isize || ny >= self.ny as isize {
+                        continue;
+                    }
+                    let (nx, ny) = (nx as usize, ny as usize);
+                    let (cx, cy) = self.center(nx, ny);
+                    let offset = [cx, cy][transverse] - cylinder.center[transverse];
+                    if let Some(spans) = self.bounded.get(&(ny * self.nx + nx)) {
+                        let nearest = spans
+                            .iter()
+                            .filter_map(|span| {
+                                let (z, op) = if boundary.lower_void {
+                                    (span.lower, span.lower_op)
+                                } else {
+                                    (span.upper, span.upper_op)
+                                };
+                                let z = f64::from(z) - cylinder.center[2];
+                                let candidate = offset.hypot(z);
+                                (op == boundary.operation
+                                    && (z >= 0.) == positive
+                                    && (candidate - radius).abs()
+                                        <= (self.res * 0.02).clamp(1e-5, 0.001))
+                                .then_some(candidate)
+                            })
+                            .min_by(|a, b| (a - radius).abs().total_cmp(&(b - radius).abs()));
+                        if let Some(candidate) = nearest {
+                            let row = [nx, ny][transverse];
+                            multiple_rows |= first_row.is_some_and(|first| first != row);
+                            first_row.get_or_insert(row);
+                            sum += candidate;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            if count >= 2 && multiple_rows {
+                let radius = sum / count as f64;
+                let index = [x, y][transverse];
+                let coordinate =
+                    (self.origin[transverse] + index as f64 * self.res).min(self.max[transverse]);
+                let offset = coordinate - cylinder.center[transverse];
+                let h = (radius * radius - offset * offset).max(0.).sqrt();
+                return (cylinder.center[2] + if positive { h } else { -h }) as f32;
+            }
+        }
         if !boundary.thread {
             return boundary.z;
         }
@@ -439,7 +564,9 @@ impl Heightfield {
                         [edge[0][0], edge[0][1], lower[0]],
                     ],
                     [normal; 4],
-                    neighbour.is_some(),
+                    op.is_some()
+                        || cut != u32::MAX
+                        || neighbour.is_some_and(|(nx, ny)| self.top_is_cut(ny * self.nx + nx)),
                     op,
                 );
                 mesh.stamp_source(first, self, cut);

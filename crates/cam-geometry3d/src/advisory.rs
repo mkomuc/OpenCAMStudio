@@ -100,6 +100,9 @@ pub fn resolve_binding_advisory(
     state: &GeometryState,
     binding: &GeometryBinding,
 ) -> Result<ResolvedInput, String> {
+    if let Some(input) = pocket_regions::resolve(state, binding, true) {
+        return input;
+    }
     match resolve_binding(state, binding) {
         Ok(input) => Ok(input),
         Err(reason) => fallback(state, binding, &reason),
@@ -111,6 +114,9 @@ fn fallback(
     binding: &GeometryBinding,
     reason: &str,
 ) -> Result<ResolvedInput, String> {
+    if let Some(input) = pocket_regions::resolve(state, binding, true) {
+        return input;
+    }
     let refs = &binding.selected;
     let view = View::for_path(state, refs)?;
     let bounds = view.bounds(view.body.bounds);

@@ -7,6 +7,7 @@ use cam_toolpath::{
 
 fn profile() -> ProfileOp {
     ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -450,6 +451,30 @@ fn control_compensation_brackets_linear_leads_and_rejects_missing_engagement() {
     assert!(
         matches!(&s[disable-1],Step::Linear{to,..} if to.y < -3.),
         "Cancellation must also occur at an air-side point"
+    );
+}
+
+#[test]
+fn open_profiles_require_computed_compensation() {
+    let mut op = profile();
+    op.closed = false;
+    op.chain = Contour::new(vec![Point::new(0., 0.), Point::new(20., 0.)]);
+    op.lead_in = Lead::Linear { length: 3. };
+    op.lead_out = op.lead_in;
+    let computed = run(op.clone());
+    assert!(!computed.has_errors(), "{:?}", computed.diagnostics);
+    assert!(!computed.program.is_empty());
+
+    op.comp = Comp::Control;
+    let control = run(op);
+    assert!(control.has_errors());
+    assert!(control.program.is_empty());
+    assert!(
+        control.diagnostics.iter().any(|d| d
+            .message
+            .contains("Open profiles require computed compensation")),
+        "{:?}",
+        control.diagnostics
     );
 }
 

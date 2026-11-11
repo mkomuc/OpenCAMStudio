@@ -8,16 +8,21 @@
 //!
 //! The core is headless and unit-tested. Rendering the resulting heightfield in
 //! the viewport is a separate concern (as with `cam-render`).
+//! [`CylindricalStock`] initializes analytic round/tube blanks;
+//! [`RotarySimulationCache`] verifies indexed and simultaneous A/B motion using
+//! finite cutter, neck and shank dimensions in a stationary material frame.
 
 mod collision;
 mod heightfield;
 mod simulation;
 mod sweep;
+mod rotary_simulation;
+pub use rotary_simulation::{analyze_rotary_removal_controlled, RotarySimulationCache, RotaryTool};
 pub use simulation::{
     analyze_removal_controlled, simulate_controlled, RemovalSample, SimulationCache,
 };
 
-pub use heightfield::{Heightfield, StockMeshCache, SurfaceDiff, SurfaceLocation, SurfaceMesh};
+pub use heightfield::{CylindricalStock, Heightfield, StockMeshCache, StockSnapshot, SurfaceDiff, SurfaceLocation, SurfaceMesh};
 
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use cam_geo::{Arc, Point};
@@ -42,7 +47,7 @@ impl Default for SimOptions {
 
 /// The bottom shape of a tool within its cutting radius — what makes a ball mill
 /// leave a rounded floor where an end mill leaves a flat one.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileShape {
     /// Flat bottom (end mill / face mill).
     Flat,
@@ -86,7 +91,7 @@ pub enum ProfileShape {
 /// `axis_bottom + offset(d)`.
 ///
 /// [`offset`]: ToolProfile::offset
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolProfile {
     /// Cutting radius, mm — the swept footprint.
     pub radius: f64,
@@ -191,8 +196,10 @@ pub struct SimTool {
 }
 
 /// The kind of a detected problem.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CollisionKind {
+    /// Tool or shank enters a setup fixture keep-out envelope.
+    Fixture,
     /// A rapid (`G0`) traverse passes through remaining stock.
     RapidThroughStock,
     /// A feed reposition or a non-cutting cutter tip enters remaining stock.
@@ -203,7 +210,7 @@ pub enum CollisionKind {
 }
 
 /// A detected problem, with where it happened.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Collision {
     pub kind: CollisionKind,
     pub at: [f64; 3],
@@ -218,9 +225,14 @@ pub struct Collision {
 }
 
 impl CollisionKind {
-    /// Whether playback should stop at contact with remaining stock.
+    /// Whether the collision involves non-cutting motion through remaining stock.
     pub fn is_stock_collision(self) -> bool {
         matches!(self, Self::RapidThroughStock | Self::NonCuttingThroughStock)
+    }
+
+    /// Whether playback should stop at contact with stock or a fixture.
+    pub fn stops_playback(self) -> bool {
+        self.is_stock_collision() || self == Self::Fixture
     }
 }
 
@@ -255,7 +267,8 @@ pub fn simulate(
     options: &SimOptions,
     tools: &[SimTool],
 ) -> SimResult {
-    simulate_controlled(program, min, max, options, tools, &|| false, |_, _| {}).unwrap()
+    simulate_controlled(program, min, max, options, tools, &|| false, |_, _| {})
+        .expect("Fixed-axis simulation cannot verify rotary motion; use RotarySimulationCache")
 }
 
 /// Verify a simulated `field` against a desired `target` surface: if the tool cut

@@ -903,7 +903,7 @@ pub(crate) fn certify(path: &[Point], r: f64, to_clear: &Polygon) -> Verdict {
 /// Split a move path into its **cutting runs**: maximal polylines of consecutive points
 /// joined by cutting moves. A run begins at the point a cut departs *from* (the plunge
 /// point), so stroking it with round caps reproduces the entry disc.
-fn cut_runs(moves: &[(Point, bool)]) -> Vec<Vec<Point>> {
+pub(crate) fn cut_runs(moves: &[(Point, bool)]) -> Vec<Vec<Point>> {
     let mut runs: Vec<Vec<Point>> = Vec::new();
     let mut cur: Vec<Point> = Vec::new();
     let mut prev: Option<Point> = None;

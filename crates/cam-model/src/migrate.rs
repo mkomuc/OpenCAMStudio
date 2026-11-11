@@ -267,6 +267,15 @@ fn step(from: u32, doc: &mut Value) -> Result<(), MigrationError> {
         33 => Ok(()), // Parallel operations default to their original row mode.
         34 => Ok(()), // Scallop keeps its full-clearance retraction by default.
         35 => Ok(()), // Scallop keeps the existing outside-in pass order.
+        37 => Ok(()), // Additional pocket regions default to empty.
+        38 => Ok(()), // Pocket stock contours default to disabled.
+        40 => Ok(()), // Wrap geometry unwrapping defaults to enabled.
+        41 => Ok(()), // Additional stock definitions leave existing stock unchanged.
+        42 => Ok(()), // Round stock defaults to the setup Z axis.
+        43 => Ok(()), // Existing round-stock edge references retain their format.
+        44 => Ok(()), // Existing operations have no fourth-axis index.
+        39 => Ok(()), // Optional cylindrical fourth-axis wrap settings.
+        36 => Ok(()), // Fixture bodies default to empty; clearances default to 5 mm.
         29 => Ok(()), // Additive Parallel finishing operations and surface bindings.
         28 => Ok(()), // Additive Bore operations and cylindrical geometry bindings.
         _ => Err(MigrationError::MissingStep { from }),

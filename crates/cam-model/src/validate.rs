@@ -9,10 +9,18 @@ pub struct MachineValidationError {
     pub value: f64,
     pub positive: bool,
     pub nonnegative: bool,
+    pub maximum: Option<f64>,
 }
 
 impl fmt::Display for MachineValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(maximum) = self.maximum {
+            return write!(
+                f,
+                "machine {} must not exceed {}, got {}",
+                self.field, maximum, self.value
+            );
+        }
         write!(
             f,
             "machine {} must be finite{}{}, got {}",
@@ -48,6 +56,7 @@ fn check_bounds(
             value,
             positive,
             nonnegative,
+            maximum: None,
         })
     }
 }
@@ -57,12 +66,22 @@ impl Machine {
     /// Placement and physical clearance require a resolved machine/setup model.
     pub fn validate(&self) -> Result<(), MachineValidationError> {
         check_bounds("tool-change time", self.tool_change_seconds, false, true)?;
+        check_bounds("minimum spindle speed", self.min_spindle_rpm, false, true)?;
         for (field, value) in [
             ("rapid rate", self.rapid_rate),
             ("maximum spindle speed", self.max_spindle_rpm),
             ("maximum feed", self.max_feed),
         ] {
             check(field, value, true)?;
+        }
+        if self.min_spindle_rpm > self.max_spindle_rpm {
+            return Err(MachineValidationError {
+                field: "minimum spindle speed",
+                value: self.min_spindle_rpm,
+                positive: false,
+                nonnegative: true,
+                maximum: Some(self.max_spindle_rpm),
+            });
         }
         for (lo_field, hi_field, span_field, lo, hi) in [
             (

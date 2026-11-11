@@ -28,6 +28,7 @@ fn machine() -> Machine {
         name: "OCS-3018".into(),
         rapid_rate: 2000.0,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: cam_model::Envelope::new(
@@ -51,6 +52,7 @@ fn document() -> Document {
         ..Default::default()
     };
     let outer = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -81,6 +83,7 @@ fn document() -> Document {
         plunge: Plunge::Straight,
     };
     let hole = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -116,6 +119,8 @@ fn document() -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "first light".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
@@ -223,6 +228,7 @@ fn tool_too_large_for_hole_reports_error() {
         ..Default::default()
     };
     let op = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -275,6 +281,7 @@ fn cancellation_stops_before_emitting() {
         ..Default::default()
     };
     let op = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -335,6 +342,7 @@ fn lead_overlap_recuts_past_the_start() {
     };
     let overlap = 2.0;
     let op = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -423,6 +431,7 @@ fn offset_leaves_stock_on_the_wall() {
     // out, leaving `offset` mm of stock on the wall for a later finishing pass.
     let run_offset = |offset: f64| {
         let op = ProfileOp {
+            wrap: None,
             passes: Default::default(),
             selections: None,
             closed: true,
@@ -501,6 +510,7 @@ fn plunge_count(prog: &Program) -> usize {
 
 fn rough_op(side: Side, chain: Contour, stepover: f64) -> ProfileOp {
     ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -787,6 +797,7 @@ fn ascii_backplot(prog: &Program, w: usize, h: usize) -> String {
 #[test]
 fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
     let op = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -834,6 +845,8 @@ fn arc_lead_and_helix_plunge_post_to_helical_gcode() {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "lead_helix".into(),
         heights: Heights::new(5.0, 2.0, 0.0),
@@ -954,6 +967,7 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
     let mut operations = vec![Operation::Carve(carve)];
     if let Some(t) = trailing_tool {
         operations.push(Operation::Profile(ProfileOp {
+            wrap: None,
             passes: Default::default(),
             selections: None,
             closed: true,
@@ -990,6 +1004,8 @@ fn carve_document(clear_tool: Option<u32>, trailing_tool: Option<u32>) -> Docume
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "carve".into(),
         heights: Heights::new(5.0, 2.0, 0.0),

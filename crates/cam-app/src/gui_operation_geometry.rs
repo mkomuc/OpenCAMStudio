@@ -7,6 +7,9 @@ use iced::widget::column;
 
 #[derive(Clone, Debug)]
 pub(super) enum GeometryMessage {
+    StockContours(bool),
+    SelectStock,
+    ResetStock,
     Add(CadFilter),
     Edit,
     Remove,
@@ -15,6 +18,8 @@ pub(super) enum GeometryMessage {
 }
 
 pub(super) struct GeometryEditor {
+    stock: bool,
+    wrapped: bool,
     kind: OpKind,
     cad_selection: Vec<EntityRef>,
     pending: Option<crate::PendingOp>,
@@ -42,8 +47,8 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
             "Add Chain. Select an open or closed engraving path. Configure individual edge selection in settings."
         })],
         OpKind::Pocket if cad => vec![
-            (CadFilter::Face, "face", "Add Pocket Floor. Select a planar floor face, preserving its islands."),
-            (CadFilter::Loop, "chain", "Add Chain. Select a closed pocket boundary; set the cutting depth in Heights."),
+            (CadFilter::Face, "face", "Add Pocket Floor. Select planar pocket floors at the same height, preserving their islands."),
+            (CadFilter::Loop, "chain", "Add Chain. Select closed pocket boundaries; set the cutting depth in Heights."),
         ],
         OpKind::Pocket => vec![(CadFilter::Loop, "chain", "Add Chain. Select a closed drawing boundary and optional islands.")],
         OpKind::Carve if cad => vec![
@@ -63,6 +68,74 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
 }
 
 impl App {
+    pub(super) fn stock_contour_editor(&self) -> bool {
+        self.geometry_editor
+            .as_ref()
+            .is_some_and(|editor| editor.stock)
+    }
+
+    fn selected_stock_contours(&self) -> Result<cam_model::StockContours, String> {
+        let mut stock = cam_model::StockContours {
+            enabled: true,
+            ..Default::default()
+        };
+        if self.operation_uses_cad_geometry() {
+            let selected = self.controller.cad_selection();
+            if !selected.is_empty() {
+                if selected.iter().any(|r| {
+                    !matches!(
+                        r.kind,
+                        EntityKind::Loop | EntityKind::Edge | EntityKind::Silhouette
+                    )
+                }) {
+                    return Err(
+                        "Select closed stock loops, connected edges, or a body silhouette".into(),
+                    );
+                }
+                let geometry =
+                    crate::cad_operations::geometry_for_setup(self.controller.document())?;
+                let source = cam_geometry3d::resolve_selection_advisory(
+                    &geometry,
+                    selected,
+                    if selected.len() == 1 && selected[0].kind == EntityKind::Silhouette {
+                        cam_model::ExtractionRecipe::ProfileSilhouette
+                    } else {
+                        cam_model::ExtractionRecipe::PocketBoundary
+                    },
+                    self.controller.stock_box().1[2],
+                )?;
+                stock.regions =
+                    cam_geometry3d::resolve_binding_advisory(&geometry, &source)?.regions;
+                stock.source = Some(source);
+            }
+        } else {
+            let selected = self.controller.pending_operation_geometry();
+            if let Some(boundary) = selected.first() {
+                self.controller
+                    .planar_operation_eligibility(OpKind::Pocket, &selected)?;
+                let outer = self
+                    .controller
+                    .loop_contour(*boundary)
+                    .ok_or("Select a closed stock contour")?;
+                let holes = selected
+                    .iter()
+                    .skip(1)
+                    .map(|r| {
+                        self.controller
+                            .loop_contour(*r)
+                            .cloned()
+                            .ok_or("Stock islands must be closed")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                stock.regions.push(
+                    cam_geo::Polygon::with_holes(outer.clone(), holes)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+        }
+        Ok(stock)
+    }
+
     pub(super) fn stock_to_leave_supported(operation: &Operation) -> bool {
         matches!(
             operation,
@@ -92,11 +165,17 @@ impl App {
         self.cad_pending_kind.is_some()
             || self.cad_editing_op.is_some()
             || self.operation_draft.as_ref().is_some_and(|op| {
-                self.controller
+                matches!(op, Operation::Pocket(p) if p.wrap.as_ref().is_some_and(|wrap| !wrap.geometry.is_empty())) || self.controller
                     .geometry_state()
                     .bindings
                     .contains_key(&op.id())
             })
+    }
+
+    pub(super) fn wrapped_pocket_geometry_editor(&self) -> bool {
+        self.geometry_editor
+            .as_ref()
+            .is_some_and(|editor| editor.wrapped)
     }
 
     pub(super) fn operation_geometry_collection(
@@ -109,8 +188,21 @@ impl App {
             .filter(|index| *index < labels.len())
             .or_else(|| (!labels.is_empty()).then_some(0));
         let cad = self.operation_uses_cad_geometry();
-        let sources = if self.cad_pending_kind.is_some() || self.cad_editing_op.is_some() {
+        let sources = if self.wrapped_pocket_geometry_editor()
+            || (self
+                .operation_draft
+                .as_ref()
+                .and_then(Operation::rotary_wrap)
+                .is_none()
+                && (self.cad_pending_kind.is_some() || self.cad_editing_op.is_some()))
+        {
             self.controller.cad_selection()
+        } else if let Some(wrap) = self
+            .operation_draft
+            .as_ref()
+            .and_then(Operation::rotary_wrap)
+        {
+            wrap.geometry.as_slice()
         } else {
             self.operation_binding_preview
                 .as_ref()
@@ -147,8 +239,27 @@ impl App {
                 action: Some(Message::GeometryRowSelected(index)),
             })
             .collect();
+        let wrapped = kind == OpKind::Pocket
+            && self
+                .operation_draft
+                .as_ref()
+                .and_then(Operation::rotary_wrap)
+                .is_some()
+            && cad;
+        let choices = if wrapped {
+            vec![
+                (CadFilter::Face, "face", "Add a cylindrical machining face."),
+                (
+                    CadFilter::Loop,
+                    "chain",
+                    "Add a closed developed boundary or connected edges.",
+                ),
+            ]
+        } else {
+            modes(kind, cad)
+        };
         let mut toolbar = row![].spacing(4).align_y(Alignment::Center);
-        for (filter, name, description) in modes(kind, cad) {
+        for &(filter, name, description) in &choices {
             toolbar = toolbar.push(hint(
                 button(icon(name, 28.))
                     .padding(4)
@@ -193,7 +304,7 @@ impl App {
             Some(Message::OperationGeometry(if selected.is_some() {
                 GeometryMessage::Edit
             } else {
-                GeometryMessage::Add(modes(kind, cad)[0].0)
+                GeometryMessage::Add(choices[0].0)
             })),
             toolbar,
         )
@@ -227,21 +338,38 @@ impl App {
         let Some(previous) = previous else {
             return;
         };
-        if previous.recipe == binding.recipe {
+        if previous.recipe == binding.recipe && previous.selected == binding.selected {
             return;
         }
         let defaults_for = |recipe: &cam_model::ExtractionRecipe| {
             if *recipe == cam_model::ExtractionRecipe::PocketBoundary {
-                crate::cad_operations::selection_height_defaults(
-                    self.controller.document(),
-                    operation,
-                )
+                // Recognize defaults saved by older versions, which treated
+                // the boundary as the top and cut the old depth below it.
+                let mut settings = cam_model::OperationHeightSettings::default();
+                *settings.definition_mut(cam_model::HeightPlaneKind::Top) =
+                    cam_model::HeightDefinition::new(
+                        cam_model::HeightReference::SelectedContours,
+                        0.,
+                    );
+                *settings.definition_mut(cam_model::HeightPlaneKind::Bottom) =
+                    cam_model::HeightDefinition::new(
+                        cam_model::HeightReference::Plane(cam_model::HeightPlaneKind::Top),
+                        -self
+                            .controller
+                            .document()
+                            .operation_base_cutting_heights(operation)
+                            .depth(),
+                    );
+                settings
             } else {
                 cam_model::OperationHeightSettings::default()
             }
         };
         let old = defaults_for(&previous.recipe);
-        let new = defaults_for(&binding.recipe);
+        // Changing from a floor to its boundary does not turn that boundary
+        // into the top of a pocket with the old depth below it. Match "Use
+        // defaults": cut from stock top down to the selected floor/contour.
+        let new = cam_model::OperationHeightSettings::default();
         if let Some(settings) = &mut self.height_draft {
             for plane in cam_model::HeightPlaneKind::ALL {
                 let definition = old.definition(plane);
@@ -407,7 +535,33 @@ impl App {
 
     pub(super) fn operation_geometry_message(&mut self, message: GeometryMessage) {
         match message {
-            GeometryMessage::Add(_) | GeometryMessage::Edit => {
+            GeometryMessage::StockContours(enabled) => {
+                self.edit_operation_draft(|op| {
+                    if let Operation::Pocket(p) = op {
+                        p.stock_contours.enabled = enabled;
+                    }
+                });
+            }
+            GeometryMessage::ResetStock => {
+                if self.stock_contour_editor() {
+                    self.controller.set_cad_selection(vec![]);
+                    if self.controller.pending_op().is_some() {
+                        let _ = self.controller.set_pending_operation_geometry(&[], None);
+                    }
+                } else {
+                    self.edit_operation_draft(|op| {
+                        if let Operation::Pocket(p) = op {
+                            p.stock_contours.enabled = true;
+                            p.stock_contours.regions.clear();
+                            p.stock_contours.source = None;
+                        }
+                    });
+                }
+                self.show_stock = true;
+                let (min, max) = self.controller.stock_box();
+                self.status = format!("Setup stock selected: X{:.3}…{:.3}, Y{:.3}…{:.3} mm. OK applies the stock footprint.", min[0], max[0], min[1], max[1]);
+            }
+            GeometryMessage::Add(_) | GeometryMessage::Edit | GeometryMessage::SelectStock => {
                 if self.geometry_editor.is_some() {
                     return;
                 }
@@ -426,6 +580,15 @@ impl App {
                 };
                 let pending = self.controller.pending_op();
                 let editor = GeometryEditor {
+                    stock: matches!(message, GeometryMessage::SelectStock),
+                    wrapped: !matches!(message, GeometryMessage::SelectStock)
+                        && kind == OpKind::Pocket
+                        && self
+                            .operation_draft
+                            .as_ref()
+                            .and_then(Operation::rotary_wrap)
+                            .is_some()
+                        && self.operation_uses_cad_geometry(),
                     kind,
                     cad_selection: self.controller.cad_selection().to_vec(),
                     pending,
@@ -441,7 +604,31 @@ impl App {
                     height_defaults: self.creation_geometry_height_defaults.clone(),
                 };
                 self.height_reference_pick = None;
-                let _ = self.pick_operation_geometry();
+                if editor.wrapped {
+                    let selected = self
+                        .operation_draft
+                        .as_ref()
+                        .and_then(Operation::rotary_wrap)
+                        .map(|wrap| wrap.geometry.clone())
+                        .unwrap_or_default();
+                    self.controller.set_cad_selection(selected);
+                    self.geometry_additive = true;
+                    if let GeometryMessage::Add(filter) = message {
+                        self.cad_filter = filter;
+                    } else {
+                        self.cad_filter =
+                            match self.controller.cad_selection().first().map(|r| r.kind) {
+                                Some(EntityKind::Edge) => CadFilter::Edge,
+                                Some(EntityKind::Loop) => CadFilter::Loop,
+                                _ => CadFilter::Face,
+                            };
+                    }
+                    self.cad_filter_explicit = true;
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                } else {
+                    let _ = self.pick_operation_geometry();
+                }
                 if self.drawing_editing_op.is_some() && editor.pending.is_none() {
                     if let Some(operation) = self.operation_draft.as_ref() {
                         let references = self.drawing_sources_for_operation(operation);
@@ -451,9 +638,71 @@ impl App {
                     }
                 }
                 if let GeometryMessage::Add(filter) = message {
-                    if self.operation_uses_cad_geometry() {
+                    if !editor.wrapped && self.operation_uses_cad_geometry() {
                         let _ = self.update(Message::GeometryFilterChanged(filter));
                     }
+                }
+                if editor.stock {
+                    let stock = match self.operation_draft.as_ref() {
+                        Some(Operation::Pocket(p)) => p.stock_contours.clone(),
+                        _ => return,
+                    };
+                    self.cad_filter = if stock
+                        .source
+                        .as_ref()
+                        .and_then(|s| s.selected.first())
+                        .is_some_and(|r| r.kind == EntityKind::Silhouette)
+                    {
+                        CadFilter::Silhouette
+                    } else if stock
+                        .source
+                        .as_ref()
+                        .and_then(|s| s.selected.first())
+                        .is_some_and(|r| r.kind == EntityKind::Edge)
+                    {
+                        CadFilter::Edge
+                    } else {
+                        CadFilter::Loop
+                    };
+                    self.cad_filter_explicit = true;
+                    self.show_stock = true;
+                    if self.operation_uses_cad_geometry() {
+                        self.controller
+                            .set_cad_selection(stock.source.map_or_else(Vec::new, |b| b.selected));
+                    } else {
+                        // A stock contour uses its own drawing selection. Do not
+                        // let it replace the pocket boundary in the parent draft.
+                        let _ = self.controller.set_pending_operation_geometry(&[], None);
+                        if let Some(region) = stock.regions.first() {
+                            let references: Vec<_> = self
+                                .controller
+                                .regions()
+                                .iter()
+                                .enumerate()
+                                .flat_map(|(i, p)| {
+                                    std::iter::once((LoopRef::outer(i), p.outer())).chain(
+                                        p.holes()
+                                            .iter()
+                                            .enumerate()
+                                            .map(move |(h, c)| (LoopRef::hole(i, h), c)),
+                                    )
+                                })
+                                .collect();
+                            let selected: Vec<_> = std::iter::once(region.outer())
+                                .chain(region.holes())
+                                .filter_map(|c| {
+                                    references
+                                        .iter()
+                                        .find(|(_, candidate)| candidate.to_ccw() == c.to_ccw())
+                                        .map(|(r, _)| *r)
+                                })
+                                .collect();
+                            let _ = self
+                                .controller
+                                .set_pending_operation_geometry(&selected, None);
+                        }
+                    }
+                    self.status = "Select a stock box edge, closed model contour, connected edges, or Silhouette. Use setup stock selects the setup box.".into();
                 }
                 self.geometry_editor = Some(editor);
             }
@@ -489,8 +738,39 @@ impl App {
                 self.status = "Geometry settings cancelled; other operation edits retained.".into();
             }
             GeometryMessage::Confirm => {
+                if self.stock_contour_editor() {
+                    match self.selected_stock_contours() {
+                        Ok(stock) => {
+                            self.operation_geometry_message(GeometryMessage::Cancel);
+                            self.edit_operation_draft(|op| {
+                                if let Operation::Pocket(p) = op {
+                                    p.stock_contours = stock;
+                                }
+                            });
+                            self.status = "Stock contours staged. Operation OK/Cancel applies or discards the changes.".into();
+                        }
+                        Err(reason) => self.status = reason,
+                    }
+                    return;
+                }
                 if let Err(error) = self.geometry_settings_valid() {
                     self.status = error;
+                    return;
+                }
+                if self.wrapped_pocket_geometry_editor() {
+                    let selected = self.controller.cad_selection().to_vec();
+                    self.edit_operation_draft(|op| {
+                        if let Some(mut wrap) = op.rotary_wrap().cloned() {
+                            wrap.geometry = selected;
+                            op.set_rotary_wrap(Some(wrap));
+                        }
+                    });
+                    self.geometry_editor = None;
+                    self.geometry_additive = false;
+                    self.geometry_row_selection = None;
+                    self.status =
+                        "Geometry staged. The operation's OK/Cancel applies or discards all tabs."
+                            .into();
                     return;
                 }
                 if self.cad_editing_op.is_some() {
@@ -517,10 +797,32 @@ impl App {
     }
 
     fn geometry_settings_valid(&self) -> Result<(), String> {
+        if self.stock_contour_editor() {
+            return self.selected_stock_contours().map(|_| ());
+        }
         let editor = self
             .geometry_editor
             .as_ref()
             .ok_or("Open geometry settings")?;
+        if editor.wrapped {
+            let selected = self.controller.cad_selection();
+            if selected.is_empty() {
+                return Err("Select at least one cylindrical face or closed boundary".into());
+            }
+            let mut operation = self
+                .operation_draft
+                .clone()
+                .ok_or("Operation unavailable")?;
+            let mut wrap = operation.rotary_wrap().cloned().ok_or("Wrap unavailable")?;
+            wrap.geometry = selected.to_vec();
+            let has_cylinder = wrap.cylinder.is_some();
+            operation.set_rotary_wrap(Some(wrap));
+            if !has_cylinder {
+                return Ok(());
+            }
+            let geometry = crate::cad_operations::geometry_for_setup(self.controller.document())?;
+            return crate::cad_operations::resolve_wrapped_operation(&geometry, &mut operation);
+        }
         if let Some(id) = self.cad_editing_op {
             self.preview_geometry_draft(id, self.controller.cad_selection().to_vec())
                 .map(|_| ())
@@ -552,21 +854,32 @@ impl App {
         let editor = self.geometry_editor.as_ref().unwrap();
         let cad = self.operation_uses_cad_geometry();
         let kind = editor.kind;
-        let name = match kind {
-            OpKind::Pocket => "Pocket",
-            OpKind::Chamfer => "Chamfer",
-            OpKind::Engrave => "Engrave",
-            OpKind::Carve => "Carve",
-            OpKind::Bore => "Bore",
-            OpKind::Thread => "Thread",
-            OpKind::Parallel => "3D Parallel",
-            OpKind::Adaptive => "3D Adaptive Clearing",
-            _ => unreachable!(),
+        let name = if editor.stock {
+            "Stock contours"
+        } else {
+            match kind {
+                OpKind::Pocket => "Pocket",
+                OpKind::Chamfer => "Chamfer",
+                OpKind::Engrave => "Engrave",
+                OpKind::Carve => "Carve",
+                OpKind::Bore => "Bore",
+                OpKind::Thread => "Thread",
+                OpKind::Parallel => "3D Parallel",
+                OpKind::Adaptive => "3D Adaptive Clearing",
+                _ => unreachable!(),
+            }
         };
         let labels = if cad {
             cad_geometry_labels(self.controller.cad_selection())
         } else {
             drawing_geometry_labels(&self.controller.pending_operation_geometry())
+        };
+        let stock_button: Element<'_, Message> = if editor.stock {
+            inspector_button("Use setup stock")
+                .on_press(Message::OperationGeometry(GeometryMessage::ResetStock))
+                .into()
+        } else {
+            Space::new().width(0).into()
         };
         let mut body = column![
             row![
@@ -595,14 +908,15 @@ impl App {
             .align_y(Alignment::Center),
             row![
                 text("Selection").size(12).width(90),
-                inspector_button(if self.geometry_additive {
+                inspector_pick_button(if self.geometry_additive {
                     "Selecting…"
                 } else {
                     "Select"
-                })
+                }, self.geometry_additive)
                 .on_press(Message::GeometryPick),
                 inspector_button("Clear")
-                    .on_press_maybe((!labels.is_empty()).then_some(Message::GeometryClear))
+                    .on_press_maybe((!labels.is_empty()).then_some(Message::GeometryClear)),
+                stock_button
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -620,7 +934,21 @@ impl App {
                     | OpKind::Parallel
             )
         {
-            let options = if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
+            let options = if editor.stock {
+                vec![
+                    (
+                        CadFilter::Silhouette,
+                        "silhouette",
+                        "Select the complete body silhouette projected onto setup XY",
+                    ),
+                    (CadFilter::Loop, "closed", "Closed stock boundary loop"),
+                    (
+                        CadFilter::Edge,
+                        "chain",
+                        "Connected edges forming a closed stock boundary",
+                    ),
+                ]
+            } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
                 vec![
                     (CadFilter::Body, "silhouette", "Whole solid body"),
                     (
@@ -631,7 +959,15 @@ impl App {
                 ]
             } else if kind == OpKind::Pocket {
                 vec![
-                    (CadFilter::Face, "face", "Pocket floor and islands"),
+                    (
+                        CadFilter::Face,
+                        "face",
+                        if editor.wrapped {
+                            "Cylindrical machining face"
+                        } else {
+                            "Pocket floor and islands"
+                        },
+                    ),
                     (CadFilter::Loop, "closed", "Closed boundary loop"),
                     (
                         CadFilter::Edge,
@@ -684,8 +1020,13 @@ impl App {
             }
             body = body.push(controls);
         }
-        let description = match kind {
-            OpKind::Pocket => "Select a planar pocket floor with its islands, a closed boundary loop, or connected edges forming a closed chain. For chains, set the cutting depth in Heights.",
+        let description = if editor.stock {
+            "Select a stock box edge, closed model loop, connected edge chain, or body silhouette. Use setup stock restores the setup box. Stock contours describe material; the cutter can approach from outside the footprint. Leave unchecked for closed pockets."
+        } else if editor.wrapped {
+            "Select cylindrical faces, closed loops, or connected edges. Select the wrap cylinder on the Multi-axis tab. Faces at different radii require separate operations."
+        } else {
+            match kind {
+            OpKind::Pocket => "Select planar pocket floors with their islands, closed boundary loops, or closed edge chains. Multiple pockets must share one floor height. Default heights cut from stock top down to the selected geometry.",
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
             OpKind::Carve => "Select one closed region. Face selection preserves its inner boundaries as islands.",
@@ -694,9 +1035,10 @@ impl App {
             OpKind::Parallel => "Select solid bodies or machining faces for ball nose finishing. Containment uses the selected geometry bounding box.",
             OpKind::Adaptive => "Select whole solid bodies, individual faces, or both. Body selection includes all of its faces; face selection limits machining to the chosen face footprint.",
             _ => unreachable!(),
+        }
         };
         body = body.push(text(description).size(12));
-        if cad {
+        if cad && !editor.stock && !editor.wrapped {
             if let Some(info) =
                 crate::cad_operations::geometry_for_setup(self.controller.document())
                     .ok()
@@ -759,6 +1101,434 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wrapped_pocket_fixture() -> (App, EntityRef, EntityRef) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        let path = std::env::temp_dir().join(format!(
+            "wrapped-pocket-picker-{}-{}.ocam",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, include_str!("../tests/fixtures/stepped_rotary.ocam")).unwrap();
+        app.controller.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let face = app
+            .controller
+            .operation(0)
+            .unwrap()
+            .rotary_wrap()
+            .unwrap()
+            .cylinder
+            .clone()
+            .unwrap();
+        let boundary = EntityRef {
+            kind: EntityKind::Loop,
+            id: 26,
+            ..face.clone()
+        };
+        app.controller.edit_operation(0, |op| {
+            let mut wrap = op.rotary_wrap().unwrap().clone();
+            wrap.geometry = vec![face.clone()];
+            op.set_rotary_wrap(Some(wrap));
+        });
+        app.setup_draft = None;
+        app.begin_operation_draft(0);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        (app, face, boundary)
+    }
+
+    #[test]
+    fn wrapped_pocket_uses_shared_geometry_editor_and_stages_changes() {
+        let (mut app, face, boundary) = wrapped_pocket_fixture();
+        let before = app.controller.document().clone();
+        let _ = app.operation_inspector(0);
+        let _ = app.update(Message::FieldChanged(Field::Feed, "321".into()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Edit));
+        assert!(app.wrapped_pocket_geometry_editor());
+        assert!(app.operation_geometry_preview().strips.is_empty());
+        assert_eq!(app.controller.cad_selection(), &[face.clone()]);
+        let _ = app.operation_geometry_settings();
+        let larger_face = EntityRef {
+            id: 2,
+            ..face.clone()
+        };
+        app.controller
+            .set_cad_selection(vec![face.clone(), larger_face]);
+        assert!(app
+            .geometry_settings_valid()
+            .unwrap_err()
+            .contains("different radii"));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.wrapped_pocket_geometry_editor());
+        app.controller.set_cad_selection(vec![face.clone()]);
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Loop));
+        assert!(app.controller.cad_selection().is_empty());
+        let viewport = app.machining_viewport();
+        assert_eq!(viewport.cad_filter, EntityKind::Loop);
+        assert_eq!(viewport.cad_operation_kind, Some(OpKind::Engrave));
+        let _ = app.update(Message::CadSelect(boundary.clone()));
+        assert_eq!(app.controller.cad_selection(), &[boundary.clone()]);
+        assert_eq!(app.editor_selected_geometry(), vec![boundary.clone()]);
+        assert!(
+            app.geometry_settings_valid().is_ok(),
+            "{:?}",
+            app.geometry_settings_valid()
+        );
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face.clone()]
+        );
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert!(!app.wrapped_pocket_geometry_editor());
+        assert_eq!(app.controller.document(), &before);
+        assert_eq!(app.fields[&Field::Feed], "321");
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face]
+        );
+
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Loop,
+        )));
+        let _ = app.update(Message::GeometryClear);
+        assert!(app.geometry_settings_valid().is_err());
+        let _ = app.update(Message::CadSelect(boundary.clone()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![boundary.clone()]
+        );
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller
+                .operation(0)
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![boundary]
+        );
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn wrapped_pocket_click_and_remove_use_the_shared_staged_picker() {
+        let (mut app, face, boundary) = wrapped_pocket_fixture();
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::CadSelect(boundary.clone()));
+        assert!(app.wrapped_pocket_geometry_editor(), "{}", app.status);
+        assert_eq!(app.controller.cad_selection(), &[boundary]);
+        let _ = app.update(Message::GeometryClear);
+        let _ = app.update(Message::CadSelect(face.clone()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        let _ = app.update(Message::GeometryRowSelected(0));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        assert!(app.wrapped_pocket_geometry_editor());
+        assert!(app.controller.cad_selection().is_empty());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face]
+        );
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn wrapped_pocket_creation_preserves_and_edits_the_existing_cad_selection() {
+        let (mut app, face, _) = wrapped_pocket_fixture();
+        let _ = app.update(Message::CancelOperationDraft);
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        assert_eq!(app.cad_pending_kind, Some(OpKind::Pocket));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        let _ = app.update(Message::CadSelect(face.clone()));
+        let _ = app.update(Message::Rotary(rotary_view::Action::Enable(true)));
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face.clone()]
+        );
+        let _ = app.update(Message::Rotary(rotary_view::Action::Pick(
+            rotary_view::Pick::Cylinder,
+        )));
+        let _ = app.update(Message::CadSelect(face.clone()));
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .cylinder,
+            Some(face.clone())
+        );
+        let _ = app.operation_inspector(0);
+        let _ = app.update(Message::GeometryRowSelected(0));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
+        assert!(app
+            .operation_draft
+            .as_ref()
+            .unwrap()
+            .rotary_wrap()
+            .unwrap()
+            .geometry
+            .is_empty());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Face,
+        )));
+        let _ = app.update(Message::CadSelect(face.clone()));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert_eq!(
+            app.operation_draft
+                .as_ref()
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .geometry,
+            vec![face]
+        );
+        assert!(
+            app.creation_operation().is_ok(),
+            "{:?}",
+            app.creation_operation().err()
+        );
+        assert_eq!(app.controller.document(), &before);
+        let _ = app.update(Message::CancelOp);
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn wrapped_drawing_pocket_uses_the_standard_drawing_geometry_editor() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Pocket);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("pocket selected")
+        };
+        app.setup_draft = None;
+        app.begin_operation_draft(id);
+        let _ = app.update(Message::Rotary(rotary_view::Action::Enable(true)));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        assert!(!app.operation_uses_cad_geometry());
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Loop,
+        )));
+        assert!(app.geometry_editor.is_some());
+        assert!(!app.wrapped_pocket_geometry_editor());
+        assert!(app.drawing_editing_op.is_some());
+        let _ = app.update(Message::GeometryClear);
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert!(app.geometry_editor.is_none());
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    #[ignore = "manual supplied-project regression; set OCAM_STOCK_PROJECT"]
+    fn supplied_stock_contours_project() {
+        use shader::Program;
+        let path = std::env::var("OCAM_STOCK_PROJECT").unwrap();
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_project(Path::new(&path)).unwrap();
+        app.begin_operation_draft(0);
+        app.operation_tab = OperationTab::Geometry;
+        let before = app.controller.operation(0).unwrap().clone();
+        let (min, max) = app.controller.stock_box();
+        let plan = |enabled: bool| {
+            let started = std::time::Instant::now();
+            eprintln!("Planning supplied project, stock contours {enabled}");
+            let mut document = app.controller.document().clone();
+            let Operation::Pocket(p) = &mut document.setup_mut().operations[0] else {
+                panic!("pocket")
+            };
+            p.stock_contours.enabled = enabled;
+            let resolved = crate::cad_operations::resolve_document(&document).unwrap();
+            if enabled {
+                let b = &resolved.geometry.bindings[&0];
+                let shadow = cam_geometry3d::pocket_stock_shadow(
+                    &resolved.geometry,
+                    &b.selected,
+                    b.effective_heights().bottom,
+                    || false,
+                )
+                .unwrap()
+                .unwrap();
+                eprintln!(
+                    "Stock walls: {} polygons, {} vertices",
+                    shadow.len(),
+                    shadow
+                        .iter()
+                        .map(|p| p.outer().len() + p.holes().iter().map(|h| h.len()).sum::<usize>())
+                        .sum::<usize>()
+                );
+            }
+            let result = cam_toolpath::build_job(
+                &resolved,
+                1000.,
+                cam_cldata::SpindleDir::Cw,
+                Some(([min[0], min[1]], [max[0], max[1]])),
+                200.,
+                &cam_toolpath::CancelToken::new(),
+            );
+            eprintln!(
+                "Planned in {:?}, {} moves",
+                started.elapsed(),
+                result.program.len()
+            );
+            result
+        };
+        let closed = plan(false);
+        let setup = plan(true);
+        assert_eq!(
+            setup.completion,
+            cam_toolpath::JobCompletion::Complete,
+            "{:?}",
+            setup.diagnostics
+        );
+        let max_cut_x = |job: &cam_toolpath::JobResult| {
+            job.program
+                .steps()
+                .iter()
+                .filter_map(|s| match s {
+                    cam_cldata::Step::Linear { to, tag, .. }
+                        if tag.kind == cam_cldata::MoveKind::Cutting =>
+                    {
+                        Some(to.x)
+                    }
+                    cam_cldata::Step::Arc { end, tag, .. }
+                        if tag.kind == cam_cldata::MoveKind::Cutting =>
+                    {
+                        Some(end.x)
+                    }
+                    _ => None,
+                })
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        eprintln!(
+            "closed max X {}, setup stock max X {}",
+            max_cut_x(&closed),
+            max_cut_x(&setup)
+        );
+        assert!(max_cut_x(&setup) > max[0]);
+        assert_ne!(setup.program, closed.program);
+
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::SelectStock));
+        let viewport = app.machining_viewport();
+        let bounds = iced::Rectangle {
+            x: 0.,
+            y: 0.,
+            width: 1000.,
+            height: 700.,
+        };
+        let mut loops = Vec::new();
+        for world in [
+            [100., 0., 25.],
+            [100., 0., -25.],
+            [50., 0., 25.],
+            [75., 10., 25.],
+        ] {
+            let point = picking_view::project(viewport.camera(), bounds, world)
+                .unwrap()
+                .0;
+            let candidates = viewport.cad_candidates_at(point, bounds);
+            if candidates.iter().any(|c| c.entity.kind == EntityKind::Loop) {
+                loops = candidates;
+                break;
+            }
+        }
+        assert!(
+            !loops.is_empty(),
+            "stock mode must pick the actual model rim"
+        );
+        let _ = app.update(Message::CadPicked(loops));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(!app.stock_contour_editor(), "{}", app.status);
+        assert!(
+            matches!(&app.operation_draft, Some(Operation::Pocket(p)) if !p.stock_contours.regions.is_empty())
+        );
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::SelectStock));
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Silhouette));
+        let viewport = app.machining_viewport();
+        assert!(viewport.stock_contour_picking && viewport.cad_silhouette);
+        assert!(viewport.cad_operation_kind.is_none());
+        let point = picking_view::project(viewport.camera(), bounds, [40., 0., -75.])
+            .unwrap()
+            .0;
+        let candidates = viewport.cad_candidates_at(point, bounds);
+        assert!(candidates
+            .iter()
+            .any(|c| c.entity.kind == EntityKind::Silhouette));
+        let _ = app.update(Message::CadPicked(candidates));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(!app.stock_contour_editor(), "{}", app.status);
+        assert!(matches!(&app.operation_draft, Some(Operation::Pocket(p))
+            if p.stock_contours.source.as_ref().unwrap().recipe == cam_model::ExtractionRecipe::ProfileSilhouette));
+
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::SelectStock));
+        let viewport = app.machining_viewport();
+        let mut clicked = false;
+        for (_, edge) in viewport.setup_geometry.stock_lines() {
+            let midpoint = std::array::from_fn(|i| (edge[0][i] + edge[1][i]) / 2.);
+            let Some((point, _)) = picking_view::project(viewport.camera(), bounds, midpoint)
+            else {
+                continue;
+            };
+            let action = viewport.update(
+                &mut ViewportState::default(),
+                &iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+                bounds,
+                iced::mouse::Cursor::Available(point),
+            );
+            if let Some(action) = action {
+                let (message, _, _) = action.into_inner();
+                if let Some(message @ Message::OperationGeometry(GeometryMessage::ResetStock)) =
+                    message
+                {
+                    let _ = app.update(message);
+                    clicked = true;
+                    break;
+                }
+            }
+        }
+        assert!(clicked, "stock wireframe must be selectable");
+        assert!(app.controller.cad_selection().is_empty());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(matches!(&app.operation_draft, Some(Operation::Pocket(p))
+            if p.stock_contours.enabled && p.stock_contours.source.is_none() && p.stock_contours.regions.is_empty()));
+        assert_eq!(app.controller.operation(0), Some(&before));
+    }
 
     /// Read-only benchmark for the supplied local tray; no project is saved.
     #[test]

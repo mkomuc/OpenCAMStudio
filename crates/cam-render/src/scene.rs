@@ -2,7 +2,7 @@
 //! backplot, plus the pure mapping to GPU vertices. Nothing here touches a GPU,
 //! so it is unit-tested like the rest of the pipeline.
 
-use crate::{PathCone, PATH_IN, PATH_OUT};
+use crate::{PathCone, PATH_OUT};
 use cam_cldata::{MoveKind, Point3, Program, Step};
 use cam_geo::{Arc, Point, Polygon};
 
@@ -216,77 +216,18 @@ impl Scene {
         if cancelled() {
             return None;
         }
+        if program.has_rotary_motion() {
+            return Self::from_program_controlled(&program.rotary_backplot(), cancelled);
+        }
         let mut scene = Scene::new();
         let mut cur: Option<Point3> = None;
-        let mut previous_cone_role = None;
-        let mut approach_top: Option<[f32; 3]> = None;
-        let mut pending_exit_cone: Option<usize> = None;
         for step in program.steps() {
             if cancelled() {
                 return None;
             }
             match step {
-                Step::Rapid { to, tag } => {
-                    if tag.kind == MoveKind::Link {
-                        for point in cur.into_iter().map(point3_f32).chain([point3_f32(*to)]) {
-                            if approach_top.is_none_or(|top| point[2] >= top[2]) {
-                                approach_top = Some(point);
-                            }
-                        }
-                    }
-                    let first_strip = scene.strips.len();
+                Step::Rapid { to, tag } | Step::Linear { to, tag, .. } => {
                     push_segment(&mut scene, cur, *to, *tag);
-                    let cone_count = scene.path_cones.len();
-                    scene.mark_path_motion(
-                        tag.kind,
-                        tag.op_id,
-                        first_strip,
-                        &mut previous_cone_role,
-                    );
-                    if tag.kind == MoveKind::Retract
-                        && pending_exit_cone.take().is_none()
-                        && scene.path_cones.len() > cone_count
-                    {
-                        scene.path_cones.last_mut().unwrap().at = point3_f32(*to);
-                    }
-                    if scene.path_cones.len() > cone_count {
-                        let index = scene.path_cones.len() - 1;
-                        match tag.kind {
-                            MoveKind::Plunge | MoveKind::LeadIn => {
-                                if let Some(top) = approach_top.take() {
-                                    scene.path_cones[index].at = top;
-                                }
-                                pending_exit_cone = None;
-                            }
-                            MoveKind::LeadOut => pending_exit_cone = Some(index),
-                            _ => {}
-                        }
-                    }
-                    cur = Some(*to);
-                }
-                Step::Linear { to, tag, .. } => {
-                    let first_strip = scene.strips.len();
-                    push_segment(&mut scene, cur, *to, *tag);
-                    let cone_count = scene.path_cones.len();
-                    scene.mark_path_motion(
-                        tag.kind,
-                        tag.op_id,
-                        first_strip,
-                        &mut previous_cone_role,
-                    );
-                    if scene.path_cones.len() > cone_count {
-                        let index = scene.path_cones.len() - 1;
-                        match tag.kind {
-                            MoveKind::Plunge | MoveKind::LeadIn => {
-                                if let Some(top) = approach_top.take() {
-                                    scene.path_cones[index].at = top;
-                                }
-                                pending_exit_cone = None;
-                            }
-                            MoveKind::LeadOut => pending_exit_cone = Some(index),
-                            _ => {}
-                        }
-                    }
                     cur = Some(*to);
                 }
                 Step::Arc {
@@ -297,38 +238,11 @@ impl Scene {
                     ..
                 } => {
                     if let Some(start) = cur {
-                        let first_strip = scene.strips.len();
                         push_arc(&mut scene, start, *end, *center, *dir, *tag);
-                        let cone_count = scene.path_cones.len();
-                        scene.mark_path_motion(
-                            tag.kind,
-                            tag.op_id,
-                            first_strip,
-                            &mut previous_cone_role,
-                        );
-                        if scene.path_cones.len() > cone_count {
-                            let index = scene.path_cones.len() - 1;
-                            match tag.kind {
-                                MoveKind::Plunge | MoveKind::LeadIn => {
-                                    if let Some(top) = approach_top.take() {
-                                        scene.path_cones[index].at = top;
-                                    }
-                                    pending_exit_cone = None;
-                                }
-                                MoveKind::LeadOut => pending_exit_cone = Some(index),
-                                _ => {}
-                            }
-                        }
-                        if tag.kind == MoveKind::Retract {
-                            if let Some(index) = pending_exit_cone {
-                                scene.path_cones[index].at = point3_f32(*end);
-                            }
-                        }
                     }
                     cur = Some(*end);
                 }
                 Step::Drill(cycle) => {
-                    // A drilled hole shows as a plunge marker at each point.
                     for &[x, y] in &cycle.points {
                         scene.add_strip_with_owner(
                             vec![
@@ -341,47 +255,28 @@ impl Scene {
                             cycle.tag.pattern_id,
                             cycle.tag.instance_index,
                         );
-                        for (a, b, color) in [
-                            (cycle.z_top, cycle.depth, PATH_IN),
-                            (cycle.depth, cycle.retract, PATH_OUT),
-                        ] {
-                            let start = [x as f32, y as f32, a as f32];
-                            let end = [x as f32, y as f32, b as f32];
-                            if let Some(mut cone) =
-                                PathCone::on_segment(start, end, color, cycle.tag.op_id)
-                            {
-                                cone.at = if color == PATH_IN { start } else { end };
-                                scene.path_cones.push(cone);
-                            }
-                        }
                     }
                     cur = None;
-                    previous_cone_role = None;
                 }
-                // A work-datum change or a program stop breaks the toolpath: the next
-                // group is a different fixturing/orientation, so lift the pen — don't
-                // draw a rapid linking it to where the previous group ended.
-                Step::Datum(_) | Step::Stop => {
-                    cur = None;
-                    previous_cone_role = None;
-                }
-                Step::ToolChange { .. } => previous_cone_role = None,
+                // Separate fixturings must never acquire a connecting line.
+                Step::Datum(_) | Step::Stop => cur = None,
                 _ => {}
             }
         }
+        scene.path_cones = crate::path_markers::main_path_cones(program, cancelled)?;
         scene.deduplicate_path_cones();
         Some(scene)
     }
 
     /// Stepdown passes revisit the same contour entry and exit at different Z
-    /// levels. Keep the first marker at each XY location (the shallowest pass in
-    /// generated toolpaths), while preserving distinct contours and drill points.
+    /// levels. Keep the first entry and final exit at each XY location, while
+    /// preserving distinct contours and drill points.
     fn deduplicate_path_cones(&mut self) {
         const SAME_CONTOUR_XY_MM: f32 = 0.1;
         let tolerance_sq = SAME_CONTOUR_XY_MM * SAME_CONTOUR_XY_MM;
         let mut unique: Vec<PathCone> = Vec::with_capacity(self.path_cones.len());
         for cone in self.path_cones.drain(..) {
-            let same_contour = unique.iter().any(|kept| {
+            let same_contour = unique.iter().position(|kept| {
                 if kept.op != cone.op || kept.color != cone.color {
                     return false;
                 }
@@ -389,54 +284,13 @@ impl Scene {
                 let dy = kept.at[1] - cone.at[1];
                 dx * dx + dy * dy <= tolerance_sq
             });
-            if !same_contour {
-                unique.push(cone);
+            match same_contour {
+                Some(index) if cone.color == PATH_OUT => unique[index] = cone,
+                Some(_) => {}
+                None => unique.push(cone),
             }
         }
         self.path_cones = unique;
-    }
-
-    fn mark_path_motion(
-        &mut self,
-        kind: MoveKind,
-        op: u32,
-        first_strip: usize,
-        previous: &mut Option<(u32, bool)>,
-    ) {
-        let role = match kind {
-            MoveKind::Plunge | MoveKind::LeadIn => Some((op, false)),
-            MoveKind::LeadOut | MoveKind::Retract => Some((op, true)),
-            _ => None,
-        };
-        if role.is_none() {
-            *previous = None;
-            return;
-        }
-        if role != *previous {
-            if let Some(strip) = self.strips.get(first_strip) {
-                let mut pairs = strip.points.windows(2).filter(|p| p[0] != p[1]);
-                let middle = pairs.clone().count() / 2;
-                if let Some(pair) = pairs.nth(middle) {
-                    let color = if matches!(kind, MoveKind::LeadOut | MoveKind::Retract) {
-                        PATH_OUT
-                    } else {
-                        PATH_IN
-                    };
-                    if let Some(mut cone) = PathCone::on_segment(pair[0], pair[1], color, op) {
-                        // Entry markers sit at the start of the plunge/lead-in.
-                        // Exit markers sit where the lead-out ends or the retract
-                        // rapid begins, so they meet the path at its rapid boundary.
-                        cone.at = if matches!(kind, MoveKind::LeadOut | MoveKind::Retract) {
-                            pair[1]
-                        } else {
-                            pair[0]
-                        };
-                        self.path_cones.push(cone);
-                        *previous = role;
-                    }
-                }
-            }
-        }
     }
 
     /// Fade every operation's strips except those in `focus` toward a muted grey,
@@ -682,10 +536,6 @@ fn push_segment(scene: &mut Scene, from: Option<Point3>, to: Point3, tag: cam_cl
     }
 }
 
-fn point3_f32(point: Point3) -> [f32; 3] {
-    [point.x as f32, point.y as f32, point.z as f32]
-}
-
 #[allow(clippy::too_many_arguments)]
 fn push_arc(
     scene: &mut Scene,
@@ -723,6 +573,7 @@ fn push_arc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PATH_IN;
     use cam_cldata::ProgramBuilder;
 
     #[test]
@@ -777,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn a_curved_lead_out_has_a_green_cone_tangent_to_the_arc() {
+    fn a_curved_lead_out_does_not_displace_the_main_retract_marker() {
         let program = ProgramBuilder::new()
             .op(4)
             .feed(100.)
@@ -796,9 +647,130 @@ mod tests {
         assert_eq!(scene.path_cones.len(), 2);
         let exit = scene.path_cones[1];
         assert_eq!((exit.color, exit.op), (PATH_OUT, 4));
-        assert_eq!(exit.at[2], -1.);
-        assert_eq!(exit.direction[2], 0.);
-        assert!(exit.direction[0] > 0. && exit.direction[1] > 0.);
+        assert_eq!(exit.at, [3., 1., 5.]);
+        assert_eq!(exit.direction, [0., 0., 1.]);
+    }
+
+    #[test]
+    fn local_adaptive_leads_and_lifts_have_no_arrows() {
+        let program = ProgramBuilder::new()
+            .op(7)
+            .feed(300.)
+            .rapid(Point3::new(10., 10., 15.), MoveKind::Link)
+            .rapid(Point3::new(10., 10., 5.), MoveKind::Link)
+            .arc(
+                Point3::new(10., 10., -2.),
+                Point3::new(12., 10., -2.),
+                cam_cldata::ArcDir::Ccw,
+                MoveKind::Plunge,
+            )
+            .linear(Point3::new(15., 10., -2.), MoveKind::Cutting)
+            .arc(
+                Point3::new(15.6, 10.6, -1.8),
+                Point3::new(15., 10.6, -1.8),
+                cam_cldata::ArcDir::Ccw,
+                MoveKind::LeadOut,
+            )
+            .rapid(Point3::new(20., 10.6, -1.8), MoveKind::Link)
+            .arc(
+                Point3::new(20.6, 10., -2.),
+                Point3::new(20., 10., -2.),
+                cam_cldata::ArcDir::Cw,
+                MoveKind::LeadIn,
+            )
+            .linear(Point3::new(25., 10., -2.), MoveKind::Cutting)
+            .rapid(Point3::new(25., 10., -1.8), MoveKind::Link)
+            .rapid(Point3::new(25.5, 10., -1.8), MoveKind::Link)
+            .linear(Point3::new(25.5, 10., -2.), MoveKind::Plunge)
+            .linear(Point3::new(30., 10., -2.), MoveKind::Cutting)
+            .arc(
+                Point3::new(30.6, 10.6, -2.),
+                Point3::new(30., 10.6, -2.),
+                cam_cldata::ArcDir::Ccw,
+                MoveKind::LeadOut,
+            )
+            .rapid(Point3::new(30.6, 10.6, 15.), MoveKind::Retract)
+            .build();
+        let scene = Scene::from_program(&program);
+        assert_eq!(
+            scene.path_cones.len(),
+            2,
+            "local transitions must not produce markers"
+        );
+        let [entry, exit] = [scene.path_cones[0], scene.path_cones[1]];
+        assert_eq!(entry.at, [10., 10., 15.]);
+        assert_eq!(entry.direction, [0., 0., -1.]);
+        assert_eq!(entry.color, PATH_IN);
+        assert_eq!(exit.at, [30.6, 10.6, 15.]);
+        assert_eq!(exit.direction, [0., 0., 1.]);
+        assert_eq!(exit.color, PATH_OUT);
+    }
+
+    #[test]
+    fn full_retracts_between_separate_contours_keep_their_markers() {
+        let mut builder = ProgramBuilder::new().op(7).feed(300.);
+        for x in [10., 50.] {
+            builder = builder
+                .rapid(Point3::new(x, 0., 15.), MoveKind::Link)
+                .rapid(Point3::new(x, 0., 5.), MoveKind::Link)
+                .linear(Point3::new(x, 0., -2.), MoveKind::Plunge)
+                .linear(Point3::new(x + 5., 0., -2.), MoveKind::Cutting)
+                .rapid(Point3::new(x + 5., 0., 15.), MoveKind::Retract);
+        }
+        let scene = Scene::from_program(&builder.build());
+        assert_eq!(scene.path_cones.len(), 4);
+        for (markers, x) in scene.path_cones.as_chunks::<2>().0.iter().zip([10., 50.]) {
+            assert_eq!(markers[0].at, [x, 0., 15.]);
+            assert_eq!(markers[1].at, [x + 5., 0., 15.]);
+        }
+    }
+
+    #[test]
+    fn a_helix_without_an_approach_points_down_its_axis() {
+        let program = ProgramBuilder::new()
+            .op(4)
+            .feed(100.)
+            .rapid(Point3::new(2., 0., 5.), MoveKind::Link)
+            .arc(
+                Point3::new(2., 0., -3.),
+                Point3::new(0., 0., -3.),
+                cam_cldata::ArcDir::Ccw,
+                MoveKind::Plunge,
+            )
+            .linear(Point3::new(4., 0., -3.), MoveKind::Cutting)
+            .rapid(Point3::new(4., 0., 5.), MoveKind::Retract)
+            .build();
+        let scene = Scene::from_program(&program);
+        assert_eq!(scene.path_cones[0].at, [2., 0., 5.]);
+        assert_eq!(scene.path_cones[0].direction, [0., 0., -1.]);
+    }
+
+    #[test]
+    fn standalone_curved_in_out_markers_use_the_exact_endpoint_tangents() {
+        let program = ProgramBuilder::new()
+            .op(4)
+            .feed(100.)
+            .rapid(Point3::new(0., 1., 0.), MoveKind::Link)
+            .arc(
+                Point3::new(1., 0., 0.),
+                Point3::new(1., 1., 0.),
+                cam_cldata::ArcDir::Ccw,
+                MoveKind::LeadIn,
+            )
+            .linear(Point3::new(2., 0., 0.), MoveKind::Cutting)
+            .arc(
+                Point3::new(3., 1., 0.),
+                Point3::new(2., 1., 0.),
+                cam_cldata::ArcDir::Ccw,
+                MoveKind::LeadOut,
+            )
+            .build();
+        let scene = Scene::from_program(&program);
+        assert_eq!(scene.path_cones.len(), 2);
+        assert_eq!(scene.path_cones[0].at, [0., 1., 0.]);
+        assert_eq!(scene.path_cones[0].direction, [0., -1., 0.]);
+        assert_eq!(scene.path_cones[1].at, [3., 1., 0.]);
+        assert_eq!(scene.path_cones[1].direction, [0., 1., 0.]);
     }
 
     #[test]

@@ -248,7 +248,8 @@ impl SimulationCache {
         self.surface_sources = enabled;
     }
     /// The same result and collision checks as a fresh simulation. Cancelled work
-    /// cannot become a checkpoint or a published result.
+    /// cannot become a checkpoint or a published result. Rotary programs return
+    /// `None`; use `RotarySimulationCache` with finite tool dimensions for them.
     #[allow(clippy::too_many_arguments)] // Matches the stateless public API plus the cache receiver.
     pub fn simulate_controlled(
         &mut self,
@@ -302,7 +303,7 @@ impl SimulationCache {
         cancelled: &dyn Fn() -> bool,
         mut progress: impl FnMut(usize, usize),
     ) -> Option<SimResult> {
-        if cancelled() {
+        if cancelled() || program.has_rotary_motion() {
             return None;
         }
         let config = Config {
@@ -357,9 +358,15 @@ impl SimulationCache {
                 return None;
             }
             let count = index + 1;
-            if count % 256 == 0 {
+            let current = step.tag().map(|tag| tag.op_id);
+            let next = program
+                .steps()
+                .get(count)
+                .and_then(Step::tag)
+                .map(|tag| tag.op_id);
+            if count % 256 == 0 || (current.is_some() && current != next) {
                 let checkpoint_limit =
-                    (32 * 1024 * 1024 / state.field.storage_bytes().max(1)).min(4);
+                    (32 * 1024 * 1024 / state.field.storage_bytes().max(1)).clamp(1, 4);
                 if checkpoint_limit > 0 {
                     self.checkpoints.push((count, state.clone()));
                 } else {
@@ -398,7 +405,8 @@ impl SimulationCache {
     }
 }
 
-/// Cancellable simulation. A stopped traversal has no complete result.
+/// Cancellable fixed-axis simulation. A stopped traversal or a rotary program
+/// has no result; use `RotarySimulationCache` for fourth-axis verification.
 pub fn simulate_controlled(
     program: &Program,
     min: [f64; 3],
@@ -408,7 +416,7 @@ pub fn simulate_controlled(
     cancelled: &dyn Fn() -> bool,
     progress: impl FnMut(usize, usize),
 ) -> Option<SimResult> {
-    if cancelled() {
+    if cancelled() || program.has_rotary_motion() {
         return None;
     }
     let config = Config {

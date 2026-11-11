@@ -114,18 +114,20 @@ impl App {
         } else {
             draft.options.axis.is_some()
         };
-        let mut controls = row![inspector_button(if draft.picking == Some(axis) {
+        let picking = draft.picking == Some(axis);
+        let mut controls = row![inspector_pick_button(if picking {
             "Selecting…"
         } else if selected {
             "Edge selected"
         } else {
             "Select edge"
-        })
+        }, picking)
         .on_press(reference_action(draft, axis))]
         .spacing(6);
         if selected {
-            controls =
-                controls.push(inspector_button("Reselect").on_press(Message::PatternPick(axis)));
+            controls = controls.push(
+                inspector_pick_button("Reselect", picking).on_press(Message::PatternPick(axis)),
+            );
         }
         controls
             .push(inspector_button("Clear").on_press(Message::PatternClear(axis)))

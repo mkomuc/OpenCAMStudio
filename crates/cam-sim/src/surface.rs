@@ -39,28 +39,31 @@ impl StockMeshCache {
         let width = field.nx.div_ceil(MESH_TILE_SIZE);
         // Tiles read one immutable stock snapshot and own disjoint cache slots.
         // Assembly below stays in tile order, preserving vertex/provenance indices.
-        self.tiles.par_iter_mut().enumerate().try_for_each(|(index, tile)| {
-            if cancelled() {
-                return None;
-            }
-            let revision = field.mesh_revisions[index];
-            if tile.as_ref().is_some_and(|(saved, _)| *saved == revision) {
-                return Some(());
-            }
-            let x = index % width * MESH_TILE_SIZE;
-            let y = index / width * MESH_TILE_SIZE;
-            let mesh = field.solid_mesh_region_controlled(
-                floor,
-                [x, y],
-                [
-                    (x + MESH_TILE_SIZE).min(field.nx),
-                    (y + MESH_TILE_SIZE).min(field.ny),
-                ],
-                cancelled,
-            )?;
-            *tile = Some((revision, mesh));
-            Some(())
-        })?;
+        self.tiles
+            .par_iter_mut()
+            .enumerate()
+            .try_for_each(|(index, tile)| {
+                if cancelled() {
+                    return None;
+                }
+                let revision = field.mesh_revisions[index];
+                if tile.as_ref().is_some_and(|(saved, _)| *saved == revision) {
+                    return Some(());
+                }
+                let x = index % width * MESH_TILE_SIZE;
+                let y = index / width * MESH_TILE_SIZE;
+                let mesh = field.solid_mesh_region_controlled(
+                    floor,
+                    [x, y],
+                    [
+                        (x + MESH_TILE_SIZE).min(field.nx),
+                        (y + MESH_TILE_SIZE).min(field.ny),
+                    ],
+                    cancelled,
+                )?;
+                *tile = Some((revision, mesh));
+                Some(())
+            })?;
         let vertices = self
             .tiles
             .iter()
@@ -356,10 +359,13 @@ impl Heightfield {
         let mut sum = 0.;
         let mut count = 0.;
         let mut cut = false;
-        for v in h.into_iter().flatten() {
-            sum += v;
-            count += 1.;
-            cut |= v < self.top;
+        for (i,v) in h.into_iter().enumerate() {
+            if let Some(v)=v {
+                sum += v;
+                count += 1.;
+                let (cx,cy)=[(x-1,y-1),(x,y-1),(x,y),(x-1,y)][i];
+                cut |= self.top_is_cut(cy as usize*self.nx+cx as usize);
+            }
         }
         let derivative = |edges: [(usize, usize); 2]| {
             let mut sum = 0.;
@@ -492,7 +498,7 @@ impl Heightfield {
                         [a[0], b[1], z],
                     ],
                     up,
-                    z < self.top,
+                    self.top_is_cut(y*self.nx+x),
                     op,
                 );
                 mesh.quad(
@@ -574,13 +580,14 @@ impl Heightfield {
                     };
                     let top = [p[a], p[b]];
                     let mut bottom = [[p[a][0], p[a][1], lower(a)], [p[b][0], p[b][1], lower(b)]];
-                    let mut wall = |upper: [[f32; 3]; 2], lower: [[f32; 3]; 2], op, cut| {
+                    let neighbour_cut=nb.is_some() && self.top_is_cut((y as isize+dy) as usize*self.nx+(x as isize+dx) as usize);
+                    let mut wall = |upper: [[f32; 3]; 2], lower: [[f32; 3]; 2], op:Option<u32>, cut:u32| {
                         if (0..2).any(|i| upper[i][2] - lower[i][2] > 1e-5) {
                             let first = mesh.positions.len();
                             mesh.quad(
                                 [upper[0], upper[1], lower[1], lower[0]],
                                 [n(a), n(b), n(b), n(a)],
-                                nb.is_some(),
+                                neighbour_cut || op.is_some() || cut!=u32::MAX,
                                 op,
                             );
                             mesh.stamp_source(first, self, cut);
@@ -666,12 +673,23 @@ mod tests {
         field.set_surface_tracking(true);
         field.set_cut_source(10, (0., 1.));
         field.cut_segment_profile_controlled(
-            [4., 5., -3.], [40., 43., -2.], &ToolProfile::flat(3.), Some(7), &|| false,
+            [4., 5., -3.],
+            [40., 43., -2.],
+            &ToolProfile::flat(3.),
+            Some(7),
+            &|| false,
         );
-        let build = |threads| rayon::ThreadPoolBuilder::new().num_threads(threads)
-            .build().unwrap().install(|| {
-                StockMeshCache::default().mesh_controlled(&field, -6., &|| false).unwrap()
-            });
+        let build = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    StockMeshCache::default()
+                        .mesh_controlled(&field, -6., &|| false)
+                        .unwrap()
+                })
+        };
         assert_eq!(build(1), build(4));
     }
 

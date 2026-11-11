@@ -15,6 +15,7 @@ fn machine() -> Machine {
         name: "OCS-3018".into(),
         rapid_rate: 2000.0,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: cam_model::Envelope::new(
@@ -32,6 +33,7 @@ fn fixture_path() -> String {
 
 fn profile_op(id: u32, chain: cam_geo::Contour, side: Side, climb: bool) -> Operation {
     Operation::Profile(ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -87,6 +89,8 @@ fn import_and_plan() -> (String, Vec<cam_toolpath::Diagnostic>, usize, usize) {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "part.dxf".into(),
         heights: Heights::new(5.0, 2.0, 0.0),

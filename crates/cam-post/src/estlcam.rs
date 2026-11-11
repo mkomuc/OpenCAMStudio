@@ -76,6 +76,7 @@ impl Post for EstlcamPost {
         let mut spindle_rpm = None;
         for (index, step) in program.steps().iter().enumerate() {
             match step {
+                Step::Rotary {..} => return Err(PostError::Unsupported("Estlcam rotary wrap output".into())),
                 Step::Comment(text) => {
                     let text = sanitize(text);
                     if dedupe {

@@ -5,6 +5,7 @@ use cam_toolpath::{CancelToken, JobCompletion};
 
 fn profile(id: u32, depth: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -177,7 +178,7 @@ fn setups_keep_independent_settings_and_operations_across_switch_save_and_histor
 }
 
 #[test]
-fn switching_setups_discards_the_previous_run_and_cannot_export_its_program() {
+fn switching_setups_exports_only_the_selected_setups_verified_program() {
     let mut app = new_app();
     let first = app.active_setup_id();
     app.edit_setup(|setup| setup.operations.push(profile(1, 2.0)));
@@ -193,7 +194,7 @@ fn switching_setups_discards_the_previous_run_and_cannot_export_its_program() {
         first_run.diagnostics
     );
     let first_program = first_run.program.clone();
-    let _ = app.export_nc();
+    let first_export = app.export_nc().map(str::to_owned);
 
     app.activate_setup(second).unwrap();
     assert!(matches!(app.export_nc(), Err(ExportError::NothingToExport)));
@@ -208,7 +209,8 @@ fn switching_setups_discards_the_previous_run_and_cannot_export_its_program() {
     let _ = app.export_nc();
 
     app.activate_setup(first).unwrap();
-    assert!(matches!(app.export_nc(), Err(ExportError::NothingToExport)));
+    assert_eq!(app.outcome().unwrap().program, first_program);
+    assert_eq!(app.export_nc().map(str::to_owned), first_export);
 }
 
 #[test]
@@ -223,7 +225,7 @@ fn duplicating_a_cad_linked_operation_assigns_a_global_id_and_copies_its_binding
         std::env::temp_dir().join(format!("multi-setup-binding-{}.ocam", std::process::id()));
     source.save_project(&path).unwrap();
     let mut json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        serde_json::from_str(&cam_app::OcamFile::read(&path).unwrap().to_json().unwrap()).unwrap();
     json["document"]["geometry"]["bindings"] = serde_json::json!({
         "1": {
             "selected": [{

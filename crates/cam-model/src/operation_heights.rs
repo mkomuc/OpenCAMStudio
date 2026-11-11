@@ -2,6 +2,9 @@
 use crate::{CuttingHeights, Document, EntityKind, EntityRef, Heights, Operation};
 use serde::{Deserialize, Serialize};
 
+/// Round blank frame and bounds expressed in that frame.
+pub type RoundStockGeometry = (crate::SetupFrame, [f64;3], [f64;3]);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HeightPlaneKind {
     Clearance,
@@ -257,19 +260,21 @@ impl OperationHeightSettings {
         if let Some(resolved) = self.resolved {
             return Ok(resolved);
         }
+        if let Some(view)=document.indexed_view(operation.id())? {return self.resolve(&view,operation);}
         self.validate_structure()?;
         let mut values = [None; 5];
         let mut visiting = [false; 5];
         for p in HeightPlaneKind::ALL {
             self.resolve_plane(p, document, operation, &mut values, &mut visiting)?;
         }
-        let (model_min, model_max) = document.height_model_bounds();
+        let stock_top = if let Some(wrap) = operation.rotary_wrap() {
+            wrap.stock_top(document)?
+        } else {
+            let (model_min, model_max) = document.height_model_bounds();
+            document.setup().stock.resolve_bounds(model_min, model_max).1[2]
+        };
         let resolved = ResolvedOperationHeights {
-            stock_top: document
-                .setup()
-                .stock
-                .resolve_bounds(model_min, model_max)
-                .1[2],
+            stock_top,
             clearance: values[0].unwrap(),
             retract: values[1].unwrap(),
             feed: values[2],
@@ -327,6 +332,22 @@ impl OperationHeightSettings {
     ) -> Result<f64, String> {
         use HeightReference::*;
         let setup = doc.setup();
+        if let Some(wrap) = op.rotary_wrap() {
+            match reference {
+                StockTop => return wrap.stock_top(doc),
+                ModelTop => return Ok(wrap.surface_z),
+                Origin => return Ok(0.),
+                SelectedContours => return match wrap.boundary_z {
+                    Some(height) => Ok(height),
+                    None if wrap.unwrap_geometry && !wrap.geometry.is_empty() => Err(
+                        "Selected contours do not have one radial height; split the wrapped selections or choose an explicit radial plane".into()
+                    ),
+                    None => Ok(doc.operation_base_cutting_heights(op).bottom),
+                },
+                ModelBottom|StockBottom|Selection|FixtureTop|FixtureBottom=>return Err("Wrapped heights use the developed plane; choose a height plane, Origin, or Stock/Model top with a radial offset".into()),
+                _=>{}
+            }
+        }
         let (model_min, model_max) = doc.height_model_bounds();
         let (stock_min, stock_max) = doc.stock_bounds_for(setup);
         Ok(match reference {
@@ -443,9 +464,8 @@ impl Document {
         let Some(binding) = self.geometry.bindings.get(&op.id()) else {
             return Ok(self.operation_base_cutting_heights(op).bottom);
         };
-        // A selected edge chain has its own Z plane. The binding's interval
-        // describes the adjoining wall that is safe to cut, and its bottom can
-        // be well below that plane (or contain an older cached depth).
+        // Profile face contours and selected edge chains have their own Z plane.
+        // A binding's wall interval can extend well below that source plane.
         if matches!(
             binding.recipe,
             crate::ExtractionRecipe::ChamferLoop
@@ -460,7 +480,10 @@ impl Document {
         let references: Vec<_> = match &binding.recipe {
             crate::ExtractionRecipe::ProfileEntries { entries }
                 if entries.iter().all(|entry| {
-                    entry.kind == crate::ProfileGeometryKind::Chain
+                    matches!(
+                        entry.kind,
+                        crate::ProfileGeometryKind::Chain | crate::ProfileGeometryKind::FaceContours
+                    )
                         && matches!(&entry.source, crate::ProfileGeometrySource::Cad(_))
                 }) =>
             {
@@ -477,10 +500,17 @@ impl Document {
             }
             _ => vec![],
         };
+        let profile_faces = matches!(op, Operation::Profile(_))
+            && matches!(
+                binding.recipe,
+                crate::ExtractionRecipe::ProfileEntries { .. }
+                    | crate::ExtractionRecipe::ProfileContours
+            );
         if references.is_empty()
-            || references
-                .iter()
-                .any(|r| !matches!(r.kind, EntityKind::Edge | EntityKind::Loop))
+            || references.iter().any(|r| {
+                !matches!(r.kind, EntityKind::Edge | EntityKind::Loop)
+                    && !(profile_faces && r.kind == EntityKind::Face)
+            })
         {
             return Ok(binding.heights.bottom);
         }
@@ -513,6 +543,10 @@ impl Document {
     /// A chamfer's zero depth means its natural cutter depth, rather than a zero
     /// cutting interval. All other strategies store their target interval directly.
     pub fn operation_base_cutting_heights(&self, op: &Operation) -> CuttingHeights {
+        if let Some(wrap)=op.rotary_wrap() {
+            let depth=match op {Operation::Profile(p)=>p.depth,Operation::Pocket(p)=>p.depth,_=>unreachable!()};
+            return CuttingHeights {top:wrap.surface_z,bottom:wrap.surface_z-depth};
+        }
         if matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)) {
             if let Some(binding) = self.geometry.bindings.get(&op.id()) {
                 return binding.effective_heights();
@@ -564,11 +598,224 @@ impl Document {
         }
         bounds(&points).unwrap_or(([0.; 3], [0.; 3]))
     }
+    /// Conservative radial extent of selected geometry around a line in `frame`.
+    /// Analytic cylinders and planar faces with line/circle boundaries avoid the
+    /// exaggerated diagonal of a cylindrical model's rectangular bounds.
+    fn stock_radial_extent(
+        &self,
+        setup: &crate::Setup,
+        frame: &crate::SetupFrame,
+        center: [f64; 2],
+    ) -> f64 {
+        let radius = |point: [f64; 3]| (point[0] - center[0]).hypot(point[1] - center[1]);
+        let mut largest = 0.0_f64;
+        for instance in &self.geometry.instances {
+            if !setup.model_instances.contains(&instance.id) {
+                continue;
+            }
+            let Some(asset) = self.geometry.asset(instance.asset_id) else {
+                continue;
+            };
+            let topology = &asset.topology;
+            let Some(body) = topology
+                .bodies
+                .iter()
+                .find(|body| body.id == instance.body_id)
+            else {
+                continue;
+            };
+            let transform =
+                |point| frame.to_setup_vector(instance.placement.transform_point(point));
+            let bounds_radius = |bounds| {
+                box_corners(bounds)
+                    .into_iter()
+                    .map(|point| radius(transform(point)))
+                    .fold(0.0, f64::max)
+            };
+            let faces: Vec<_> = topology
+                .faces
+                .iter()
+                .filter(|face| face.body_id == instance.body_id)
+                .collect();
+            if faces.is_empty() {
+                largest = largest.max(bounds_radius(body.bounds));
+            }
+            for face in faces {
+                let estimate = match &face.surface {
+                    crate::CadSurface::Cylinder {
+                        origin,
+                        axis,
+                        radius: r,
+                        ..
+                    } => {
+                        let direction =
+                            frame.to_setup_vector(instance.placement.transform_vector(*axis));
+                        // Bound axial displacement even for a slightly tilted cylinder:
+                        // a tiny angular error can matter on a very long part.
+                        let axial_extent = box_corners(face.bounds)
+                            .into_iter()
+                            .map(|point| {
+                                (0..3)
+                                    .map(|i| (point[i] - origin[i]) * axis[i])
+                                    .sum::<f64>()
+                                    .abs()
+                            })
+                            .fold(0.0, f64::max);
+                        let cylinder_bound = radius(transform(*origin))
+                            + r
+                            + direction[0].hypot(direction[1]) * axial_extent;
+                        cylinder_bound.min(bounds_radius(face.bounds))
+                    }
+                    crate::CadSurface::Plane { .. } => {
+                        let edges: Vec<_> = topology
+                            .edges
+                            .iter()
+                            .filter(|edge| {
+                                edge.body_id == instance.body_id && edge.face_ids.contains(&face.id)
+                            })
+                            .collect();
+                        if edges.is_empty() {
+                            bounds_radius(face.bounds)
+                        } else {
+                            let mut r = 0.0_f64;
+                            let mut analytic = true;
+                            for edge in edges {
+                                match &edge.curve {
+                                    crate::CadCurve::Line { start, end } => {
+                                        r = r
+                                            .max(radius(transform(*start)))
+                                            .max(radius(transform(*end)))
+                                    }
+                                    crate::CadCurve::CircleArc {
+                                        center: c,
+                                        radius: arc_radius,
+                                        ..
+                                    } => r = r.max(radius(transform(*c)) + arc_radius),
+                                    _ => {
+                                        analytic = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if analytic {
+                                r
+                            } else {
+                                bounds_radius(face.bounds)
+                            }
+                        }
+                    }
+                    _ => bounds_radius(face.bounds),
+                };
+                largest = largest.max(estimate);
+            }
+        }
+        for point in self
+            .geometry
+            .drawing_regions
+            .iter()
+            .flat_map(|r| r.outer().points())
+            .chain(self.geometry.drawing_paths.iter().flat_map(|p| p.points()))
+        {
+            largest = largest.max(radius(frame.to_setup_vector([point.x, point.y, 0.])));
+        }
+        largest
+    }
+
+    /// Resolve a round blank in its own frame. Edge references select a direction;
+    /// origin-axis references additionally locate the center at the setup origin.
+    pub fn round_stock_geometry(
+        &self,
+        setup: &crate::Setup,
+    ) -> Result<Option<RoundStockGeometry>, String> {
+        let axis = match setup.stock {
+            crate::Stock::FixedRound { axis, .. } | crate::Stock::RelativeRound { axis, .. } => {
+                axis
+            }
+            _ => return Ok(None),
+        };
+        let references = match axis {
+            Some(crate::StockAxis::Edge(edge)) => Some(crate::FrameReferences {
+                z: Some(crate::FrameAxisReference {
+                    entity: edge.entity(),
+                    flipped: false,
+                }),
+                ..Default::default()
+            }),
+            Some(crate::StockAxis::Origin { origin_axis }) => {
+                let direction = setup.frame.to_world_vector(std::array::from_fn(|i| {
+                    if i == origin_axis.index() {
+                        1.
+                    } else {
+                        0.
+                    }
+                }));
+                let mut refs = crate::FrameReferences::default();
+                refs.stock_axes[2] = Some(direction);
+                Some(refs)
+            }
+            None => None,
+        };
+        let frame = match references {
+            Some(references) => setup
+                .frame
+                .resolve_references(&self.geometry, references)
+                .map_err(|e| format!("Stock axis: {e}"))?,
+            None => setup.frame.clone(),
+        };
+        let mut oriented = setup.clone();
+        oriented.frame = frame.clone();
+        let (model_min, model_max) = self.height_model_bounds_for(&oriented);
+        let (mut min, mut max) = setup.stock.resolve_bounds(model_min, model_max);
+        let center = if matches!(axis, Some(crate::StockAxis::Origin { .. })) {
+            let point = frame.to_setup_vector(
+                setup
+                    .frame
+                    .to_world_vector(setup.origin_position(setup.origin_index)),
+            );
+            [point[0], point[1]]
+        } else {
+            [
+                (model_min[0] + model_max[0]) * 0.5,
+                (model_min[1] + model_max[1]) * 0.5,
+            ]
+        };
+        let radius = match setup.stock {
+            crate::Stock::FixedRound { diameter, .. } => diameter * 0.5,
+            crate::Stock::RelativeRound { radial, .. } => {
+                self.stock_radial_extent(setup, &frame, center) + radial
+            }
+            _ => unreachable!(),
+        };
+        for i in 0..2 {
+            min[i] = center[i] - radius;
+            max[i] = center[i] + radius;
+        }
+        Ok(Some((frame, min, max)))
+    }
+
     /// Enclosing stock bounds in the requested setup's machining axes. Inherited
     /// stock keeps the original blank's enclosure; its removed regions are supplied
     /// by simulation. Resolve directly from the source axes to avoid accumulating
     /// oversized bounding boxes through a chain of rotated setups.
     pub fn stock_bounds_for(&self, setup: &crate::Setup) -> ([f64; 3], [f64; 3]) {
+        if let crate::Stock::FromSolid { instance } = setup.stock {
+            if let Some((instance, body)) = instance.and_then(|id| self.geometry.instance(id)).and_then(|instance| {
+                self.geometry.asset(instance.asset_id).and_then(|a| a.topology.bodies.iter().find(|b| b.id == instance.body_id)).map(|body| (instance, body))
+            }) {
+                let points = box_corners(body.bounds).map(|p| setup.frame.to_setup_vector(instance.placement.transform_point(p)));
+                return bounds(&points).unwrap_or(([0.; 3], [0.; 3]));
+            }
+            return ([0.; 3], [0.; 3]);
+        }
+        match self.round_stock_geometry(setup) {
+            Ok(Some((frame, min, max))) => {
+                let points = box_corners([min, max])
+                    .map(|p| setup.frame.to_setup_vector(frame.to_world_vector(p)));
+                return bounds(&points).unwrap_or(([0.; 3], [0.; 3]));
+            }
+            Err(_) => return ([0.; 3], [0.; 3]),
+            Ok(None) => {}
+        }
         if setup.stock != crate::Stock::PreviousSetup {
             let (min, max) = self.height_model_bounds_for(setup);
             return setup.stock.resolve_bounds(min, max);
@@ -583,8 +830,7 @@ impl Document {
         else {
             return self.height_model_bounds_for(setup);
         };
-        let (min, max) = self.height_model_bounds_for(source);
-        let (min, max) = source.stock.resolve_bounds(min, max);
+        let (min, max) = self.stock_bounds_for(source);
         let points = box_corners([min, max])
             .map(|p| setup.frame.to_setup_vector(source.frame.to_world_vector(p)));
         bounds(&points).unwrap_or(([0.; 3], [0.; 3]))
@@ -775,6 +1021,132 @@ mod tests {
         }));
         doc
     }
+    #[test]
+    fn relative_round_stock_fits_cylindrical_faces_without_bbox_corner_inflation() {
+        let mut document = doc();
+        let cylinder = CadFace {
+            id: 2,
+            body_id: 1,
+            surface: CadSurface::Cylinder {
+                origin: [0., 0., 0.],
+                axis: [0., 0., 1.],
+                radius: 15.,
+                inward: false,
+            },
+            loop_ids: vec![],
+            bounds: [[-15., -15., 0.], [15., 15., 40.]],
+        };
+        let mut faces = vec![cylinder];
+        let mut edges = vec![CadEdge {
+            id: 9,
+            body_id: 1,
+            vertices: [1, 2],
+            face_ids: vec![2],
+            curve: CadCurve::Line {
+                start: [15., 0., 0.],
+                end: [15., 0., 40.],
+            },
+        }];
+        for (id, z) in [(3, 0.), (4, 40.)] {
+            faces.push(CadFace {
+                id,
+                body_id: 1,
+                surface: CadSurface::Plane {
+                    origin: [0., 0., z],
+                    normal: [0., 0., 1.],
+                },
+                loop_ids: vec![],
+                bounds: [[-15., -15., z], [15., 15., z]],
+            });
+            edges.push(CadEdge {
+                id: 10 + id,
+                body_id: 1,
+                vertices: [1, 2],
+                face_ids: vec![id],
+                curve: CadCurve::CircleArc {
+                    center: [0., 0., z],
+                    normal: [0., 0., 1.],
+                    x_axis: [1., 0., 0.],
+                    radius: 15.,
+                    start_angle: 0.,
+                    end_angle: std::f64::consts::PI,
+                },
+            });
+        }
+        document.geometry.assets.push(GeometryAsset {
+            id: 1,
+            revision: 1,
+            name: "Round part".into(),
+            source_format: CadFormat::Step,
+            source_data: vec![].into(),
+            source_units: SourceUnits::Millimetres,
+            backend: "test".into(),
+            import_options: None,
+            import_diagnostics: vec![],
+            source_fingerprint: String::new(),
+            topology: TopologySnapshot {
+                bodies: vec![CadBody {
+                    id: 1,
+                    name: "Body".into(),
+                    valid_solid: true,
+                    bounds: [[-15., -15., 0.], [15., 15., 40.]],
+                }],
+                faces,
+                edges,
+                ..Default::default()
+            }
+            .into(),
+        });
+        document.geometry.instances.push(GeometryInstance {
+            id: 1,
+            asset_id: 1,
+            body_id: 1,
+            name: "Body".into(),
+            placement: Default::default(),
+            visible: true,
+        });
+        let setup = document.setup_mut();
+        setup.model_instances = vec![1];
+        setup.stock = Stock::RelativeRound {
+            radial: 0.,
+            inner_diameter: 0.,
+            bottom: 0.,
+            top: 0.,
+            tube: false,
+            axis: Some(StockAxis::Edge(StockAxisReference {
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                edge_id: 9,
+            })),
+        };
+        let (_, lo, hi) = document
+            .round_stock_geometry(document.setup())
+            .unwrap()
+            .unwrap();
+        assert_eq!((lo, hi), ([-15., -15., 0.], [15., 15., 40.]));
+        if let Stock::RelativeRound { radial, .. } = &mut document.setup_mut().stock {
+            *radial = 2.;
+        }
+        let (_, lo, hi) = document
+            .round_stock_geometry(document.setup())
+            .unwrap()
+            .unwrap();
+        assert_eq!((lo, hi), ([-17., -17., 0.], [17., 17., 40.]));
+        document.setup_mut().origin = [3., 0., 0.];
+        if let Stock::RelativeRound { axis, .. } = &mut document.setup_mut().stock {
+            *axis = Some(StockAxis::Origin {
+                origin_axis: StockOriginAxis::Z,
+            });
+        }
+        let (_, lo, hi) = document
+            .round_stock_geometry(document.setup())
+            .unwrap()
+            .unwrap();
+        assert_eq!((lo, hi), ([-17., -20., 0.], [23., 20., 40.]));
+    }
+
     #[test]
     fn adaptive_height_helpers_are_safe_before_and_after_binding() {
         let mut doc = doc();

@@ -17,11 +17,14 @@ impl App {
         let work_offset = self
             .current_operation(id)
             .map_or(self.controller.active_origin(), Operation::work_offset);
-        let value = value
+        let value = if let Some(wrap)=self.current_operation(id).and_then(Operation::rotary_wrap) {
+            let offset=self.fields.get(&Field::Wrap(super::rotary_view::Number::Offset)).and_then(|s|s.parse::<f64>().ok()).unwrap_or(wrap.offset);
+            wrap.radius+offset+value-wrap.surface_z
+        }else{value
             - self
                 .controller
                 .inspection_setup()
-                .origin_position(work_offset)[2];
+                .origin_position(work_offset)[2]};
         fn precision(text: &str) -> usize {
             let (mantissa, exponent) = text
                 .trim()
@@ -146,7 +149,7 @@ impl App {
         &self,
         id: u32,
     ) -> Result<ResolvedOperationHeights, String> {
-        let mut document = self.controller.document().clone();
+        let mut document = self.rotary_draft_document();
         for tool in &self.operation_tools {
             if !document
                 .setup()
@@ -181,8 +184,47 @@ impl App {
             })
             .collect();
         apply_op_fields(&mut op, &parsed);
-        if let Some(binding) = &self.operation_binding_preview {
+        if op.rotary_wrap().is_some() {
+            let geometry=crate::cad_operations::geometry_for_setup(&document)?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut op)?;
+            return self.edited_height_settings()?.resolve(&document,&op);
+        }
+        if let Operation::Profile(profile) = &mut op {
+            if profile.selections.is_some() {
+                if let Some(mut binding) =
+                    crate::cad_operations::resolve_profile_entries(&document, profile)?
+                {
+                    if let Some(previous) = document.geometry.bindings.get(&id) {
+                        binding.overrides = previous.overrides.clone();
+                    }
+                    document.geometry.bindings.insert(id, binding);
+                } else {
+                    document.geometry.bindings.remove(&id);
+                }
+            } else if let Some(binding) = &self.operation_binding_preview {
+                document.geometry.bindings.insert(id, binding.clone());
+            }
+        } else if let Some(binding) = &self.operation_binding_preview {
             document.geometry.bindings.insert(id, binding.clone());
+        }
+        if document.rotary_indexes.contains_key(&id)
+            && !matches!(&op, Operation::Profile(p) if p.selections.is_some())
+        {
+            if let Some(mut binding) = document.geometry.bindings.get(&id).cloned() {
+                if crate::cad_operations::surface_recipe(&binding.recipe) {
+                    let cutting = document.operation_base_cutting_heights(&op);
+                    binding.heights.bottom = binding.heights.top - cutting.depth();
+                }
+                if matches!(binding.recipe, cam_model::ExtractionRecipe::FaceRegion) {
+                    if let Some(view) = document.indexed_view(id)? {
+                        binding.heights.top = view.stock_bounds_for(view.setup()).1[2];
+                    }
+                }
+                let geometry = crate::cad_operations::geometry_for_operation(&document, id)?;
+                binding.heights = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?.heights;
+                binding.overrides = cam_model::GeometryOverrides::default();
+                document.geometry.bindings.insert(id, binding);
+            }
         }
         self.edited_height_settings()?.resolve(&document, &op)
     }
@@ -255,7 +297,7 @@ impl App {
                 section = section.push(
                     row![
                         help_wrap(
-                            text("From").size(12).width(50),
+                            text("From").size(12).width(70),
                             illustrated_help::height_help(plane),
                             self.tooltips
                         ),
@@ -278,7 +320,7 @@ impl App {
                     section = section.push(
                         row![
                             help_wrap(
-                                text("Offset").size(12).width(50),
+                                text("Offset (mm)").size(12).width(70),
                                 illustrated_help::height_help(plane),
                                 self.tooltips
                             ),
@@ -295,7 +337,6 @@ impl App {
                                     }
                                     style
                                 }),
-                            text("mm").size(11)
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center),
@@ -338,11 +379,11 @@ impl App {
                     if needs_geometry {
                         section = section.push(
                             row![
-                                inspector_button(if self.height_reference_pick == Some(plane) {
+                                inspector_pick_button(if self.height_reference_pick == Some(plane) {
                                     "Done picking"
                                 } else {
                                     "Pick reference geometry"
-                                })
+                                }, self.height_reference_pick == Some(plane))
                                 .on_press(Message::HeightPickToggle(plane)),
                                 inspector_button("Clear")
                                     .on_press(Message::HeightSelectionClear(plane))
@@ -418,7 +459,8 @@ impl App {
                         if let Some(z) = heights.plane(plane) {
                             section = section.push(
                                 text(format!(
-                                    "WCS Z {} mm",
+                                    "{} {} mm",
+                                    if self.current_operation(id).and_then(Operation::rotary_wrap).is_some(){"Radius"}else{"WCS Z"},
                                     self.height_display_value(id, plane, z)
                                 ))
                                 .size(11)
@@ -440,6 +482,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_maximum_z_sets_automatic_tool_change_height_without_changing_travel() {
+        let mut machine = crate::default_machine();
+        assert_eq!(machine.envelope.extent().2, 100.0);
+        assert_eq!(machine.envelope.max.z, 50.0);
+        set_machine_z_limits(&mut machine.envelope, 100.0, 100.0);
+        assert_eq!(machine.envelope.extent().2, 100.0);
+        assert_eq!(machine.envelope.min.z, 0.0);
+
+        let mut controller = AppController::new(machine);
+        controller.edit_setup(|setup| setup.origin[2] = 12.0);
+        let setup = controller.inspection_setup();
+        assert_eq!(
+            setup.resolved_tool_change_height(controller.machine().envelope.max.z)
+                - setup.origin[2],
+            100.0
+        );
+    }
 
     #[test]
     fn tool_change_height_uses_wcs_values_in_the_setup_inspector() {

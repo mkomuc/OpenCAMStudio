@@ -32,15 +32,15 @@ impl App {
                 let operation = progress
                     .operation
                     .map_or(String::new(), |id| format!(" · operation #{id}"));
-                format!(
-                    "Calculating toolpaths{operation} · {} / {} operations complete",
-                    progress.completed, progress.total
-                )
+                format!("Calculating toolpaths{operation}…")
             }
             JobPhase::Verification if progress.total > 0 => format!(
-                "Verifying toolpaths · {:.0}%",
+                "Verifying toolpaths{} · {:.0}%",
+                if self.controller.run_preview().is_some() { " · preview is unverified" } else { "" },
                 (progress.completed as f64 / progress.total as f64).clamp(0.0, 1.0) * 100.0
             ),
+            JobPhase::Verification if self.controller.run_preview().is_some() =>
+                "Verifying toolpaths · preview is unverified…".into(),
             JobPhase::Verification => "Verifying toolpaths…".into(),
             JobPhase::RenderPreparation => "Preparing preview…".into(),
         };
@@ -198,6 +198,11 @@ impl App {
         self.operation_draft = None;
         self.controller
             .select(operation.map_or(Selection::Setup, Selection::Operation));
+        if let Some(id) = operation {
+            self.seed_rotary_index_draft(id);
+        } else {
+            self.rotary_index_draft = None;
+        }
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
         self.controller
@@ -220,7 +225,6 @@ impl App {
                 if action == ToolpathAction::Simulate {
                     self.pending_simulation = Some(stamp.clone());
                     self.show_stock = true;
-                    self.set_pane_visible(Pane::Output, true);
                 }
                 if action == ToolpathAction::ProcessingTime {
                     self.pending_processing_time =
@@ -318,7 +322,42 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+
+    #[test]
+    fn simulation_preserves_output_pane_visibility() {
+        for visible in [false, true] {
+            let (mut app, _) = App::new();
+            app.controller
+                .open_dxf(SAMPLE_DXF, "simulation.dxf")
+                .unwrap();
+            app.end_setup_draft();
+            app.controller
+                .add_operation(Operation::Drill(cam_model::DrillOp {
+                    id: 0,
+                    tool: 1,
+                    points: vec![[10., 10.]],
+                    depth: 2.,
+                    start_offset: 0.,
+                    peck: None,
+                    dwell: None,
+                    spindle_rpm: 1000.,
+                    tool_preset: None,
+                    cooling: Default::default(),
+                    entry_feeds: Default::default(),
+                    work_offset: 1,
+                    feed: 100.,
+                }));
+            app.controller.select(Selection::Setup);
+            app.refresh_fields();
+            app.set_pane_visible(Pane::Output, visible);
+            let setup = app.controller.inspection_setup().id;
+
+            let _ = app.toolpath_command(TreeNode::Setup(setup), ToolpathAction::Simulate);
+
+            assert!(app.pending_simulation.is_some(), "{}", app.status);
+            assert_eq!(app.pane_handle(Pane::Output).is_some(), visible);
+        }
+    }
 
     #[test]
     fn opening_saved_paths_reuses_them_and_legacy_projects_wait_for_a_user_run() {
@@ -334,21 +373,12 @@ mod tests {
         let (mut app, _) = App::new();
         app.library.tools.clear();
         app.open_project(&path).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while app.controller.run_needs_poll() {
-            app.controller.poll_run();
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(app.controller.cache_stats().computed, 0);
-        assert_eq!(
-            app.controller.cache_stats().reused,
-            source.document().setup().operations.len()
-        );
-        assert!(app.controller.outcome().is_some());
+        assert!(!app.controller.run_needs_poll(), "saved verification must not start a worker");
+        assert_eq!(app.controller.outcome().unwrap().program, source.outcome().unwrap().program);
+        assert_eq!(app.controller.outcome().unwrap().collisions, source.outcome().unwrap().collisions);
 
         let mut legacy: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&crate::OcamFile::read(&path).unwrap().to_json().unwrap()).unwrap();
         legacy.as_object_mut().unwrap().remove("toolpaths");
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         app.open_project(&path).unwrap();

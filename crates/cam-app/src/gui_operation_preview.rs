@@ -188,6 +188,12 @@ impl App {
     }
 
     pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
+        if let Some(wrap) = self.operation_draft.as_ref().and_then(Operation::rotary_wrap) {
+            if self.wrapped_pocket_geometry_editor() {
+                return self.controller.cad_selection().to_vec();
+            }
+            return wrap.geometry.iter().chain(wrap.cylinder.iter()).cloned().collect();
+        }
         if let Some(draft) = &self.pattern_draft {
             return draft
                 .highlighted
@@ -232,6 +238,9 @@ impl App {
 
     pub(super) fn operation_geometry_preview(&self) -> Scene {
         let mut scene = Scene::new();
+        if self.wrapped_pocket_geometry_editor() {
+            return scene;
+        }
         let (operation, binding) = if self.creating_operation() {
             match self.creation_operation() {
                 Ok((op, binding)) => (Some(op), binding),
@@ -241,6 +250,7 @@ impl App {
             let operation = self.operation_draft.clone();
             let binding = operation
                 .as_ref()
+                .filter(|op| op.rotary_wrap().is_none())
                 .and_then(|op| {
                     self.operation_binding_preview
                         .as_ref()
@@ -249,9 +259,19 @@ impl App {
                 .cloned();
             (operation, binding)
         };
-        let Some(op) = operation else {
+        let Some(mut op) = operation else {
             return scene;
         };
+        if op.rotary_wrap().is_some() {
+            if let Ok(geometry)=crate::cad_operations::geometry_for_setup(self.controller.document()) {
+                if crate::cad_operations::resolve_wrapped_operation(&geometry,&mut op).is_err(){return scene;}
+            }
+        }
+        // The saved binding and cached operation contours still describe the old
+        // selection while the geometry picker is open.
+        if self.cad_editing_op.is_some() || self.drawing_editing_op.is_some() {
+            return scene;
+        }
         let frame = &self.controller.inspection_setup().frame;
         let mut outlines = Vec::new();
         let mut centers = Vec::new();
@@ -328,6 +348,10 @@ impl App {
                 Operation::Pocket(p) => {
                     outlines.push((p.boundary.points().to_vec(), true));
                     outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
+                    for region in &p.additional_regions {
+                        outlines.push((region.outer().points().to_vec(), true));
+                        outlines.extend(region.holes().iter().map(|c| (c.points().to_vec(), true)));
+                    }
                 }
                 Operation::Carve(p) => {
                     outlines.push((p.boundary.points().to_vec(), true));
@@ -344,6 +368,25 @@ impl App {
                 Operation::Thread(p) => centers.extend(p.points.iter().copied()),
                 Operation::Profile(_) | Operation::Adaptive(_) | Operation::Parallel(_) => {}
             }
+        }
+        if let Some(wrap)=op.rotary_wrap() {
+            let mut program=cam_cldata::Program::new();
+            let tag=cam_cldata::Tag::new(op.id(),cam_cldata::MoveKind::Cutting);
+            for (mut points,closed) in outlines {
+                if closed {if let Some(first)=points.first().copied(){points.push(first);}}
+                for (i,point) in points.iter().enumerate() {
+                    let to=cam_cldata::Point3::new(point.x,point.y,wrap.surface_z);
+                    program.push(if i==0 {cam_cldata::Step::Rapid{to,tag}}else{cam_cldata::Step::Linear{to,feed:1.,tag}});
+                }
+            }
+            if let Ok(wrapped)=cam_toolpath::wrap_program(&program,wrap,&cam_toolpath::CancelToken::new()) {
+                scene=Scene::from_program(&wrapped);
+                for strip in &mut scene.strips {
+                    strip.color=PICK_BOUNDARY;strip.width=3.;
+                    for point in &mut strip.points {*point=frame.to_world_vector(point.map(f64::from)).map(|n|n as f32);}
+                }
+            }
+            return scene;
         }
         for (points, closed) in outlines {
             let mut world: Vec<_> = points
@@ -398,6 +441,15 @@ impl App {
                     }
                 }
             }
+        }
+        let index=if self.operation_draft.is_some(){self.rotary_index_draft.as_ref()}else{self.controller.document().rotary_indexes.get(&op.id())};
+        if let Some(index)=index {
+            let center=cam_cldata::Point3::new(index.center[0],index.center[1],index.center[2]);
+            for strip in &mut scene.strips {for point in &mut strip.points {
+                let p=frame.to_setup_vector(point.map(f64::from));
+                let p=index.axis.material_point(cam_cldata::Point3::new(p[0],p[1],p[2]),center,index.angle);
+                *point=frame.to_world_vector([p.x,p.y,p.z]).map(|v|v as f32);
+            }}
         }
         scene
     }
@@ -527,8 +579,18 @@ impl App {
                     normal
                 };
                 let base = vertices.len() as u32;
+                let normal = if let Some(index) = &self.rotary_index_draft {
+                    let n = index.axis.material_point(
+                        cam_cldata::Point3::new(normal[0], normal[1], normal[2]),
+                        cam_cldata::Point3::new(0., 0., 0.),
+                        index.angle,
+                    );
+                    [n.x, n.y, n.z]
+                } else {
+                    normal
+                };
                 vertices.extend(quad.map(|corner| MeshVertex {
-                    position: frame.to_world_vector(corners[corner]).map(|v| v as f32),
+                    position: rotary_view::index_point_to_world(frame, self.rotary_index_draft.as_ref(), corners[corner]).map(|v| v as f32),
                     normal: frame.to_world_vector(normal).map(|v| v as f32),
                     color,
                 }));

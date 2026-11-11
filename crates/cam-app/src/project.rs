@@ -1,17 +1,10 @@
-//! The on-disk `.ocam` format — a self-contained JSON snapshot. A single file family
-//! (`TOOLING_PLAN.md` §3.1) carries **either** a [`Project`] (a machining session) or a
-//! [`ToolLibrary`], distinguished by an explicit top-level `"ocam"` tag rather than by
-//! sniffing the contents. A pre-tag project (a bare [`Project`] object) still loads via
-//! the legacy fallback in [`OcamFile::from_json`].
+//! Self-contained `.ocam` projects use versioned ZIP containers with editable
+//! JSON and losslessly compressed material-state caches. Display meshes rebuild
+//! from that state at the saved resolution. Legacy tagged/untagged JSON projects
+//! still load; tool libraries remain tagged JSON.
 //!
-//! ## Reading is a two-stage operation
-//!
-//! Since schema v10 a saved project is **migrated before it is deserialized**: the text
-//! is parsed to a JSON tree, [`cam_model::migrate`] brings the embedded document up to
-//! [`SCHEMA_VERSION`](cam_model::SCHEMA_VERSION), and only then does serde build a
-//! [`Document`]. Every load goes through it, including one already at the current
-//! version, so the migrating path is the ordinary path rather than a rarely-exercised
-//! branch.
+//! All embedded documents pass through [`cam_model::migrate`] before typed
+//! deserialization and validation, including documents in current-format archives.
 
 use std::collections::BTreeSet;
 
@@ -20,11 +13,13 @@ use cam_model::{migrate, Document};
 
 use crate::tool_library::ToolLibrary;
 use crate::JobParams;
+#[path = "project_archive.rs"]
+mod archive;
 
 /// Why a `.ocam` file could not be read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LoadError {
-    /// The bytes are not the JSON this format is made of.
+    /// Invalid JSON, archive contents or project data.
     Json(String),
     /// The file parsed, but its document could not be brought to the current schema.
     Migration(migrate::MigrationError),
@@ -126,7 +121,10 @@ impl OcamFile {
     /// build is refused rather than read leniently, because importing one replaces the
     /// working tool set.
     pub fn from_json(text: &str) -> Result<Self, LoadError> {
-        let mut value: serde_json::Value = serde_json::from_str(text)?;
+        Self::from_value(serde_json::from_str(text)?)
+    }
+
+    fn from_value(mut value: serde_json::Value) -> Result<Self, LoadError> {
 
         // The tag decides what this is. A project — tagged or, for a pre-tag file,
         // untagged — is migrated before serde sees it; anything else goes straight
@@ -173,6 +171,36 @@ pub struct StoredToolpaths {
     pub cache: cam_toolpath::OperationCache,
     /// Each value combines the local input hash and the ordered dependency hash.
     pub fingerprints: std::collections::BTreeMap<u32, String>,
+    /// Completed, full-setup verification results, keyed by setup identity.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub verification: std::collections::BTreeMap<u64, StoredVerification>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredVerification {
+    pub fingerprint: String,
+    pub program: cam_cldata::Program,
+    pub diagnostics: Vec<cam_toolpath::Diagnostic>,
+    pub collisions: Vec<cam_sim::Collision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_snapshot: Option<cam_sim::StockSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_stock_snapshot: Option<cam_sim::StockSnapshot>,
+    /// Archive manifests with missing/corrupt derived data must not restore a result.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_stock_cache: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_stock: Option<(Vec<cam_render::MeshVertex>, Vec<u32>)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stock_vertices: Vec<cam_render::MeshVertex>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stock_indices: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stock_machined: Vec<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stock_operations: Vec<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stock_cut_sources: Vec<Option<cam_sim::SurfaceLocation>>,
 }
 
 /// A stable project-browser node, shared with the persisted view.
@@ -341,6 +369,12 @@ impl Project {
                     ));
                 }
             }
+            if let cam_model::Stock::FromSolid { instance } = setup.stock {
+                let valid = instance.and_then(|id| self.document.geometry.instance(id)).and_then(|body| {
+                    self.document.geometry.asset(body.asset_id).and_then(|asset| asset.topology.bodies.iter().find(|b| b.id == body.body_id && b.valid_solid))
+                }).is_some();
+                if !valid { return Err(format!("setup {} refers to an unavailable stock solid", setup.name)); }
+            }
             if let cam_model::Stock::FixedBox {
                 size,
                 model_position,
@@ -438,9 +472,9 @@ impl Project {
 }
 
 /// Write a validated self-contained snapshot without exposing a half-written project.
-pub(crate) fn atomic_save(path: &std::path::Path, json: &str) -> Result<(), String> {
-    use std::io::Write;
-    OcamFile::from_json(json).map_err(|e| e.to_string())?;
+pub(crate) fn atomic_save(path: &std::path::Path, project: &Project) -> Result<(), String> {
+    project.validate()?;
+    project.document.geometry.validate()?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -463,11 +497,12 @@ pub(crate) fn atomic_save(path: &std::path::Path, json: &str) -> Result<(), Stri
             .open(&temp)
             .map_err(|e| e.to_string())?;
         owned = true;
-        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        archive::write(&mut file, project)?;
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
-        let check = std::fs::read_to_string(&temp).map_err(|e| e.to_string())?;
-        OcamFile::from_json(&check).map_err(|e| e.to_string())?;
+        let check = std::fs::File::open(&temp).map_err(|e| e.to_string())?;
+        let restored = archive::read(check, true).map_err(|e| e.to_string())?;
+        if let OcamFile::Project(restored) = restored { restored.document.geometry.validate()?; }
         std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -532,7 +567,7 @@ mod tests {
     /// generated. A fixture built by serializing today's `Project` would silently follow
     /// the model forward and stop being a v9 file the moment the schema moved again —
     /// which is the one thing it must never do.
-    fn v9_project_json() -> String {
+    pub(super) fn v9_project_json() -> String {
         serde_json::json!({
             "ocam": "project",
             "schema_version": 9,

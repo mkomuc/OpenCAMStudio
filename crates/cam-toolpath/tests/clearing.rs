@@ -33,6 +33,7 @@ fn machine() -> Machine {
         name: "OCS-3018".into(),
         rapid_rate: 2000.0,
         tool_change_seconds: 0.0,
+        min_spindle_rpm: 0.0,
         max_spindle_rpm: 10_000.0,
         max_feed: 800.0,
         envelope: cam_model::Envelope::new(
@@ -72,6 +73,8 @@ fn setup(operations: Vec<Operation>, tools: Vec<Tool>) -> Document {
         material: String::new(),
         material_id: None,
         model_instances: Vec::new(),
+        fixture_instances: Vec::new(),
+        fixture_clearance: Default::default(),
         program_name: String::new(),
         name: "clearing".into(),
         heights: Heights::new(CLEARANCE, RETRACT, TOP),
@@ -193,6 +196,9 @@ fn assert_no_rapid_onto_uncut_stock(program: &Program, floor: f64) {
 /// A 60×40 pocket with a 10×10 island, cleared in two levels by a ⌀6 end mill.
 fn pocket_doc() -> Document {
     let op = PocketOp {
+        wrap: None,
+        additional_regions: Vec::new(),
+        stock_contours: Default::default(),
         finishing: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
@@ -227,6 +233,7 @@ fn pocket_doc() -> Document {
 /// An outside profile with radial roughing — the *other* caller of the clearing engine.
 fn roughing_doc() -> Document {
     let op = ProfileOp {
+        wrap: None,
         passes: Default::default(),
         selections: None,
         closed: true,
@@ -655,6 +662,271 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
         "the adaptive island clear must simulate without collisions, got: {:?}",
         sim.collisions
     );
+}
+
+#[test]
+fn adaptive_reference_pocket_uses_lifted_rapid_links_and_clears_each_depth() {
+    use cam_sim::{simulate, SimOptions, SimTool, ToolProfile};
+    // Recreate cnc_test.ocam and the NC reference's pocket/cutter dimensions.
+    // No external projects, CAD kernel, GUI, or skipped fixture checks.
+    for (engagement, stepdown, plunge, allowance) in [
+        (1.5, 2., Plunge::Straight, 0.),
+        (
+            2.4,
+            6.,
+            Plunge::Helix {
+                radius: 2.,
+                pitch: 1.,
+            },
+            0.,
+        ),
+        (2.4, 6., Plunge::Straight, 0.4),
+    ] {
+        let mut doc = pocket_doc();
+        let Operation::Pocket(op) = &mut doc.setups[0].operations[0] else {
+            unreachable!()
+        };
+        op.boundary = rect(10., -10., 40., 10.);
+        op.islands.clear();
+        op.depth = 6.;
+        op.clear.stepdown = stepdown;
+        op.clear.plunge = plunge;
+        op.clear.offset = allowance;
+        op.clear.clearing.engagement = engagement;
+        let (program, nc) = post(&doc, "adaptive-reference-pocket");
+        program.validate().unwrap();
+        assert!(nc.contains("Z-6.000"));
+        let mut previous = None;
+        let mut cutting_travel = 0.;
+        let mut lifts = 0;
+        let mut short_lifts = 0;
+        let mut rapid_travel = 0.;
+        let mut middle_wall_cut = 0.;
+        let mut depths = std::collections::BTreeSet::new();
+        for step in program.steps() {
+            let end = match step {
+                Step::Rapid { to, .. } => {
+                    if let Some(p) = previous {
+                        let p: cam_cldata::Point3 = p;
+                        if p.z < 0. && to.z > p.z + 1e-6 {
+                            if to.z >= CLEARANCE {
+                                lifts += 1;
+                            } else {
+                                short_lifts += 1;
+                                assert!((to.z - p.z - 0.2).abs() < 1e-6);
+                            }
+                        }
+                        if p.z < 0. && (p.z - to.z).abs() < 1e-6 {
+                            rapid_travel += (p.x - to.x).hypot(p.y - to.y);
+                            assert!((13.6 + allowance - 0.001..=36.4 - allowance + 0.001)
+                                .contains(&to.x));
+                            assert!((-6.4 + allowance - 0.001..=6.4 - allowance + 0.001)
+                                .contains(&to.y));
+                        }
+                    }
+                    *to
+                }
+                Step::Linear { to, tag, .. } => {
+                    if tag.kind == MoveKind::Cutting {
+                        let p = previous.unwrap();
+                        cutting_travel += (p.x - to.x).hypot(p.y - to.y);
+                        depths.insert((-to.z * 1000.).round() as i32);
+                        if (p.y - to.y).abs() < 0.02 && (to.y.abs() - (7. - allowance)).abs() < 0.02
+                        {
+                            middle_wall_cut +=
+                                (p.x.max(to.x).min(25.5) - p.x.min(to.x).max(24.5)).max(0.);
+                        }
+                        assert!((13. + allowance - 0.02..=37. - allowance + 0.02).contains(&to.x));
+                        assert!((-7. + allowance - 0.02..=7. - allowance + 0.02).contains(&to.y));
+                    }
+                    *to
+                }
+                Step::Arc { end, .. } => *end,
+                _ => continue,
+            };
+            previous = Some(end);
+        }
+        let levels = (6. / stepdown) as usize;
+        assert_eq!(lifts, levels, "only one retract per cutting depth");
+        eprintln!("stepover {engagement}: short lifts {short_lifts}, rapid {rapid_travel}, middle wall {middle_wall_cut}");
+        assert!(short_lifts >= 4 * levels);
+        assert!(rapid_travel > 30. * levels as f64);
+        assert!(
+            middle_wall_cut <= 2.01 * levels as f64,
+            "middle of each long wall should cut once: {middle_wall_cut}"
+        );
+        assert_eq!(depths.len(), levels);
+        // Old frontier loops travelled 782 / 555 mm per level respectively.
+        let limit = if engagement == 1.5 { 680. } else { 500. };
+        assert!(cutting_travel < limit * levels as f64, "{cutting_travel}");
+        for resolution in [0.25, 0.5] {
+            let sim = simulate(
+                &program,
+                [9., -11., -8.],
+                [41., 11., 0.],
+                &SimOptions {
+                    resolution,
+                    tool_radius: 3.,
+                },
+                &[SimTool {
+                    number: 1,
+                    profile: ToolProfile::flat(3.),
+                    noncutting_tip_radius: None,
+                }],
+            );
+            assert!(sim.is_clean(), "{:?}", sim.collisions);
+            for x in 14..=36 {
+                for y in -6..=6 {
+                    assert!(
+                        sim.field.sample(x as f64, y as f64) <= -5.99,
+                        "uncut floor at {x},{y}"
+                    );
+                }
+            }
+            assert_eq!(
+                sim.field.sample(9.5, 0.),
+                0.,
+                "outside wall must remain intact"
+            );
+            assert_eq!(sim.field.sample(40.5, 0.), 0.);
+            if allowance > 0. {
+                assert_eq!(sim.field.sample(10.125, 0.), 0., "reserved wall stock");
+            }
+        }
+    }
+}
+
+#[test]
+fn configured_adaptive_leads_are_posted_as_arcs_and_simulate_cleanly() {
+    use cam_sim::{simulate, SimOptions, SimTool, ToolProfile};
+    for (overlap, finishing) in [(0., false), (0.75, false), (0., true), (0.75, true)] {
+        let mut doc = pocket_doc();
+        let Operation::Pocket(op) = &mut doc.setups[0].operations[0] else {
+            unreachable!()
+        };
+        op.boundary = rect(10., -10., 40., 10.);
+        op.islands.clear();
+        op.depth = 6.;
+        op.clear.stepdown = 6.;
+        op.clear.clearing.engagement = 2.4;
+        op.clear.lead_in = Lead::Arc { radius: 0.6 };
+        op.clear.lead_out = Lead::Arc { radius: 0.6 };
+        op.clear.lead_overlap = overlap;
+        op.finishing.enabled = finishing;
+        op.finishing.count = 1;
+        op.finishing.stepover = 0.4;
+        op.entry_feeds.lead_in = Some(123.);
+        op.entry_feeds.lead_out = Some(234.);
+        let (program, nc) = post(&doc, "adaptive-configured-leads");
+        program.validate().unwrap();
+        let mut incoming = 0;
+        let mut outgoing = 0;
+        for step in program.steps() {
+            if let Step::Arc {
+                end,
+                center,
+                feed,
+                tag,
+                ..
+            } = step
+            {
+                if matches!(tag.kind, MoveKind::LeadIn | MoveKind::LeadOut) {
+                    assert!(((end.x - center.x).hypot(end.y - center.y) - 0.6).abs() < 1e-10);
+                    if tag.kind == MoveKind::LeadIn {
+                        incoming += 1;
+                        assert_eq!(*feed, 123.);
+                        assert_eq!(end.z, -6.);
+                    } else {
+                        outgoing += 1;
+                        assert_eq!(*feed, 234.);
+                    }
+                }
+            }
+        }
+        assert!(
+            incoming >= 5 && outgoing >= 5,
+            "configured leads must not force concentric clearing: {incoming}/{outgoing}"
+        );
+        assert!(nc.contains("G2 ") || nc.contains("G3 "));
+        for resolution in [0.25, 0.5] {
+            let sim = simulate(
+                &program,
+                [9., -11., -8.],
+                [41., 11., 0.],
+                &SimOptions {
+                    resolution,
+                    tool_radius: 3.,
+                },
+                &[SimTool {
+                    number: 1,
+                    profile: ToolProfile::flat(3.),
+                    noncutting_tip_radius: None,
+                }],
+            );
+            assert!(sim.is_clean(), "{:?}", sim.collisions);
+            for x in 14..=36 {
+                for y in -6..=6 {
+                    assert!(
+                        sim.field.sample(x as f64, y as f64) <= -5.99,
+                        "uncut floor at {x},{y}"
+                    );
+                }
+            }
+            assert_eq!(sim.field.sample(9.5, 0.), 0.);
+            assert_eq!(sim.field.sample(40.5, 0.), 0.);
+        }
+    }
+}
+
+#[test]
+fn saved_adaptive_stepover_paths_are_recomputed_after_travel_trimming() {
+    use cam_toolpath::{JobEnv, OperationCache, StrategyResult};
+    for mut doc in [pocket_doc(), roughing_doc(), carve_doc()] {
+        for enabled in [false, true] {
+            let op = &mut doc.setups[0].operations[0];
+            let engagement = if enabled { 2.4 } else { 0. };
+            match op {
+                Operation::Pocket(p) => p.clear.clearing.engagement = engagement,
+                Operation::Profile(p) => p.clearing.engagement = engagement,
+                Operation::Carve(p) => {
+                    p.clear.as_mut().unwrap().params.clearing.engagement = engagement
+                }
+                _ => unreachable!(),
+            }
+            let env = JobEnv {
+                heights: Heights::new(5., 2., 0.),
+                tools: &[],
+                stock: None,
+                spindle: SpindleDir::Cw,
+            };
+            let token = CancelToken::new();
+            let mut cache = OperationCache::default();
+            cache.compute(op, &env, &token, StrategyResult::default);
+            let revisions = if enabled {
+                vec![None, Some(0), Some(1), Some(2)]
+            } else {
+                vec![None, Some(0)]
+            };
+            for revision in revisions {
+                let mut saved = serde_json::to_value(&cache).unwrap();
+                let key = saved["entries"][0]["key"].as_object_mut().unwrap();
+                if let Some(revision) = revision {
+                    key.insert(
+                        "adaptive_clearing_revision".into(),
+                        serde_json::json!(revision),
+                    );
+                } else {
+                    key.remove("adaptive_clearing_revision");
+                }
+                let mut reopened: OperationCache = serde_json::from_value(saved).unwrap();
+                reopened.compute(op, &env, &token, StrategyResult::default);
+                assert_eq!(reopened.stats.computed, usize::from(enabled));
+                assert_eq!(reopened.stats.reused, usize::from(!enabled));
+                reopened.compute(op, &env, &token, || panic!("current path must be reused"));
+                assert_eq!(reopened.stats.reused, 1 + usize::from(!enabled));
+            }
+        }
+    }
 }
 
 /// A steered clear must actually **traverse** the stock it has already removed.

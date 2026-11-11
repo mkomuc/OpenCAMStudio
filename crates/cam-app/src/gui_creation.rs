@@ -69,6 +69,11 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
+        self.rotary_pick=None;
+        self.rotary_wrap_draft=None;
+        self.rotary_index_draft=None;
+        self.rotary_index_mode=rotary_view::IndexMode::Manual;
+        self.seed_rotary_index_values();
         self.cutting_force_inputs
             .remove(&(self.controller.inspection_setup().id, None));
         self.thread_parameters = thread_parameters::ThreadParameters::for_creation(kind);
@@ -149,17 +154,7 @@ impl App {
                 document.setup_mut().tools.push(tool.clone());
             }
         }
-        let defaults = if self.cad_pending_kind == Some(OpKind::Pocket)
-            && !self
-                .controller
-                .cad_selection()
-                .first()
-                .is_some_and(|r| matches!(r.kind, EntityKind::Loop | EntityKind::Edge))
-        {
-            cam_model::OperationHeightSettings::default()
-        } else {
-            crate::cad_operations::selection_height_defaults(&document, &operation)
-        };
+        let defaults = crate::cad_operations::selection_height_defaults(&document, &operation);
         let previous = self
             .creation_geometry_height_defaults
             .clone()
@@ -219,6 +214,14 @@ impl App {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
+        if draft.rotary_wrap().is_some_and(|wrap|!wrap.geometry.is_empty()) {
+            let geometry=crate::cad_operations::geometry_for_setup(self.controller.document())?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut draft)?;
+            return Ok((draft,None));
+        }
+        if self.cad_pending_kind.is_some() && draft.rotary_wrap().is_some() {
+            return Err("Select machining geometry on the Geometry tab".into());
+        }
         if let Operation::Profile(profile) = &mut draft {
             if profile.selections.is_none() {
                 profile.selections = self.active_profile_geometry_entries();
@@ -229,7 +232,7 @@ impl App {
             }
         }
         if let Some(kind) = self.cad_pending_kind {
-            let mut document = self.controller.document().clone();
+            let mut document = self.rotary_draft_document();
             for tool in &self.operation_tools {
                 if let Some(existing) = document
                     .setup_mut()
@@ -263,6 +266,7 @@ impl App {
                 (Operation::Pocket(op), Operation::Pocket(new)) => {
                     op.boundary = new.boundary;
                     op.islands = new.islands;
+                    op.additional_regions = new.additional_regions;
                 }
                 (Operation::Face(op), Operation::Face(new)) => op.boundary = new.boundary,
                 (Operation::Drill(op), Operation::Drill(new)) => op.points = new.points,
@@ -361,7 +365,7 @@ impl App {
     pub(super) fn creation_ready(&self) -> bool {
         self.creation_operation()
             .and_then(|(op, binding)| {
-                let mut document = self.controller.document().clone();
+                let mut document = self.rotary_draft_document();
                 for tool in &self.operation_tools {
                     if let Some(existing) = document
                         .setup_mut()

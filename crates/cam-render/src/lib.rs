@@ -16,6 +16,8 @@ mod camera;
 mod gizmo;
 mod mesh;
 mod path_cone;
+mod path_markers;
+mod rotary_view;
 mod scene;
 mod tool;
 
@@ -26,6 +28,7 @@ pub use gizmo::label_atlas;
 pub use gizmo::{pick_face, unit_cube, GizmoVertex};
 pub use mesh::{mesh_vertices, stock_mesh_vertices_controlled, MeshVertex};
 pub use path_cone::{path_cone_mesh, PathCone, PATH_IN, PATH_OUT};
+pub use rotary_view::RotaryStockTransform;
 pub use scene::{
     Color, LineStrip, Scene, Vertex, CUT, ENVELOPE, ENVELOPE_OVER, PART, PLUNGE, RAPID,
 };

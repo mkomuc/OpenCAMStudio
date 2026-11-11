@@ -30,7 +30,8 @@ impl AppController {
         // Keep the complete validated setup graph in worker snapshots. Exclusion and
         // disabled datums are run filters applied by the planner; pruning source ops
         // here would leave pattern membership dangling.
-        let document = self.document().clone();
+        let mut document = self.document().clone();
+        document.active_setup_id = self.active_setup_id;
         let (min, max) = self.stock_box();
         let frame_error = self.validate_setup_frame(self.setup()).err().or_else(|| {
             if self.setup().stock != Stock::PreviousSetup {
@@ -64,6 +65,7 @@ impl AppController {
             preview_program: None,
             preview_resolution: None,
             toolpath_preview: false,
+            display_only: false,
             removal_analysis: false,
             stock_force_surfaces: false,
             simulation_accuracy: self.simulation_accuracy,
@@ -73,7 +75,7 @@ impl AppController {
     pub fn start_run(&mut self) -> JobStamp {
         self.automatic_toolpath_run = false;
         let inputs = self.job_inputs();
-        self.submit_run(inputs)
+        self.submit_run(inputs, None)
     }
 
     /// Apply changed operation configuration without reviewing unchanged later
@@ -81,7 +83,7 @@ impl AppController {
     pub fn start_automatic_run(&mut self) -> JobStamp {
         let inputs = self.job_inputs();
         self.automatic_toolpath_run = true;
-        self.submit_run(inputs)
+        self.submit_run(inputs, None)
     }
 
     /// Run the active setup or one of its included operations. Filtering the
@@ -145,12 +147,13 @@ impl AppController {
                     .into(),
             );
         }
-        if recompute {
-            self.operation_cache.invalidate_operations(&ids);
-            self.toolpath_fingerprints.retain(|id, _| !ids.contains(id));
-        }
+        let cache = recompute.then(|| {
+            let mut cache = self.operation_cache.clone();
+            cache.invalidate_operations(&ids);
+            cache
+        });
         self.automatic_toolpath_run = false;
-        Ok(self.submit_run(inputs))
+        Ok(self.submit_run(inputs, cache))
     }
 
     /// Run exactly one pattern, retaining every included source at each instance.
@@ -195,15 +198,16 @@ impl AppController {
         if ids.is_empty() {
             return Err("No included source operations in this pattern.".into());
         }
-        if recompute {
-            self.operation_cache.invalidate_operations(&ids);
-            self.toolpath_fingerprints.retain(|id, _| !ids.contains(id));
-        }
+        let cache = recompute.then(|| {
+            let mut cache = self.operation_cache.clone();
+            cache.invalidate_operations(&ids);
+            cache
+        });
         self.automatic_toolpath_run = false;
-        Ok(self.submit_run(inputs))
+        Ok(self.submit_run(inputs, cache))
     }
 
-    fn submit_run(&mut self, inputs: JobInputs) -> JobStamp {
+    fn verification_fingerprint(&self, inputs: &JobInputs) -> String {
         // Source blobs are represented by immutable asset revisions/content hashes,
         // not serialized again on every submit. Revisions + exact stamp equality
         // provide the publication guard; this hash is provenance, not cryptography.
@@ -214,7 +218,7 @@ impl AppController {
             .map(|a| (a.id, a.revision, &a.source_fingerprint))
             .collect();
         let bytes = serde_json::to_vec(&(
-            &inputs.document.setups,
+            (&inputs.document.setups, inputs.document.active_setup_id, &inputs.document.rotary_indexes, env!("CARGO_PKG_VERSION"), 1u32),
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,
             &geometry.bindings,
@@ -232,14 +236,18 @@ impl AppController {
             self.post_kind,
         ))
         .expect("job inputs serialize");
-        let fingerprint = cam_model::GeometryAsset::fingerprint_source(&bytes);
+        cam_model::GeometryAsset::fingerprint_source(&bytes)
+    }
+
+    fn submit_run(&mut self, inputs: JobInputs, cache: Option<cam_toolpath::OperationCache>) -> JobStamp {
+        let fingerprint = self.verification_fingerprint(&inputs);
         self.outcome = None;
         self.nc = None;
         self.jobs.start(
             self.document_epoch,
             fingerprint,
             inputs,
-            self.operation_cache.clone(),
+            cache.unwrap_or_else(|| self.operation_cache.clone()),
         )
     }
     #[cfg(test)]
@@ -251,11 +259,196 @@ impl AppController {
         let Some(result) = self.jobs.poll(self.document_epoch) else {
             return false;
         };
+        let fingerprint = result.stamp.input_fingerprint.clone();
         self.operation_cache = result.cache;
         self.outcome = Some(result.outcome);
         self.record_toolpath_fingerprints();
+        self.remember_full_verification(Some(&fingerprint));
         self.nc = None;
         true
+    }
+    pub(super) fn remember_full_verification(&mut self, submitted: Option<&str>) {
+        let inputs = self.job_inputs();
+        let fingerprint = self.verification_fingerprint(&inputs);
+        if submitted.is_some_and(|saved| saved != fingerprint) {
+            return;
+        }
+        let Some(outcome) = self.outcome.as_ref() else {
+            return;
+        };
+        if outcome.completion == JobCompletion::Failed {
+            self.saved_verification.remove(&self.active_setup_id);
+            return;
+        }
+        if outcome.completion != JobCompletion::Complete {
+            return;
+        }
+        self.saved_verification.insert(
+            self.active_setup_id,
+            crate::project::StoredVerification {
+                fingerprint,
+                program: outcome.program.clone(),
+                diagnostics: outcome.diagnostics.clone(),
+                collisions: outcome.collisions.clone(),
+                stock_snapshot: outcome.stock_snapshot.clone(),
+                initial_stock_snapshot: outcome.initial_stock_snapshot.clone(),
+                requires_stock_cache: false,
+                initial_stock: outcome
+                    .initial_stock
+                    .as_ref()
+                    .filter(|_| outcome.initial_stock_snapshot.is_none())
+                    .cloned(),
+                stock_vertices: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_vertices.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_indices: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_indices.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_machined: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_machined.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_operations: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_operations.clone()
+                } else {
+                    Vec::new()
+                },
+                stock_cut_sources: if outcome.stock_snapshot.is_none() {
+                    outcome.stock_cut_sources.clone()
+                } else {
+                    Vec::new()
+                },
+            },
+        );
+    }
+
+    pub(super) fn restore_saved_verification(&mut self) -> bool {
+        if self.setups().is_empty() {
+            return false;
+        }
+        let inputs = self.job_inputs();
+        let fingerprint = self.verification_fingerprint(&inputs);
+        let Some(saved) = self.saved_verification.get(&self.active_setup_id) else {
+            return false;
+        };
+        let vertices_valid = |vertices: &[cam_render::MeshVertex], indices: &[u32]| {
+            indices.len().is_multiple_of(3)
+                && indices.iter().all(|&i| (i as usize) < vertices.len())
+                && vertices.iter().all(|v| {
+                    v.position
+                        .iter()
+                        .chain(&v.normal)
+                        .chain(&v.color)
+                        .all(|n| n.is_finite())
+                })
+        };
+        if saved.fingerprint != fingerprint
+            || saved.program.validate().is_err()
+            || (saved.requires_stock_cache
+                && saved.stock_snapshot.is_none()
+                && saved.stock_vertices.is_empty()
+                && saved.initial_stock.is_none())
+            || !vertices_valid(&saved.stock_vertices, &saved.stock_indices)
+            || saved
+                .initial_stock
+                .as_ref()
+                .is_some_and(|(v, i)| !vertices_valid(v, i))
+            || saved.stock_machined.len() != saved.stock_vertices.len()
+            || saved.stock_operations.len() != saved.stock_vertices.len()
+            || (!saved.stock_cut_sources.is_empty()
+                && saved.stock_cut_sources.len() != saved.stock_vertices.len())
+            || saved
+                .collisions
+                .iter()
+                .any(|c| !c.fraction.is_finite() || c.at.iter().any(|v| !v.is_finite()))
+        {
+            return false;
+        }
+        let render = |snapshot: &cam_sim::StockSnapshot, tiled: bool| {
+            let (field, floor) = snapshot.restore().ok()?;
+            if !field.matches_grid(
+                inputs.min,
+                inputs.max,
+                inputs.stock_resolution(&saved.program),
+            ) || floor != inputs.min[2]
+            {
+                return None;
+            }
+            let surface = if tiled {
+                cam_sim::StockMeshCache::default().mesh_controlled(&field, floor, &|| false)?
+            } else {
+                field.to_solid_mesh_controlled(floor, &|| false)?
+            };
+            let vertices = cam_render::stock_mesh_vertices_controlled(
+                &surface.positions,
+                &surface.normals,
+                &inputs.document.setup().frame,
+                &|| false,
+            )?;
+            Some((vertices, surface))
+        };
+        let (stock_vertices, stock_indices, stock_machined, stock_operations, stock_cut_sources) =
+            if let Some(snapshot) = &saved.stock_snapshot {
+                let Some((vertices, surface)) = render(snapshot, true) else {
+                    return false;
+                };
+                (
+                    vertices,
+                    surface.indices,
+                    surface.machined,
+                    surface.operations,
+                    surface.cut_sources.unwrap_or_default(),
+                )
+            } else {
+                (
+                    saved.stock_vertices.clone(),
+                    saved.stock_indices.clone(),
+                    saved.stock_machined.clone(),
+                    saved.stock_operations.clone(),
+                    saved.stock_cut_sources.clone(),
+                )
+            };
+        let initial_stock = if let Some(snapshot) = &saved.initial_stock_snapshot {
+            let Some((vertices, surface)) = render(snapshot, false) else {
+                return false;
+            };
+            Some((vertices, surface.indices))
+        } else {
+            saved.initial_stock.clone()
+        };
+        let scene = inputs.program_scene(&saved.program, &CancelToken::new());
+        self.outcome = Some(RunOutcome {
+            completion: JobCompletion::Complete,
+            stamp: Some(JobStamp {
+                request_id: 0,
+                revision: self.document_epoch,
+                input_fingerprint: fingerprint,
+            }),
+            program: saved.program.clone(),
+            diagnostics: saved.diagnostics.clone(),
+            scene,
+            initial_stock,
+            stock_vertices,
+            stock_machined,
+            stock_operations,
+            stock_cut_sources,
+            stock_indices,
+            stock_snapshot: saved.stock_snapshot.clone(),
+            initial_stock_snapshot: saved.initial_stock_snapshot.clone(),
+            collisions: saved.collisions.clone(),
+            ..Default::default()
+        });
+        true
+    }
+
+    #[cfg(feature = "gui")]
+    pub(crate) fn run_preview(&self) -> Option<&RunOutcome> {
+        self.jobs.preview()
     }
     pub fn run_pending(&self) -> bool {
         self.jobs.pending()
@@ -303,11 +496,19 @@ impl AppController {
         let mut previous_setup = String::new();
         for setup in &document.setups {
             // Common machining configuration; omit names and view state.
+            let stock_axis_instance = match setup.stock {
+                Stock::FixedRound { axis, .. } | Stock::RelativeRound { axis, .. } => axis.and_then(|axis| match axis { cam_model::StockAxis::Edge(edge) => Some(edge.instance_id), cam_model::StockAxis::Origin { .. } => None }),
+                _ => None,
+            };
             let models: Vec<_> = document
                 .geometry
                 .instances
                 .iter()
-                .filter(|instance| setup.model_instances.contains(&instance.id))
+                .filter(|instance| {
+                    setup.model_instances.contains(&instance.id)
+                        || setup.fixture_instances.contains(&instance.id)
+                        || stock_axis_instance == Some(instance.id)
+                })
                 .map(|instance| {
                     let asset = document.geometry.asset(instance.asset_id).map(|asset| {
                         (
@@ -326,7 +527,13 @@ impl AppController {
                 &setup.stock,
                 (setup.stock == Stock::PreviousSetup).then_some(&previous_setup),
                 document.stock_bounds_for(setup),
-                &setup.model_instances,
+                (
+                    &setup.model_instances,
+                    &setup.fixture_instances,
+                    setup.fixture_clearance,
+                    (!setup.fixture_instances.is_empty())
+                        .then_some(cam_toolpath::FIXTURE_ROUTING_REVISION),
+                ),
                 &setup.extra_origins,
                 setup.origin,
                 setup.origin_index,
@@ -359,6 +566,7 @@ impl AppController {
                 let mut bytes = serde_json::to_vec(&(
                     &common,
                     op,
+                    document.rotary_indexes.get(&id),
                     tools,
                     setup.operation_heights.get(&id).unwrap_or(&setup.heights),
                     setup.height_settings.get(&id),
@@ -374,9 +582,15 @@ impl AppController {
                         &cam_toolpath::ParallelStrategy::DOMAIN_REVISION.to_le_bytes(),
                     );
                 }
+                if op.rotary_wrap().is_some() {bytes.extend_from_slice(&cam_toolpath::ROTARY_WRAP_REVISION.to_le_bytes());}
                 if matches!(op, Operation::Adaptive(_)) {
                     bytes.extend_from_slice(
                         &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),
+                    );
+                }
+                if matches!(op, Operation::Pocket(p) if p.stock_contours.enabled) {
+                    bytes.extend_from_slice(
+                        &cam_toolpath::PocketStrategy::STOCK_CONTOUR_REVISION.to_le_bytes(),
                     );
                 }
                 let own = cam_model::GeometryAsset::fingerprint_source(&bytes);
@@ -482,6 +696,128 @@ mod tests {
         }));
         (receiver, release)
     }
+    #[test]
+    fn completed_full_setup_verification_is_saved_restored_and_invalidated() {
+        let mut app = app();
+        let original = app.run(&CancelToken::new()).clone();
+        assert_eq!(original.completion, JobCompletion::Complete);
+        let path = std::env::temp_dir().join(format!("saved-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        let restored = reopened.outcome().expect("verification restored on open");
+        assert_eq!(restored.program, original.program);
+        assert_eq!(restored.collisions, original.collisions);
+        assert_eq!(restored.stock_indices, original.stock_indices);
+        assert_eq!(restored.stock_vertices, original.stock_vertices);
+        assert!(!reopened.run_pending());
+        assert_eq!(reopened.export_nc().is_ok(), app.export_nc().is_ok());
+        reopened.edit_operation(0, |op| {
+            if let Operation::Drill(d) = op { d.depth = 1.; }
+        });
+        assert!(!reopened.restore_saved_verification());
+        assert!(reopened.outcome().is_none());
+        let mut different_machine = AppController::new(crate::default_machine());
+        different_machine.edit_machine(|m| m.envelope.max.z += 1.);
+        different_machine.open_project(&path).unwrap();
+        assert!(different_machine.outcome().is_none());
+        let mut different_index = AppController::new(crate::default_machine());
+        different_index.open_project(&path).unwrap();
+        different_index.edit_document(|doc| { doc.rotary_indexes.insert(0, cam_model::RotaryIndex { angle: 30., ..Default::default() }); });
+        assert!(!different_index.restore_saved_verification());
+        let mut different_accuracy = AppController::new(crate::default_machine());
+        different_accuracy.set_simulation_accuracy(0.5);
+        different_accuracy.open_project(&path).unwrap();
+        assert!(different_accuracy.outcome().is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn inherited_stock_snapshots_restore_both_input_and_result() {
+        let mut app = app();
+        let first = app.active_setup_id();
+        let second = app.add_setup();
+        app.edit_setup(|s| s.stock = Stock::PreviousSetup);
+        let original = app.run(&CancelToken::new()).clone();
+        assert_eq!(original.completion, JobCompletion::Complete);
+        assert!(original.initial_stock_snapshot.is_some());
+        assert!(original.stock_snapshot.is_some());
+        let path =
+            std::env::temp_dir().join(format!("inherited-snapshots-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        reopened.activate_setup(second).unwrap();
+        let restored = reopened.outcome().expect("saved inherited setup restored");
+        assert_eq!(restored.initial_stock, original.initial_stock);
+        assert_eq!(restored.stock_vertices, original.stock_vertices);
+        assert_eq!(restored.stock_indices, original.stock_indices);
+        assert_eq!(restored.stock_machined, original.stock_machined);
+        assert_eq!(restored.stock_operations, original.stock_operations);
+        assert_eq!(restored.stock_cut_sources, original.stock_cut_sources);
+        assert_eq!(restored.program, original.program);
+        reopened.activate_setup(first).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restored_collision_still_blocks_export() {
+        let mut app = app();
+        app.run(&CancelToken::new());
+        app.outcome.as_mut().unwrap().collisions.push(cam_sim::Collision {
+            kind: cam_sim::CollisionKind::RapidThroughStock,
+            at: [1., 2., 3.], message: "saved collision".into(), op_id: Some(0),
+            pattern_id: None, instance_index: None, step_index: Some(1), fraction: 0.5,
+        });
+        app.remember_full_verification(None);
+        let path = std::env::temp_dir().join(format!("collision-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        assert_eq!(reopened.outcome().unwrap().collisions[0].message, "saved collision");
+        assert!(matches!(reopened.export_nc(), Err(ExportError::RapidThroughStock(_))));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_is_restored_per_setup_and_rejects_invalid_saved_mesh() {
+        let mut app = app();
+        let first = app.active_setup_id();
+        let second = app.add_setup();
+        app.activate_setup(first).unwrap();
+        let first_program = app.run(&CancelToken::new()).program.clone();
+        app.activate_setup(second).unwrap();
+        let second_program = app.run(&CancelToken::new()).program.clone();
+        let path = std::env::temp_dir().join(format!("setup-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, first_program);
+        reopened.activate_setup(second).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, second_program);
+        reopened.activate_setup(first).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, first_program);
+        reopened.saved_verification.get_mut(&first).unwrap().stock_indices.push(u32::MAX);
+        reopened.cancel_run();
+        assert!(!reopened.restore_saved_verification());
+        assert!(reopened.outcome().is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scoped_verification_does_not_replace_full_setup_result() {
+        let mut app = app();
+        let full = app.run(&CancelToken::new()).program.clone();
+        app.start_toolpath_run(Some(0), true).unwrap();
+        drain(&mut app);
+        let path = std::env::temp_dir().join(format!("scoped-verification-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        let mut reopened = AppController::new(crate::default_machine());
+        reopened.open_project(&path).unwrap();
+        assert_eq!(reopened.outcome().unwrap().program, full);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn toolpaths_and_status_survive_reopen_without_recalculation() {
         let mut app = app();
@@ -803,6 +1139,23 @@ mod tests {
             "late cancelled result cannot publish"
         );
         assert!(!app.run_pending());
+    }
+    #[test]
+    fn cancelling_forced_recompute_preserves_existing_paths_and_statuses() {
+        let mut app = app();
+        app.run(&CancelToken::new());
+        let (entered, release) = gate(&mut app);
+        app.start_toolpath_run(Some(1), true).unwrap();
+        let token = entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(app.toolpath_is_up_to_date(0));
+        assert!(app.toolpath_is_up_to_date(1));
+        app.cancel_run();
+        assert!(token.is_cancelled());
+        release.send(()).unwrap();
+        drain(&mut app);
+        app.run(&CancelToken::new());
+        assert_eq!(app.cache_stats().reused, 2);
+        assert_eq!(app.cache_stats().computed, 0);
     }
     #[test]
     fn replacement_job_is_latest_and_only_it_can_publish() {

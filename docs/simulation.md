@@ -68,3 +68,10 @@ count and grid spacing. In force coloring mode, **Info** adds the current force,
 power, torque and removal rate; **Statistics** adds mean/max sampled force and
 removed volume per operation. Playback uses a separate simulation lane and does not
 replace the verified result used for G-code export.
+
+Cylindrical Wrap and indexed **3+1** operations use the same playback controls and
+remaining-stock workflow. Their simulation retains material in a stationary frame
+through A/B indexing, including hollow blanks and previously cut cavities. Set the
+blank dimensions and stock axis independently of the wrap radius. See
+[fourth-axis machining and simulation](rotary-wrap.md#stock-and-simulation) for setup,
+accuracy and fixture details.

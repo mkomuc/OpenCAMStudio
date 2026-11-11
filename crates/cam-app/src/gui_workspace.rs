@@ -2,6 +2,21 @@
 use super::*;
 use iced::widget::column;
 
+#[cfg(test)]
+fn stock_to_machine_view(
+    frame: &cam_model::SetupFrame,
+    axis: cam_cldata::RotaryAxis,
+    center: cam_cldata::Point3,
+    angle: f64,
+    point: [f32; 3],
+    vector: bool,
+) -> [f32; 3] {
+    let p = frame.to_setup_vector(point.map(f64::from));
+    let origin = if vector { cam_cldata::Point3::new(0., 0., 0.) } else { center };
+    let p = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), origin, -angle);
+    frame.to_world_vector([p.x, p.y, p.z]).map(|v| v as f32)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Workspace {
     #[default]
@@ -88,11 +103,18 @@ fn tool_table_matches(
 }
 
 pub(super) fn stock_world_bounds(controller: &AppController) -> Option<([f32; 3], [f32; 3])> {
-    let (min, max) = controller.stock_box();
+    stock_world_bounds_for_setup(controller, controller.inspection_setup())
+}
+
+pub(super) fn stock_world_bounds_for_setup(
+    controller: &AppController,
+    setup: &cam_model::Setup,
+) -> Option<([f32; 3], [f32; 3])> {
+    let (min, max) = controller.pending_setup_stock_bounds(setup);
     if min[0] >= max[0] || min[1] >= max[1] {
         return None;
     }
-    let frame = &controller.inspection_setup().frame;
+    let frame = &setup.frame;
     let points: Vec<_> = (0..8)
         .map(|index| {
             frame
@@ -119,18 +141,54 @@ pub(super) fn stock_world_bounds(controller: &AppController) -> Option<([f32; 3]
 
 /// The configured input blank: a box, or the preceding setup's processed stock.
 pub(super) fn uncut_stock_mesh(controller: &AppController) -> (Vec<MeshVertex>, Vec<u32>) {
-    if controller.inspection_setup().stock == cam_model::Stock::PreviousSetup {
+    uncut_stock_mesh_for_setup(controller, controller.inspection_setup())
+}
+
+pub(super) fn uncut_stock_mesh_for_setup(
+    controller: &AppController,
+    setup: &cam_model::Setup,
+) -> (Vec<MeshVertex>, Vec<u32>) {
+    if setup.stock == cam_model::Stock::PreviousSetup {
+        if controller.inspection_setup().stock != cam_model::Stock::PreviousSetup {
+            return (Vec::new(), Vec::new());
+        }
         return controller
             .outcome()
             .filter(|o| o.completion == JobCompletion::Complete)
             .and_then(|o| o.initial_stock.clone())
             .unwrap_or_default();
     }
-    let (min, max) = controller.stock_box();
+    let (min, max) = controller.pending_setup_stock_bounds(setup);
     if !controller.has_geometry() || (0..3).any(|axis| max[axis] <= min[axis]) {
         return (vec![], vec![]);
     }
-    let frame = &controller.inspection_setup().frame;
+    let frame = &setup.frame;
+    let stock = setup.stock;
+    let shape = crate::stock_shape::oriented_round_mesh(controller.document(), setup)
+        .ok()
+        .flatten()
+        .or_else(|| crate::stock_shape::solid_mesh(controller.document(), setup));
+    if let Some(mesh) = shape {
+        let vertices = mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .map(|(p, n)| MeshVertex {
+                position: frame.to_world_vector(p.map(f64::from)).map(|v| v as f32),
+                normal: frame.to_world_vector(n.map(f64::from)).map(|v| v as f32),
+                color: [0.72, 0.66, 0.22, 1.],
+            })
+            .collect();
+        return (vertices, mesh.indices);
+    }
+    if matches!(
+        stock,
+        cam_model::Stock::FromSolid { .. }
+            | cam_model::Stock::FixedRound { .. }
+            | cam_model::Stock::RelativeRound { .. }
+    ) {
+        return (vec![], vec![]);
+    }
     let corners: [[f64; 3]; 8] = std::array::from_fn(|index| {
         std::array::from_fn(|axis| {
             if index & (1 << axis) == 0 {
@@ -170,6 +228,7 @@ pub(super) struct ViewportKey {
     selection: Selection,
     pending: Option<crate::PendingOp>,
     outcome: Option<crate::JobStamp>,
+    verifying_preview: bool,
     simulation: Option<SimulationViewportKey>,
     operation_preview: Option<crate::JobStamp>,
     cad_selection: Vec<EntityRef>,
@@ -211,11 +270,13 @@ impl PartialEq for SimulationViewportKey {
 #[derive(Clone, PartialEq)]
 struct EditorKey {
     creating: bool,
+    wrapped_geometry_editor: bool,
     cad_kind: Option<OpKind>,
     cad_editing: Option<u32>,
     drawing_editing: Option<u32>,
     tool: Option<cam_model::Tool>,
     operation: Option<Operation>,
+    rotary_index: Option<cam_model::RotaryIndex>,
     binding: Option<cam_model::GeometryBinding>,
     geometry: Vec<EntityRef>,
     fields: BTreeMap<Field, String>,
@@ -333,7 +394,10 @@ impl App {
                     Some(TreeNode::Asset(id)) => instance.asset_id == *id,
                     Some(TreeNode::Model(id)) => instance.id == *id,
                     Some(_) => true,
-                    None => setup.model_instances.contains(&instance.id),
+                    None => {
+                        setup.model_instances.contains(&instance.id)
+                            || setup.fixture_instances.contains(&instance.id)
+                    }
                 }
             };
             if !in_scope || self.hidden_assets.contains(&instance.asset_id) {
@@ -414,6 +478,7 @@ impl App {
                 });
         let labels = grid_view::GridLabels {
             camera: viewport.camera(),
+            grid_size: viewport.grid_size,
         };
         let height_preview = self.height_preview(viewport.camera(), viewport.browser_overlay_width);
         let viewport_camera = viewport.camera();
@@ -532,6 +597,13 @@ impl App {
                     .geometry_state()
                     .instances
                     .iter()
+                    .filter(|i| {
+                        !self
+                            .controller
+                            .inspection_setup()
+                            .fixture_instances
+                            .contains(&i.id)
+                    })
                     .map(|i| i.id),
             );
         }
@@ -562,7 +634,10 @@ impl App {
             origin: self.controller.active_origin(),
             selection: self.controller.selection(),
             pending: self.controller.pending_op(),
-            outcome: self.controller.outcome().and_then(|o| o.stamp.clone()),
+            outcome: self.controller.outcome()
+                .or_else(|| self.controller.run_preview())
+                .and_then(|o| o.stamp.clone()),
+            verifying_preview: self.controller.run_preview().is_some(),
             simulation: self
                 .simulation
                 .as_ref()
@@ -597,11 +672,13 @@ impl App {
             pattern: self.pattern_draft.clone(),
             editor: editing.then(|| EditorKey {
                 creating: self.creating_operation(),
+                wrapped_geometry_editor: self.wrapped_pocket_geometry_editor(),
                 cad_kind: self.cad_pending_kind,
                 cad_editing: self.cad_editing_op,
                 drawing_editing: self.drawing_editing_op,
                 tool: self.wizard_tool(),
                 operation: self.operation_draft.clone(),
+                rotary_index: self.rotary_index_draft.clone(),
                 binding: self.operation_binding_preview.clone(),
                 geometry: selected_geometry.clone(),
                 fields: self.fields.clone(),
@@ -690,8 +767,28 @@ impl App {
                 editing.then_some(selected_geometry.as_slice()),
                 silhouette_bottom,
                 Some(self.cached_cad_scene(&cad_hidden)),
+                self.setup_draft.as_ref(),
             );
             if let Some(player) = self.simulation.as_ref().filter(|_| !model_view && !editing) {
+                if player.options.rotary_view == crate::settings::SimulationRotaryView::RotatingStock {
+                    if let Some((axis, center, angle)) = player.rotary_pose() {
+                        let frame = &self.controller.inspection_setup().frame;
+                        let rotate = cam_render::RotaryStockTransform::new(frame, axis, center, angle);
+                        rotate.apply_mesh(Arc::make_mut(&mut viewport.mesh_vertices).as_mut_slice());
+                        rotate.apply_mesh(Arc::make_mut(&mut viewport.transparent_stock_vertices).as_mut_slice());
+                        for vertex in Arc::make_mut(&mut viewport.vertices).iter_mut()
+                            .chain(Arc::make_mut(&mut viewport.cad_edges).iter_mut()) {
+                            vertex.position = rotate.point(vertex.position);
+                        }
+                        for cone in Arc::make_mut(&mut viewport.path_cones).iter_mut() {
+                            cone.at = rotate.point(cone.at);
+                            cone.direction = rotate.vector(cone.direction);
+                        }
+                        for mark in Arc::make_mut(&mut viewport.drill_marks).iter_mut() {
+                            mark.at = rotate.point(mark.at);
+                        }
+                    }
+                }
                 let (vertices, indices) = player.tool_mesh();
                 let (target_vertices, target_indices) = if player.options.transparent_tool {
                     (
@@ -735,6 +832,7 @@ impl App {
                 let selected: Vec<_> = draft
                     .model_instances
                     .iter()
+                    .chain(&draft.fixture_instances)
                     .filter_map(|id| {
                         let instance = geometry.instance(*id)?;
                         let asset = geometry.asset(instance.asset_id)?;
@@ -763,6 +861,10 @@ impl App {
                 Arc::make_mut(&mut viewport.mesh_indices)
                     .extend(indices.into_iter().map(|i| i + offset));
             }
+            if editing {
+                let overlay = self.index_face_overlay(&viewport.cad_scene);
+                Arc::make_mut(&mut viewport.vertices).extend(overlay.line_vertices());
+            }
             if self.pattern_draft.is_some() {
                 let preview = self.pattern_placement_preview();
                 viewport.bounds = union_bounds(viewport.bounds, preview.bounds());
@@ -783,13 +885,23 @@ impl App {
             || self.height_reference_pick.is_some();
         viewport.geometry_pick_active = (self.geometry_additive || self.geometry_auto_pick)
             && self.operation_tab == OperationTab::Geometry;
+        viewport.stock_contour_picking = self.stock_contour_editor();
+        viewport.stock_contour_setup_selected = self.stock_contour_editor()
+            && if self.operation_uses_cad_geometry() {
+                self.controller.cad_selection().is_empty()
+            } else {
+                self.controller.pending_operation_geometry().is_empty()
+            };
         viewport.cad_select_through = self.cad_select_through;
+        let (grid_x, grid_y, grid_z) = self.controller.machine().envelope.extent();
+        viewport.grid_size = [grid_x as f32, grid_y as f32, grid_z as f32];
         viewport.controls = self.view;
         viewport.show_gizmo = self.show_gizmo;
         viewport.gizmo_size = self.gizmo_size;
         let pattern_pick = self.pattern_draft.as_ref().and_then(|draft| draft.picking);
         viewport.setup_axis =
             self.setup_axis_pick.is_some() || pattern_pick.is_some_and(|axis| axis < 2);
+        viewport.stock_axis_model_only = self.setup_axis_pick == Some(3);
         if pattern_pick.is_some() {
             viewport.picking = true;
             viewport.cad_filter = EntityKind::Edge;
@@ -873,6 +985,31 @@ impl App {
         if self.height_reference_pick.is_some() {
             viewport.cad_operation_kind = None;
         }
+        if self.rotary_pick.is_some() || self.wrapped_pocket_geometry_editor() {
+            viewport.cad_operation_kind=Some(OpKind::Engrave);
+            viewport.cad_filter_explicit=true;
+            viewport.cad_silhouette=false;
+            if let Some(pick) = self.rotary_pick {
+                if matches!(pick, rotary_view::Pick::IndexFace | rotary_view::Pick::IndexLoop | rotary_view::Pick::IndexEdge) {
+                    // Index references may lie in any plane, not just setup XY.
+                    viewport.cad_operation_kind = None;
+                }
+                // A pending drawing operation otherwise intercepts the click as a
+                // planar pick before the CAD face can be hit-tested.
+                viewport.picking = false;
+                viewport.cad_filter = match pick {
+                    rotary_view::Pick::Cylinder | rotary_view::Pick::Faces | rotary_view::Pick::IndexFace => EntityKind::Face,
+                    rotary_view::Pick::Edges | rotary_view::Pick::IndexEdge => EntityKind::Edge,
+                    rotary_view::Pick::Loops | rotary_view::Pick::IndexLoop => EntityKind::Loop,
+                };
+            }
+        }
+        if self.stock_contour_editor() {
+            viewport.cad_operation_kind = None;
+            viewport.cad_filter_explicit = true;
+            viewport.cad_silhouette =
+                self.cad_filter == CadFilter::Silhouette || self.modifiers.control();
+        }
         if pattern_pick.is_some() {
             viewport.cad_operation_kind = None;
             viewport.cad_filter = EntityKind::Edge;
@@ -951,47 +1088,67 @@ impl App {
                 format!("{} · {}", kind, source)
             })
             .unwrap_or_default();
-        let controls = row![
+        let position_pick = self.operation_position_pick.is_some()
+            && self.operation_preview_active()
+            && self.operation_tab == OperationTab::Linking
+            && self.model_view.is_none()
+            && !self.controller.setups().is_empty();
+        let origin_pick = self.in_origin_pick() && !self.setup_origin_mode().is_box();
+        let axis_pick = self.setup_axis_pick.is_some()
+            || self
+                .pattern_draft
+                .as_ref()
+                .and_then(|draft| draft.picking)
+                .is_some_and(|axis| axis < 2);
+        let drawing_pick = self
+            .controller
+            .pending_op()
+            .is_some_and(|p| op_uses_snaps(p.kind));
+        let mut controls = row![
             toggle("Show stock · F8", self.show_stock, Message::ToggleStock),
             toggle(
                 "Transparent stock",
                 self.settings.view.transparent_stock,
                 Message::ToggleTransparentStock
             ),
-            toggle(
+        ];
+        if origin_pick || position_pick || axis_pick {
+            controls = controls.push(toggle(
                 "Highlight features",
                 self.settings.snapping.highlight_features,
-                Message::ToggleFeatureHighlights
-            ),
-            toggle(
-                "Snap",
-                self.settings.snapping.enabled,
-                Message::ToggleSnapping
-            ),
-            toggle(
-                "Endpoints",
-                self.snaps.contains(&SnapKind::End),
-                Message::ToggleSnap(SnapKind::End)
-            ),
-            toggle(
-                "Midpoints",
-                self.snaps.contains(&SnapKind::Mid),
-                Message::ToggleSnap(SnapKind::Mid)
-            ),
-            toggle(
-                "Quadrants",
-                self.snaps.contains(&SnapKind::Quadrant),
-                Message::ToggleSnap(SnapKind::Quadrant)
-            ),
-            toggle(
-                "Nearest",
-                self.snaps.contains(&SnapKind::Nearest),
-                Message::ToggleSnap(SnapKind::Nearest)
-            ),
-            text(hint).size(12),
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center);
+                Message::ToggleFeatureHighlights,
+            ));
+        }
+        if origin_pick || position_pick || drawing_pick {
+            controls = controls
+                .push(toggle(
+                    "Snap",
+                    self.settings.snapping.enabled,
+                    Message::ToggleSnapping,
+                ))
+                .push(toggle(
+                    "Endpoints",
+                    self.snaps.contains(&SnapKind::End),
+                    Message::ToggleSnap(SnapKind::End),
+                ))
+                .push(toggle(
+                    "Midpoints",
+                    self.snaps.contains(&SnapKind::Mid),
+                    Message::ToggleSnap(SnapKind::Mid),
+                ))
+                .push(toggle(
+                    "Quadrants",
+                    self.snaps.contains(&SnapKind::Quadrant),
+                    Message::ToggleSnap(SnapKind::Quadrant),
+                ))
+                .push(toggle(
+                    "Nearest",
+                    self.snaps.contains(&SnapKind::Nearest),
+                    Message::ToggleSnap(SnapKind::Nearest),
+                ))
+                .push(text(hint).size(12));
+        }
+        let controls = controls.spacing(4).align_y(Alignment::Center);
         container(
             scrollable(controls).direction(scrollable::Direction::Horizontal(
                 scrollable::Scrollbar::default(),
@@ -1428,6 +1585,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rotating_stock_view_inverts_material_coordinates_in_setup_axes() {
+        let frame = cam_model::SetupFrame::from_xy([0., 1., 0.], [-1., 0., 0.]).unwrap();
+        let center = cam_cldata::Point3::new(3., 4., 5.);
+        let machine = cam_cldata::Point3::new(8., 9., 10.);
+        for axis in [cam_cldata::RotaryAxis::A, cam_cldata::RotaryAxis::B] {
+            let material = axis.material_point(machine, center, 37.);
+            let world_material = frame.to_world_vector([material.x, material.y, material.z]).map(|v| v as f32);
+            let result = stock_to_machine_view(&frame, axis, center, 37., world_material, false);
+            let expected = frame.to_world_vector([machine.x, machine.y, machine.z]);
+            for i in 0..3 { assert!((f64::from(result[i]) - expected[i]).abs() < 1e-5); }
+        }
+    }
+
+    #[test]
     fn selection_shows_only_selected_toolpaths_and_setup_shows_configured_stock() {
         let mut app = picking_app();
         app.end_setup_draft();
@@ -1616,13 +1787,14 @@ mod tests {
 
         app.settings.view.stock_color = [0.8, 0.3, 0.1];
         app.settings.view.transparent_stock = true;
+        app.settings.view.stock_transparency = 0.5;
         let transparent = app.machining_viewport();
         assert!(transparent.mesh_indices.is_empty());
         assert_eq!(transparent.transparent_stock_indices.len(), 36);
         assert!(transparent
             .transparent_stock_vertices
             .iter()
-            .all(|v| v.color == [0.72, 0.66, 0.22, 0.25]));
+            .all(|v| v.color == [0.72, 0.66, 0.22, 0.5]));
         assert_eq!(transparent.frame_bounds, frame_bounds);
         assert_eq!(transparent.vertices, drawing, "drawing stays visible");
 
@@ -1675,9 +1847,9 @@ mod tests {
             .zip(&outcome.stock_operations)
         {
             let expected = if *owner == Some(id) {
-                [0.8, 0.3, 0.1, 0.25]
+                [0.8, 0.3, 0.1, 0.5]
             } else {
-                [0.72, 0.66, 0.22, 0.25]
+                [0.72, 0.66, 0.22, 0.5]
             };
             assert_eq!(vertex.color, expected);
         }
@@ -1744,21 +1916,14 @@ mod tests {
             app.drain_operation_preview();
             let viewport = app.machining_viewport();
             let scoped = app.operation_preview_outcome().unwrap();
-            assert_eq!(viewport.mesh_indices.as_slice(), scoped.stock_indices);
+            assert!(!scoped.stock_indices.is_empty());
             assert!(scoped.stock_operations.contains(&Some(selected)));
-            if selected == ids[0] {
-                assert!(
-                    !scoped.stock_operations.contains(&Some(ids[1])),
-                    "a later operation must not remove material in this preview"
-                );
-            } else {
-                assert!(
-                    scoped.stock_operations.contains(&Some(ids[0])),
-                    "earlier cuts remain in the selected operation's starting stock"
-                );
-            }
             assert_eq!(viewport.path_cones.len(), 2);
             assert!(viewport.path_cones.iter().all(|cone| cone.op == selected));
+            assert_eq!(viewport.mesh_indices.as_slice(), scoped.stock_indices);
+            if selected == ids[0] {
+                assert!(!scoped.stock_operations.contains(&Some(ids[1])));
+            }
             for (vertex, owner) in viewport.mesh_vertices.iter().zip(&scoped.stock_operations) {
                 let expected = if *owner == Some(selected) {
                     [0.1, 0.9, 0.2, 1.]
@@ -1786,6 +1951,26 @@ mod tests {
             .mesh_vertices
             .iter()
             .all(|v| v.color == [0.72, 0.66, 0.22, 1.]));
+    }
+
+    #[test]
+    fn setup_stock_edits_update_the_visible_draft_without_committing() {
+        let mut app = picking_app();
+        app.show_stock = true;
+        app.settings.view.transparent_stock = true;
+        let saved = app.controller.inspection_setup().stock;
+        let before = app.machining_viewport().transparent_stock_vertices.clone();
+        assert!(!before.is_empty());
+        let _ = app.update(Message::SetupStockNumberChanged(0, "15".into()));
+        let after = app.machining_viewport().transparent_stock_vertices.clone();
+        assert_ne!(before.as_ref(), after.as_ref());
+        assert_eq!(app.controller.inspection_setup().stock, saved);
+        let draft = app.setup_draft.as_ref().unwrap();
+        let expected = uncut_stock_mesh_for_setup(&app.controller, draft).0;
+        assert_eq!(after.len(), expected.len());
+        for (visible, expected) in after.iter().zip(expected.iter()) {
+            assert_eq!(visible.position, expected.position);
+        }
     }
 
     #[test]
@@ -2194,6 +2379,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         viewport.browser_overlay_width = 250.;
         let bounds = iced::Rectangle {
@@ -2303,6 +2489,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let bounds = iced::Rectangle {
             x: 0.,
@@ -2377,6 +2564,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             None,
             None,
             None,
@@ -2478,6 +2666,53 @@ mod performance_tests {
     use super::*;
     use std::{hint::black_box, time::Instant};
 
+    /// Isolate the rotating-stock display transform, excluding removal and GPU work.
+    #[test]
+    #[ignore = "large display-transform benchmark; run with --ignored --nocapture"]
+    fn rotating_stock_transform_benchmark() {
+        let frame = cam_model::SetupFrame::from_xy([1., 2., 3.], [-2., 1., 0.]).unwrap();
+        let axis = cam_cldata::RotaryAxis::A;
+        let center = cam_cldata::Point3::new(3., 4., 5.);
+        let original: Vec<_> = (0..771_068)
+            .map(|i| MeshVertex {
+                position: [
+                    (i % 1024) as f32 * 0.03,
+                    (i / 1024) as f32 * 0.03,
+                    (i as f32 * 0.01).sin(),
+                ],
+                normal: [0.6, 0.8, 0.],
+                color: [0.1, 0.2, 0.3, 1.],
+            })
+            .collect();
+        let (mut scalar_seconds, mut bulk_seconds) = (0., 0.);
+        for angle in [37., 90., 173.] {
+            let mut reference = original.clone();
+            let start = Instant::now();
+            for vertex in &mut reference {
+                vertex.position =
+                    stock_to_machine_view(&frame, axis, center, angle, vertex.position, false);
+                vertex.normal = stock_to_machine_view(&frame, axis, center, angle, vertex.normal, true);
+            }
+            scalar_seconds += start.elapsed().as_secs_f64();
+            black_box(&reference);
+            let mut optimized = original.clone();
+            let start = Instant::now();
+            let transform = cam_render::RotaryStockTransform::new(&frame, axis, center, angle);
+            transform.apply_mesh(&mut optimized);
+            bulk_seconds += start.elapsed().as_secs_f64();
+            black_box(&optimized);
+            for (a, b) in reference.iter().zip(&optimized) {
+                for i in 0..3 {
+                    assert!((a.position[i] - b.position[i]).abs() < 1e-5);
+                    assert!((a.normal[i] - b.normal[i]).abs() < 1e-6);
+                }
+                assert_eq!(a.color, b.color);
+            }
+        }
+        println!("rotating stock, {} vertices: scalar {:.3} ms/frame; bulk {:.3} ms/frame; {:.1}x transform speedup",
+            original.len(), scalar_seconds / 3. * 1000., bulk_seconds / 3. * 1000., scalar_seconds / bulk_seconds);
+    }
+
     fn cad_app() -> App {
         let (mut app, _) = App::new();
         app.settings = crate::Settings::default();
@@ -2489,6 +2724,48 @@ mod performance_tests {
             ))
             .unwrap();
         app
+    }
+
+    #[test]
+    fn transparent_stock_reveals_the_model_and_opaque_stock_keeps_reference_edges() {
+        let (mut app, _) = App::new();
+        app.settings = crate::Settings::default();
+        app.controller = AppController::new(crate::default_machine());
+        let path = std::env::temp_dir().join(format!("rotary-stock-view-{}.ocam", std::process::id()));
+        std::fs::write(&path, include_str!("../tests/fixtures/stepped_rotary.ocam")).unwrap();
+        app.controller.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        app.controller.select(Selection::Operation(0));
+        app.model_view = None;
+        app.setup_draft = None;
+        app.show_stock = false;
+        let model = app.machining_viewport();
+        assert!(!model.mesh_indices.is_empty());
+        assert!(!model.cad_edges.is_empty());
+        let (vertices, indices) = uncut_stock_mesh(&app.controller);
+        assert!(!indices.is_empty());
+        app.show_stock = true;
+        app.settings.view.transparent_stock = false;
+        let stock = app.machining_viewport();
+        assert_eq!(stock.mesh_vertices.len(), vertices.len());
+        assert_eq!(*stock.mesh_indices, indices);
+        assert_eq!(stock.cad_edges, model.cad_edges);
+        app.settings.view.transparent_stock = true;
+        let transparent = app.machining_viewport();
+        assert_eq!(transparent.mesh_indices, model.mesh_indices);
+        assert_eq!(transparent.mesh_vertices, model.mesh_vertices);
+        assert_eq!(*transparent.transparent_stock_indices, indices);
+        assert!(transparent.transparent_stock_convex);
+        app.show_stock = false;
+        assert_eq!(app.machining_viewport().mesh_indices, model.mesh_indices);
+        app.show_stock = true;
+        app.controller.edit_stock(|stock| {
+            if let cam_model::Stock::RelativeRound { tube, inner_diameter, .. } = stock {
+                *tube = true;
+                *inner_diameter = 10.;
+            }
+        });
+        assert!(!app.machining_viewport().transparent_stock_convex, "hollow stock is not convex");
     }
 
     #[test]
@@ -2663,6 +2940,7 @@ mod performance_tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         let neutral = build(&app.controller, None, None, &[], false);
@@ -2716,7 +2994,11 @@ mod performance_tests {
         app.settings.view.transparent_stock = true;
         let transparent = app.machining_viewport();
         assert!(!transparent.transparent_stock_indices.is_empty());
-        assert!(transparent.mesh_indices.len() < opaque.mesh_indices.len());
+        let (cad_vertices, cad_indices) = transparent.cad_scene.mesh(&[], None);
+        assert!(!cad_indices.is_empty());
+        assert_eq!(*transparent.mesh_indices, cad_indices);
+        assert_eq!(transparent.mesh_vertices.len(), cad_vertices.len());
+        assert!(!opaque.mesh_indices.is_empty());
         let id = app
             .controller
             .inspection_setup()

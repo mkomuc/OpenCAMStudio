@@ -2682,6 +2682,7 @@ mod tests {
 
     fn inner_op(hole: f64, lead_r: f64, start: Option<[f64; 2]>) -> ProfileOp {
         ProfileOp {
+            wrap: None,
             passes: Default::default(),
             selections: None,
             closed: true,
@@ -2815,6 +2816,7 @@ mod tests {
     /// the stock frames, with a stepover and (optionally) an engagement cap.
     fn outside_rough_op(engagement: f64) -> ProfileOp {
         ProfileOp {
+            wrap: None,
             passes: Default::default(),
             selections: None,
             closed: true,

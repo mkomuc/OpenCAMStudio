@@ -80,11 +80,23 @@ impl AppController {
     /// Publish the shared operation editor in a single undoable transaction.
     pub fn commit_operation_creation(
         &mut self,
+        operation: Operation,
+        binding: Option<cam_model::GeometryBinding>,
+        settings: cam_model::OperationHeightSettings,
+        tools: Vec<Tool>,
+        stock_to_leave: cam_model::StockToLeave,
+    ) -> Result<u32, String> {
+        self.commit_operation_creation_with_index(operation,binding,settings,tools,stock_to_leave,None)
+    }
+
+    pub fn commit_operation_creation_with_index(
+        &mut self,
         mut operation: Operation,
         binding: Option<cam_model::GeometryBinding>,
         settings: cam_model::OperationHeightSettings,
         tools: Vec<Tool>,
         stock_to_leave: cam_model::StockToLeave,
+        index: Option<cam_model::RotaryIndex>,
     ) -> Result<u32, String> {
         let replacing = self.pending_op.as_ref().and_then(|p| p.replacing);
         if self.setups().is_empty() {
@@ -94,6 +106,8 @@ impl AppController {
         operation.set_id(id);
         operation.set_work_offset(self.active_origin);
         let mut document = self.document().clone();
+        if let Some(index)=index {index.validate()?;if operation.rotary_wrap().is_some(){return Err("An operation cannot be both indexed and wrapped".into());}document.rotary_indexes.insert(id,index);}else{document.rotary_indexes.remove(&id);}
+
         for tool in tools {
             if let Some(existing) = document
                 .setup_mut()

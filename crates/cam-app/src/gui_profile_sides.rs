@@ -6,6 +6,7 @@ type EntryContours = Result<(Vec<ProfileContour>, Option<cam_model::CuttingHeigh
 
 #[derive(PartialEq)]
 struct ContourKey {
+    index: Option<cam_model::RotaryIndex>,
     revision: u64,
     setup: u64,
     entries: Vec<cam_model::ProfileGeometryEntry>,
@@ -13,6 +14,7 @@ struct ContourKey {
 
 #[derive(PartialEq)]
 struct ResolutionKey {
+    index: Option<cam_model::RotaryIndex>,
     revision: u64,
     setup: u64,
     operation: u32,
@@ -44,6 +46,7 @@ impl App {
         profile: &mut ProfileOp,
     ) -> Result<Option<cam_model::GeometryBinding>, String> {
         let key = ResolutionKey {
+            index:self.rotary_index_draft.clone(),
             revision: self.controller.revision(),
             setup: self.controller.active_setup_id(),
             operation: profile.id,
@@ -60,7 +63,7 @@ impl App {
             } else {
                 let mut resolved = profile.clone();
                 let result = crate::cad_operations::resolve_profile_entries(
-                    self.controller.document(),
+                    &self.rotary_draft_document(),
                     &mut resolved,
                 )
                 .map(|binding| {
@@ -93,7 +96,7 @@ impl App {
             return Some(cache.contours.clone());
         }
         let geometry =
-            crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+            self.indexed_draft_geometry().ok()?;
         let contours = Arc::new(
             entries
                 .iter()
@@ -113,6 +116,7 @@ impl App {
             entry.contour_count = 0;
         }
         ContourKey {
+            index:self.rotary_index_draft.clone(),
             revision: self.controller.revision(),
             setup: self.controller.active_setup_id(),
             entries: geometry_entries,
@@ -128,7 +132,7 @@ impl App {
         if let Some((_, finding)) = cache.verification.as_ref().filter(|(old, _)| *old == key) {
             return finding.clone();
         }
-        let finding = crate::cad_operations::geometry_for_setup(self.controller.document())
+        let finding = self.indexed_draft_geometry()
             .ok()
             .and_then(|geometry| cam_geometry3d::verify_profile_entry(&geometry, entry));
         cache.verification = Some((key, finding.clone()));
@@ -186,13 +190,14 @@ impl App {
                                 self.profile_silhouette_bottom(heights.map_or(0., |h| h.bottom))
                             }
                             cam_model::ProfileGeometrySource::Cad(refs)
-                                if entry.kind == cam_model::ProfileGeometryKind::Chain =>
+                                if matches!(entry.kind, cam_model::ProfileGeometryKind::Chain | cam_model::ProfileGeometryKind::FaceContours) =>
                             {
                                 // Open chains have no certified cutting interval.
                                 // Place the editor geometry on its source plane,
                                 // independently of the operation's cutting depth.
-                                self.controller
-                                    .document()
+                                let document = self.rotary_draft_document();
+                                let view = document.indexed_view(profile.id).ok()?;
+                                view.as_ref().unwrap_or(&document)
                                     .height_selection_bounds(refs)
                                     .ok()?
                                     .1[2]
@@ -256,7 +261,7 @@ impl App {
         }
         let z = if let Some(binding) = binding {
             let geometry =
-                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+                self.indexed_draft_geometry().ok()?;
             let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding).ok()?;
             let old_sides: Vec<_> = profile.contours().map(|c| c.side).collect();
             if let Some(first) = resolved.profiles.first() {
@@ -384,6 +389,7 @@ impl App {
             browser_width,
             z,
             frame: self.controller.inspection_setup().frame.clone(),
+            index: self.rotary_index_draft.clone(),
             radius: self.profile_tab_diameter(&profile).unwrap_or(0.) * 0.5 + profile.offset,
             contours: profile.contours().collect(),
             climb: profile.clearing.climb,
@@ -400,6 +406,7 @@ pub(super) struct SideOverlay {
     camera: OrbitCamera,
     browser_width: f32,
     frame: cam_model::SetupFrame,
+    index: Option<cam_model::RotaryIndex>,
     z: f64,
     radius: f64,
     contours: Vec<ProfileContour>,
@@ -463,11 +470,11 @@ fn side_normal(contour: &ProfileContour, tangent: [f64; 2]) -> [f64; 2] {
 }
 
 impl SideOverlay {
-    fn project(&self, point: [f64; 2], bounds: iced::Rectangle) -> Option<iced::Point> {
+    pub(super) fn project(&self, point: [f64; 2], bounds: iced::Rectangle) -> Option<iced::Point> {
         picking_view::project(
             self.camera,
             bounds,
-            self.frame.to_world_vector([point[0], point[1], self.z]),
+            rotary_view::index_point_to_world(&self.frame, self.index.as_ref(), [point[0], point[1], self.z]),
         )
         .filter(|(p, depth)| p.x.is_finite() && p.y.is_finite() && (0.0..=1.0).contains(depth))
         .map(|p| p.0)
@@ -795,6 +802,7 @@ mod tests {
             camera: OrbitCamera::framed([-10., -10., -5.], [50., 50., 5.]),
             browser_width: 0.,
             frame: Default::default(),
+            index: None,
             z: 0.,
             radius: 3.,
             contours: vec![square(side)],

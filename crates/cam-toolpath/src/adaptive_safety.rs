@@ -26,6 +26,10 @@ pub(super) fn certify_layer(
     cancel: &CancelToken,
 ) -> Result<(), SafetyFailure> {
     let mut current: Option<Point3> = None;
+    // Stock-contour clearing repeats the same XY rings at many depths. Within
+    // this call the obstacle shadow and radius are fixed, so a certified swept
+    // segment can be reused. Bound memory for paths without repeated geometry.
+    let mut checked_segments = std::collections::HashSet::new();
     for (index, step) in program.steps().iter().enumerate() {
         if cancel.is_cancelled() {
             return Err(SafetyFailure::Cancelled);
@@ -88,8 +92,21 @@ pub(super) fn certify_layer(
             if cancel.is_cancelled() {
                 return Err(SafetyFailure::Cancelled);
             }
+            let a = [pair[0].x.to_bits(), pair[0].y.to_bits()];
+            let b = [pair[1].x.to_bits(), pair[1].y.to_bits()];
+            let key = if a <= b {
+                (a, b, (radius + margin).to_bits())
+            } else {
+                (b, a, (radius + margin).to_bits())
+            };
+            if checked_segments.contains(&key) {
+                continue;
+            }
             if !segment_clear(pair[0], pair[1], protected, radius + margin) {
                 return Err(reject("swept cutter intersects the protected model"));
+            }
+            if checked_segments.len() < 100_000 {
+                checked_segments.insert(key);
             }
         }
     }

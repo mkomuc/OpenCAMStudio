@@ -173,6 +173,10 @@ impl App {
                 inputs.toolpath_preview = true;
             }
             PreviewScope::Through(through) => {
+                // Browser previews need the stock left by this operation and its
+                // predecessors. Keep fixture verification and export publication
+                // out of this background job, but calculate the stock mesh.
+                inputs.display_only = true;
                 let later: Vec<_> = document
                     .setup()
                     .operations
@@ -291,6 +295,37 @@ mod tests {
         app.controller.select(Selection::Operation(id));
         app.focus_ops = BTreeSet::from([id]);
         app.sync_operation_preview();
+    }
+
+    #[test]
+    fn browsing_shows_removed_stock_without_cancelling_the_active_run() {
+        let (mut app, ids) = preview_app();
+        focus(&mut app, ids[0]);
+        app.drain_operation_preview();
+        let preview = app.operation_preview_outcome().unwrap();
+        assert!(!preview.stock_indices.is_empty());
+        assert!(preview.stock_operations.contains(&Some(ids[0])));
+        assert!(!preview.stock_operations.contains(&Some(ids[1])));
+        assert!(preview.scene.strips.iter().any(|s| s.op == Some(ids[0])));
+
+        let (entered, receiver) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        app.controller.set_run_test_hook(Arc::new(move |token| {
+            entered.send(token.clone()).unwrap();
+            wait.lock().unwrap().recv().unwrap();
+        }));
+        app.controller.start_run();
+        let token = receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        focus(&mut app, ids[1]);
+        focus(&mut app, ids[0]);
+        assert!(!token.is_cancelled(), "selection must not cancel verification");
+        app.controller.edit_operation(ids[0], |op| {
+            let Operation::Drill(op) = op else { panic!() };
+            op.depth = 1.;
+        });
+        assert!(token.is_cancelled(), "toolpath edits cancel obsolete verification");
+        release.send(()).unwrap();
     }
 
     #[test]

@@ -97,7 +97,14 @@ use crate::{BoreOp, Tool};
 /// v34: surface-offset finishing mode.
 /// v35: Scallop entry and retraction preferences.
 /// v36: Scallop pass ordering.
-pub const SCHEMA_VERSION: u32 = 36;
+/// v37: setup fixture bodies and radial/axial fixture clearances.
+/// v38: multiple pocket regions sharing operation cutting heights.
+/// v39: optional stock contours for pocket and 2D adaptive material footprints.
+/// v42: round, tubular and solid-derived stock definitions.
+/// v43: optional edge-aligned round stock.
+/// v44: round stock supports axes through the setup origin.
+/// v45: fixed fourth-axis indexes on individual operations.
+pub const SCHEMA_VERSION: u32 = 45;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -475,6 +482,67 @@ impl Heights {
     }
 }
 
+/// A straight CAD edge whose direction defines the axis of round stock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StockAxisReference {
+    pub asset_id: u64,
+    pub revision: u64,
+    pub instance_id: u64,
+    pub body_id: u64,
+    pub edge_id: u64,
+}
+impl From<&crate::EntityRef> for StockAxisReference {
+    fn from(entity: &crate::EntityRef) -> Self {
+        Self {
+            asset_id: entity.asset_id,
+            revision: entity.revision,
+            instance_id: entity.instance_id,
+            body_id: entity.body_id,
+            edge_id: entity.id,
+        }
+    }
+}
+impl StockAxisReference {
+    pub fn entity(self) -> crate::EntityRef {
+        crate::EntityRef {
+            asset_id: self.asset_id,
+            revision: self.revision,
+            instance_id: self.instance_id,
+            body_id: self.body_id,
+            id: self.edge_id,
+            kind: crate::EntityKind::Edge,
+        }
+    }
+}
+
+/// A round-stock direction selected from a CAD edge or the setup origin axes.
+/// The untagged edge form preserves projects saved before origin axes were added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum StockAxis {
+    Edge(StockAxisReference),
+    Origin { origin_axis: StockOriginAxis },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StockOriginAxis {
+    X,
+    Y,
+    Z,
+}
+impl StockOriginAxis {
+    pub fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+    pub fn from_index(index: usize) -> Option<Self> {
+        [Self::X, Self::Y, Self::Z].get(index).copied()
+    }
+}
+
 /// Input material for a setup: a model-relative box, or the remaining solid
 /// simulated from the preceding setup. Document-level bounds resolution accounts
 /// for both model selection and the work axes of inherited stock.
@@ -496,6 +564,29 @@ pub enum Stock {
     },
     /// A box grown independently on the negative and positive side of each axis.
     RelativeBox { offsets: [[f64; 3]; 2] },
+    /// Round stock parallel to the selected edge or along an origin axis.
+    /// When unset, the direction is setup Z.
+    FixedRound {
+        diameter: f64,
+        inner_diameter: f64,
+        length: f64,
+        position: f64,
+        tube: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<StockAxis>,
+    },
+    /// Round stock fitted around the model bounds with radial and axial allowances.
+    RelativeRound {
+        radial: f64,
+        inner_diameter: f64,
+        bottom: f64,
+        top: f64,
+        tube: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<StockAxis>,
+    },
+    /// A selected imported solid supplies the stock geometry.
+    FromSolid { instance: Option<u64> },
     /// Remaining material after the preceding setup in document execution order.
     /// Resolve its enclosing bounds through `Document::stock_bounds_for`; the
     /// machining worker supplies the actual simulated solid.
@@ -544,7 +635,19 @@ impl Stock {
                 });
                 (lo, std::array::from_fn(|i| lo[i] + size[i]))
             }
-            Self::PreviousSetup => (min, max),
+            Self::FixedRound { diameter, length, position, .. } => {
+                let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+                let z = min[2] - position * (length - (max[2] - min[2]));
+                ([center[0] - diameter / 2., center[1] - diameter / 2., z],
+                 [center[0] + diameter / 2., center[1] + diameter / 2., z + length])
+            }
+            Self::RelativeRound { radial, bottom, top, .. } => {
+                let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+                let radius = ((max[0] - min[0]).hypot(max[1] - min[1])) * 0.5 + radial;
+                ([center[0] - radius, center[1] - radius, min[2] - bottom],
+                 [center[0] + radius, center[1] + radius, max[2] + top])
+            }
+            Self::FromSolid { .. } | Self::PreviousSetup => (min, max),
             Self::RelativeBox { offsets } => (
                 std::array::from_fn(|i| min[i] - offsets[0][i]),
                 std::array::from_fn(|i| max[i] + offsets[1][i]),
@@ -708,6 +811,9 @@ fn profile_closed_default() -> bool {
 /// A profile operation may contain several independently retracted contours.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    /// Optional simultaneous fourth-axis cylindrical wrap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<crate::RotaryWrap>,
     /// Additional pass controls. Defaults preserve existing saved cuts.
     #[serde(default)]
     pub passes: crate::ProfilePasses,
@@ -947,7 +1053,8 @@ pub struct ClearParams {
     #[serde(default)]
     pub keep_tool_down: bool,
     /// Vertical lift above the cutting level during local linking moves, mm.
-    /// Zero keeps transitions at depth; distant links still use clearance.
+    /// Zero keeps normal transitions at depth; adaptive wall withdrawals lift
+    /// at least 0.2 mm. Distant links still use clearance.
     #[serde(default)]
     pub lift_height: f64,
     /// Maximum depth removed per pass, mm. `0` clears the full depth in one pass.
@@ -976,14 +1083,16 @@ pub struct ClearParams {
     /// How the tool enters the material in Z at each pass.
     #[serde(default)]
     pub plunge: Plunge,
-    /// Lead-in onto the finished walls, eased from the cleared interior.
+    /// Lead-in from cleared stock onto a wall or an adaptive cutting section.
     #[serde(default)]
     pub lead_in: Lead,
-    /// Lead-out off the walls after the finishing pass.
+    /// Lead-out from a wall or an adaptive cutting section into cleared stock.
     #[serde(default)]
     pub lead_out: Lead,
     /// Distance each ring keeps cutting past its start before retracting, mm, so the
     /// loop-closure junction leaves no witness dent.
+    /// Adjoining adaptive cuts overlap by this distance along the next cut;
+    /// zero uses exactly the same departure and re-entry point at their seam.
     #[serde(default)]
     pub lead_overlap: f64,
     /// Constant-engagement clearing parameters (engagement cap + climb).
@@ -1027,6 +1136,9 @@ pub struct CarveClearing {
 /// stepdown passes, down to a depth.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PocketOp {
+    /// Optional simultaneous fourth-axis cylindrical wrap (including 2D adaptive clearing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<crate::RotaryWrap>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -1035,6 +1147,13 @@ pub struct PocketOp {
     pub boundary: Contour,
     /// Closed islands to leave uncut (holes within the pocket).
     pub islands: Vec<Contour>,
+    /// Additional pockets, each retaining its own boundary and islands.
+    /// All regions use the operation cutting heights and clearing settings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_regions: Vec<cam_geo::Polygon>,
+    /// Optional material footprint for open pockets and 2D adaptive clearing.
+    #[serde(default)]
+    pub stock_contours: crate::StockContours,
     /// Pocket depth below the reference plane (Z=0), as a positive magnitude (mm).
     /// The floor sits at absolute Z `-depth`.
     pub depth: f64,
@@ -1129,6 +1248,7 @@ pub struct AdaptiveOp {
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveParams {
     /// Vertical lift above the cutting level during stay-down transitions, mm.
+    /// Adaptive wall withdrawals use a minimum 0.2 mm lift.
     #[serde(default)]
     pub lift_height: f64,
     /// Preferred entry and exit locations in setup XY.
@@ -2135,6 +2255,12 @@ pub struct Setup {
     /// Model instance identities included in machining for this setup. Empty selects none.
     #[serde(default)]
     pub model_instances: Vec<u64>,
+    /// Body instances used as fixtures; excluded from machining models and stock.
+    #[serde(default)]
+    pub fixture_instances: Vec<u64>,
+    /// Keep-out distances around fixture bodies in setup axes, millimetres.
+    #[serde(default)]
+    pub fixture_clearance: crate::FixtureClearance,
     /// NC program name for this setup.
     #[serde(default)]
     pub program_name: String,
@@ -2375,6 +2501,9 @@ fn default_origin_index() -> u32 {
 /// The top-level document: shared geometry and an ordered collection of setups.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Document {
+    /// Per-operation 3+1 indexing; stable operation IDs are document-wide.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub rotary_indexes: std::collections::BTreeMap<u32, crate::RotaryIndex>,
     /// Schema version this document conforms to.
     pub schema_version: u32,
     /// Independent physical workholding setups, in browser order.
@@ -2415,6 +2544,7 @@ pub struct Document {
 impl PartialEq for Document {
     fn eq(&self, other: &Self) -> bool {
         self.schema_version == other.schema_version
+            && self.rotary_indexes == other.rotary_indexes
             && self.setups == other.setups
             && self.geometry == other.geometry
             && self.cad_linked_operations == other.cad_linked_operations
@@ -2471,6 +2601,7 @@ impl Document {
     pub fn empty() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            rotary_indexes: Default::default(),
             active_setup_id: 0,
             setups: Vec::new(),
             geometry: crate::GeometryState::default(),
@@ -2739,6 +2870,7 @@ mod tests {
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            wrap: None,
             passes: Default::default(),
             selections: None,
             closed: true,
@@ -2830,6 +2962,8 @@ mod tests {
             material: String::new(),
             material_id: None,
             model_instances: Vec::new(),
+            fixture_instances: Vec::new(),
+            fixture_clearance: Default::default(),
             program_name: String::new(),
             name: "stock allowance test".into(),
             heights: Heights::new(10.0, 5.0, 0.0),
@@ -2997,6 +3131,15 @@ mod tests {
             "grown per-axis, bottom = top - thickness"
         );
         assert_eq!(max, [72.0, 55.0, 0.0]);
+    }
+
+    #[test]
+    fn round_stock_resolves_and_round_trips() {
+        let stock = Stock::RelativeRound { radial: 2., inner_diameter: 4., bottom: 1., top: 3., tube: true, axis: None };
+        let (lo, hi) = stock.resolve_bounds([-3., -4., 2.], [3., 4., 12.]);
+        assert_eq!((lo, hi), ([-7., -7., 1.], [7., 7., 15.]));
+        let json = serde_json::to_string(&stock).unwrap();
+        assert_eq!(serde_json::from_str::<Stock>(&json).unwrap(), stock);
     }
 
     #[test]

@@ -16,6 +16,7 @@ default = []
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:ab_glyph"]
 
 [dependencies]
+serde.workspace = true
 cam-model = { path = "../cam-model" }
 cam-geo = { path = "../cam-geo" }
 cam-cldata = { path = "../cam-cldata" }

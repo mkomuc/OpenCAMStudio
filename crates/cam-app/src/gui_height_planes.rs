@@ -1,4 +1,4 @@
-//! Operation height preview: setup-aligned bounding rectangles and labels.
+//! Operation height preview: machining-plane rectangles and labels.
 use super::*;
 
 pub(super) fn field_id(field: Field) -> String {
@@ -13,6 +13,7 @@ pub(super) struct HeightPlane {
     pub color: Color,
     pub active: bool,
     pub corners: [[f32; 3]; 4],
+    pub outlines: Vec<Vec<[f32; 3]>>,
 }
 
 pub(super) struct HeightOverlay {
@@ -81,7 +82,24 @@ impl App {
         };
         let heights = self.resolve_height_editor(id).ok()?;
         let setup = self.controller.inspection_setup();
-        let (min, max) = self.controller.stock_box();
+        let document = self.rotary_draft_document();
+        let indexed = document.indexed_view(id).ok()?;
+        let (min, max) = indexed.as_ref().map_or_else(
+            || self.controller.stock_box(),
+            |view| view.stock_bounds_for(view.setup()),
+        );
+        let mut operation = self.current_operation(id)?.clone();
+        let parsed = self
+            .fields
+            .iter()
+            .filter_map(|(f, v)| v.parse::<f64>().ok().map(|v| (*f, v)))
+            .collect();
+        apply_op_fields(&mut operation, &parsed);
+        if operation.rotary_wrap().is_some() {
+            let geometry =
+                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry, &mut operation).ok()?;
+        }
         let pad = (max[0] - min[0]).max(max[1] - min[1]).max(1.) * 0.08;
         let colors = [
             Color::from_rgb(1., 0.38, 0.16),
@@ -95,13 +113,29 @@ impl App {
             .into_iter()
             .filter_map(|plane| {
                 let z = heights.plane(plane)?;
+                if operation
+                    .rotary_wrap()
+                    .is_some_and(|w| w.effective_radius() + z - w.surface_z <= 0.)
+                {
+                    return None;
+                }
                 let corners = [
                     [min[0] - pad, min[1] - pad, z],
                     [max[0] + pad, min[1] - pad, z],
                     [max[0] + pad, max[1] + pad, z],
                     [min[0] - pad, max[1] + pad, z],
                 ]
-                .map(|p| setup.frame.to_world_vector(p).map(|v| v as f32));
+                .map(|p| {
+                    rotary_view::index_point_to_world(
+                        &setup.frame,
+                        self.rotary_index_draft.as_ref(),
+                        p,
+                    )
+                    .map(|v| v as f32)
+                });
+                let outlines = operation.rotary_wrap().map_or_else(Vec::new, |wrap| {
+                    wrapped_plane_outlines(wrap, z, min, max, &setup.frame)
+                });
                 Some(HeightPlane {
                     name: names[plane.index()],
                     z,
@@ -110,6 +144,7 @@ impl App {
                     active: focused.as_deref()
                         == Some(super::height_editor::plane_input_id(plane).as_str()),
                     corners,
+                    outlines,
                 })
             })
             .collect();
@@ -119,6 +154,55 @@ impl App {
             browser_width,
         })
     }
+}
+
+fn wrapped_plane_outlines(
+    wrap: &cam_model::RotaryWrap,
+    z: f64,
+    min: [f64; 3],
+    max: [f64; 3],
+    frame: &cam_model::SetupFrame,
+) -> Vec<Vec<[f32; 3]>> {
+    let radius = wrap.effective_radius() + z - wrap.surface_z;
+    if !radius.is_finite() || radius <= 0. {
+        return Vec::new();
+    }
+    let axial = match wrap.axis {
+        cam_model::RotaryAxis::A => 0,
+        cam_model::RotaryAxis::B => 1,
+    };
+    let pad = (max[axial] - min[axial]).max(1.) * 0.08;
+    let ends = [min[axial] - pad, max[axial] + pad];
+    let point = |along: f64, angle: f64| {
+        let (s, c) = angle.sin_cos();
+        let p = match wrap.axis {
+            cam_model::RotaryAxis::A => [
+                along,
+                wrap.center[1] + radius * s,
+                wrap.center[2] + radius * c,
+            ],
+            cam_model::RotaryAxis::B => [
+                wrap.center[0] + radius * s,
+                along,
+                wrap.center[2] + radius * c,
+            ],
+        };
+        frame.to_world_vector(p).map(|v| v as f32)
+    };
+    let mut paths: Vec<_> = ends
+        .into_iter()
+        .map(|along| {
+            (0..=128)
+                .map(|i| point(along, std::f64::consts::TAU * i as f64 / 128.))
+                .collect()
+        })
+        .collect();
+    paths.extend((0..4).map(|i| {
+        ends.into_iter()
+            .map(|along| point(along, std::f64::consts::FRAC_PI_2 * i as f64))
+            .collect()
+    }));
+    paths
 }
 
 fn project(camera: OrbitCamera, point: [f32; 3], size: iced::Size) -> iced::Point {
@@ -154,39 +238,61 @@ impl canvas::Program<Message> for HeightOverlay {
             if !plane.z.is_finite() {
                 continue;
             }
-            let points = plane
-                .corners
-                .map(|p| project(self.camera, p, bounds.size()));
-            if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
-                continue;
-            }
-            let path = canvas::Path::new(|p| {
-                p.move_to(points[0]);
-                for point in &points[1..] {
-                    p.line_to(*point);
+            let outlines = if plane.outlines.is_empty() {
+                vec![plane
+                    .corners
+                    .into_iter()
+                    .chain(std::iter::once(plane.corners[0]))
+                    .collect()]
+            } else {
+                plane.outlines.clone()
+            };
+            for outline in outlines {
+                let points: Vec<_> = outline
+                    .into_iter()
+                    .map(|p| project(self.camera, p, bounds.size()))
+                    .collect();
+                if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                    continue;
                 }
-                p.close();
-            });
-            frame.stroke(
-                &path,
-                canvas::Stroke::default()
-                    .with_color(plane.color)
-                    .with_width(if plane.active { 2.5 } else { 1.2 }),
-            );
+                let path = canvas::Path::new(|p| {
+                    p.move_to(points[0]);
+                    for point in &points[1..] {
+                        p.line_to(*point);
+                    }
+                });
+                frame.stroke(
+                    &path,
+                    canvas::Stroke::default()
+                        .with_color(plane.color)
+                        .with_width(if plane.active { 2.5 } else { 1.2 }),
+                );
+            }
         }
         let mut labels: Vec<iced::Rectangle> = Vec::new();
         let mut captions = Vec::new();
         for (index, plane) in self.planes.iter().enumerate() {
-            let points = plane
-                .corners
-                .map(|p| project(self.camera, p, bounds.size()));
+            let points: Vec<_> = if let Some(ring) = plane.outlines.first() {
+                ring.iter()
+                    .map(|p| project(self.camera, *p, bounds.size()))
+                    .collect()
+            } else {
+                plane
+                    .corners
+                    .map(|p| project(self.camera, p, bounds.size()))
+                    .to_vec()
+            };
             if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
                 continue;
             }
             // Distribute labels along the same edge; resolve collisions for top views
             // and coincident stock/cutting planes without losing their true Z outline.
             let t = (index as f32 + 0.5) / self.planes.len().max(1) as f32;
-            let anchor = points[0] + (points[1] - points[0]) * t;
+            let anchor = if plane.outlines.is_empty() {
+                points[0] + (points[1] - points[0]) * t
+            } else {
+                points[((points.len() - 1) as f32 * t) as usize]
+            };
             let content = format!("{}: {} mm", plane.name, plane.value_label);
             let width = content.len() as f32 * 6.8 + 16.;
             let mut rect = iced::Rectangle {
@@ -242,6 +348,12 @@ mod tests {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        // Height expectations use the drawing surface as stock top.
+        app.controller.edit_stock(|s| {
+            *s = cam_model::Stock::RelativeBox {
+                offsets: [[1., 1., 0.]; 2],
+            }
+        });
         app.controller.new_operation(OpKind::Profile);
         let id = app
             .controller
@@ -359,6 +471,109 @@ mod tests {
             .inspection_setup()
             .height_settings
             .contains_key(&id));
+    }
+
+    #[test]
+    fn indexed_height_planes_match_rotated_stock_and_machine_frame_for_both_axes() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R, RotaryAxis};
+        let (mut app, id) = operation_editor();
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::FixedBox {
+                size: [30., 20., 12.],
+                model_position: [0.3, 0.4, 0.2],
+            }
+        });
+        app.controller.edit_setup(|setup| {
+            setup.frame.world_from_setup.rotation = [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]];
+        });
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        for (plane, reference, offset) in [
+            (P::Top, R::StockTop, 0.),
+            (P::Bottom, R::StockBottom, 0.),
+            (P::Feed, R::Plane(P::Top), 2.),
+            (P::Retract, R::Plane(P::Top), 4.),
+            (P::Clearance, R::Plane(P::Retract), 6.),
+        ] {
+            *app.height_draft.as_mut().unwrap().definition_mut(plane) =
+                cam_model::HeightDefinition::new(reference, offset);
+            app.height_offsets.insert(plane, fmt_num(offset));
+        }
+        let (min, max) = app.controller.stock_box();
+        let frame = app.controller.inspection_setup().frame.clone();
+        let camera = OrbitCamera::framed([-50.; 3], [100.; 3]);
+        for (axis, angle) in [(RotaryAxis::A, 90.), (RotaryAxis::B, -45.), (RotaryAxis::A, 270.)] {
+            app.rotary_action(rotary_view::Action::IndexAxis(axis));
+            for (i, value) in [(0, angle), (1, 2.), (2, 3.), (3, -4.)] {
+                app.rotary_action(rotary_view::Action::IndexValue(i, value.to_string()));
+            }
+            let center = cam_cldata::Point3::new(2., 3., -4.);
+            let rotated: Vec<_> = (0..8).map(|bits| {
+                let p = std::array::from_fn::<_, 3, _>(|i| if bits & (1 << i) == 0 { min[i] } else { max[i] });
+                axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle)
+            }).collect();
+            let zmin = rotated.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+            let zmax = rotated.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+            let heights = app.resolve_height_editor(id).unwrap();
+            assert!((heights.top - zmax).abs() < 1e-8);
+            assert!((heights.bottom - zmin).abs() < 1e-8);
+            assert!((heights.clearance - zmax - 10.).abs() < 1e-8);
+            let overlay = app.height_preview(camera, 0.).unwrap();
+            assert_eq!(overlay.planes.len(), 5);
+            for plane in overlay.planes {
+                for point in plane.corners {
+                    let p = frame.to_setup_vector(point.map(f64::from));
+                    let machine = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle);
+                    assert!((machine.z - plane.z).abs() < 1e-4, "{} {axis:?} {angle}", plane.name);
+                }
+                assert!((plane.value_label.parse::<f64>().unwrap() - plane.z).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_round_stock_heights_follow_the_rotated_cylinder() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R, RotaryAxis};
+        let (mut app, id) = operation_editor();
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::FixedRound {
+                diameter: 20., inner_diameter: 0., length: 50., position: 0.5,
+                tube: false, axis: Some(cam_model::StockAxis::Origin {
+                    origin_axis: cam_model::StockOriginAxis::X,
+                }),
+            }
+        });
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        *app.height_draft.as_mut().unwrap().definition_mut(P::Top) = cam_model::HeightDefinition::new(R::StockTop, 0.);
+        *app.height_draft.as_mut().unwrap().definition_mut(P::Bottom) = cam_model::HeightDefinition::new(R::StockBottom, 0.);
+        app.height_offsets.insert(P::Top, "0".into());
+        app.height_offsets.insert(P::Bottom, "0".into());
+        let setup = app.controller.inspection_setup();
+        let (frame, min, max) = app.controller.document().round_stock_geometry(setup).unwrap().unwrap();
+        let setup_frame = setup.frame.clone();
+        for (axis, angle) in [(RotaryAxis::A, 47.), (RotaryAxis::B, 90.)] {
+            app.rotary_action(rotary_view::Action::IndexAxis(axis));
+            app.rotary_action(rotary_view::Action::IndexValue(0, angle.to_string()));
+            app.rotary_action(rotary_view::Action::IndexValue(2, "3".into()));
+            let center = cam_cldata::Point3::new(0., 3., 0.);
+            let mut lower = f64::INFINITY;
+            let mut upper = f64::NEG_INFINITY;
+            for axial in [min[2], max[2]] {
+                for i in 0..1440 {
+                    let angle_sample = std::f64::consts::TAU * i as f64 / 1440.;
+                    let p = [
+                        (min[0]+max[0])*0.5 + (max[0]-min[0])*0.5*angle_sample.cos(),
+                        (min[1]+max[1])*0.5 + (max[0]-min[0])*0.5*angle_sample.sin(), axial,
+                    ];
+                    let p = setup_frame.to_setup_vector(frame.to_world_vector(p));
+                    let p = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle);
+                    lower = lower.min(p.z);
+                    upper = upper.max(p.z);
+                }
+            }
+            let heights = app.resolve_height_editor(id).unwrap();
+            assert!((heights.top - upper).abs() < 0.001, "{axis:?}: {} vs {upper}", heights.top);
+            assert!((heights.bottom - lower).abs() < 0.001, "{axis:?}: {} vs {lower}", heights.bottom);
+        }
     }
     #[test]
     fn cycles_invalid_offsets_and_missing_selections_block_apply_and_defaults_recover() {
@@ -524,5 +739,32 @@ mod tests {
         );
         let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "2e-4".into()));
         assert_eq!(app.height_display_value(id, P::Clearance, 0.1002), "0.1002");
+    }
+    #[test]
+    fn wrapped_planes_are_cylinders_in_both_rotary_orientations() {
+        for axis in [cam_model::RotaryAxis::A, cam_model::RotaryAxis::B] {
+            let wrap = cam_model::RotaryWrap {
+                axis,
+                radius: 100.,
+                offset: 1.,
+                center: [10., 20., 30.],
+                ..Default::default()
+            };
+            let frame = cam_model::SetupFrame::default();
+            let paths = wrapped_plane_outlines(&wrap, 15., [-40.; 3], [40.; 3], &frame);
+            assert_eq!(paths.len(), 6);
+            assert_eq!(paths[0].first(), paths[0].last());
+            for point in paths.iter().take(2).flatten() {
+                let radius = match axis {
+                    cam_model::RotaryAxis::A => {
+                        (point[1] as f64 - 20.).hypot(point[2] as f64 - 30.)
+                    }
+                    cam_model::RotaryAxis::B => {
+                        (point[0] as f64 - 10.).hypot(point[2] as f64 - 30.)
+                    }
+                };
+                assert!((radius - 116.).abs() < 0.0001, "{radius}");
+            }
+        }
     }
 }

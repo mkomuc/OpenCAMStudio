@@ -166,12 +166,17 @@ fn arc_samples(centre: Point, a: Point, b: Point, n: usize) -> Vec<Point> {
     while sweep < -std::f64::consts::PI {
         sweep += std::f64::consts::TAU;
     }
-    (0..=n)
+    let mut points: Vec<_> = (0..=n)
         .map(|i| {
             let ang = a0 + sweep * (i as f64) / (n as f64);
             Point::new(centre.x + r * ang.cos(), centre.y + r * ang.sin())
         })
-        .collect()
+        .collect();
+    // Trigonometric reconstruction can move a junction by a few ulps. Keep
+    // the exact caller-owned seam points for zero-overlap joins and ramps.
+    points[0] = a;
+    points[n] = b;
+    points
 }
 
 /// Whether every sampled point of a lead stays inside the cleared/air region (the
@@ -258,6 +263,31 @@ pub(crate) fn emit_lead(
 mod plunge_tests {
     use super::*;
     use cam_geo::Contour;
+
+    #[test]
+    fn sampled_arc_leads_keep_exact_junction_coordinates() {
+        let on = Point::new(24.8123456789, -7.);
+        let tangent = (1., 0.);
+        let normal = (0., 1.);
+        for lead in [
+            Lead::Arc { radius: 0.6 },
+            Lead::ArcSweep {
+                radius: 1.3,
+                angle_deg: 120.,
+            },
+        ] {
+            for incoming in [false, true] {
+                let off = if incoming {
+                    lead_start_point(on, tangent, normal, lead)
+                } else {
+                    lead_end_point(on, tangent, normal, lead)
+                };
+                let points = lead_samples_n(on, off, normal, lead, 32);
+                assert_eq!(points[0], on);
+                assert_eq!(*points.last().unwrap(), off);
+            }
+        }
+    }
 
     #[test]
     fn entry_circle_cannot_cross_an_island_between_legal_endpoints() {

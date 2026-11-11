@@ -3,8 +3,8 @@ use crate::{CancelToken, Diagnostic, JobEnv, Strategy, StrategyResult};
 use cam_cldata::{MoveKind, Point3, Step, Tag};
 use cam_geometry3d::ParallelGeometry;
 use cam_model::{AdaptiveContainment, ParallelOp, StockToLeave, ToolKind};
-use std::collections::HashMap;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use wide::{f64x4, CmpLe};
 mod scallop;
 type V = [f64; 3];
@@ -210,15 +210,18 @@ struct Bounds4 {
     hy: f64x4,
 }
 fn pack_bounds(bounds: &[([f64; 2], [f64; 2])]) -> Vec<Bounds4> {
-    bounds.chunks(4).map(|batch| {
-        let lane = |i: usize| batch.get(i).copied().unwrap_or(([0.; 2], [0.; 2]));
-        Bounds4 {
-            lx: f64x4::new(std::array::from_fn(|i| lane(i).0[0])),
-            ly: f64x4::new(std::array::from_fn(|i| lane(i).0[1])),
-            hx: f64x4::new(std::array::from_fn(|i| lane(i).1[0])),
-            hy: f64x4::new(std::array::from_fn(|i| lane(i).1[1])),
-        }
-    }).collect()
+    bounds
+        .chunks(4)
+        .map(|batch| {
+            let lane = |i: usize| batch.get(i).copied().unwrap_or(([0.; 2], [0.; 2]));
+            Bounds4 {
+                lx: f64x4::new(std::array::from_fn(|i| lane(i).0[0])),
+                ly: f64x4::new(std::array::from_fn(|i| lane(i).0[1])),
+                hx: f64x4::new(std::array::from_fn(|i| lane(i).1[0])),
+                hy: f64x4::new(std::array::from_fn(|i| lane(i).1[1])),
+            }
+        })
+        .collect()
 }
 fn filter_bounds(ids: &mut Vec<usize>, bounds: &[Bounds4], p: V, r: f64) {
     let px = f64x4::splat(p[0]);
@@ -237,7 +240,10 @@ fn filter_bounds(ids: &mut Vec<usize>, bounds: &[Bounds4], p: V, r: f64) {
         let mask = (dx * dx + dy * dy).cmp_le(limit).move_mask();
         // The spatial index emits sorted, unique IDs. Most interior blocks are
         // complete, so avoid scanning their group boundaries a second time.
-        if ids[first].is_multiple_of(4) && first + 4 <= ids.len() && ids[first + 3] == ids[first] + 3 {
+        if ids[first].is_multiple_of(4)
+            && first + 4 <= ids.len()
+            && ids[first + 3] == ids[first] + 3
+        {
             for lane in 0..4 {
                 if mask & (1 << lane) != 0 {
                     ids[written] = block * 4 + lane;
@@ -539,10 +545,7 @@ impl Strategy for ParallelStrategy {
         };
         for first in (0..=rows).step_by(batch_rows) {
             let end = (first + batch_rows).min(rows + 1);
-            let batch: Option<Vec<_>> = (first..end)
-                .into_par_iter()
-                .map(&sample_row)
-                .collect();
+            let batch: Option<Vec<_>> = (first..end).into_par_iter().map(&sample_row).collect();
             let Some(batch) = batch else {
                 out.cancelled = true;
                 return out;
@@ -1102,11 +1105,13 @@ mod tests {
     #[ignore = "manual SIMD throughput measurement"]
     fn bounds_filter_benchmark() {
         use std::{hint::black_box, time::Instant};
-        let bounds: Vec<_> = (0..8192).map(|i| {
-            let x = (i % 128) as f64 * 0.1;
-            let y = (i / 128) as f64 * 0.1;
-            ([x, y], [x + 0.2, y + 0.2])
-        }).collect();
+        let bounds: Vec<_> = (0..8192)
+            .map(|i| {
+                let x = (i % 128) as f64 * 0.1;
+                let y = (i / 128) as f64 * 0.1;
+                ([x, y], [x + 0.2, y + 0.2])
+            })
+            .collect();
         let packed = pack_bounds(&bounds);
         let source: Vec<_> = (0..bounds.len()).collect();
         for simd in [false, true] {
@@ -1127,14 +1132,24 @@ mod tests {
                 }
                 black_box(ids);
             }
-            println!("{}: {:.2} ms", if simd { "SIMD" } else { "scalar" }, start.elapsed().as_secs_f64() * 1000.);
+            println!(
+                "{}: {:.2} ms",
+                if simd { "SIMD" } else { "scalar" },
+                start.elapsed().as_secs_f64() * 1000.
+            );
         }
     }
 
     #[test]
     fn finishing_is_identical_with_one_or_four_workers() {
-        let serial = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-        let parallel = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let serial = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let parallel = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
         for scallop in [false, true] {
             for stay_down in [false, true] {
                 let mut operation = op();
@@ -1143,8 +1158,10 @@ mod tests {
                 operation.params.containment = AdaptiveContainment::Center;
                 let mut geometry = surface();
                 // Separate selections exercise trims, empty fragments and retracts.
-                geometry.selected = rectangle(0., 0., 4., 10.).into_iter()
-                    .chain(rectangle(6., 0., 10., 10.)).collect();
+                geometry.selected = rectangle(0., 0., 4., 10.)
+                    .into_iter()
+                    .chain(rectangle(6., 0., 10., 10.))
+                    .collect();
                 let single = serial.install(|| run(operation.clone(), geometry.clone()));
                 let multi = parallel.install(|| run(operation.clone(), geometry.clone()));
                 assert!(!single.has_errors(), "{:?}", single.diagnostics);

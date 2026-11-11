@@ -145,6 +145,8 @@ pub struct ViewPrefs {
     pub show_stock: bool,
     /// Blend the stock surface so the model or drawing remains visible inside it.
     pub transparent_stock: bool,
+    /// Transparency from 0 (opaque) to 1 (fully transparent).
+    pub stock_transparency: f32,
     /// Stock surface RGB color, with each channel in the range 0–1.
     pub stock_color: [f32; 3],
     pub show_gizmo: bool,
@@ -174,6 +176,8 @@ pub struct SimulationPrefs {
     pub show_tool: bool,
     pub tool_display: SimulationToolDisplay,
     pub transparent_tool: bool,
+    /// Choose which side of the rotary motion remains stationary on screen.
+    pub rotary_view: SimulationRotaryView,
     pub programmed_point: bool,
     pub show_toolpath: bool,
     pub show_links: bool,
@@ -202,6 +206,7 @@ impl Default for SimulationPrefs {
             show_tool: true,
             tool_display: SimulationToolDisplay::Shaft,
             transparent_tool: false,
+            rotary_view: SimulationRotaryView::FixedStock,
             programmed_point: false,
             show_toolpath: true,
             show_links: true,
@@ -237,6 +242,9 @@ macro_rules! simulation_choices {
         }
     };
 }
+simulation_choices!(SimulationRotaryView {
+    FixedStock => "Fixed stock, rotating tool", RotatingStock => "Rotating stock, fixed tool",
+});
 simulation_choices!(SimulationToolDisplay {
     Cutter => "Cutter", Shaft => "Cutter and shaft", Holder => "Cutter and holder",
 });
@@ -380,6 +388,7 @@ impl Default for ViewPrefs {
         Self {
             show_stock: false,
             transparent_stock: false,
+            stock_transparency: 0.75,
             stock_color: [0.2, 0.65, 0.3],
             show_gizmo: true,
             show_origin: true,
@@ -526,6 +535,7 @@ impl Settings {
         self.simulation.comparison_tolerance =
             clamp(self.simulation.comparison_tolerance, (0.001, 2.0), 0.05);
         let v = &mut self.view;
+        v.stock_transparency = clamp(v.stock_transparency, (0.0, 1.0), d.view.stock_transparency);
         for (channel, fallback) in v.stock_color.iter_mut().zip(d.view.stock_color) {
             *channel = clamp(*channel, (0.0, 1.0), fallback);
         }
@@ -822,6 +832,7 @@ mod tests {
         let old: Settings = serde_json::from_str(r#"{"simulation":{"accuracy":1.5}}"#).unwrap();
         assert_eq!(old.simulation.accuracy, 1.5);
         assert!(old.simulation.stop_on_collision);
+        assert_eq!(old.simulation.rotary_view, SimulationRotaryView::FixedStock);
         assert!(old.simulation.regenerate_on_rewind);
         assert_eq!(
             old.simulation.toolpath_mode,
@@ -833,6 +844,7 @@ mod tests {
         );
         let mut settings = old;
         settings.simulation.tool_display = SimulationToolDisplay::Holder;
+        settings.simulation.rotary_view = SimulationRotaryView::RotatingStock;
         settings.simulation.toolpath_mode = SimulationToolpathMode::Leading;
         settings.simulation.toolpath_coloring = SimulationToolpathColoring::CuttingForce;
         settings.simulation.stock_coloring = SimulationStockColoring::Tool;
@@ -858,6 +870,19 @@ mod tests {
         settings.simulation.comparison_tolerance = f32::NAN;
         settings.clamp_all();
         assert_eq!(settings.simulation.comparison_tolerance, 0.05);
+    }
+
+    #[test]
+    fn stock_transparency_defaults_clamps_and_round_trips() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.view.stock_transparency, 0.75);
+        settings.view.stock_transparency = 1.5;
+        settings.clamp_all();
+        assert_eq!(settings.view.stock_transparency, 1.0);
+        settings.view.stock_transparency = 0.42;
+        let loaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(loaded.view.stock_transparency, 0.42);
     }
 
     #[test]

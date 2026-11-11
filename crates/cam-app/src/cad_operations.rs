@@ -331,6 +331,9 @@ pub(crate) fn model_bounds(geometry: &GeometryState, setup: &Setup) -> ([f64; 3]
 fn stock_top(document: &Document) -> f64 {
     document.stock_bounds_for(document.setup()).1[2]
 }
+fn operation_stock_top(document:&Document,id:u32)->Result<f64,String> {
+    Ok(document.indexed_view(id)?.as_ref().map_or_else(||stock_top(document),stock_top))
+}
 /// Validate the complete selection before strategy extraction. A mixed geometry
 /// field cannot become a valid operation by dropping its incompatible members.
 pub(crate) fn validate_selection(
@@ -392,7 +395,7 @@ pub(crate) fn resolve_profile_entries(
     document: &Document,
     profile: &mut ProfileOp,
 ) -> Result<Option<GeometryBinding>, String> {
-    let geometry = geometry_for_setup(document)?;
+    let geometry = geometry_for_operation(document,profile.id)?;
     let entries = profile
         .selections
         .as_mut()
@@ -425,7 +428,7 @@ pub(crate) fn resolve_profile_entries(
         ExtractionRecipe::ProfileEntries {
             entries: entries.clone(),
         },
-        stock_top(document),
+        operation_stock_top(document,profile.id)?,
     )?;
     if !certified_heights {
         // Open paths use the operator's depth, rather than a default wall
@@ -457,7 +460,7 @@ pub(crate) fn create_operation(
     work_offset: u32,
     defaults: JobParams,
 ) -> Result<(Operation, GeometryBinding), String> {
-    let geometry = geometry_for_setup(document)?;
+    let geometry = geometry_for_operation(document,id)?;
     if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
         cam_geometry3d::validate_adaptive_selection(&geometry, &selected)?;
     } else {
@@ -467,7 +470,7 @@ pub(crate) fn create_operation(
         &geometry,
         &selected,
         recipe(kind, &geometry, &selected)?,
-        stock_top(document),
+        operation_stock_top(document,id)?,
     )?;
     let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
     let depth = if binding.recipe == ExtractionRecipe::PocketBoundary {
@@ -484,6 +487,9 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            wrap: None,
+            additional_regions: resolved.regions.iter().skip(1).cloned().collect(),
+            stock_contours: Default::default(),
             finishing: Default::default(),
             id,
             tool,
@@ -513,6 +519,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            wrap: None,
             passes: cam_model::ProfilePasses {
                 lead_end_distance: 0.6,
                 lead_end_distance_enabled: Some(false),
@@ -781,6 +788,55 @@ pub(crate) fn resolve_document(document: &Document) -> Result<Document, String> 
     resolve_document_checked(document, &|| false).map_err(|diagnostic| diagnostic.message)
 }
 
+pub(crate) fn geometry_for_operation(document:&Document,id:u32)->Result<GeometryState,String> {
+    let geometry=geometry_for_setup(document)?;
+    if let Some(index)=document.rotary_indexes.get(&id) {index.validate()?;Ok(index.geometry(&geometry))}else{Ok(geometry)}
+}
+
+pub(crate) fn resolve_wrapped_operation(geometry:&GeometryState, operation:&mut Operation)->Result<(),String> {
+    let Some(mut wrap)=operation.rotary_wrap().cloned() else {return Ok(());};
+    wrap.validate()?;
+    if let Some(cylinder)=wrap.cylinder.clone() {
+        wrap=cam_geometry3d::wrap_cylinder(geometry,&cylinder,wrap)?;
+    }
+    wrap.boundary_z=if wrap.unwrap_geometry {cam_geometry3d::wrapped_boundary_height(geometry,&wrap)?}else{None};
+    wrap.periodic=wrap.unwrap_geometry && cam_geometry3d::periodic_cylinder_selection(geometry,&wrap)?;
+    if !wrap.geometry.is_empty() {
+        let contours=if wrap.unwrap_geometry {cam_geometry3d::unwrap_boundaries(geometry,&wrap)?}else{
+            let recipe=if matches!(operation,Operation::Pocket(_)){ExtractionRecipe::PocketBoundary}else{ExtractionRecipe::ProfileContours};
+            let binding=cam_geometry3d::resolve_selection_advisory(geometry,&wrap.geometry,recipe,wrap.surface_z)?;
+            let input=cam_geometry3d::resolve_binding_advisory(geometry,&binding)?;
+            if !input.profiles.is_empty(){input.profiles}else{
+                input.regions.iter().flat_map(|r|std::iter::once(r.outer()).chain(r.holes().iter())).map(|chain|ProfileContour{chain:chain.clone(),closed:true,side:Side::On}).collect()
+            }
+        };
+        match operation {
+            Operation::Profile(profile)=>{
+                let mut contours=contours.into_iter();
+                let first=contours.next().ok_or("Empty wrapped contour")?;
+                profile.chain=first.chain; profile.closed=first.closed;
+                profile.additional_chains=contours.collect();
+                profile.selections=None;
+            }
+            Operation::Pocket(pocket)=>{
+                let mut regions=cam_geometry3d::wrapped_regions(&contours)?.into_iter();
+                let first=regions.next().ok_or("Empty wrapped pocket")?;
+                pocket.boundary=first.outer().clone();pocket.islands=first.holes().to_vec();
+                pocket.additional_regions=regions.collect();
+            }
+            _=>return Err("Rotary wrapping supports Profile and Pocket operations".into()),
+        }
+    }
+    if matches!(operation,Operation::Profile(profile) if profile.comp!=Comp::Computed) {
+        return Err("Wrapped contours require computed cutter compensation".into());
+    }
+    if matches!(operation,Operation::Pocket(pocket) if pocket.stock_contours.enabled) {
+        return Err("Disable Stock Contours for a wrapped pocket; define its boundary in the unwrapped plane".into());
+    }
+    operation.set_rotary_wrap(Some(wrap));
+    Ok(())
+}
+
 /// Typed source ownership is preserved when resolution runs in a worker.
 pub(crate) fn resolve_document_checked(
     document: &Document,
@@ -803,6 +859,7 @@ pub(crate) fn resolve_document_checked(
         if !document.operation_is_included(document.setup().id, operation.id()) {
             continue;
         }
+        if operation.rotary_wrap().is_some() || document.rotary_indexes.contains_key(&operation.id()) {continue;}
         if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
             let heights = settings.resolve(document, operation).map_err(|reason| {
                 error(format!("Operation {}: {reason}", operation.id())).for_op(operation.id())
@@ -826,7 +883,27 @@ pub(crate) fn resolve_document_checked(
                 .with_code(cam_toolpath::DiagnosticCode::Cancelled));
         }
         let id = operation.id();
+        let base_instances=resolved.geometry.instances.clone();
+        if let Some(index)=document.rotary_indexes.get(&id) {
+            index.validate().map_err(error)?;
+            resolved.geometry=index.geometry(&resolved.geometry);
+        }
         let resolved_operation: Result<(), String> = (|| {
+            if operation.rotary_wrap().is_some() {
+                resolve_wrapped_operation(&resolved.geometry,operation)?;
+                resolved.geometry.bindings.remove(&id);
+                resolved.cad_linked_operations.remove(&id);
+                if let Some(settings)=resolved.setup().height_settings.get(&id).cloned() {
+                    let mut settings=settings;settings.resolved=None;
+                    // The wrap now carries its developed CAD floor, but stock
+                    // references still belong to the original world geometry.
+                    // Resolving against the rotated worker geometry would apply
+                    // the setup frame twice when measuring the round blank.
+                    let heights=settings.resolve(document,operation)?;
+                    resolved.setup_mut().height_settings.get_mut(&id).unwrap().resolved=Some(heights);
+                }
+                return Ok(());
+            }
             let Some(binding) = document.geometry.bindings.get(&id) else {
                 if document.cad_linked_operations.contains(&id) {
                     return Err(format!(
@@ -856,7 +933,7 @@ pub(crate) fn resolve_document_checked(
                 current_binding.heights.bottom = current_binding.heights.top - cutting.depth();
             }
             if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
-                current_binding.heights.top = stock_top(document);
+                current_binding.heights.top = operation_stock_top(document,id)?;
             }
             let input =
                 cam_geometry3d::resolve_binding_advisory(&resolved.geometry, &current_binding)
@@ -870,13 +947,14 @@ pub(crate) fn resolve_document_checked(
                     })?;
             let depth = input.heights.depth();
             let region = || input.regions.first().ok_or("No resolved machining region");
-            match (operation, &binding.recipe) {
+            match (&mut *operation, &binding.recipe) {
                 (
                     Operation::Pocket(p),
                     ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary,
                 ) => {
                     p.boundary = region()?.outer().clone();
                     p.islands = region()?.holes().to_vec();
+                    p.additional_regions = input.regions.iter().skip(1).cloned().collect();
                     p.depth = depth;
                 }
                 (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {
@@ -1079,9 +1157,45 @@ pub(crate) fn resolve_document_checked(
                 .resolved_fingerprint = Some(fingerprint);
             Ok(())
         })();
+        resolved.geometry.instances=base_instances;
         resolved_operation.map_err(|message| error(message).for_op(id))?;
+        if document.rotary_indexes.contains_key(&id) {
+            if let Some(settings) = document.setup().height_settings.get(&id) {
+                // References such as SelectedContours depend on the binding's
+                // cutting interval. Resolve it after extracting indexed CAD,
+                // while keeping original placements for the indexed view.
+                let mut source = document.clone();
+                if let Some(binding) = resolved.geometry.bindings.get(&id) {
+                    source.geometry.bindings.insert(id, binding.clone());
+                }
+                let mut settings = settings.clone();
+                settings.resolved = None;
+                let heights = settings.resolve(&source, operation).map_err(|reason| {
+                    error(format!("Operation {id}: {reason}")).for_op(id)
+                })?;
+                resolved.setup_mut().height_settings.get_mut(&id).unwrap().resolved = Some(heights);
+            }
+        }
     }
     resolved.setup_mut().operations = operations;
+    // Keep fixture placements for the planner's independent safety checks, after
+    // resolving machining references against model bodies only.
+    document
+        .setup()
+        .validate_fixtures(&document.geometry)
+        .map_err(error)?;
+    if !document.setup().fixture_instances.is_empty() {
+        let setup_geometry = document
+            .geometry
+            .geometry_in_setup(&document.setup().frame)
+            .map_err(error)?;
+        resolved.geometry.instances.extend(
+            setup_geometry
+                .instances
+                .into_iter()
+                .filter(|instance| document.setup().fixture_instances.contains(&instance.id)),
+        );
+    }
     Ok(resolved)
 }
 
@@ -1104,6 +1218,11 @@ pub(crate) fn selection_height_defaults(
     operation: &Operation,
 ) -> OperationHeightSettings {
     let mut settings = OperationHeightSettings::default();
+    // Pocket floors, loops and closed edge chains all describe the target
+    // bottom plane. Start at stock top, including after geometry replacement.
+    if matches!(operation, Operation::Pocket(_)) {
+        return settings;
+    }
     if matches!(operation, Operation::Adaptive(_) | Operation::Parallel(_)) {
         *settings.definition_mut(HeightPlaneKind::Top) =
             HeightDefinition::new(HeightReference::StockTop, 0.);
@@ -1208,9 +1327,9 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
         base.heights.bottom = base.heights.top - cutting.depth();
     }
     if matches!(base.recipe, ExtractionRecipe::FaceRegion) {
-        base.heights.top = stock_top(document);
+        base.heights.top = operation_stock_top(document,id)?;
     }
-    let input = cam_geometry3d::resolve_binding_advisory(&geometry_for_setup(document)?, &base)?;
+    let input = cam_geometry3d::resolve_binding_advisory(&geometry_for_operation(document,id)?, &base)?;
     let binding = document.geometry.bindings.get_mut(&id).unwrap();
     binding.heights = input.heights;
     binding.resolved_fingerprint = None;
@@ -1226,8 +1345,8 @@ pub(crate) fn refresh_binding_heights(document: &mut Document) {
         let mut context=document.clone();
         let owner=document.setups.iter().find(|s|s.operations.iter().any(|o|o.id()==id))?;
         context.active_setup_id=owner.id;
-        if matches!(base.recipe,ExtractionRecipe::FaceRegion) {base.heights.top=stock_top(&context);}
-        Some((id,geometry_for_setup(&context).and_then(|geometry|cam_geometry3d::resolve_binding_advisory(&geometry,&base)).map(|input|input.heights)))
+        if matches!(base.recipe,ExtractionRecipe::FaceRegion) {base.heights.top=operation_stock_top(&context,id).ok()?;}
+        Some((id,geometry_for_operation(&context,id).and_then(|geometry|cam_geometry3d::resolve_binding_advisory(&geometry,&base)).map(|input|input.heights)))
     }).collect();
     for (id, result) in updates {
         let binding = document.geometry.bindings.get_mut(&id).unwrap();
@@ -1242,6 +1361,110 @@ pub(crate) fn refresh_binding_heights(document: &mut Document) {
                     reason: format!("Geometry changed: {reason}"),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod pocket_stock_tests {
+    use super::*;
+    use crate::{default_machine, AppController};
+    use cam_cldata::{MoveKind, SpindleDir, Step};
+    use cam_toolpath::{CancelToken, JobCompletion};
+
+    #[test]
+    #[ignore = "supplied testfile2.ocam regression; set OCAM_STOCK_PROJECT"]
+    fn supplied_floor_holes_are_cleared_to_the_stock_contour() {
+        let path = std::env::var("OCAM_STOCK_PROJECT").unwrap();
+        let mut app = AppController::new(default_machine());
+        app.open_project(Path::new(&path)).unwrap();
+        let (min, max) = app.stock_box();
+        // The saved project selects the right floor; the screenshot selects
+        // the corresponding left floor in the same flipped setup.
+        for (face, center) in [(34, 75.), (32, -75.)] {
+            let mut selected = app.geometry_state().bindings[&0].selected.clone();
+            selected[0].id = face;
+            app.edit_cad_geometry(0, selected).unwrap();
+            let document = resolve_document(app.document()).unwrap();
+            assert!(
+                matches!(&document.setup().operations[0], Operation::Pocket(p)
+                if p.stock_contours.enabled && p.islands.len() == 1)
+            );
+            let started = std::time::Instant::now();
+            let result = cam_toolpath::build_job(
+                &document,
+                1000.,
+                SpindleDir::Cw,
+                Some(([min[0], min[1]], [max[0], max[1]])),
+                200.,
+                &CancelToken::new(),
+            );
+            eprintln!(
+                "Face {face}: {} moves in {:?}",
+                result.program.len(),
+                started.elapsed()
+            );
+            assert_eq!(
+                result.completion,
+                JobCompletion::Complete,
+                "{:?}",
+                result.diagnostics
+            );
+            result.program.validate().unwrap();
+            let mut previous: Option<cam_cldata::Point3> = None;
+            let mut crosses_hole = false;
+            for step in result.program.steps() {
+                match step {
+                    Step::Linear { to, tag, .. } => {
+                        if let Some(a) = previous.filter(|_| tag.kind == MoveKind::Cutting) {
+                            let dx = to.x - a.x;
+                            let dy = to.y - a.y;
+                            let length_sq = dx * dx + dy * dy;
+                            if length_sq > 0. {
+                                let t =
+                                    (((center - a.x) * dx - a.y * dy) / length_sq).clamp(0., 1.);
+                                crosses_hole |= (a.x + t * dx - center).hypot(a.y + t * dy) < 3.;
+                            }
+                        }
+                        previous = Some(*to);
+                    }
+                    Step::Rapid { to, .. } => previous = Some(*to),
+                    Step::Arc { end, .. } => previous = Some(*end),
+                    _ => {}
+                }
+            }
+            let cuts: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    Step::Arc { end, tag, .. } if tag.kind == MoveKind::Cutting => Some(*end),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                crosses_hole,
+                "stock above the 20 mm through-hole must be machined"
+            );
+            assert!(cuts.iter().any(|p| p.y > max[1]));
+            assert!(cuts.iter().any(|p| p.y < min[1]));
+            assert!(
+                cuts.iter().any(|p| if center > 0. {
+                    p.x > max[0]
+                } else {
+                    p.x < min[0]
+                }),
+                "the open floor must extend to the stock edges with runout"
+            );
+            assert!(
+                cuts.iter().all(|p| if center > 0. {
+                    p.x >= 53. - 0.01
+                } else {
+                    p.x <= -53. + 0.01
+                }),
+                "the rising wall at X +/-50 must remain protected"
+            );
         }
     }
 }
