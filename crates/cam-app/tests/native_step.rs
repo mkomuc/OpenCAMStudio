@@ -286,6 +286,11 @@ fn step_plate_floor_island_four_holes_profile_generates_and_reopens_without_sour
     let pocket = app
         .create_cad_operation(OpKind::Pocket, vec![floor_ref])
         .unwrap();
+    app.edit_operation(pocket, |op| {
+        let Operation::Pocket(p) = op else { panic!() };
+        // The 2 mm stepdown requires lifting above the uncut material between rings.
+        p.clear.lift_height = 2.0;
+    });
     let Operation::Pocket(p) = app.operation(pocket).unwrap() else {
         panic!()
     };
@@ -871,11 +876,13 @@ fn display_tessellation_quality_does_not_change_pocket_nc() {
         select_all_models(&mut app);
         let f=app.geometry_state().assets[0].topology.faces.iter().find(|f|matches!(f.surface,CadSurface::Plane{origin,normal} if (origin[2]+6.).abs()<1e-6&&normal[2]>0.9)).unwrap();
         let r = reference(app.geometry_state(), EntityKind::Face, f.id);
-        app.create_cad_operation(OpKind::Pocket, vec![r]).unwrap();
-        assert_eq!(
-            app.run(&CancelToken::new()).completion,
-            JobCompletion::Complete
-        );
+        let pocket = app.create_cad_operation(OpKind::Pocket, vec![r]).unwrap();
+        app.edit_operation(pocket, |op| {
+            let Operation::Pocket(p) = op else { panic!() };
+            p.clear.lift_height = 2.0;
+        });
+        let result = app.run(&CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Complete);
         snapshots.push(app.export_nc().unwrap().to_string());
     }
     assert_eq!(snapshots[0], snapshots[1]);

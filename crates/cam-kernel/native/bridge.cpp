@@ -494,10 +494,13 @@ TopoDS_Shape read_step(const char* path,double precision,std::string& units,bool
     configure_precision(precision);
     // Recognize the broken escaped header before touching any STEP string data.
     std::ifstream file(path,std::ios::binary);
-    char header[15]{};
+    char header[19]{};
     file.read(header,sizeof(header));
     IFSelect_ReturnStatus status;
-    if(std::string(header,static_cast<size_t>(file.gcount()))=="ISO-10303-21;\\n") {
+    const std::string prefix(header,static_cast<size_t>(file.gcount()));
+    if(prefix.rfind("ISO-10303-21;\\n",0)==0 ||
+       prefix.rfind("ISO-10303-21;\\r\\n",0)==0 ||
+       prefix.rfind("ISO-10303-21;\r\\n",0)==0) {
         file.clear(); file.seekg(0);
         std::ostringstream contents; contents<<file.rdbuf();
         if(file.bad()) throw std::runtime_error("Could not read escaped STEP data");
