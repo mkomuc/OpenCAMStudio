@@ -144,7 +144,55 @@ impl Strategy for ProfileStrategy {
                 ..Default::default()
             };
         }
-        schedule::compute(&self.op, env, cancel)
+        let rough = &self.op.passes.contour_roughing;
+        if !rough.enabled {
+            return schedule::compute(&self.op, env, cancel);
+        }
+        let mut result = StrategyResult::default();
+        let finish_allowance = if self.op.passes.finishing {
+            self.op.passes.finish_count as f64 * self.op.passes.finish_stepover
+        } else {
+            0.
+        };
+        for i in (0..=rough.stepovers).rev() {
+            let mut pass = self.op.clone();
+            pass.passes.contour_roughing.enabled = false;
+            if i > 0 {
+                pass.offset += finish_allowance + i as f64 * rough.stepover;
+                if !pass.offset.is_finite() {
+                    return StrategyResult {
+                        diagnostics: vec![Diagnostic::error(
+                            "Contour roughing offset is too large",
+                        )],
+                        ..Default::default()
+                    };
+                }
+                pass.passes.tolerance = rough.smoothing_deviation;
+                pass.passes.finishing = false;
+                pass.passes.finish_only_final = false;
+            }
+            let part = schedule::compute(&pass, env, cancel);
+            result.diagnostics.extend(part.diagnostics.clone());
+            if part.cancelled || part.has_errors() {
+                result.program = Program::new();
+                result.cancelled = part.cancelled;
+                return result;
+            }
+            if result
+                .program
+                .steps()
+                .len()
+                .saturating_add(part.program.steps().len())
+                > cam_model::MAX_PROFILE_MOVES
+            {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error("Profile motion budget exceeded")],
+                    ..Default::default()
+                };
+            }
+            result.program.extend(part.program);
+        }
+        result
     }
 }
 impl ProfileStrategy {
@@ -3317,6 +3365,68 @@ mod tests {
                 .all(|p| p.z == 5. && (p.y - expected_y).abs() < 1e-9));
             assert_eq!(retracts[0].x, cuts[0].x);
         }
+    }
+
+    #[test]
+    fn contour_roughing_approaches_open_profiles_from_the_air_side() {
+        for (side, expected) in [
+            (Side::Outside, vec![15., 14., 13.]),
+            (Side::Inside, vec![5., 6., 7.]),
+        ] {
+            let mut op = outside_rough_op(0.);
+            op.closed = false;
+            op.chain = Contour::new(vec![Point::new(10., 10.), Point::new(30., 10.)]);
+            op.side = side;
+            op.stepover = 0.;
+            op.passes.contour_roughing.enabled = true;
+            op.passes.contour_roughing.stepovers = 2;
+            let result = run_outside_rough(op);
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let ys: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(to.y),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ys, expected);
+        }
+    }
+
+    #[test]
+    fn closed_contour_roughing_preserves_the_original_finishing_schedule() {
+        for side in [Side::Inside, Side::Outside] {
+            let mut op = outside_rough_op(0.);
+            op.stepover = 0.;
+            op.side = side;
+            op.passes.finishing = true;
+            let baseline = run_outside_rough(op.clone());
+            assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+            op.passes.contour_roughing.enabled = true;
+            op.passes.contour_roughing.stepovers = 2;
+            let rough = run_outside_rough(op);
+            assert!(!rough.has_errors(), "{:?}", rough.diagnostics);
+            assert!(rough.program.steps().len() > baseline.program.steps().len());
+            assert!(rough.program.steps().ends_with(baseline.program.steps()));
+        }
+    }
+
+    #[test]
+    fn contour_roughing_rejects_incompatible_and_collapsed_paths_atomically() {
+        let mut op = inner_op(8., 0., None);
+        op.lead_in = Lead::None;
+        op.lead_out = Lead::None;
+        op.passes.contour_roughing.enabled = true;
+        op.passes.contour_roughing.stepovers = 2;
+        let result = run_inner(op.clone());
+        assert!(result.has_errors());
+        assert!(result.program.steps().is_empty());
+        op.side = Side::On;
+        let result = run_inner(op);
+        assert!(result.has_errors());
+        assert!(result.program.steps().is_empty());
     }
 
     #[test]

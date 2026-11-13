@@ -10,6 +10,19 @@ Enable tooltips in the view preferences to show this help.
 
 ## Passes and entry
 
+Enable **Roughing passes** for a fixed number of additional contours before the
+normal profile or chamfer pass. **Maximum stepover** sets their radial
+spacing, and **Number of stepovers** sets the number of additional contours.
+They start on the air side and work towards the selected wall. **Smoothing
+deviation** controls arc fitting on those roughing contours; it must be positive
+and no greater than the stepover. The normal finishing contour retains its own
+accuracy setting. This option works with open and closed Inside/Outside chains,
+including linked profile geometry. Profile stock-boundary clearing is a separate
+option and cannot be combined with contour roughing. Contour roughing also
+requires computed compensation and cannot be combined with profile tabs or taper.
+For modeled chamfer faces, each additional pass offsets every straight face band toward its air side; the existing stepdown still sets band height. Smoothing deviation has no effect on these straight bands.
+
+
 Passes controls axial stepdown, radial finishing passes, finishing feed, spring
 repeats and execution order. Even stepdowns distribute depth evenly; smaller
 bottom increments can apply to roughing too or only to the final wall passes.
@@ -44,7 +57,7 @@ engagement/disengagement at least one cutter radius long. Its backplot shows
 programmed coordinates; it does not simulate the controller's compensated cutter
 envelope. Wear and inverse-wear compensation are unavailable.
 
-Linked CAD profiles do not support radial roughing, controller compensation or
+Linked CAD profiles do not support stock-boundary clearing, controller compensation or
 taper. Unlinked computed profiles can use a stepped taper with zero or negative
 angle: higher cuts remove more material. Positive angles would undercut and are
 rejected. Taper cannot be combined with tabs.

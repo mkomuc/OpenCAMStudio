@@ -68,9 +68,51 @@ impl std::fmt::Display for ProfileOrder {
     }
 }
 
+/// Optional, fixed-count contour roughing on the air side of a wall.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContourRoughing {
+    pub enabled: bool,
+    pub stepover: f64,
+    /// Maximum deviation used when fitting arcs to roughing contours (mm).
+    pub smoothing_deviation: f64,
+    /// Additional contours before the normal profile or chamfer pass.
+    pub stepovers: u32,
+}
+impl Default for ContourRoughing {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stepover: 1.0,
+            smoothing_deviation: 0.1,
+            stepovers: 1,
+        }
+    }
+}
+impl ContourRoughing {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled
+            && (!self.stepover.is_finite()
+                || self.stepover <= 0.
+                || !self.smoothing_deviation.is_finite()
+                || self.smoothing_deviation <= 0.
+                || self.smoothing_deviation > self.stepover
+                || self.stepovers == 0
+                || self.stepovers > 1000
+                || !(self.stepover * self.stepovers as f64).is_finite())
+        {
+            return Err(
+                "Roughing passes require positive finite stepover and smoothing deviation (no greater than stepover), and 1..1000 stepovers".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProfilePasses {
+    pub contour_roughing: ContourRoughing,
     /// An explicit drawing-boundary snapshot; None uses the setup stock.
     pub stock_boundary: Option<cam_geo::Contour>,
     pub outer_corner: ProfileCorner,
@@ -116,6 +158,7 @@ pub struct ProfilePasses {
 impl Default for ProfilePasses {
     fn default() -> Self {
         Self {
+            contour_roughing: ContourRoughing::default(),
             stock_boundary: None,
             outer_corner: ProfileCorner::Round,
             finishing: false,
@@ -243,6 +286,16 @@ impl ProfileOp {
     /// Independent of GUI callers and checked before allocating motion buffers.
     pub fn validate_profile(&self, top: f64) -> Result<(), String> {
         self.entry_feeds.validate()?;
+        self.passes.contour_roughing.validate()?;
+        if self.passes.contour_roughing.enabled
+            && (self.stepover > 0.
+                || self.tabs.enabled
+                || self.comp != Comp::Computed
+                || self.passes.taper_angle != 0.
+                || self.contours().any(|c| c.side == Side::On))
+        {
+            return Err("Contour roughing requires Inside/Outside, computed compensation, and no stock clearing, tabs or taper".into());
+        }
         if let Some(boundary) = &self.passes.stock_boundary {
             cam_geo::Polygon::new(boundary.clone())
                 .map_err(|e| format!("Invalid roughing boundary: {e}"))?;
@@ -507,6 +560,22 @@ pub fn equivalent_profile_contours(a: &crate::ProfileContour, b: &crate::Profile
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn contour_roughing_defaults_and_round_trips() {
+        let legacy: ProfilePasses = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.contour_roughing.enabled);
+        let settings = ContourRoughing {
+            enabled: true,
+            stepover: 2.,
+            smoothing_deviation: 0.1,
+            stepovers: 3,
+        };
+        let restored: ContourRoughing =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored, settings);
+        assert!(restored.validate().is_ok());
+    }
+
     #[test]
     fn legacy_lead_distance_and_explicit_switch_round_trip() {
         let legacy: ProfilePasses = serde_json::from_str(r#"{"lead_end_distance":0.6}"#).unwrap();

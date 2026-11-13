@@ -52,6 +52,58 @@ impl Strategy for ChamferStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        let rough = &self.op.contour_roughing;
+        if let Err(message) = rough.validate() {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        if rough.enabled {
+            if self.op.faces.is_empty() && self.op.side == Side::On {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(
+                        "Contour roughing requires an Inside or Outside edge chain",
+                    )],
+                    ..Default::default()
+                };
+            }
+            let mut result = StrategyResult::default();
+            for i in (0..=rough.stepovers).rev() {
+                let part = self.compute_offset(env, cancel, i as f64 * rough.stepover);
+                result.diagnostics.extend(part.diagnostics.clone());
+                if part.cancelled || part.has_errors() {
+                    result.program = Program::new();
+                    result.cancelled = part.cancelled;
+                    return result;
+                }
+                if result
+                    .program
+                    .steps()
+                    .len()
+                    .saturating_add(part.program.steps().len())
+                    > cam_model::MAX_PROFILE_MOVES
+                {
+                    return StrategyResult {
+                        diagnostics: vec![Diagnostic::error("Chamfer motion budget exceeded")],
+                        ..Default::default()
+                    };
+                }
+                result.program.extend(part.program);
+            }
+            return result;
+        }
+        self.compute_offset(env, cancel, 0.)
+    }
+}
+
+impl ChamferStrategy {
+    fn compute_offset(
+        &self,
+        env: &JobEnv,
+        cancel: &CancelToken,
+        rough_offset: f64,
+    ) -> StrategyResult {
         let mut effective = self.op.clone();
         let entry_enabled = effective
             .lead_in_enabled
@@ -202,7 +254,7 @@ impl Strategy for ChamferStrategy {
         };
 
         if !op.faces.is_empty() {
-            return faces::compute(op, env, tool, included_angle_deg, cancel);
+            return faces::compute(op, env, tool, included_angle_deg, rough_offset, cancel);
         }
         if (op.closed && !op.chain.is_valid()) || (!op.closed && op.chain.len() < 2) {
             diagnostics.push(Diagnostic::error(format!(
@@ -297,12 +349,27 @@ impl Strategy for ChamferStrategy {
             delta * tan_a + tip_offset
         };
         let signed = match op.side {
-            Side::Outside => off,
-            Side::Inside => -off,
+            Side::Outside => off + rough_offset,
+            Side::Inside => -off - rough_offset,
             Side::On => 0.0,
         };
+        let tolerance = if rough_offset > 0. {
+            op.contour_roughing.smoothing_deviation
+        } else {
+            crate::emit::ARCFIT_TOL
+        };
         if !op.closed {
-            return open_chamfer(op, env, cancel, signed, tan_a, delta, width, diagnostics);
+            return open_chamfer(
+                op,
+                env,
+                cancel,
+                signed,
+                tan_a,
+                delta,
+                width,
+                tolerance,
+                diagnostics,
+            );
         }
         let region = match Polygon::new(op.chain.clone()) {
             Ok(p) => p,
@@ -471,7 +538,14 @@ impl Strategy for ChamferStrategy {
                     op.entry_feeds.lead_in(op.feed),
                     lead,
                 );
-                crate::emit::cut_polyline(&mut program, &loop_pts, op.feed, cut, z);
+                crate::emit::cut_polyline_tolerance(
+                    &mut program,
+                    &loop_pts,
+                    op.feed,
+                    cut,
+                    z,
+                    tolerance,
+                );
                 crate::leads::emit_lead(
                     &mut program,
                     exit_on,
@@ -513,6 +587,7 @@ fn open_chamfer(
     tan_a: f64,
     delta: f64,
     width: f64,
+    tolerance: f64,
     mut diagnostics: Vec<Diagnostic>,
 ) -> StrategyResult {
     let points = match crate::profile::offset_open_chain(op.chain.points(), offset) {
@@ -586,12 +661,13 @@ fn open_chamfer(
             op.entry_feeds.lead_in(op.feed),
             Tag::new(op.id, MoveKind::LeadIn),
         );
-        crate::emit::cut_polyline(
+        crate::emit::cut_polyline_tolerance(
             &mut program,
             &points,
             op.feed,
             Tag::new(op.id, MoveKind::Cutting),
             z,
+            tolerance,
         );
         crate::leads::emit_lead(
             &mut program,
@@ -699,6 +775,7 @@ mod tests {
 
     fn op(width: f64) -> ChamferOp {
         ChamferOp {
+            contour_roughing: Default::default(),
             tip_offset: 0.0,
             lead_in_enabled: None,
             same_lead_out: false,
@@ -746,6 +823,66 @@ mod tests {
             Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(to.z),
             _ => None,
         })
+    }
+
+    #[test]
+    fn contour_roughing_offsets_open_chamfers_and_retains_final_bevel() {
+        for (side, expected) in [
+            (Side::Outside, vec![2., 1., 0.]),
+            (Side::Inside, vec![-2., -1., 0.]),
+        ] {
+            let mut op = op(1.);
+            op.closed = false;
+            op.chain = Contour::new(vec![Point::new(0., 0.), Point::new(20., 0.)]);
+            op.side = side;
+            op.contour_roughing.enabled = true;
+            op.contour_roughing.stepovers = 2;
+            let result = run(op, chamfer_tool(90., 0.));
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let cuts: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(cuts.len(), 3);
+            for (cut, y) in cuts.iter().zip(expected) {
+                assert!((cut.y - y).abs() < 1e-8);
+                assert!((cut.z + 1.).abs() < 1e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn closed_chamfer_roughing_preserves_the_final_bevel() {
+        for side in [Side::Inside, Side::Outside] {
+            let mut op = op(1.);
+            op.side = side;
+            let baseline = run(op.clone(), chamfer_tool(90., 0.));
+            assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+            op.contour_roughing.enabled = true;
+            op.contour_roughing.stepovers = 2;
+            let rough = run(op, chamfer_tool(90., 0.));
+            assert!(!rough.has_errors(), "{:?}", rough.diagnostics);
+            assert!(rough.program.steps().len() > baseline.program.steps().len());
+            assert!(rough.program.steps().ends_with(baseline.program.steps()));
+        }
+    }
+
+    #[test]
+    fn contour_roughing_rejects_invalid_spacing_and_on_side() {
+        let mut op = op(1.);
+        op.contour_roughing.enabled = true;
+        op.contour_roughing.stepover = 0.;
+        let result = run(op.clone(), chamfer_tool(90., 0.));
+        assert!(result.has_errors() && result.program.steps().is_empty());
+        op.contour_roughing.stepover = 1.;
+        op.side = Side::On;
+        let result = run(op, chamfer_tool(90., 0.));
+        assert!(result.has_errors() && result.program.steps().is_empty());
     }
 
     #[test]
@@ -833,6 +970,82 @@ mod tests {
     }
 
     #[test]
+    fn modeled_face_roughing_offsets_each_band_toward_its_air_side() {
+        let mut operation = op(1.);
+        operation.side = Side::On; // Each modeled face supplies its own air direction.
+        operation.depth = 1.;
+        operation.stepdown = 0.5;
+        operation.faces = vec![
+            cam_model::ChamferFace {
+                upper: [[0., 0.], [20., 0.]],
+                lower: [[0., -1.], [20., -1.]],
+                top: 0.,
+                bottom: -1.,
+                outward: [0., -1.],
+            },
+            cam_model::ChamferFace {
+                upper: [[30., 20.], [30., 0.]],
+                lower: [[31., 20.], [31., 0.]],
+                top: 0.,
+                bottom: -1.,
+                outward: [1., 0.],
+            },
+        ];
+        let baseline = run(operation.clone(), chamfer_tool(90., 0.));
+        assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+        operation.contour_roughing.enabled = true;
+        operation.contour_roughing.stepovers = 2;
+        let result = run(operation, chamfer_tool(90., 0.));
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        result.program.validate().unwrap();
+        assert!(result.program.steps().ends_with(baseline.program.steps()));
+        let cuts: Vec<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cuts.len(), 12);
+        for (stage, extra) in [2., 1., 0.].into_iter().enumerate() {
+            let band = &cuts[stage * 4..stage * 4 + 4];
+            assert!((band[0].y + 0.5 + extra).abs() < 1e-8);
+            assert!((band[1].y + 1.0 + extra).abs() < 1e-8);
+            assert!((band[2].x - 30.5 - extra).abs() < 1e-8);
+            assert!((band[3].x - 31.0 - extra).abs() < 1e-8);
+            assert_eq!(
+                band.iter().map(|p| p.z).collect::<Vec<_>>(),
+                vec![-0.5, -1., -0.5, -1.]
+            );
+        }
+    }
+
+    #[test]
+    fn modeled_face_roughing_enforces_the_combined_band_budget() {
+        let mut operation = op(1.);
+        operation.depth = 1.;
+        operation.stepdown = 0.001;
+        operation.faces = vec![cam_model::ChamferFace {
+            upper: [[0., 0.], [20., 0.]],
+            lower: [[0., -1.], [20., -1.]],
+            top: 0.,
+            bottom: -1.,
+            outward: [0., -1.],
+        }];
+        operation.contour_roughing.enabled = true;
+        operation.contour_roughing.stepovers = 1000;
+        let result = run(operation, chamfer_tool(90., 0.));
+        assert!(result.has_errors());
+        assert!(result.program.is_empty());
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("resource budget")));
+    }
+
+    #[test]
     fn modeled_face_band_approaches_cut_stock_instead_of_colliding() {
         let mut operation = op(10.);
         operation.id = 9;
@@ -855,8 +1068,12 @@ mod tests {
             stock: Some(([-5., -15.], [25., 5.])),
             spindle: cam_cldata::SpindleDir::Cw,
         };
-        let result = ChamferStrategy::new(operation).compute(&env, &CancelToken::new());
+        let result = ChamferStrategy::new(operation.clone()).compute(&env, &CancelToken::new());
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        operation.contour_roughing.enabled = true;
+        operation.contour_roughing.stepovers = 2;
+        let rough_result = ChamferStrategy::new(operation).compute(&env, &CancelToken::new());
+        assert!(!rough_result.has_errors(), "{:?}", rough_result.diagnostics);
         let mut program = result.program;
         program.steps.insert(0, Step::ToolChange { tool: 1 });
         let simulate = |program: &Program| {
@@ -899,6 +1116,15 @@ mod tests {
         let simulation = simulate(&program);
         assert!(simulation.is_clean(), "{:?}", simulation.collisions);
         assert!(simulation.removed_volume > 0.);
+        let mut rough_program = rough_result.program;
+        rough_program.steps.insert(0, Step::ToolChange { tool: 1 });
+        let rough_simulation = simulate(&rough_program);
+        assert!(
+            rough_simulation.is_clean(),
+            "{:?}",
+            rough_simulation.collisions
+        );
+        assert!(rough_simulation.removed_volume > 0.);
     }
 
     #[test]

@@ -66,6 +66,33 @@ mod tests {
     }
 
     #[test]
+    fn contour_roughing_draft_retains_values_and_undoes() {
+        let (mut app, id) = editor();
+        let before = app.controller.operation(id).unwrap().clone();
+        let _ = app.update(Message::ContourRoughingToggled(true));
+        let _ = app.update(Message::FieldChanged(
+            Field::ContourRoughStepover,
+            "2".into(),
+        ));
+        let _ = app.update(Message::FieldChanged(
+            Field::ContourRoughSmoothing,
+            "0.2".into(),
+        ));
+        let _ = app.update(Message::FieldChanged(Field::ContourRoughCount, "3".into()));
+        let _ = app.update(Message::ContourRoughingToggled(false));
+        let _ = app.update(Message::ContourRoughingToggled(true));
+        assert_eq!(app.fields[&Field::ContourRoughCount], "3");
+        let _ = app.update(Message::Apply);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Profile(p)) if p.passes.contour_roughing.enabled && p.passes.contour_roughing.stepover == 2. && p.passes.contour_roughing.smoothing_deviation == 0.2 && p.passes.contour_roughing.stepovers == 3),
+            "{}",
+            app.status
+        );
+        assert!(app.controller.undo());
+        assert_eq!(app.controller.operation(id), Some(&before));
+    }
+
+    #[test]
     fn finishing_draft_survives_collapse_commits_atomically_and_undoes() {
         let (mut app, id) = editor();
         let before = app.controller.operation(id).unwrap().clone();

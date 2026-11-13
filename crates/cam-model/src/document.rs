@@ -1728,6 +1728,9 @@ impl ChamferFace {
 /// form the requested width; optional width increments divide the cut into passes.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChamferOp {
+    /// Fixed-count passes approaching the edge from the air side.
+    #[serde(default)]
+    pub contour_roughing: crate::ContourRoughing,
     /// Close the path between its last and first vertices. Legacy files use closed rims.
     #[serde(default = "default_true")]
     pub closed: bool,

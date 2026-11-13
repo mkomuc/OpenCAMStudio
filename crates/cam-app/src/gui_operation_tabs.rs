@@ -185,6 +185,8 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         return true;
     }
     match field {
+        Field::ContourRoughStepover | Field::ContourRoughSmoothing => value <= 0.,
+        Field::ContourRoughCount => value < 1. || value > 1000. || value.fract() != 0.,
         Field::Profile(n) => n.invalid(value),
         Field::PocketFinish(n) => n.invalid(value),
         Field::Depth
@@ -623,6 +625,9 @@ impl App {
             if matches!(
                 field,
                 Field::Profile(_)
+                    | Field::ContourRoughStepover
+                    | Field::ContourRoughSmoothing
+                    | Field::ContourRoughCount
                     | Field::PocketFinish(_)
                     | Field::TabWidth
                     | Field::TabHeight
@@ -688,6 +693,45 @@ impl App {
                 self.tooltips,
                 self.field_invalid(field),
             ));
+        }
+        if tab == OperationTab::Passes {
+            let rough = match op {
+                Operation::Profile(p) => Some(&p.passes.contour_roughing),
+                Operation::Chamfer(c) => Some(&c.contour_roughing),
+                _ => None,
+            };
+            if let Some(rough) = rough {
+                list = list.optional_section(
+                    "Roughing passes",
+                    rough.enabled,
+                    Some(Message::ContourRoughingToggled),
+                );
+                if rough.enabled {
+                    for field in [
+                        Field::ContourRoughStepover,
+                        Field::ContourRoughSmoothing,
+                        Field::ContourRoughCount,
+                    ] {
+                        let value = self.fields.get(&field).cloned().unwrap_or_default();
+                        list = list.push(field_row_labeled(
+                            field,
+                            self.field_label(field),
+                            self.field_help(field),
+                            &value,
+                            self.tooltips,
+                            self.field_invalid(field),
+                        ));
+                    }
+                    let help = match op {
+                        Operation::Chamfer(c) if !c.faces.is_empty() || self.chamfer_faces_active() => None,
+                        Operation::Chamfer(_) => Some("Additional contours approach the edge from the air side. Select Inside or Outside."),
+                        _ => Some("Additional contours approach the selected wall from the air side. Requires Inside/Outside; profile tabs, stock clearing and taper cannot be combined."),
+                    };
+                    if let Some(help) = help {
+                        list = list.push(text(help).size(11).color(INSPECTOR_MUTED));
+                    }
+                }
+            }
         }
         match op {
             Operation::Profile(p) => {
@@ -1457,6 +1501,48 @@ mod tests {
             [Field::StockLeaveRadial, Field::StockLeaveAxial]
         );
         assert_eq!(stock_offset_fields(face), [Field::StockLeaveAxial]);
+    }
+
+    #[test]
+    fn modeled_chamfer_roughing_fields_survive_toggle() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Chamfer);
+        let id = app
+            .controller
+            .inspection_setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        app.begin_operation_draft(id);
+        app.edit_operation_draft(|op| {
+            if let Operation::Chamfer(chamfer) = op {
+                chamfer.faces = vec![cam_model::ChamferFace {
+                    upper: [[0., 0.], [20., 0.]],
+                    lower: [[0., -1.], [20., -1.]],
+                    top: 0.,
+                    bottom: -1.,
+                    outward: [0., -1.],
+                }];
+            }
+        });
+        let _ = app.update(Message::ContourRoughingToggled(true));
+        for (field, value) in [
+            (Field::ContourRoughStepover, "2"),
+            (Field::ContourRoughSmoothing, "0.2"),
+            (Field::ContourRoughCount, "3"),
+        ] {
+            assert!(operation_fields(app.current_operation(id).unwrap()).contains(&field));
+            let _ = app.update(Message::FieldChanged(field, value.into()));
+        }
+        let _ = app.update(Message::ContourRoughingToggled(false));
+        let _ = app.update(Message::ContourRoughingToggled(true));
+        assert_eq!(app.fields[&Field::ContourRoughCount], "3");
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Chamfer(c)) if !c.faces.is_empty() && c.contour_roughing.enabled && c.contour_roughing.stepover == 2. && c.contour_roughing.smoothing_deviation == 0.2 && c.contour_roughing.stepovers == 3)
+        );
     }
 
     #[test]

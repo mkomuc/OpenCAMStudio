@@ -2377,6 +2377,7 @@ impl AppController {
                 })
             }
             OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+                contour_roughing: Default::default(),
                 tip_offset: 1.0,
                 lead_in_enabled: Some(true),
                 same_lead_out: false,

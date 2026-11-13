@@ -324,5 +324,15 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 .map(Field::Wrap),
         );
     }
+    if matches!(op, Operation::Profile(p) if p.passes.contour_roughing.enabled)
+        || matches!(op, Operation::Chamfer(c) if c.contour_roughing.enabled)
+    {
+        fields.extend([
+            Field::ContourRoughStepover,
+            Field::ContourRoughSmoothing,
+            Field::ContourRoughCount,
+        ]);
+    }
+
     fields
 }

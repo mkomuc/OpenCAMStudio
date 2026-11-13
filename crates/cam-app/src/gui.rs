@@ -1333,6 +1333,9 @@ enum Field {
     ChamferTipOffset,
     /// Chamfer width increment per pass (mm); 0 cuts in one pass.
     ChamferStep,
+    ContourRoughStepover,
+    ContourRoughSmoothing,
+    ContourRoughCount,
     /// Lead-in size (length for Linear, radius for Arc).
     LeadInSize,
     /// Lead-out size.
@@ -1493,6 +1496,9 @@ impl Field {
             Field::ChamferDepth => "Tip depth (mm, 0=tip)",
             Field::ChamferTipOffset => "Chamfer tip offset (mm)",
             Field::ChamferStep => "Step (mm, 0=one pass)",
+            Field::ContourRoughStepover => "Maximum stepover (mm)",
+            Field::ContourRoughCount => "Number of stepovers",
+            Field::ContourRoughSmoothing => "Smoothing deviation (mm)",
             Field::LeadInSize => "Lead-in size (mm)",
             Field::LeadOutSize => "Lead-out size (mm)",
             Field::LeadOverlap => "Lead overlap (mm)",
@@ -1780,6 +1786,9 @@ impl Field {
                  on the tool's flank the cut lands. 0 = cut at the tip."
             }
             Field::ChamferTipOffset => "Additional distance below the chamfer edge. The tool moves outward by the corresponding amount to keep the cutting flank on the same bevel. Radius mills require zero tip offset.",
+            Field::ContourRoughStepover => "Distance between adjacent contour roughing passes in the XY plane.",
+            Field::ContourRoughSmoothing => "Maximum arc-fitting deviation for roughing contours; must not exceed the stepover.",
+            Field::ContourRoughCount => "Additional passes on the air side before the final contour.",
             Field::ChamferStep => {
                 "Chamfer width added per pass (mm) for a multi-pass chamfer. 0 = cut the \
                  whole chamfer in a single pass."
@@ -3110,6 +3119,7 @@ enum Message {
     AdaptiveContainmentChanged(cam_model::AdaptiveContainment),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
     ChamferGradualToggled(bool),
+    ContourRoughingToggled(bool),
     /// Toggle the selected thread's gradual (equal-material) radial infeed.
     ThreadGradualToggled(bool),
     /// Create a new default tool and select it.
@@ -4801,6 +4811,27 @@ impl App {
                     apply_op_fields(op, &parsed);
                     if let Operation::Pocket(p) = op {
                         toggle.set(&mut p.finishing, value);
+                    }
+                });
+                self.refresh_operation_fields();
+            }
+            Message::ContourRoughingToggled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    match op {
+                        Operation::Profile(p) => p.passes.contour_roughing.enabled = enabled,
+                        Operation::Chamfer(c) => c.contour_roughing.enabled = enabled,
+                        _ => {}
                     }
                 });
                 self.refresh_operation_fields();
@@ -13224,6 +13255,22 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (op, Field::RampFeed) => Some(op.entry_feeds().ramp.unwrap_or(0.)),
         (op, Field::LeadInFeed) => Some(op.entry_feeds().lead_in.unwrap_or(0.)),
         (op, Field::LeadOutFeed) => Some(op.entry_feeds().lead_out.unwrap_or(0.)),
+        (Operation::Profile(o), Field::ContourRoughStepover) => {
+            Some(o.passes.contour_roughing.stepover)
+        }
+        (Operation::Profile(o), Field::ContourRoughSmoothing) => {
+            Some(o.passes.contour_roughing.smoothing_deviation)
+        }
+        (Operation::Chamfer(o), Field::ContourRoughSmoothing) => {
+            Some(o.contour_roughing.smoothing_deviation)
+        }
+        (Operation::Profile(o), Field::ContourRoughCount) => {
+            Some(o.passes.contour_roughing.stepovers as f64)
+        }
+        (Operation::Chamfer(o), Field::ContourRoughStepover) => Some(o.contour_roughing.stepover),
+        (Operation::Chamfer(o), Field::ContourRoughCount) => {
+            Some(o.contour_roughing.stepovers as f64)
+        }
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
         (Operation::Profile(o), Field::Profile(n)) => Some(n.get(o)),
         (Operation::Chamfer(o), Field::Profile(profile_parameters::Number::LeadInSweep)) => {
@@ -13404,6 +13451,24 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             Operation::Engrave(op) => op.top = value,
             Operation::Carve(op) => op.top = value,
             _ => {}
+        }
+    }
+    let rough = match op {
+        Operation::Profile(o) => Some(&mut o.passes.contour_roughing),
+        Operation::Chamfer(o) => Some(&mut o.contour_roughing),
+        _ => None,
+    };
+    if let Some(rough) = rough {
+        if let Some(v) = get(Field::ContourRoughStepover).filter(|v| v.is_finite() && *v > 0.) {
+            rough.stepover = v;
+        }
+        if let Some(v) = get(Field::ContourRoughSmoothing).filter(|v| v.is_finite() && *v > 0.) {
+            rough.smoothing_deviation = v;
+        }
+        if let Some(v) = get(Field::ContourRoughCount)
+            .filter(|v| v.is_finite() && *v >= 1. && *v <= 1000. && v.fract() == 0.)
+        {
+            rough.stepovers = v as u32;
         }
     }
     match op {
@@ -17470,6 +17535,7 @@ mod inspector_field_tests {
 
     fn chamfer(top: f64) -> Operation {
         Operation::Chamfer(cam_model::ChamferOp {
+            contour_roughing: Default::default(),
             tip_offset: 0.0,
             lead_in_enabled: None,
             same_lead_out: false,
