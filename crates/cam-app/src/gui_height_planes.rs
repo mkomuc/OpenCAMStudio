@@ -725,10 +725,8 @@ mod tests {
             if kind == OpKind::Chamfer {
                 assert!((heights.bottom + 1.).abs() < 1e-9);
                 let _ = app.update(Message::HeightOffsetChanged(P::Bottom, "0.5".into()));
-                assert!(app
-                    .resolve_height_editor(id)
-                    .unwrap_err()
-                    .contains("chamfer width"));
+                let error = app.resolve_height_editor(id).unwrap_err();
+                assert!(error.contains("selected chamfer and cutter geometry"), "{error}");
                 let _ = app.update(Message::CancelOperationDraft);
             }
         }

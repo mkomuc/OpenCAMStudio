@@ -261,7 +261,10 @@ fn approach(
         });
         return None;
     }
-    if hop <= link_threshold {
+    // A lead can start beyond the cleared area even when the ring-to-ring hop
+    // is short. Retract before moving to that entry; a local lifted traverse
+    // cannot establish clearance for the whole lead-in path.
+    if hop <= link_threshold && lead_path.is_empty() {
         return enter_with_plunge(
             prog,
             p,

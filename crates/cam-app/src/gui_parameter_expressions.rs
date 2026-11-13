@@ -861,6 +861,7 @@ mod tests {
         let tool = cam_model::Tool {
             number: 1,
             diameter: 6.,
+            flute_length: 20.,
             ..Default::default()
         };
         let _ = app.update(Message::OperationProjectToolPicked(tool));

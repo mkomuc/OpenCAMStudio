@@ -480,20 +480,18 @@ fn dimensions(tool: &cam_model::Tool) -> Vec<Dimension> {
                     z: tip_length + corner_radius * t,
                 },
             );
-            if tip_length > 0.0 {
-                add(
-                    TipLength,
-                    "Tip length",
-                    tip_length,
-                    Vertical {
-                        radius: r,
-                        from: 0.0,
-                        to: tip_length,
-                        left: false,
-                        lane: 48.0,
-                    },
-                );
-            }
+            add(
+                TipLength,
+                "Tip length",
+                tip_length,
+                Vertical {
+                    radius: r,
+                    from: 0.0,
+                    to: tip_length,
+                    left: false,
+                    lane: 48.0,
+                },
+            );
         }
         ToolKind::BullNose { corner_radius } => {
             let t = std::f64::consts::FRAC_1_SQRT_2;

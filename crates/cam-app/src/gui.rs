@@ -16705,9 +16705,10 @@ mod multi_setup_draft_tests {
             }
             let id = operation.id();
             let field = Field::LiftHeight;
+            let initial = if kind == OpKind::Pocket { 0.2 } else { 0.0 };
             assert!(operation_fields(&operation).contains(&field));
             assert_eq!(operation_tabs::field_tab(field), OperationTab::Linking);
-            assert_eq!(op_field(&operation, field), Some(0.));
+            assert_eq!(op_field(&operation, field), Some(initial));
             for value in [-1., f64::NAN, f64::INFINITY] {
                 assert!(operation_tabs::operation_field_invalid(
                     &operation, field, value
@@ -16724,11 +16725,14 @@ mod multi_setup_draft_tests {
             send(&mut app, Message::FieldChanged(field, "2".into()));
             assert_eq!(
                 op_field(app.controller.operation(id).unwrap(), field),
-                Some(0.)
+                Some(initial)
             );
             send(&mut app, Message::CancelOperationDraft);
             app.begin_operation_draft(id);
-            assert_eq!(app.fields.get(&field).map(String::as_str), Some("0"));
+            assert_eq!(
+                app.fields.get(&field).map(String::as_str),
+                Some(if kind == OpKind::Pocket { "0.2" } else { "0" })
+            );
             send(&mut app, Message::FieldChanged(field, "2".into()));
             send(&mut app, Message::Apply);
             assert_eq!(
@@ -16740,7 +16744,7 @@ mod multi_setup_draft_tests {
             assert!(app.controller.undo());
             assert_eq!(
                 op_field(app.controller.operation(id).unwrap(), field),
-                Some(0.)
+                Some(initial)
             );
             assert!(app.controller.redo());
             assert_eq!(

@@ -864,7 +864,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
             adaptive_enabled: None,
             pocket_overlap: None,
             keep_tool_down: false,
-            lift_height: 0.0,
+            lift_height: 0.2,
             stepdown: 2.,
             overlap: 0.5,
             offset: 0.,
@@ -872,8 +872,8 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
             plunge_feed: 100.,
             plunge: Plunge::Straight,
             lead_overlap: 0.,
-            lead_in: Lead::None,
-            lead_out: Lead::None,
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
             clearing: Clearing::default(),
         },
     }));
@@ -1716,11 +1716,13 @@ fn pocket_and_drill_report_obstructed_approaches_as_advisory_findings() {
         };
         app.create_cad_operation_with_tool(kind, vec![selected.clone()], tool)
             .unwrap();
+        let outcome = app.run(&CancelToken::new());
         assert_eq!(
-            app.run(&CancelToken::new()).completion,
+            outcome.completion,
             JobCompletion::Complete
         );
-        assert!(app.export_nc().is_ok());
+        let result = app.export_nc();
+        assert!(result.is_ok(), "{result:?}");
 
         // An unknown curved roof is ignored only when its exact conservative
         // bounds prove it cannot block this feature, including after rotation.
