@@ -599,6 +599,7 @@ impl ChamferStrategy {
 
 /// Open paths end at their last selected vertex and retract before each return.
 /// Side follows Profile: Outside offsets left, Inside offsets right.
+#[allow(clippy::too_many_arguments)]
 fn open_chamfer(
     op: &ChamferOp,
     env: &JobEnv,

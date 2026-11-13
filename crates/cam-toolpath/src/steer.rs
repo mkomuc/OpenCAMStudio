@@ -1574,8 +1574,7 @@ mod tests {
                 let (mut prev, mut prev_cut) = (None, false);
                 let mut worst = (0.0_f64, Point::new(0.0, 0.0), 0usize, 0usize);
                 let mut since_rapid = 0usize;
-                for i in 0..run.path.len() {
-                    let (q, cut) = run.path[i];
+                for (i, &(q, cut)) in run.path.iter().enumerate() {
                     if !cut {
                         prev = Some(q);
                         prev_cut = false;
