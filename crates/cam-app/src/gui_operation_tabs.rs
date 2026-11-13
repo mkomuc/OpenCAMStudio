@@ -61,8 +61,7 @@ impl OperationTab {
     }
 }
 
-/// The primary tab for each numeric field. Preset pass parameters also appear
-/// on Tool; operation_fields determines availability independently of the tab.
+/// The primary tab for each numeric field. Operation fields determine availability.
 pub(super) fn field_tab(field: Field) -> OperationTab {
     match field {
         Field::Wrap(_) => OperationTab::MultiAxis,
@@ -652,11 +651,8 @@ impl App {
                     continue;
                 }
             }
-            let preset_parameter = tab == OperationTab::Tool
-                && matches!(
-                    field,
-                    Field::Stepdown | Field::Overlap | Field::Peck | Field::ChamferStep
-                );
+            let preset_parameter =
+                tab == OperationTab::Tool && matches!(field, Field::Peck | Field::ChamferStep);
             if (!preset_parameter && field_tab(field) != tab) || is_clear_field(field) {
                 continue;
             }

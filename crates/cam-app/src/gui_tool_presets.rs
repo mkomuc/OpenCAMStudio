@@ -1869,6 +1869,30 @@ mod tests {
     }
 
     #[test]
+    fn new_operation_entry_feed_defaults_follow_cutting_feeds() {
+        let mut app = app();
+        app.cad_pending_kind = Some(OpKind::Profile);
+        app.cad_tool_pick = Some(1);
+        app.controller.cancel_operation();
+        app.seed_creation_editor(OpKind::Profile);
+        for (field, source) in [
+            (Field::RampFeed, "=plungeFeed"),
+            (Field::LeadInFeed, "=feed"),
+            (Field::LeadOutFeed, "=feed"),
+        ] {
+            assert_eq!(app.fields[&field], source);
+        }
+        send(&mut app, Message::FieldChanged(Field::Feed, "640".into()));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::PlungeFeed, "180".into()),
+        );
+        assert_eq!(app.parsed_field_value(Field::RampFeed).unwrap(), 180.);
+        assert_eq!(app.parsed_field_value(Field::LeadInFeed).unwrap(), 640.);
+        assert_eq!(app.parsed_field_value(Field::LeadOutFeed).unwrap(), 640.);
+    }
+
+    #[test]
     fn cad_creation_uses_the_same_material_match() {
         let mut app = app();
         app.cad_pending_kind = Some(OpKind::Profile);

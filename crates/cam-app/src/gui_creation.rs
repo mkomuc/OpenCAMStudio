@@ -90,6 +90,30 @@ impl App {
         self.operation_binding_preview = None;
         self.operation_geometry = None;
         self.operation_draft = Some(self.controller.operation_template(kind, 0));
+        if let Some(op) = &mut self.operation_draft {
+            let fields = operation_fields(op);
+            for (field, parameter, source) in [
+                (
+                    Field::RampFeed,
+                    cam_model::OperationParameter::RampFeed,
+                    "=plungeFeed",
+                ),
+                (
+                    Field::LeadInFeed,
+                    cam_model::OperationParameter::LeadInFeed,
+                    "=feed",
+                ),
+                (
+                    Field::LeadOutFeed,
+                    cam_model::OperationParameter::LeadOutFeed,
+                    "=feed",
+                ),
+            ] {
+                if fields.contains(&field) {
+                    parameter.set_source(op, source);
+                }
+            }
+        }
         self.stock_to_leave_draft = Some(
             self.controller
                 .pending_op()
