@@ -2320,7 +2320,7 @@ impl AppController {
                         adaptive_enabled: None,
                         pocket_overlap: None,
                         keep_tool_down: false,
-                        lift_height: 0.0,
+                        lift_height: 0.2,
                         clearing: cam_model::Clearing::default(),
                         stepdown: p.stepdown,
                         overlap: 0.5,
@@ -2329,8 +2329,8 @@ impl AppController {
                         plunge_feed,
                         plunge: Plunge::Straight,
                         lead_overlap: 0.0,
-                        lead_in: Lead::None,
-                        lead_out: Lead::None,
+                        lead_in: Lead::Arc { radius: 0.6 },
+                        lead_out: Lead::Arc { radius: 0.6 },
                     },
                 })
             }
@@ -2910,7 +2910,7 @@ impl AppController {
                                 adaptive_enabled: None,
                                 pocket_overlap: None,
                                 keep_tool_down: false,
-                                lift_height: 0.0,
+                                lift_height: 0.2,
                                 clearing: cam_model::Clearing::default(),
                                 stepdown: p.stepdown,
                                 overlap: 0.5,
@@ -2919,8 +2919,8 @@ impl AppController {
                                 plunge_feed: p.plunge_feed,
                                 plunge: Plunge::Straight,
                                 lead_overlap: 0.0,
-                                lead_in: Lead::None,
-                                lead_out: Lead::None,
+                                lead_in: Lead::Arc { radius: 0.6 },
+                                lead_out: Lead::Arc { radius: 0.6 },
                             },
                         }));
                     }
@@ -4204,6 +4204,9 @@ mod tests {
         match app.selected_operation() {
             Some(Operation::Pocket(o)) => {
                 assert!(o.islands.is_empty(), "no islands by default");
+                assert_eq!(o.clear.lift_height, 0.2);
+                assert_eq!(o.clear.lead_in, Lead::Arc { radius: 0.6 });
+                assert_eq!(o.clear.lead_out, Lead::Arc { radius: 0.6 });
                 assert!(
                     (0.0..1.0).contains(&o.clear.overlap),
                     "a sane default overlap"

@@ -1155,8 +1155,8 @@ impl Default for ClearParams {
             feed: 0.0,
             plunge_feed: 0.0,
             plunge: Plunge::Straight,
-            lead_in: Lead::None,
-            lead_out: Lead::None,
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
             lead_overlap: 0.0,
             clearing: Clearing::default(),
         }
@@ -2937,6 +2937,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_clearing_defaults_to_arc_leads_but_missing_saved_leads_remain_none() {
+        let defaults = super::ClearParams::default();
+        assert_eq!(defaults.lead_in, super::Lead::Arc { radius: 0.6 });
+        assert_eq!(defaults.lead_out, super::Lead::Arc { radius: 0.6 });
+
+        let saved: super::ClearParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(saved.lead_in, super::Lead::None);
+        assert_eq!(saved.lead_out, super::Lead::None);
+    }
     use super::*;
     use crate::{Comp, Lead, Plunge, Side};
     use cam_geo::{Contour, Point};
