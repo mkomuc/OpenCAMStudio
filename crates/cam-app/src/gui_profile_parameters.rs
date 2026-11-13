@@ -633,15 +633,12 @@ impl App {
         let Operation::Profile(mut profile) = self.operation_draft.clone()? else {
             return None;
         };
-        let parsed = self
-            .fields
-            .iter()
-            .filter_map(|(field, text)| {
-                text.trim().parse::<f64>().ok().map(|value| (*field, value))
-            })
-            .collect();
+        let parsed = self.parsed_operation_fields();
         let mut operation = Operation::Profile(profile);
         apply_op_fields(&mut operation, &parsed);
+        if let Err(error) = self.apply_parameter_sources(&mut operation) {
+            return Some(error);
+        }
         let Operation::Profile(p) = operation else {
             unreachable!()
         };
@@ -708,14 +705,7 @@ impl App {
                 .get(&field)
                 .cloned()
                 .unwrap_or_else(|| fmt_num(n.get(p)));
-            field_row_labeled(
-                field,
-                n.label(),
-                n.help(),
-                &value,
-                self.tooltips,
-                self.field_invalid(field),
-            )
+            self.parameter_field_row(field, n.label(), n.help(), &value)
         };
         let toggle = |t: Toggle| -> Element<'_, Message> {
             row![
@@ -819,8 +809,10 @@ impl App {
             }
         }
         list = list.plain();
-        if let Some(error) = self.profile_parameter_error() {
-            list = list.push(text(error).size(12).color(palette::ERROR));
+        if self.parameter_editor.focused.is_none() {
+            if let Some(error) = self.profile_parameter_error() {
+                list = list.push(text(error).size(12).color(palette::ERROR));
+            }
         }
         list
     }

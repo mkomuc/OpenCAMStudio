@@ -74,6 +74,8 @@ impl std::fmt::Display for ProfileOrder {
 pub struct ContourRoughing {
     pub enabled: bool,
     pub stepover: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stepover_expression: Option<String>,
     /// Maximum deviation used when fitting arcs to roughing contours (mm).
     pub smoothing_deviation: f64,
     /// Additional contours before the normal profile or chamfer pass.
@@ -84,6 +86,7 @@ impl Default for ContourRoughing {
         Self {
             enabled: false,
             stepover: 1.0,
+            stepover_expression: None,
             smoothing_deviation: 0.1,
             stepovers: 1,
         }
@@ -119,6 +122,8 @@ pub struct ProfilePasses {
     pub finishing: bool,
     pub finish_count: u32,
     pub finish_stepover: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_stepover_expression: Option<String>,
     /// Zero inherits the cutting feed.
     pub finish_feed: f64,
     pub spring_passes: u32,
@@ -164,6 +169,7 @@ impl Default for ProfilePasses {
             finishing: false,
             finish_count: 1,
             finish_stepover: 0.5,
+            finish_stepover_expression: None,
             finish_feed: 0.,
             spring_passes: 0,
             finish_only_final: false,
@@ -569,6 +575,7 @@ mod tests {
             stepover: 2.,
             smoothing_deviation: 0.1,
             stepovers: 3,
+            stepover_expression: None,
         };
         let restored: ContourRoughing =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();

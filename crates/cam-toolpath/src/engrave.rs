@@ -45,6 +45,24 @@ impl Strategy for EngraveStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty() {
+            return self.compute_resolved_parameters(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Engrave(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![crate::Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Engrave(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved_parameters(env, cancel)
+    }
+}
+impl EngraveStrategy {
+    fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         let mut diagnostics = Vec::new();
 
@@ -314,6 +332,7 @@ mod tests {
 
     fn op(depth: f64) -> EngraveOp {
         EngraveOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),

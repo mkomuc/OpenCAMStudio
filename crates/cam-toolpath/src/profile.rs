@@ -128,6 +128,32 @@ impl Strategy for ProfileStrategy {
         "profile"
     }
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty()
+            && self.op.passes.finish_stepover_expression.is_none()
+            && self
+                .op
+                .passes
+                .contour_roughing
+                .stepover_expression
+                .is_none()
+        {
+            return self.compute_resolved(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Profile(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Profile(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved(env, cancel)
+    }
+}
+impl ProfileStrategy {
+    fn compute_resolved(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         if cancel.is_cancelled() {
             return StrategyResult {
                 cancelled: true,
@@ -2730,6 +2756,7 @@ mod tests {
 
     fn inner_op(hole: f64, lead_r: f64, start: Option<[f64; 2]>) -> ProfileOp {
         ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,
@@ -2765,6 +2792,45 @@ mod tests {
             lead_out: Lead::Arc { radius: lead_r },
             lead_overlap: 0.0,
         }
+    }
+
+    #[test]
+    fn parameter_formulas_reach_toolpath_and_errors_emit_no_motion() {
+        let mut numeric = inner_op(30., 1., None);
+        numeric.side = Side::Outside;
+        numeric.lead_in = Lead::None;
+        numeric.lead_out = Lead::None;
+        numeric.passes.finishing = true;
+        numeric.passes.finish_stepover = 0.6;
+        numeric.passes.contour_roughing.enabled = true;
+        numeric.passes.contour_roughing.stepover = 5.7;
+        let expected = run_inner(numeric.clone());
+        assert!(!expected.has_errors(), "{:?}", expected.diagnostics);
+        let mut formula = numeric.clone();
+        formula.passes.finish_stepover = 99.; // stale snapshots must not reach machining
+        formula.passes.contour_roughing.stepover = 99.;
+        formula.passes.finish_stepover_expression =
+            Some("Math.min(tool_diameter * 0.1; maximumStepover)".into());
+        formula.passes.contour_roughing.stepover_expression = Some(
+            "Math.max((tool_diameter - 2 * tool_cornerRadius) * 0.95; tool_diameter * 0.20)".into(),
+        );
+        let actual = run_inner(formula.clone());
+        assert!(!actual.has_errors(), "{:?}", actual.diagnostics);
+        // Use the exact floating-point calculations of the expressions.
+        numeric.passes.finish_stepover = 6. * 0.1;
+        numeric.passes.contour_roughing.stepover = 6. * 0.95;
+        assert_eq!(actual.program, run_inner(numeric.clone()).program);
+        formula.passes.finish_stepover_expression = None;
+        formula.passes.finish_stepover = 0.25;
+        numeric.passes.finish_stepover = 0.25;
+        assert_eq!(
+            run_inner(formula.clone()).program,
+            run_inner(numeric).program
+        );
+        formula.passes.contour_roughing.stepover_expression = Some("tool_diameter / 0".into());
+        let invalid = run_inner(formula);
+        assert!(invalid.has_errors());
+        assert!(invalid.program.steps().is_empty());
     }
 
     fn run_inner(op: ProfileOp) -> StrategyResult {
@@ -2864,6 +2930,7 @@ mod tests {
     /// the stock frames, with a stepover and (optionally) an engagement cap.
     fn outside_rough_op(engagement: f64) -> ProfileOp {
         ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,

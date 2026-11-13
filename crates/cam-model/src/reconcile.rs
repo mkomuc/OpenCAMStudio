@@ -417,6 +417,7 @@ mod tests {
     fn operation_tool_references_are_rewritten() {
         let mk_drill = |id: u32, tool: u32| {
             Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
                 cooling: Default::default(),

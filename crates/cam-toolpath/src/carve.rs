@@ -143,6 +143,24 @@ impl Strategy for CarveStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty() {
+            return self.compute_resolved_parameters(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Carve(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![crate::Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Carve(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved_parameters(env, cancel)
+    }
+}
+impl CarveStrategy {
+    fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if let Err(reason) = op.entry_feeds.validate() {
             return StrategyResult {
@@ -1418,6 +1436,7 @@ mod tests {
 
     fn op(depth: f64) -> CarveOp {
         CarveOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),

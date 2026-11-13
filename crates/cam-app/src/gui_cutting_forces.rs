@@ -72,17 +72,7 @@ impl App {
 
     fn force_operation(&self, op: &Operation) -> Operation {
         let mut draft = op.clone();
-        let fields = self
-            .fields
-            .iter()
-            .filter_map(|(field, text)| {
-                text.trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .map(|v| (*field, v))
-            })
-            .collect();
+        let fields = self.parsed_operation_fields();
         apply_op_fields(&mut draft, &fields);
         draft
     }

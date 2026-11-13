@@ -89,11 +89,7 @@ impl App {
             |view| view.stock_bounds_for(view.setup()),
         );
         let mut operation = self.current_operation(id)?.clone();
-        let parsed = self
-            .fields
-            .iter()
-            .filter_map(|(f, v)| v.parse::<f64>().ok().map(|v| (*f, v)))
-            .collect();
+        let parsed = self.parsed_operation_fields();
         apply_op_fields(&mut operation, &parsed);
         if operation.rotary_wrap().is_some() {
             let geometry =

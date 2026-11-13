@@ -33,6 +33,7 @@ fn fixture_path() -> String {
 
 fn profile_op(id: u32, chain: cam_geo::Contour, side: Side, climb: bool) -> Operation {
     Operation::Profile(ProfileOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         passes: Default::default(),
         selections: None,

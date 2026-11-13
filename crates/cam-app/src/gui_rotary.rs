@@ -669,14 +669,7 @@ impl App {
             .get(&field)
             .cloned()
             .unwrap_or_else(|| fmt_num(wrap.offset));
-        form = form.push(field_row_labeled(
-            field,
-            "Offset (mm)",
-            field.help(),
-            &value,
-            self.tooltips,
-            self.field_invalid(field),
-        ));
+        form = form.push(self.parameter_field_row(field, "Offset (mm)", field.help(), &value));
         form = form.push(
             row![
                 text("Radius").size(12).width(Length::Fill),

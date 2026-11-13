@@ -57,6 +57,24 @@ impl Strategy for ThreadStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty() {
+            return self.compute_resolved_parameters(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Thread(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![crate::Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Thread(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved_parameters(env, cancel)
+    }
+}
+impl ThreadStrategy {
+    fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if let Err(reason) = op.entry_feeds.validate() {
             return StrategyResult {
@@ -586,6 +604,7 @@ mod tests {
     /// M10×1.5 base op: one hole at the origin, 6 mm long (an exact 4 turns).
     fn op(internal: bool, hand: Hand, climb: bool) -> ThreadOp {
         ThreadOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),

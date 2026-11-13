@@ -106,18 +106,7 @@ impl App {
         }
         let (op, z) = self.profile_selection_geometry()?;
         let mut operation = Operation::Profile(op);
-        let parsed = self
-            .fields
-            .iter()
-            .filter_map(|(field, value)| {
-                value
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .map(|v| (*field, v))
-            })
-            .collect();
+        let parsed = self.parsed_operation_fields();
         apply_op_fields(&mut operation, &parsed);
         let Operation::Profile(op) = operation else {
             return None;

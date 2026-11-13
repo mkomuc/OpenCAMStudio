@@ -105,7 +105,8 @@ use crate::{BoreOp, Tool};
 /// v44: round stock supports axes through the setup origin.
 /// v45: fixed fourth-axis indexes on individual operations.
 /// v46: concave radius mill tool geometry.
-pub const SCHEMA_VERSION: u32 = 46;
+/// v47: persistent numeric-operation parameter formulas.
+pub const SCHEMA_VERSION: u32 = 47;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -830,6 +831,8 @@ fn profile_closed_default() -> bool {
 /// A profile operation may contain several independently retracted contours.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Optional simultaneous fourth-axis cylindrical wrap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<crate::RotaryWrap>,
@@ -969,6 +972,8 @@ impl ProfileOp {
 /// its capabilities (canned `G83` on Fanuc, explicit pecks on grbl).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DrillOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -1155,6 +1160,8 @@ pub struct CarveClearing {
 /// stepdown passes, down to a depth.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PocketOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Optional simultaneous fourth-axis cylindrical wrap (including 2D adaptive clearing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<crate::RotaryWrap>,
@@ -1227,6 +1234,8 @@ pub struct PocketOp {
 /// 3D surface finishing over a CAD solid or selected faces.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParallelOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     pub id: u32,
     pub tool: u32,
     #[serde(default)]
@@ -1246,6 +1255,8 @@ pub struct ParallelOp {
 /// 3D adaptive roughing resolved from an independent CAD machining projection.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     pub id: u32,
     pub tool: u32,
     #[serde(default)]
@@ -1512,6 +1523,8 @@ impl std::fmt::Display for Axis {
 /// number, so the final faced plane is `start_offset - depth`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FaceOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -1571,6 +1584,8 @@ pub struct FaceOp {
 /// geometry to cut.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -1728,6 +1743,8 @@ impl ChamferFace {
 /// form the requested width; optional width increments divide the cut into passes.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChamferOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Fixed-count passes approaching the edge from the air side.
     #[serde(default)]
     pub contour_roughing: crate::ContourRoughing,
@@ -1847,6 +1864,8 @@ pub struct ChamferOp {
 /// ([`cam_geo::vtip_half_width`]); it is not specified independently.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EngraveOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number — must select a V-bit (the strategy reads its angle and tip radius).
@@ -1916,6 +1935,8 @@ pub struct EngraveOp {
 /// - **The path must be closed.** There is no interior to consume otherwise.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CarveOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// The V-bit — the defining tool, chosen in the creation wizard. The strategy reads
@@ -2897,6 +2918,7 @@ mod tests {
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,
@@ -3031,6 +3053,7 @@ mod tests {
 
     fn carve(clear_tool: Option<u32>) -> Operation {
         Operation::Carve(CarveOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -3200,6 +3223,7 @@ mod tests {
     fn same_work_across_kinds_is_false() {
         let prof = profile(0);
         let drill = Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),

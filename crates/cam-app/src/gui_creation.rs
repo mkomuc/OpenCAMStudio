@@ -203,17 +203,23 @@ impl App {
             .inspector_fields()
             .into_iter()
             .map(|field| {
-                self.fields
-                    .get(&field)
-                    .and_then(|s| s.trim().parse::<f64>().ok())
-                    .filter(|v| {
-                        v.is_finite() && !operation_tabs::operation_field_invalid(&draft, field, *v)
-                    })
-                    .map(|v| (field, v))
-                    .ok_or("Correct invalid operation fields")
+                let value = self.parsed_field_value(field).map_err(|error| {
+                    format!(
+                        "Correct invalid operation fields: {} ({error})",
+                        self.field_label(field)
+                    )
+                })?;
+                if operation_tabs::operation_field_invalid(&draft, field, value) {
+                    return Err(format!(
+                        "Correct invalid operation fields: {} is outside its allowed range",
+                        self.field_label(field)
+                    ));
+                }
+                Ok((field, value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
+        self.apply_parameter_sources(&mut draft)?;
         if draft
             .rotary_wrap()
             .is_some_and(|wrap| !wrap.geometry.is_empty())

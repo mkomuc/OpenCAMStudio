@@ -1120,6 +1120,7 @@ mod tests {
             passes: 0,
         };
         let mut operation = ParallelOp {
+            parameter_expressions: Default::default(),
             id: 1,
             tool: 1,
             spindle_rpm: 1000.,
@@ -1201,6 +1202,7 @@ mod tests {
             passes: 0,
         };
         let mut operation = ParallelOp {
+            parameter_expressions: Default::default(),
             id: 1,
             tool: 1,
             spindle_rpm: 1000.,
@@ -1254,6 +1256,7 @@ mod tests {
             passes: 0,
         };
         let mut operation = ParallelOp {
+            parameter_expressions: Default::default(),
             id: 1,
             tool: 1,
             spindle_rpm: 1000.,

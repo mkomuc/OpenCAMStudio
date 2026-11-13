@@ -871,6 +871,7 @@ mod tests {
         app.edit_setup(|s| {
             s.heights = cam_model::Heights::new(5., 2., 0.);
             s.operations.push(Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 id: 1,
                 tool: 1,
                 points: vec![[5., 5.]],
@@ -1251,6 +1252,7 @@ mod tests {
                 thickness: 17.,
             };
             setup.operations = vec![Operation::Pocket(PocketOp {
+                parameter_expressions: Default::default(),
                 wrap: None,
                 additional_regions: Vec::new(),
                 stock_contours: Default::default(),
@@ -1324,6 +1326,7 @@ mod tests {
             setup.height_settings.clear();
             setup.operation_heights.clear();
             setup.operations = vec![Operation::Parallel(cam_model::ParallelOp {
+                parameter_expressions: Default::default(),
                 id: 7,
                 tool: 1,
                 work_offset: 1,
@@ -1527,6 +1530,7 @@ mod tests {
         inherited_setup(&mut app);
         app.edit_setup(|s| {
             s.operations.push(Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 id: 2,
                 tool: 1,
                 points: vec![[2., 2.]],

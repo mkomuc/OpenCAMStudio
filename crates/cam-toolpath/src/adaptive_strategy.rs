@@ -32,6 +32,24 @@ impl Strategy for AdaptiveStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty() {
+            return self.compute_resolved_parameters(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Adaptive(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![crate::Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Adaptive(op) = operation else {
+            unreachable!()
+        };
+        Self { op, ..self.clone() }.compute_resolved_parameters(env, cancel)
+    }
+}
+impl AdaptiveStrategy {
+    fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         let mut diagnostics = Vec::new();
         macro_rules! fail { ($($arg:tt)*) => {{ diagnostics.push(Diagnostic::error(format!($($arg)*))); return StrategyResult { diagnostics, ..Default::default() }; }} }
@@ -531,6 +549,7 @@ mod tests {
             error_bound: 0.02,
         };
         let mut op = AdaptiveOp {
+            parameter_expressions: Default::default(),
             id: 3,
             tool: 1,
             spindle_rpm: 6000.,

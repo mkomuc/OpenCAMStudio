@@ -184,6 +184,7 @@ fn allowances_multiple_passes_and_spring_pass_reach_the_requested_wall() {
 #[test]
 fn angle_limits_axial_travel_and_entry_feeds_are_independent() {
     let op = BoreOp {
+        parameter_expressions: Default::default(),
         ramp_angle: Some(2.),
         entry_feeds: EntryFeeds {
             ramp: Some(111.),

@@ -1355,6 +1355,7 @@ mod tests {
         for _ in 0..3 {
             app.controller
                 .add_operation(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool: 1,
                     points: vec![[10., 10.]],

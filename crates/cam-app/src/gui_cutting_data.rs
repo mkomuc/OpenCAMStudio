@@ -58,7 +58,12 @@ impl App {
             {
                 continue;
             }
-            if edited != Some(field) {
+            if edited != Some(field)
+                && !self
+                    .fields
+                    .get(&field)
+                    .is_some_and(|s| s.trim_start().starts_with('='))
+            {
                 if let Some(value) = value {
                     self.fields.insert(field, fmt_num(value));
                 }
@@ -71,6 +76,39 @@ impl App {
             field,
             Field::SpindleRpm | Field::Feed | Field::CuttingSpeed | Field::FeedPerTooth
         ) {
+            return;
+        }
+        let paired = match field {
+            Field::SpindleRpm => Field::CuttingSpeed,
+            Field::CuttingSpeed => Field::SpindleRpm,
+            Field::Feed => Field::FeedPerTooth,
+            _ => Field::Feed,
+        };
+        if self
+            .fields
+            .get(&paired)
+            .is_some_and(|s| s.trim_start().starts_with('='))
+        {
+            if let Some(value) = self.field_value(paired) {
+                self.fields.insert(paired, fmt_num(value));
+            }
+        }
+        if self
+            .fields
+            .get(&field)
+            .is_some_and(|s| s.trim_start().starts_with('='))
+        {
+            if field == Field::FeedPerTooth
+                && self
+                    .fields
+                    .get(&Field::SpindleRpm)
+                    .is_some_and(|s| s.parse::<f64>().is_ok_and(|v| v == 0.))
+            {
+                self.fields.insert(
+                    Field::SpindleRpm,
+                    fmt_num(self.controller.defaults().spindle_rpm),
+                );
+            }
             return;
         }
         let Some(tool) = self.operation_preset_tool() else {

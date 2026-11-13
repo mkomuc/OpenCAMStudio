@@ -117,6 +117,8 @@ mod illustrated_help;
 mod operation_positions;
 #[path = "gui_operation_preview.rs"]
 mod operation_preview;
+#[path = "gui_parameter_expressions.rs"]
+mod parameter_expressions;
 #[path = "gui_picking.rs"]
 mod picking_view;
 #[path = "gui_pocket_parameters.rs"]
@@ -2226,6 +2228,7 @@ struct App {
     operation_tab: OperationTab,
     collapsed_operation_sections: BTreeSet<operation_sections::Section>,
     focused_height: Option<String>,
+    parameter_editor: parameter_expressions::Editor,
     height_draft_id: Option<u32>,
     height_draft: Option<cam_model::OperationHeightSettings>,
     height_disabled_feed_reference: Option<cam_model::HeightReference>,
@@ -2845,6 +2848,9 @@ enum Message {
     SetSetupVisible(u64, bool),
     SetOperationVisible(u32, bool),
     FieldChanged(Field, String),
+    ParameterInputState(Field, bool, usize),
+    ParameterComplete(Field, &'static str, usize),
+    ParameterSuggestionMove(Field, i32),
     HeightReferenceChanged(cam_model::HeightPlaneKind, cam_model::HeightReference),
     HeightOffsetChanged(cam_model::HeightPlaneKind, String),
     HeightSourceToggled(cam_model::HeightPlaneKind, cam_model::HeightReference, bool),
@@ -3592,7 +3598,14 @@ impl App {
         (self.cad_override_top, self.cad_override_bottom) = overrides;
         let supported = self.inspector_fields();
         for (field, value) in previous {
-            if supported.contains(&field) {
+            if supported.contains(&field)
+                || (value.trim().parse::<f64>().is_err()
+                    && parameter_expressions::parameter(field).is_some_and(|p| {
+                        self.operation_draft
+                            .as_ref()
+                            .is_some_and(|op| p.value(op).is_some())
+                    }))
+            {
                 self.fields.insert(field, value);
             }
         }
@@ -3859,6 +3872,7 @@ impl App {
             operation_tab: OperationTab::default(),
             collapsed_operation_sections: BTreeSet::new(),
             focused_height: None,
+            parameter_editor: Default::default(),
             height_draft_id: None,
             height_draft: None,
             height_disabled_feed_reference: None,
@@ -6162,6 +6176,15 @@ impl App {
                 } else if self.focused_height.as_ref() == Some(&id) {
                     self.focused_height = None;
                 }
+            }
+            Message::ParameterInputState(field, focused, cursor) => {
+                self.parameter_input_state(field, focused, cursor);
+            }
+            Message::ParameterComplete(field, name, cursor) => {
+                return self.complete_parameter(field, name, cursor);
+            }
+            Message::ParameterSuggestionMove(field, delta) => {
+                self.move_parameter_suggestion(field, delta);
             }
             Message::FieldChanged(field, value) => {
                 if self.library_mode() {
@@ -9407,13 +9430,14 @@ impl App {
     /// Reload the inspector edit buffers from the model for the current
     /// selection.
     fn refresh_fields(&mut self) {
+        self.parameter_editor = Default::default();
         self.edited_tool_input = None;
         if self.creating_operation() {
             self.focused_height = None;
             self.fields.clear();
             for field in self.inspector_fields() {
-                if let Some(value) = self.field_value(field) {
-                    self.fields.insert(field, fmt_num(value));
+                if let Some(source) = self.saved_field_source(field) {
+                    self.fields.insert(field, source);
                 }
             }
             return;
@@ -9438,8 +9462,8 @@ impl App {
             }
         }
         for field in self.inspector_fields() {
-            if let Some(value) = self.field_value(field) {
-                self.fields.insert(field, fmt_num(value));
+            if let Some(source) = self.saved_field_source(field) {
+                self.fields.insert(field, source);
             }
         }
     }
@@ -9721,12 +9745,7 @@ impl App {
     /// - **Flute length** > 0 everywhere; ≥ corner radius (rounded-edge); ≥ flute radius
     ///   ⌀/2 (ball nose) — the cutting-end feature must fit inside the flute.
     fn field_invalid(&self, field: Field) -> bool {
-        let Some(value) = self
-            .fields
-            .get(&field)
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .filter(|v| v.is_finite())
-        else {
+        let Ok(value) = self.parsed_field_value(field) else {
             return true;
         };
         if self.creating_operation() {
@@ -10021,9 +10040,16 @@ impl App {
             // by `refresh_fields`, so an untouched inspector compares equal all the way
             // down and the button stays grey — which is what tells the operator, at a
             // glance, whether an edit has been committed or is still sitting in the box.
-            return fields_are_dirty(&self.inspector_fields(), &self.fields, |f| {
-                self.field_value(f)
-            });
+            return self.parameter_fields_dirty()
+                || fields_are_dirty(
+                    &self
+                        .inspector_fields()
+                        .into_iter()
+                        .filter(|f| parameter_expressions::parameter(*f).is_none())
+                        .collect::<Vec<_>>(),
+                    &self.fields,
+                    |f| self.field_value(f),
+                );
         }
         match (self.tool_edit.clone(), self.library.tools.get(self.lib_sel)) {
             (Some(edit), Some(saved)) => {
@@ -10251,6 +10277,46 @@ impl App {
     }
     /// The model value backing a field for the current selection, if any.
     fn field_value(&self, field: Field) -> Option<f64> {
+        if !self.library_mode() {
+            if let Some(parameter) = parameter_expressions::parameter(field) {
+                let op = self.operation_draft.as_ref().or_else(|| {
+                    if let Selection::Operation(id) = self.controller.selection() {
+                        self.controller.operation(id)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(op) = op {
+                    if matches!(field, Field::CuttingSpeed | Field::FeedPerTooth)
+                        && ![
+                            cam_model::OperationParameter::CuttingSpeed,
+                            cam_model::OperationParameter::FeedPerTooth,
+                            cam_model::OperationParameter::SpindleRpm,
+                            cam_model::OperationParameter::Feed,
+                        ]
+                        .iter()
+                        .any(|p| p.expression(op).is_some())
+                    {
+                        return self.operation_cutting_value(op, field);
+                    }
+                    let tool = self
+                        .operation_tools
+                        .iter()
+                        .chain(self.controller.inspection_setup().tools.iter())
+                        .find(|t| t.number == op.tool());
+                    if !op.has_parameter_expressions() {
+                        if let Some(value) = op_field(op, field) {
+                            return Some(value);
+                        }
+                    }
+                    if let Ok(values) = op.evaluate_parameter_sources(tool, &BTreeMap::new()) {
+                        if let Some(value) = values.get(&parameter) {
+                            return Some(*value);
+                        }
+                    }
+                }
+            }
+        }
         if matches!(field, Field::CuttingSpeed | Field::FeedPerTooth) {
             let operation = self.operation_draft.as_ref().or_else(|| {
                 if let Selection::Operation(id) = self.controller.selection() {
@@ -10468,11 +10534,11 @@ impl App {
         self.apply_machine_edit();
         let mut parsed: BTreeMap<Field, f64> = BTreeMap::new();
         let supported = self.inspector_fields();
-        for (&field, text) in &self.fields {
+        for &field in self.fields.keys() {
             if !supported.contains(&field) {
                 continue;
             }
-            match text.trim().parse::<f64>() {
+            match self.parsed_field_value(field) {
                 Ok(v) => {
                     parsed.insert(field, v);
                 }
@@ -10514,6 +10580,10 @@ impl App {
                 return;
             };
             apply_op_fields(&mut operation, &parsed);
+            if let Err(error) = self.apply_parameter_sources(&mut operation) {
+                self.report_error(error);
+                return;
+            }
             let parse_override = |value: &str| -> Result<Option<f64>, String> {
                 if value.trim().is_empty() {
                     Ok(None)
@@ -12522,13 +12592,11 @@ impl App {
                 raw,
                 self.edited_tool_input == Some(field) || field == Field::Flutes,
             );
-            list = list.push(field_row_labeled(
+            list = list.push(self.parameter_field_row(
                 field,
                 self.field_label(field),
                 self.field_help(field),
                 &value,
-                self.tooltips,
-                self.field_invalid(field),
             ));
         }
         if let Some(tool) = &self.tool_edit {
@@ -16237,6 +16305,7 @@ mod multi_setup_draft_tests {
         let tool = app.controller.use_tool(vbit);
         app.controller
             .add_operation(Operation::Carve(cam_model::CarveOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 clear: None,
@@ -17508,6 +17577,7 @@ mod inspector_field_tests {
 
     fn drill(peck: Option<f64>, dwell: Option<f64>) -> Operation {
         Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -17535,6 +17605,7 @@ mod inspector_field_tests {
 
     fn chamfer(top: f64) -> Operation {
         Operation::Chamfer(cam_model::ChamferOp {
+            parameter_expressions: Default::default(),
             contour_roughing: Default::default(),
             tip_offset: 0.0,
             lead_in_enabled: None,

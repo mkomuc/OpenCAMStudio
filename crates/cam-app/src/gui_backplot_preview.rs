@@ -269,6 +269,7 @@ mod tests {
         let ids = [10., 25.].map(|x| {
             app.controller
                 .add_operation(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool: 1,
                     points: vec![[x, 10.]],

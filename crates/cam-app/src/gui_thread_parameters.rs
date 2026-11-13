@@ -312,14 +312,7 @@ impl App {
         };
         body = body.push(text(hint).size(11).color(INSPECTOR_MUTED));
         for (field, value) in [(Field::MajorDia, major_value), (Field::Pitch, pitch_value)] {
-            body = body.push(field_row_labeled(
-                field,
-                field.label(),
-                field.help(),
-                &value,
-                self.tooltips,
-                self.field_invalid(field),
-            ));
+            body = body.push(self.parameter_field_row(field, field.label(), field.help(), &value));
         }
         body.push(profile_picker(
             "Hand",

@@ -52,6 +52,26 @@ impl Strategy for ChamferStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty()
+            && self.op.contour_roughing.stepover_expression.is_none()
+        {
+            return self.compute_resolved(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Chamfer(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Chamfer(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved(env, cancel)
+    }
+}
+impl ChamferStrategy {
+    fn compute_resolved(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let rough = &self.op.contour_roughing;
         if let Err(message) = rough.validate() {
             return StrategyResult {
@@ -775,6 +795,7 @@ mod tests {
 
     fn op(width: f64) -> ChamferOp {
         ChamferOp {
+            parameter_expressions: Default::default(),
             contour_roughing: Default::default(),
             tip_offset: 0.0,
             lead_in_enabled: None,

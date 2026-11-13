@@ -424,6 +424,7 @@ mod tests {
             assert!(!thread_standards()[..index].contains(s));
         }
         let mut op = crate::ThreadOp {
+            parameter_expressions: Default::default(),
             id: 1,
             tool: 1,
             points: vec![[0., 0.]],

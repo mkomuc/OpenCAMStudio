@@ -61,6 +61,24 @@ impl Strategy for PocketStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty() {
+            return self.compute_resolved_parameters(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Pocket(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![crate::Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Pocket(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved_parameters(env, cancel)
+    }
+}
+impl PocketStrategy {
+    fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if op.wrap.as_ref().is_some_and(|wrap| wrap.periodic) {
             let Some(tool) = env.tool(op.tool) else {
@@ -782,6 +800,7 @@ mod tests {
                 cam_model::RotaryAxis::B => Point::new(angular, axial),
             };
             let op = PocketOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool: 1,
                 wrap: Some(cam_model::RotaryWrap {
@@ -944,6 +963,7 @@ mod tests {
     #[test]
     fn keep_tool_down_connects_levels_and_finishing_and_preserves_final_retract() {
         let mut op = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -1017,6 +1037,7 @@ mod tests {
         // Depth 3 at 1.5 stepdown ⇒ 2 levels. Staying down means one plunge and one
         // retract *per level*, not per ring — and the rings are still all cut.
         let op = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -1068,6 +1089,7 @@ mod tests {
     #[test]
     fn helix_plunge_pocket_enters_on_helical_arcs() {
         let op = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -1134,6 +1156,7 @@ mod tests {
     #[test]
     fn tool_too_large_for_pocket_errors() {
         let op = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -1197,6 +1220,7 @@ mod tests {
         // Finer overlap ⇒ smaller spacing ⇒ more rings ⇒ more cutting moves.
         let run = |overlap: f64| {
             let mut op = PocketOp {
+                parameter_expressions: Default::default(),
                 wrap: None,
                 additional_regions: Vec::new(),
                 stock_contours: Default::default(),
@@ -1252,6 +1276,7 @@ mod tests {
         // boundary, so the deepest cut into the +X wall is 2 mm shallower.
         let run = |offset: f64| {
             let op = PocketOp {
+                parameter_expressions: Default::default(),
                 wrap: None,
                 additional_regions: Vec::new(),
                 stock_contours: Default::default(),
@@ -1323,6 +1348,7 @@ mod tests {
 
     fn leaded_op(islands: Vec<Contour>) -> PocketOp {
         PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -2006,6 +2032,7 @@ mod tests {
         // the geometric floor. The gate is 1.5·e = 3.0 — see
         // `frontadvance::CERT_ENGAGEMENT_SLACK`.
         let op = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -2160,6 +2187,7 @@ mod tests {
         // arc), never emitted overshooting the boundary. High overlap gives the
         // multiple rings that put the wall ring on the leaded path in the first place.
         let small = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),

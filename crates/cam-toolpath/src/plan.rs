@@ -431,6 +431,19 @@ fn build_job_with_compute(
             completion = JobCompletion::Cancelled;
             break;
         }
+        let mut resolved_operation;
+        let (operation, parameter_error) = if operation.has_parameter_expressions() {
+            resolved_operation = operation.clone();
+            let error = resolved_operation
+                .resolve_parameter_expressions(&setup.tools)
+                .err();
+            if error.is_none() {
+                resolved_operation.freeze_parameter_expressions();
+            }
+            (&resolved_operation, error)
+        } else {
+            (operation, None)
+        };
         let indexed_geometry = doc
             .rotary_indexes
             .get(&operation.id())
@@ -450,7 +463,12 @@ fn build_job_with_compute(
         }
         env.heights.clearance = env.heights.clearance.max(fixture_top);
         env.heights.retract = env.heights.retract.max(fixture_top);
-        let mut result = if let Some(Err(reason)) = &configured {
+        let mut result = if let Some(reason) = parameter_error {
+            StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            }
+        } else if let Some(Err(reason)) = &configured {
             StrategyResult {
                 diagnostics: vec![Diagnostic::error(reason.clone())],
                 ..Default::default()
@@ -1986,6 +2004,7 @@ mod tests {
 
     fn profile_operation() -> Operation {
         Operation::Profile(cam_model::ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,
@@ -2063,6 +2082,7 @@ mod tests {
             operations: (0..operations)
                 .map(|id| {
                     Operation::Drill(DrillOp {
+                        parameter_expressions: Default::default(),
                         id,
                         tool: 1,
                         points: vec![[10.0 + id as f64, 10.0]],
@@ -2364,6 +2384,7 @@ mod tests {
             spindle: SpindleDir::Cw,
         };
         let mut pocket = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             id: 2,
             tool: 1,
@@ -2514,6 +2535,7 @@ mod tests {
             ])
         };
         let pocket = Operation::Pocket(cam_model::PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -2572,6 +2594,7 @@ mod tests {
         assert!((min_cut_z(&pocket_allowed.program) - -1.5).abs() < 1e-9);
 
         let face = Operation::Face(cam_model::FaceOp {
+            parameter_expressions: Default::default(),
             id: 3,
             tool: 1,
             boundary: square(),
@@ -2977,6 +3000,7 @@ mod tests {
         doc.setup_mut()
             .operations
             .push(Operation::Adaptive(cam_model::AdaptiveOp {
+                parameter_expressions: Default::default(),
                 id: 4,
                 tool: 1,
                 spindle_rpm: 1000.0,

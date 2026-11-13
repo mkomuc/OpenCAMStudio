@@ -1021,6 +1021,7 @@ impl AppController {
         {
             return Err("Operation refers to a missing tool".into());
         }
+        operation.resolve_parameter_expressions(&document.setup().tools)?;
         let before = Some(document.operation_base_cutting_heights(old));
         if let Some(heights) = safety_heights {
             heights.validate()?;
@@ -1539,6 +1540,7 @@ mod tests {
     use super::*;
     fn drill() -> Operation {
         Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             id: 0,
             tool: 1,
             points: vec![[10., 10.]],

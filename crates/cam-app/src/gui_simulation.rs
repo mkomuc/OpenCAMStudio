@@ -1204,6 +1204,7 @@ mod tests {
             }
         });
         controller.add_operation(Operation::Drill(cam_model::DrillOp {
+            parameter_expressions: Default::default(),
             id: 0,
             tool: 1,
             points: vec![[4., 4.]],
@@ -1994,6 +1995,7 @@ mod tests {
             }
         });
         controller.add_operation(Operation::Drill(cam_model::DrillOp {
+            parameter_expressions: Default::default(),
             id: 0,
             tool: 1,
             points: vec![[2., 2.]],

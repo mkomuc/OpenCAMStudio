@@ -178,18 +178,7 @@ impl App {
                 .cloned()
                 .ok_or("Operation unavailable")?
         };
-        let parsed = self
-            .fields
-            .iter()
-            .filter_map(|(field, value)| {
-                value
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .map(|v| (*field, v))
-            })
-            .collect();
+        let parsed = self.parsed_operation_fields();
         apply_op_fields(&mut op, &parsed);
         if op.rotary_wrap().is_some() {
             let geometry = crate::cad_operations::geometry_for_setup(&document)?;

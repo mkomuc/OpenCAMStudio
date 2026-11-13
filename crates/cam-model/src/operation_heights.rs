@@ -1040,6 +1040,7 @@ mod tests {
     fn doc() -> Document {
         let mut doc:Document=serde_json::from_value(serde_json::json!({"schema_version":18,"setups":[{"id":1,"name":"reference test","heights":{"clearance":5.,"retract":2.,"top_of_stock":0.},"stock":{"BoundingBox":{"x_offset":0.,"y_offset":0.,"top":10.,"thickness":15.}},"tools":[],"operations":[]}]})).unwrap();
         doc.setup_mut().operations.push(Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             id: 1,
             tool: 1,
             points: vec![[0., 0.]],
@@ -1186,6 +1187,7 @@ mod tests {
     fn adaptive_height_helpers_are_safe_before_and_after_binding() {
         let mut doc = doc();
         let mut op = AdaptiveOp {
+            parameter_expressions: Default::default(),
             id: 2,
             tool: 1,
             spindle_rpm: 1000.,

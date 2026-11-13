@@ -196,6 +196,7 @@ fn assert_no_rapid_onto_uncut_stock(program: &Program, floor: f64) {
 /// A 60×40 pocket with a 10×10 island, cleared in two levels by a ⌀6 end mill.
 fn pocket_doc() -> Document {
     let op = PocketOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
@@ -233,6 +234,7 @@ fn pocket_doc() -> Document {
 /// An outside profile with radial roughing — the *other* caller of the clearing engine.
 fn roughing_doc() -> Document {
     let op = ProfileOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         passes: Default::default(),
         selections: None,
@@ -271,6 +273,7 @@ fn roughing_doc() -> Document {
 /// separately, and the property below is what says whether that argument holds.
 fn face_doc(overshoot: f64) -> Document {
     let op = FaceOp {
+        parameter_expressions: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),
@@ -306,6 +309,7 @@ fn carve_doc() -> Document {
         ..Default::default()
     };
     let op = CarveOp {
+        parameter_expressions: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),

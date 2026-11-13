@@ -27,6 +27,12 @@ mod fixtures;
 pub use fixtures::{FixtureClearance, FixtureEnvelope};
 mod profile_selection;
 pub use profile_selection::*;
+mod parameter_expression;
+pub use parameter_expression::{
+    evaluate_expression, evaluate_parameter_results, evaluate_parameters,
+};
+mod operation_parameters;
+pub use operation_parameters::OperationParameter;
 mod profile_parameters;
 pub use profile_parameters::*;
 mod operation_heights;

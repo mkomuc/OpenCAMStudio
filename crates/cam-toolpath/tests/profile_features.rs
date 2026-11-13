@@ -7,6 +7,7 @@ use cam_toolpath::{
 
 fn profile() -> ProfileOp {
     ProfileOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         passes: Default::default(),
         selections: None,

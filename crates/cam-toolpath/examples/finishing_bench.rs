@@ -48,6 +48,7 @@ fn main() {
     println!("CPU workers: {}", rayon::current_num_threads());
     for scallop in [false, true] {
         let operation = ParallelOp {
+            parameter_expressions: Default::default(),
             id: 1,
             tool: 1,
             work_offset: 1,

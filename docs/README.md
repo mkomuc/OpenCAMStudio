@@ -5,6 +5,7 @@ For installation and a feature overview, start with the [project README](../READ
 - [Setups and work coordinates](multi-setup.md): machining sides, stock and separate NC programs.
 - [CAD import and selection](cad-import.md): drawings, STEP/IGES, linked geometry and model replacement.
 - [Choosing an operation](operation-compatibility.md): supported geometry, cutters and machining limits.
+- [Numeric parameter formulas](parameter-expressions.md): Excel-style formulas, autocomplete and display precision.
 - [Profile milling](profile-operation.md): cutting sides, passes, leads, tabs and compensation.
 - [Fourth-axis wrap milling](rotary-wrap.md): cylindrical Profile, Pocket and 2D adaptive toolpaths, A/B output and verification limits.
 - [Bore milling](bore-operation.md): finishing accessible holes and bosses.

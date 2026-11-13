@@ -1638,6 +1638,7 @@ mod tests {
         for x in [10., 25.] {
             app.controller
                 .add_operation(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool: 1,
                     points: vec![[x, 10.]],
@@ -1756,6 +1757,7 @@ mod tests {
         let center = [(min[0] + max[0]) / 2., (min[1] + max[1]) / 2.];
         app.controller
             .add_operation(Operation::Drill(cam_model::DrillOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool: 1,
                 points: vec![center],
@@ -1837,6 +1839,7 @@ mod tests {
 
         app.controller
             .add_operation(Operation::Drill(cam_model::DrillOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool: 1,
                 points: vec![[10., 10.]],
@@ -1907,6 +1910,7 @@ mod tests {
         for x in [10., 25.] {
             app.controller
                 .add_operation(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool: 1,
                     points: vec![[x, 10.]],

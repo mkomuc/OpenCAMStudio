@@ -490,6 +490,7 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: resolved.regions.iter().skip(1).cloned().collect(),
             stock_contours: Default::default(),
@@ -522,6 +523,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: cam_model::ProfilePasses {
                 lead_end_distance: 0.6,
@@ -575,6 +577,7 @@ pub(crate) fn create_operation(
             clearing: Clearing::default(),
         }),
         OpKind::Drill => Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -594,6 +597,7 @@ pub(crate) fn create_operation(
             feed: defaults.plunge_feed,
         }),
         OpKind::Face => Operation::Face(FaceOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -612,6 +616,7 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
         }),
         OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+            parameter_expressions: Default::default(),
             contour_roughing: Default::default(),
             tip_offset: 1.0,
             lead_in_enabled: Some(true),
@@ -657,6 +662,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Engrave => Operation::Engrave(EngraveOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -675,6 +681,7 @@ pub(crate) fn create_operation(
             start: None,
         }),
         OpKind::Carve => Operation::Carve(CarveOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -719,6 +726,7 @@ pub(crate) fn create_operation(
             ..Default::default()
         }),
         OpKind::Thread => Operation::Thread(ThreadOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -750,6 +758,7 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
         }),
         OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -764,6 +773,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Parallel => Operation::Parallel(ParallelOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -899,9 +909,18 @@ pub(crate) fn resolve_document_checked(
     }
     document.geometry.validate().map_err(error)?;
     let mut resolved = document.clone();
+    let tools = resolved.setup().tools.clone();
+    for operation in &mut resolved.setup_mut().operations {
+        if document.operation_is_included(document.setup().id, operation.id()) {
+            operation
+                .resolve_parameter_expressions(&tools)
+                .map_err(|reason| error(reason).for_op(operation.id()))?;
+        }
+    }
+    let prepared_operations = resolved.setup().operations.clone();
     // Resolve all reference geometry in its source placement, before rotating
     // instances for the strategy adapters. Keep a worker-only absolute snapshot.
-    for operation in &document.setup().operations {
+    for operation in &prepared_operations {
         if !document.operation_is_included(document.setup().id, operation.id()) {
             continue;
         }
@@ -939,6 +958,7 @@ pub(crate) fn resolve_document_checked(
             resolved.geometry = index.geometry(&resolved.geometry);
         }
         let resolved_operation: Result<(), String> = (|| {
+            operation.resolve_parameter_expressions(&resolved.setup().tools)?;
             if operation.rotary_wrap().is_some() {
                 resolve_wrapped_operation(&resolved.geometry, operation)?;
                 resolved.geometry.bindings.remove(&id);

@@ -92,14 +92,7 @@ impl App {
                 .get(&field)
                 .cloned()
                 .unwrap_or_else(|| fmt_num(n.get(p)));
-            field_row_labeled(
-                field,
-                n.label(),
-                n.help(),
-                &value,
-                self.tooltips,
-                self.field_invalid(field),
-            )
+            self.parameter_field_row(field, n.label(), n.help(), &value)
         };
         let toggle = |label, help, value, t| -> Element<'_, Message> {
             row![

@@ -671,6 +671,7 @@ mod tests {
         });
         for point in [[2., 2.], [6., 6.]] {
             app.add_operation(Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool: 1,
                 points: vec![point],

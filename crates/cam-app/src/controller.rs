@@ -2243,6 +2243,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                parameter_expressions: Default::default(),
                 wrap: None,
                 passes: cam_model::ProfilePasses {
                     lead_end_distance: 0.6,
@@ -2297,6 +2298,7 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Pocket(PocketOp {
+                    parameter_expressions: Default::default(),
                     wrap: None,
                     additional_regions: Vec::new(),
                     stock_contours: Default::default(),
@@ -2330,6 +2332,7 @@ impl AppController {
                 })
             }
             OpKind::Drill => Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 points: vec![centroid(&chain)],
@@ -2353,6 +2356,7 @@ impl AppController {
                     None => Axis::along_longest_edge(chain.points()),
                 };
                 Operation::Face(FaceOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool,
                     boundary: chain,
@@ -2377,6 +2381,7 @@ impl AppController {
                 })
             }
             OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+                parameter_expressions: Default::default(),
                 contour_roughing: Default::default(),
                 tip_offset: 1.0,
                 lead_in_enabled: Some(true),
@@ -2437,6 +2442,7 @@ impl AppController {
                 }
                 let dia = (xmax - xmin).max(ymax - ymin);
                 Operation::Thread(ThreadOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool,
                     points: vec![centroid(&chain)],
@@ -2475,6 +2481,7 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Carve(CarveOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool,
                     // No clearing tool by default: the V-bit alone is the simple case,
@@ -2509,6 +2516,7 @@ impl AppController {
                 })
             }
             OpKind::Engrave => Operation::Engrave(EngraveOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 chain,
@@ -2530,6 +2538,7 @@ impl AppController {
                 end: None,
             }),
             OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 spindle_rpm,
@@ -2540,6 +2549,7 @@ impl AppController {
                 params: AdaptiveParams::default(),
             }),
             OpKind::Parallel => Operation::Parallel(ParallelOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 spindle_rpm,
@@ -2801,6 +2811,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    parameter_expressions: Default::default(),
                     wrap: None,
                     passes: cam_model::ProfilePasses {
                         lead_end_distance: 0.6,
@@ -2855,6 +2866,7 @@ impl AppController {
                     let dia = (xmax - xmin).min(ymax - ymin);
                     if dia <= p.tool_diameter + 1e-9 {
                         operations.push(Operation::Drill(DrillOp {
+                            parameter_expressions: Default::default(),
                             id,
                             tool: 1,
                             points: vec![centroid(hole)],
@@ -2871,6 +2883,7 @@ impl AppController {
                         }));
                     } else {
                         operations.push(Operation::Pocket(PocketOp {
+                            parameter_expressions: Default::default(),
                             wrap: None,
                             additional_regions: Vec::new(),
                             stock_contours: Default::default(),
@@ -3753,6 +3766,7 @@ mod tests {
             doc.setup_mut()
                 .operations
                 .push(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: third,
                     tool: 1,
                     points: vec![[25.0, 25.0]],

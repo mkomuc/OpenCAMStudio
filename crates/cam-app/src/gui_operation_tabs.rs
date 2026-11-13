@@ -685,13 +685,11 @@ impl App {
                 self.fields.get(&field).cloned().unwrap_or_default()
             };
             let section = operation_field_section(field, tab);
-            list = list.section(section).push(field_row_labeled(
+            list = list.section(section).push(self.parameter_field_row(
                 field,
                 self.field_label(field),
                 self.field_help(field),
                 &value,
-                self.tooltips,
-                self.field_invalid(field),
             ));
         }
         if tab == OperationTab::Passes {
@@ -713,13 +711,11 @@ impl App {
                         Field::ContourRoughCount,
                     ] {
                         let value = self.fields.get(&field).cloned().unwrap_or_default();
-                        list = list.push(field_row_labeled(
+                        list = list.push(self.parameter_field_row(
                             field,
                             self.field_label(field),
                             self.field_help(field),
                             &value,
-                            self.tooltips,
-                            self.field_invalid(field),
                         ));
                     }
                     let help = match op {
@@ -784,13 +780,11 @@ impl App {
                         list = list.push(profile_picker("Tab shape","Rectangular tabs keep a flat top; triangular tabs rise and fall gradually.",self.tooltips,p.tabs.shape,&cam_model::TabShape::ALL[..],Message::ProfileTabShape));
                         for field in [Field::TabWidth, Field::TabHeight] {
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
-                            list = list.push(field_row_labeled(
+                            list = list.push(self.parameter_field_row(
                                 field,
                                 self.field_label(field),
                                 self.field_help(field),
                                 &value,
-                                self.tooltips,
-                                self.field_invalid(field),
                             ));
                         }
                         list = list.push(profile_picker(
@@ -805,13 +799,11 @@ impl App {
                                 Field::TabSpacing
                             };
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
-                            list = list.push(field_row_labeled(
+                            list = list.push(self.parameter_field_row(
                                 field,
                                 self.field_label(field),
                                 self.field_help(field),
                                 &value,
-                                self.tooltips,
-                                self.field_invalid(field),
                             ));
                         }
                         list = list.push(self.tab_location_controls(p));
@@ -855,13 +847,11 @@ impl App {
                 if tab == OperationTab::Passes {
                     let field = Field::ChamferTipOffset;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.section("Chamfer").push(field_row_labeled(
+                    list = list.section("Chamfer").push(self.parameter_field_row(
                         field,
                         self.field_label(field),
                         self.field_help(field),
                         &value,
-                        self.tooltips,
-                        self.field_invalid(field),
                     ));
                     list = list.section("Passes").push(text("Stepdown limits the height of each face band. 0 uses the cutter's usable flank automatically; smaller cutters use more passes.").size(12));
                 }
@@ -895,23 +885,19 @@ impl App {
                     }
                     let field = Field::ChamferWidth;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.section("Chamfer").push(field_row_labeled(
+                    list = list.section("Chamfer").push(self.parameter_field_row(
                         field,
                         self.field_label(field),
                         self.field_help(field),
                         &value,
-                        self.tooltips,
-                        self.field_invalid(field),
                     ));
                     let field = Field::ChamferTipOffset;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.push(field_row_labeled(
+                    list = list.push(self.parameter_field_row(
                         field,
                         self.field_label(field),
                         self.field_help(field),
                         &value,
-                        self.tooltips,
-                        self.field_invalid(field),
                     ));
                     list = list.section("Passes");
                     list = list.push(
@@ -1191,13 +1177,11 @@ impl App {
                                 continue;
                             }
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
-                            list = list.push(field_row_labeled(
+                            list = list.push(self.parameter_field_row(
                                 field,
                                 self.field_label(field),
                                 self.field_help(field),
                                 &value,
-                                self.tooltips,
-                                self.field_invalid(field),
                             ));
                         }
                         if tab == OperationTab::Passes {
@@ -1333,9 +1317,8 @@ impl App {
             .inspector_fields()
             .into_iter()
             .map(|field| {
-                self.fields
-                    .get(&field)
-                    .and_then(|text| text.parse::<f64>().ok())
+                self.parsed_field_value(field)
+                    .ok()
                     .map(|number| (field, number))
                     .ok_or("Invalid operation field")
             })
