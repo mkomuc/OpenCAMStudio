@@ -187,7 +187,7 @@ impl Operation {
                 if !o.stepover.is_finite() || o.stepover < 0. {
                     return Err("Profile stepover must be finite and nonnegative.".into());
                 }
-                let axial = step_depth(cutting_depth_mm, o.stepdown)?;
+                let axial = step_depth(cutting_depth_mm, if o.passes.multiple_depths { o.stepdown } else { cutting_depth_mm })?;
                 if o.stepover > 0. {
                     (axial, o.stepover.min(tool.diameter), "Nominal roughing pass: stepdown and radial stepover; entry and finishing loads may differ.")
                 } else {
@@ -195,16 +195,22 @@ impl Operation {
                 }
             }
             Self::Pocket(o) => {
-                let spacing = overlap_width(o.clear.overlap)?;
-                let cap = o.clear.clearing.engagement;
+                let cap = if o.clear.pocket_adaptive_enabled() { o.clear.clearing.engagement } else { 0.0 };
+                let spacing = if cap > 0.0 { tool.diameter } else if let Some(overlap) = o.clear.pocket_overlap {
+                    if !overlap.is_finite() || overlap < 0.0 || overlap >= tool.diameter { return Err("Pocket overlap must be nonnegative and less than the tool diameter.".into()); }
+                    tool.diameter - overlap
+                } else { overlap_width(o.clear.overlap)? };
                 if !cap.is_finite() {
                     return Err("Pocket engagement must be finite.".into());
                 }
                 let radial = if cap > 0. { cap.min(tool.diameter) } else { spacing };
-                (step_depth(cutting_depth_mm, o.clear.stepdown)?, radial,
+                (step_depth(cutting_depth_mm, if o.clear.multiple_depths.enabled { o.clear.stepdown } else { cutting_depth_mm })?, radial,
                  "Nominal clearing pass: stepdown and ring spacing or adaptive engagement cap; entries, corners and finishing may differ.")
             }
-            Self::Face(o) => (step_depth(cutting_depth_mm, o.stepdown)?, overlap_width(o.overlap)?,
+            Self::Face(o) => (step_depth(cutting_depth_mm, if o.multiple_depths.enabled { o.stepdown } else { cutting_depth_mm })?, if let Some(overlap) = o.absolute_overlap {
+                if !overlap.is_finite() || overlap < 0.0 || overlap >= tool.diameter { return Err("Facing overlap must be nonnegative and less than the tool diameter.".into()); }
+                tool.diameter - overlap
+            } else { overlap_width(o.overlap)? },
                 "Nominal facing pass: stepdown and diameter × (1 − overlap)."),
             Self::Adaptive(o) => {
                 positive(o.params.optimal_load, "Optimal load")?;

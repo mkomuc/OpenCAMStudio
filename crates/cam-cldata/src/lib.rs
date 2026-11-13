@@ -188,8 +188,13 @@ pub enum Step {
     /// angle is absolute, continuous degrees. `None` feed means rapid. Feed is
     /// mm/min along the material path of `length` mm; posts lower it to G93.
     Rotary {
-        to: Point3, angle: f64, axis: RotaryAxis, center: Point3,
-        feed: Option<f64>, length: f64, tag: Tag,
+        to: Point3,
+        angle: f64,
+        axis: RotaryAxis,
+        center: Point3,
+        feed: Option<f64>,
+        length: f64,
+        tag: Tag,
     },
     /// Rapid traverse to a point (`G0`) — non-cutting, at the machine's rapid
     /// rate.
@@ -351,9 +356,10 @@ impl Program {
         let mut result = self.clone();
         for step in &mut result.steps {
             let tag = match step {
-                Step::Rotary { tag, .. } | Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
-                    Some(tag)
-                }
+                Step::Rotary { tag, .. }
+                | Step::Rapid { tag, .. }
+                | Step::Linear { tag, .. }
+                | Step::Arc { tag, .. } => Some(tag),
                 Step::Drill(c) => Some(&mut c.tag),
                 _ => None,
             };
@@ -391,9 +397,10 @@ impl Step {
     /// Provenance carried by a motion step, when this step represents motion.
     pub fn tag(&self) -> Option<Tag> {
         match self {
-            Step::Rotary { tag, .. } | Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
-                Some(*tag)
-            }
+            Step::Rotary { tag, .. }
+            | Step::Rapid { tag, .. }
+            | Step::Linear { tag, .. }
+            | Step::Arc { tag, .. } => Some(*tag),
             Step::Drill(cycle) => Some(cycle.tag),
             _ => None,
         }
@@ -403,8 +410,22 @@ impl Step {
     pub fn translated(&self, d: [f64; 3]) -> Step {
         let p = |q: Point3| Point3::new(q.x + d[0], q.y + d[1], q.z + d[2]);
         match self {
-            Step::Rotary { to, center, angle, axis, feed, length, tag } => Step::Rotary {
-                to:p(*to),center:p(*center),angle:*angle,axis:*axis,feed:*feed,length:*length,tag:*tag,
+            Step::Rotary {
+                to,
+                center,
+                angle,
+                axis,
+                feed,
+                length,
+                tag,
+            } => Step::Rotary {
+                to: p(*to),
+                center: p(*center),
+                angle: *angle,
+                axis: *axis,
+                feed: *feed,
+                length: *length,
+                tag: *tag,
             },
             Step::Rapid { to, tag } => Step::Rapid {
                 to: p(*to),

@@ -26,7 +26,7 @@ fn travel(bounds: Option<MotionBounds>, machine: &Machine) -> Result<(), PostErr
 fn rates(program: &Program, machine: &Machine) -> Result<(), PostError> {
     for step in program.steps() {
         let feed = match step {
-            Step::Rotary {feed,..} => *feed,
+            Step::Rotary { feed, .. } => *feed,
             Step::Linear { feed, .. } | Step::Arc { feed, .. } => Some(*feed),
             Step::Drill(c) => Some(c.feed),
             _ => None,
@@ -84,11 +84,15 @@ pub(crate) fn preflight(
     for (index, step) in program.steps().iter().enumerate() {
         let mut output = step.clone();
         match &mut output {
-            Step::Rotary {to,angle,center,..} => {
-                current=Some(*to);
-                *to=point(*to);
-                *center=point(*center);
-                *angle=num(*angle,options.precision.max(6)).parse().expect("formatted rotary angle");
+            Step::Rotary {
+                to, angle, center, ..
+            } => {
+                current = Some(*to);
+                *to = point(*to);
+                *center = point(*center);
+                *angle = num(*angle, options.precision.max(6))
+                    .parse()
+                    .expect("formatted rotary angle");
             }
             Step::Rapid { to, .. } | Step::Linear { to, .. } => {
                 current = Some(*to);

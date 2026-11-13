@@ -110,7 +110,9 @@ pub fn verify_fixture_clearance(
     }) {
         return Err("Fixture verification requires finite, ordered fixture envelopes".into());
     }
-    if program.has_rotary_motion() {return rotary::verify(program,tools,fixtures,cancel);}
+    if program.has_rotary_motion() {
+        return rotary::verify(program, tools, fixtures, cancel);
+    }
     let mut envelopes = std::collections::BTreeMap::new();
     let mut contacts = Vec::new();
     let mut cur = None;

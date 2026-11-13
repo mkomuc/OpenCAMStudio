@@ -61,8 +61,7 @@ impl OperationTab {
     }
 }
 
-/// The primary tab for each numeric field. Preset pass parameters also appear
-/// on Tool; operation_fields determines availability independently of the tab.
+/// The primary tab for each numeric field. Operation fields determine availability.
 pub(super) fn field_tab(field: Field) -> OperationTab {
     match field {
         Field::Wrap(_) => OperationTab::MultiAxis,
@@ -178,11 +177,15 @@ pub(super) fn set_operation_start_coordinate(op: &mut Operation, axis: usize, va
 /// used for automatic/full-depth settings. Cross-field geometry gates remain in
 /// the job resolver; an inspector never relaxes those gates.
 pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) -> bool {
-    if let Field::Wrap(number)=field {return number.invalid(value);}
+    if let Field::Wrap(number) = field {
+        return number.invalid(value);
+    }
     if !value.is_finite() {
         return true;
     }
     match field {
+        Field::ContourRoughStepover | Field::ContourRoughSmoothing => value <= 0.,
+        Field::ContourRoughCount => value < 1. || value > 1000. || value.fract() != 0.,
         Field::Profile(n) => n.invalid(value),
         Field::PocketFinish(n) => n.invalid(value),
         Field::Depth
@@ -201,6 +204,15 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         Field::StockLeaveRadial | Field::StockLeaveAxial | Field::ChamferTipOffset => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
+        Field::Engagement if matches!(op, Operation::Pocket(p) if p.clear.pocket_adaptive_enabled()) => {
+            value <= 0.0
+        }
+        Field::Stepdown
+            if matches!(op, Operation::Face(f) if !f.multiple_depths.enabled)
+                || matches!(op, Operation::Profile(p) if !p.passes.multiple_depths) =>
+        {
+            false
+        }
         Field::Stepdown
             if matches!(
                 op,
@@ -221,6 +233,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         Field::ThreadPasses => value < 1.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::ThreadSpringPasses => value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::Overlap | Field::ClearOverlap => !(0.0..=99.0).contains(&value),
+        Field::PocketOverlap | Field::FaceOverlap => value < 0.0,
         Field::PlungeA | Field::ClearPlungeA => {
             let (main, clear) = App::op_plunge_styles(op);
             match if field == Field::ClearPlungeA {
@@ -594,7 +607,9 @@ impl App {
             list = list.push(self.operation_linking_controls(op, linked.is_some()));
         }
         for field in self.geometry_operation_fields(op) {
-            if matches!(field,Field::Wrap(_)) {continue;}
+            if matches!(field, Field::Wrap(_)) {
+                continue;
+            }
             if tab == OperationTab::Linking {
                 continue; // Rendered once in the grouped linking sections.
             }
@@ -619,6 +634,9 @@ impl App {
             if matches!(
                 field,
                 Field::Profile(_)
+                    | Field::ContourRoughStepover
+                    | Field::ContourRoughSmoothing
+                    | Field::ContourRoughCount
                     | Field::PocketFinish(_)
                     | Field::TabWidth
                     | Field::TabHeight
@@ -627,6 +645,18 @@ impl App {
                     | Field::StartY
             ) {
                 continue; // Grouped beneath their section toggles.
+            }
+            if matches!(op, Operation::Pocket(_))
+                && matches!(
+                    field,
+                    Field::Stepdown | Field::Engagement | Field::PocketOverlap
+                )
+            {
+                continue;
+            }
+            if matches!(op, Operation::Face(_) | Operation::Profile(_)) && field == Field::Stepdown
+            {
+                continue;
             }
             if let Operation::Chamfer(chamfer) = op {
                 if matches!(field, Field::ChamferWidth | Field::ChamferTipOffset)
@@ -643,11 +673,8 @@ impl App {
                     continue;
                 }
             }
-            let preset_parameter = tab == OperationTab::Tool
-                && matches!(
-                    field,
-                    Field::Stepdown | Field::Overlap | Field::Peck | Field::ChamferStep
-                );
+            let preset_parameter =
+                tab == OperationTab::Tool && matches!(field, Field::Peck | Field::ChamferStep);
             if (!preset_parameter && field_tab(field) != tab) || is_clear_field(field) {
                 continue;
             }
@@ -676,14 +703,49 @@ impl App {
                 self.fields.get(&field).cloned().unwrap_or_default()
             };
             let section = operation_field_section(field, tab);
-            list = list.section(section).push(field_row_labeled(
+            list = list.section(section).push(self.parameter_field_row(
                 field,
                 self.field_label(field),
                 self.field_help(field),
                 &value,
-                self.tooltips,
-                self.field_invalid(field),
             ));
+        }
+        if tab == OperationTab::Passes {
+            let rough = match op {
+                Operation::Profile(p) => Some(&p.passes.contour_roughing),
+                Operation::Chamfer(c) => Some(&c.contour_roughing),
+                _ => None,
+            };
+            if let Some(rough) = rough {
+                list = list.optional_section(
+                    "Roughing passes",
+                    rough.enabled,
+                    Some(Message::ContourRoughingToggled),
+                );
+                if rough.enabled {
+                    for field in [
+                        Field::ContourRoughStepover,
+                        Field::ContourRoughSmoothing,
+                        Field::ContourRoughCount,
+                    ] {
+                        let value = self.fields.get(&field).cloned().unwrap_or_default();
+                        list = list.push(self.parameter_field_row(
+                            field,
+                            self.field_label(field),
+                            self.field_help(field),
+                            &value,
+                        ));
+                    }
+                    let help = match op {
+                        Operation::Chamfer(c) if !c.faces.is_empty() || self.chamfer_faces_active() => None,
+                        Operation::Chamfer(_) => Some("Additional contours approach the edge from the air side. Select Inside or Outside."),
+                        _ => Some("Additional contours approach the selected wall from the air side. Requires Inside/Outside; profile tabs, stock clearing and taper cannot be combined."),
+                    };
+                    if let Some(help) = help {
+                        list = list.push(text(help).size(11).color(INSPECTOR_MUTED));
+                    }
+                }
+            }
         }
         match op {
             Operation::Profile(p) => {
@@ -736,13 +798,11 @@ impl App {
                         list = list.push(profile_picker("Tab shape","Rectangular tabs keep a flat top; triangular tabs rise and fall gradually.",self.tooltips,p.tabs.shape,&cam_model::TabShape::ALL[..],Message::ProfileTabShape));
                         for field in [Field::TabWidth, Field::TabHeight] {
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
-                            list = list.push(field_row_labeled(
+                            list = list.push(self.parameter_field_row(
                                 field,
                                 self.field_label(field),
                                 self.field_help(field),
                                 &value,
-                                self.tooltips,
-                                self.field_invalid(field),
                             ));
                         }
                         list = list.push(profile_picker(
@@ -757,13 +817,11 @@ impl App {
                                 Field::TabSpacing
                             };
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
-                            list = list.push(field_row_labeled(
+                            list = list.push(self.parameter_field_row(
                                 field,
                                 self.field_label(field),
                                 self.field_help(field),
                                 &value,
-                                self.tooltips,
-                                self.field_invalid(field),
                             ));
                         }
                         list = list.push(self.tab_location_controls(p));
@@ -780,8 +838,44 @@ impl App {
             }
             Operation::Pocket(p) => {
                 if tab == OperationTab::Passes {
+                    list = list.extend(self.multiple_depth_controls(
+                        p.clear.multiple_depths,
+                        p.clear.stepdown,
+                        false,
+                    ));
                     list = list.extend(self.pocket_finishing_controls(&p.finishing));
                     list = list.section("Passes");
+                    let adaptive = p.clear.pocket_adaptive_enabled();
+                    list = list.push(row![
+                        label_help("Adaptive clearing", "Use adaptive clearing to limit radial engagement; otherwise use concentric clearing.", self.tooltips),
+                        checkbox(adaptive).size(15).on_toggle(Message::PocketAdaptiveToggled)
+                    ].spacing(8).align_y(Alignment::Center));
+                    if !adaptive {
+                        let value = self
+                            .fields
+                            .get(&Field::PocketOverlap)
+                            .cloned()
+                            .unwrap_or_default();
+                        list = list.push(self.parameter_field_row(
+                            Field::PocketOverlap,
+                            "Overlap (mm)",
+                            self.field_help(Field::PocketOverlap),
+                            &value,
+                        ));
+                    }
+                    if adaptive {
+                        let value = self
+                            .fields
+                            .get(&Field::Engagement)
+                            .cloned()
+                            .unwrap_or_default();
+                        list = list.push(self.parameter_field_row(
+                            Field::Engagement,
+                            "Adaptive stepover (mm)",
+                            self.field_help(Field::Engagement),
+                            &value,
+                        ));
+                    }
                     list = list.push(
                         row![
                             label_help("Climb", help::CLIMB, self.tooltips),
@@ -794,6 +888,8 @@ impl App {
                 }
             }
             Operation::Face(f) if tab == OperationTab::Passes => {
+                list =
+                    list.extend(self.multiple_depth_controls(f.multiple_depths, f.stepdown, true));
                 list = list.section("Passes").push(profile_picker(
                     "Direction",
                     help::FACE_DIRECTION,
@@ -807,13 +903,11 @@ impl App {
                 if tab == OperationTab::Passes {
                     let field = Field::ChamferTipOffset;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.section("Chamfer").push(field_row_labeled(
+                    list = list.section("Chamfer").push(self.parameter_field_row(
                         field,
                         self.field_label(field),
                         self.field_help(field),
                         &value,
-                        self.tooltips,
-                        self.field_invalid(field),
                     ));
                     list = list.section("Passes").push(text("Stepdown limits the height of each face band. 0 uses the cutter's usable flank automatically; smaller cutters use more passes.").size(12));
                 }
@@ -830,25 +924,36 @@ impl App {
                     ));
                 }
                 if tab == OperationTab::Passes {
+                    let radius_tool = self
+                        .operation_tools
+                        .iter()
+                        .chain(self.controller.inspection_setup().tools.iter())
+                        .find(|tool| tool.number == c.tool)
+                        .and_then(|tool| match tool.kind {
+                            ToolKind::RadiusMill {
+                                corner_radius,
+                                tip_length,
+                            } => Some((corner_radius, tip_length)),
+                            _ => None,
+                        });
+                    if let Some((radius, tip_length)) = radius_tool {
+                        list = list.push(text(format!("Radius mill: R{radius:.3} mm roundover, tip depth {:.3} mm. Width and depth are set by the tool; use zero tip offset.", radius + tip_length)).size(12).color(palette::GROUP_LABEL));
+                    }
                     let field = Field::ChamferWidth;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.section("Chamfer").push(field_row_labeled(
+                    list = list.section("Chamfer").push(self.parameter_field_row(
                         field,
                         self.field_label(field),
                         self.field_help(field),
                         &value,
-                        self.tooltips,
-                        self.field_invalid(field),
                     ));
                     let field = Field::ChamferTipOffset;
                     let value = self.fields.get(&field).cloned().unwrap_or_default();
-                    list = list.push(field_row_labeled(
+                    list = list.push(self.parameter_field_row(
                         field,
                         self.field_label(field),
                         self.field_help(field),
                         &value,
-                        self.tooltips,
-                        self.field_invalid(field),
                     ));
                     list = list.section("Passes");
                     list = list.push(
@@ -1128,13 +1233,11 @@ impl App {
                                 continue;
                             }
                             let value = self.fields.get(&field).cloned().unwrap_or_default();
-                            list = list.push(field_row_labeled(
+                            list = list.push(self.parameter_field_row(
                                 field,
                                 self.field_label(field),
                                 self.field_help(field),
                                 &value,
-                                self.tooltips,
-                                self.field_invalid(field),
                             ));
                         }
                         if tab == OperationTab::Passes {
@@ -1270,9 +1373,8 @@ impl App {
             .inspector_fields()
             .into_iter()
             .map(|field| {
-                self.fields
-                    .get(&field)
-                    .and_then(|text| text.parse::<f64>().ok())
+                self.parsed_field_value(field)
+                    .ok()
                     .map(|number| (field, number))
                     .ok_or("Invalid operation field")
             })
@@ -1438,6 +1540,48 @@ mod tests {
             [Field::StockLeaveRadial, Field::StockLeaveAxial]
         );
         assert_eq!(stock_offset_fields(face), [Field::StockLeaveAxial]);
+    }
+
+    #[test]
+    fn modeled_chamfer_roughing_fields_survive_toggle() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample.dxf").unwrap();
+        app.controller.new_operation(OpKind::Chamfer);
+        let id = app
+            .controller
+            .inspection_setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        app.begin_operation_draft(id);
+        app.edit_operation_draft(|op| {
+            if let Operation::Chamfer(chamfer) = op {
+                chamfer.faces = vec![cam_model::ChamferFace {
+                    upper: [[0., 0.], [20., 0.]],
+                    lower: [[0., -1.], [20., -1.]],
+                    top: 0.,
+                    bottom: -1.,
+                    outward: [0., -1.],
+                }];
+            }
+        });
+        let _ = app.update(Message::ContourRoughingToggled(true));
+        for (field, value) in [
+            (Field::ContourRoughStepover, "2"),
+            (Field::ContourRoughSmoothing, "0.2"),
+            (Field::ContourRoughCount, "3"),
+        ] {
+            assert!(operation_fields(app.current_operation(id).unwrap()).contains(&field));
+            let _ = app.update(Message::FieldChanged(field, value.into()));
+        }
+        let _ = app.update(Message::ContourRoughingToggled(false));
+        let _ = app.update(Message::ContourRoughingToggled(true));
+        assert_eq!(app.fields[&Field::ContourRoughCount], "3");
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Chamfer(c)) if !c.faces.is_empty() && c.contour_roughing.enabled && c.contour_roughing.stepover == 2. && c.contour_roughing.smoothing_deviation == 0.2 && c.contour_roughing.stepovers == 3)
+        );
     }
 
     #[test]
@@ -1841,6 +1985,25 @@ mod tests {
     }
     fn linked_face_app() -> (App, u32) {
         linked_face_app_at_heights(-1., -5., -1.)
+    }
+
+    #[test]
+    fn existing_face_overlap_displays_in_millimetres_without_dirtying_the_draft() {
+        let (mut app, id) = linked_face_app();
+        let Operation::Face(face) = app.controller.operation(id).unwrap() else {
+            panic!("face")
+        };
+        let tool = app
+            .controller
+            .inspection_setup()
+            .tools
+            .iter()
+            .find(|tool| tool.number == face.tool)
+            .unwrap();
+        let expected = tool.diameter * face.overlap;
+        app.begin_operation_draft(id);
+        assert!(!app.operation_draft_dirty());
+        assert!((app.fields[&Field::FaceOverlap].parse::<f64>().unwrap() - expected).abs() < 1e-8);
     }
 
     #[test]
@@ -2789,7 +2952,11 @@ mod tests {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
         app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
-        app.controller.edit_stock(|s|*s=cam_model::Stock::RelativeBox{offsets:[[1.,1.,0.];2]});
+        app.controller.edit_stock(|s| {
+            *s = cam_model::Stock::RelativeBox {
+                offsets: [[1., 1., 0.]; 2],
+            }
+        });
         app.operation_tab = OperationTab::Heights;
         app.setup_draft = None;
         app.controller.select(Selection::Setup);
@@ -3017,8 +3184,10 @@ mod tests {
                 };
                 let heights = app.resolve_height_editor(id).unwrap();
                 assert_eq!((heights.top, heights.bottom), (76., 25.));
-                assert!(matches!(app.controller.operation(id), Some(Operation::Pocket(p))
-                    if p.additional_regions.len() == 1));
+                assert!(
+                    matches!(app.controller.operation(id), Some(Operation::Pocket(p))
+                    if p.additional_regions.len() == 1)
+                );
                 let _ = app.update(Message::OperationGeometry(GeometryMessage::Remove));
                 assert!(app.geometry_editor.is_none(), "{}", app.status);
                 assert_eq!(app.resolve_height_editor(id).unwrap(), heights);

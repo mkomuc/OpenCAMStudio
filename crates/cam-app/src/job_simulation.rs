@@ -131,24 +131,32 @@ impl JobInputs {
         let fixture_contacts = self.fixture_collisions(program, cancel)?;
         let mut samples = if self.uses_rotary_stock(program) {
             cam_sim::analyze_rotary_removal_controlled(
-                program, self.min, self.max,
-                &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
-                &self.rotary_sim_tools(), initial.as_ref(), &|| cancel.is_cancelled(),
-                |done,total| progress.set(JobPhase::Verification,done,total,None),
+                program,
+                self.min,
+                self.max,
+                &SimOptions {
+                    resolution,
+                    tool_radius: self.tool_diameter / 2.,
+                },
+                &self.rotary_sim_tools(),
+                initial.as_ref(),
+                &|| cancel.is_cancelled(),
+                |done, total| progress.set(JobPhase::Verification, done, total, None),
             )
-        } else { cam_sim::analyze_removal_controlled(
-            program,
-            self.min,
-            self.max,
-            &SimOptions {
-                resolution,
-                tool_radius: self.tool_diameter / 2.,
-            },
-            &tools,
-            initial.as_ref(),
-            &|| cancel.is_cancelled(),
-            |done, total| progress.set(JobPhase::Verification, done, total, None),
-        )
+        } else {
+            cam_sim::analyze_removal_controlled(
+                program,
+                self.min,
+                self.max,
+                &SimOptions {
+                    resolution,
+                    tool_radius: self.tool_diameter / 2.,
+                },
+                &tools,
+                initial.as_ref(),
+                &|| cancel.is_cancelled(),
+                |done, total| progress.set(JobPhase::Verification, done, total, None),
+            )
         }
         .map_err(Diagnostic::error)?;
         if let Some(first) = fixture_contacts
@@ -208,7 +216,9 @@ impl JobInputs {
             .with_code(DiagnosticCode::InvalidInput)
             .for_setup(self.document.setup().id));
         }
-        self.document.round_stock_geometry(self.document.setup()).map_err(Diagnostic::error)?;
+        self.document
+            .round_stock_geometry(self.document.setup())
+            .map_err(Diagnostic::error)?;
         let (min, max) = (self.min, self.max);
         if min[0] >= max[0] || min[1] >= max[1] {
             return Ok(StockSimulation::default());
@@ -217,8 +227,23 @@ impl JobInputs {
             .preview_resolution
             .unwrap_or_else(|| self.stock_resolution(program));
         let round = self.defined_round_stock(resolution, cancel)?;
-        let assets: Vec<_> = self.document.geometry.assets.iter().map(|a| (a.id, a.revision, &a.source_fingerprint)).collect();
-        let round_key = serde_json::to_string(&(self.document.setup().stock, self.min, self.max, resolution, &self.document.setup().frame, &self.document.geometry.instances, assets)).unwrap();
+        let assets: Vec<_> = self
+            .document
+            .geometry
+            .assets
+            .iter()
+            .map(|a| (a.id, a.revision, &a.source_fingerprint))
+            .collect();
+        let round_key = serde_json::to_string(&(
+            self.document.setup().stock,
+            self.min,
+            self.max,
+            resolution,
+            &self.document.setup().frame,
+            &self.document.geometry.instances,
+            assets,
+        ))
+        .unwrap();
         let key = self.previous_stock_key(resolution);
         if let Some(key) = &key {
             if simulation
@@ -235,13 +260,18 @@ impl JobInputs {
         } else {
             simulation.previous = None;
         }
-        let initial = key.as_ref().and(simulation.previous.as_ref()).map(|(k, f)| (k.as_str(), f))
+        let initial = key
+            .as_ref()
+            .and(simulation.previous.as_ref())
+            .map(|(k, f)| (k.as_str(), f))
             .or_else(|| round.as_ref().map(|f| (round_key.as_str(), f)));
         // Setup selection shows the input blank, while operation selection and
         // playback show the material remaining after the destination's cuts.
         let inherited = self.document.setup().stock == cam_model::Stock::PreviousSetup;
-        let initial_snapshot = initial.filter(|_| inherited && self.preview_program.is_none())
-            .map(|(_, field)| field.snapshot(min[2]).map_err(Diagnostic::error)).transpose()?;
+        let initial_snapshot = initial
+            .filter(|_| inherited && self.preview_program.is_none())
+            .map(|(_, field)| field.snapshot(min[2]).map_err(Diagnostic::error))
+            .transpose()?;
         let input_mesh = if let Some((_, field)) =
             initial.filter(|_| inherited && self.preview_program.is_none())
         {
@@ -271,7 +301,9 @@ impl JobInputs {
         progress.set(JobPhase::RenderPreparation, 0, 1, None);
         let snapshot = if self.preview_program.is_none() {
             Some(sim.field.snapshot(min[2]).map_err(Diagnostic::error)?)
-        } else { None };
+        } else {
+            None
+        };
         // Render the stock as a watertight solid down to its floor, so the full
         // thickness shows and cut walls shade crisply (not a smooth top sheet).
         let Some(surface) = simulation
@@ -323,13 +355,22 @@ impl JobInputs {
             // This lane consumes geometry and contacts. Force analysis traverses
             // separately with volume accounting enabled in cam-sim.
             rotary.set_volume_tracking(false);
-            return rotary.simulate_controlled(
-                program, self.min, self.max,
-                &SimOptions { resolution, tool_radius: self.tool_diameter / 2. },
-                &self.rotary_sim_tools(), initial, self.stock_force_surfaces,
-                &|| cancel.is_cancelled(),
-                |done,total| progress.set(JobPhase::Verification,done,total,None),
-            ).map_err(Diagnostic::error);
+            return rotary
+                .simulate_controlled(
+                    program,
+                    self.min,
+                    self.max,
+                    &SimOptions {
+                        resolution,
+                        tool_radius: self.tool_diameter / 2.,
+                    },
+                    &self.rotary_sim_tools(),
+                    initial,
+                    self.stock_force_surfaces,
+                    &|| cancel.is_cancelled(),
+                    |done, total| progress.set(JobPhase::Verification, done, total, None),
+                )
+                .map_err(Diagnostic::error);
         }
         let tools = &self.document.setup().tools;
         let sim_tools: Vec<SimTool> = tools
@@ -378,25 +419,59 @@ impl JobInputs {
                 result = verify(program, simulation).ok_or_else(stopped)?;
             }
         }
-        if cancelled() { Err(stopped()) } else { Ok(result) }
+        if cancelled() {
+            Err(stopped())
+        } else {
+            Ok(result)
+        }
     }
 
     fn uses_rotary_stock(&self, program: &Program) -> bool {
-        program.has_rotary_motion() || self.document.setup().operations.iter().any(|op|
-            self.document.operation_is_included(self.document.setup().id,op.id()) && (op.rotary_wrap().is_some() || self.document.rotary_indexes.contains_key(&op.id())))
+        program.has_rotary_motion()
+            || self.document.setup().operations.iter().any(|op| {
+                self.document
+                    .operation_is_included(self.document.setup().id, op.id())
+                    && (op.rotary_wrap().is_some()
+                        || self.document.rotary_indexes.contains_key(&op.id()))
+            })
     }
 
     fn rotary_sim_tools(&self) -> Vec<cam_sim::RotaryTool> {
-        self.document.setup().tools.iter().map(|t| {
-            let outline=t.profile();
-            let flute=outline.segs.iter().filter(|s|s.cutting).map(|s|s.end.y).fold(0.,f64::max).max(1e-6);
-            cam_sim::RotaryTool {
-                tool: SimTool { number:t.number, profile:sim_profile(t),
-                    noncutting_tip_radius:outline.segs.first().filter(|s|!s.cutting && s.end.y.abs()<1e-9).map(|s|s.end.x) },
-                flute_length:flute, length:t.length.max(flute), neck_length:if matches!(t.kind,cam_model::ToolKind::ThreadMill{..}){t.neck_length.max(t.flute_len())}else{t.neck_length},
-                neck_radius:t.neck_dia()/2., shank_radius:t.shank_dia()/2.,
-            }
-        }).collect()
+        self.document
+            .setup()
+            .tools
+            .iter()
+            .map(|t| {
+                let outline = t.profile();
+                let flute = outline
+                    .segs
+                    .iter()
+                    .filter(|s| s.cutting)
+                    .map(|s| s.end.y)
+                    .fold(0., f64::max)
+                    .max(1e-6);
+                cam_sim::RotaryTool {
+                    tool: SimTool {
+                        number: t.number,
+                        profile: sim_profile(t),
+                        noncutting_tip_radius: outline
+                            .segs
+                            .first()
+                            .filter(|s| !s.cutting && s.end.y.abs() < 1e-9)
+                            .map(|s| s.end.x),
+                    },
+                    flute_length: flute,
+                    length: t.length.max(flute),
+                    neck_length: if matches!(t.kind, cam_model::ToolKind::ThreadMill { .. }) {
+                        t.neck_length.max(t.flute_len())
+                    } else {
+                        t.neck_length
+                    },
+                    neck_radius: t.neck_dia() / 2.,
+                    shank_radius: t.shank_dia() / 2.,
+                }
+            })
+            .collect()
     }
 
     /// CAD clearance is not proof of cleared stock: a ball nose leaves scallops
@@ -493,31 +568,77 @@ impl JobInputs {
         changed.then_some(output)
     }
 
-    fn defined_round_stock(&self, resolution: f64, cancel: &CancelToken) -> Result<Option<Heightfield>, Diagnostic> {
+    fn defined_round_stock(
+        &self,
+        resolution: f64,
+        cancel: &CancelToken,
+    ) -> Result<Option<Heightfield>, Diagnostic> {
         let stock = self.document.setup().stock;
-        if !matches!(stock, cam_model::Stock::FixedRound { .. } | cam_model::Stock::RelativeRound { .. } | cam_model::Stock::FromSolid { .. }) { return Ok(None); }
-        if cancel.is_cancelled() {return Err(Diagnostic::error("Stock calculation cancelled"));}
-        let setup=self.document.setup();
-        if let Some((frame,min,max))=self.document.round_stock_geometry(setup).map_err(Diagnostic::error)? {
-            let direction=setup.frame.to_setup_vector(frame.to_world_vector([0.,0.,1.]));
-            if let Some(axis)=(0..3).find(|&i|direction[i].abs()>1.-1e-9) {
-                let center=setup.frame.to_setup_vector(frame.to_world_vector([(min[0]+max[0])*0.5,(min[1]+max[1])*0.5,0.]));
-                let a=center[axis]+direction[axis]*min[2];
-                let b=center[axis]+direction[axis]*max[2];
-                let inner=match stock {
-                    cam_model::Stock::FixedRound{tube:true,inner_diameter,..}|cam_model::Stock::RelativeRound{tube:true,inner_diameter,..}=>inner_diameter*0.5,
-                    _=>0.,
+        if !matches!(
+            stock,
+            cam_model::Stock::FixedRound { .. }
+                | cam_model::Stock::RelativeRound { .. }
+                | cam_model::Stock::FromSolid { .. }
+        ) {
+            return Ok(None);
+        }
+        if cancel.is_cancelled() {
+            return Err(Diagnostic::error("Stock calculation cancelled"));
+        }
+        let setup = self.document.setup();
+        if let Some((frame, min, max)) = self
+            .document
+            .round_stock_geometry(setup)
+            .map_err(Diagnostic::error)?
+        {
+            let direction = setup
+                .frame
+                .to_setup_vector(frame.to_world_vector([0., 0., 1.]));
+            if let Some(axis) = (0..3).find(|&i| direction[i].abs() > 1. - 1e-9) {
+                let center = setup.frame.to_setup_vector(frame.to_world_vector([
+                    (min[0] + max[0]) * 0.5,
+                    (min[1] + max[1]) * 0.5,
+                    0.,
+                ]));
+                let a = center[axis] + direction[axis] * min[2];
+                let b = center[axis] + direction[axis] * max[2];
+                let inner = match stock {
+                    cam_model::Stock::FixedRound {
+                        tube: true,
+                        inner_diameter,
+                        ..
+                    }
+                    | cam_model::Stock::RelativeRound {
+                        tube: true,
+                        inner_diameter,
+                        ..
+                    } => inner_diameter * 0.5,
+                    _ => 0.,
                 };
-                return cam_sim::CylindricalStock::new_controlled(axis,center,[a.min(b),a.max(b)],(max[0]-min[0])*0.5,inner,resolution,&||cancel.is_cancelled())
-                    .map(|s|Some(s.field)).map_err(Diagnostic::error);
+                return cam_sim::CylindricalStock::new_controlled(
+                    axis,
+                    center,
+                    [a.min(b), a.max(b)],
+                    (max[0] - min[0]) * 0.5,
+                    inner,
+                    resolution,
+                    &|| cancel.is_cancelled(),
+                )
+                .map(|s| Some(s.field))
+                .map_err(Diagnostic::error);
             }
         }
         let mesh = crate::stock_shape::oriented_round_mesh(&self.document, self.document.setup())
             .map_err(Diagnostic::error)?
             .or_else(|| crate::stock_shape::solid_mesh(&self.document, self.document.setup()))
-            .ok_or_else(|| Diagnostic::error("Invalid stock dimensions or unavailable solid mesh"))?;
-        Heightfield::from_stock_mesh_controlled(&mesh, self.min, self.max, resolution, &|| cancel.is_cancelled())
-            .map(Some).ok_or_else(|| Diagnostic::error("Stock calculation cancelled"))
+            .ok_or_else(|| {
+                Diagnostic::error("Invalid stock dimensions or unavailable solid mesh")
+            })?;
+        Heightfield::from_stock_mesh_controlled(&mesh, self.min, self.max, resolution, &|| {
+            cancel.is_cancelled()
+        })
+        .map(Some)
+        .ok_or_else(|| Diagnostic::error("Stock calculation cancelled"))
     }
 
     fn previous_stock_key(&self, resolution: f64) -> Option<String> {
@@ -683,19 +804,17 @@ impl JobInputs {
                     original.active_setup_id = setup.id;
                     input.document = Arc::new(original);
                     input.defined_round_stock(res, cancel)?
-                },
+                }
             };
-            let mut result = source
-                .simulate_field(
-                    &mut job.program,
-                    res,
-                    initial.as_ref().map(|f| ("predecessor", f)),
-                    cancel,
-                    progress,
-                    &mut SimulationCache::default(),
-                    &mut cam_sim::RotarySimulationCache::default(),
-                )
-                ?;
+            let mut result = source.simulate_field(
+                &mut job.program,
+                res,
+                initial.as_ref().map(|f| ("predecessor", f)),
+                cancel,
+                progress,
+                &mut SimulationCache::default(),
+                &mut cam_sim::RotarySimulationCache::default(),
+            )?;
             result.collisions.extend(source.fixture_collisions_against(
                 &job.program,
                 &source.document.geometry,
@@ -752,6 +871,7 @@ mod tests {
         app.edit_setup(|s| {
             s.heights = cam_model::Heights::new(5., 2., 0.);
             s.operations.push(Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 id: 1,
                 tool: 1,
                 points: vec![[5., 5.]],
@@ -1132,6 +1252,7 @@ mod tests {
                 thickness: 17.,
             };
             setup.operations = vec![Operation::Pocket(PocketOp {
+                parameter_expressions: Default::default(),
                 wrap: None,
                 additional_regions: Vec::new(),
                 stock_contours: Default::default(),
@@ -1154,6 +1275,9 @@ mod tests {
                 start: None,
                 end: None,
                 clear: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     stepdown: 2.,
                     overlap: 0.4,
                     feed: 300.,
@@ -1205,6 +1329,7 @@ mod tests {
             setup.height_settings.clear();
             setup.operation_heights.clear();
             setup.operations = vec![Operation::Parallel(cam_model::ParallelOp {
+                parameter_expressions: Default::default(),
                 id: 7,
                 tool: 1,
                 work_offset: 1,
@@ -1408,6 +1533,7 @@ mod tests {
         inherited_setup(&mut app);
         app.edit_setup(|s| {
             s.operations.push(Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 id: 2,
                 tool: 1,
                 points: vec![[2., 2.]],

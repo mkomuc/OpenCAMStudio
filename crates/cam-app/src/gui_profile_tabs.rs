@@ -29,11 +29,14 @@ impl App {
         if op.tabs.manual {
             header = header
                 .push(
-                    inspector_pick_button(if self.profile_tab_picking {
-                        "Done"
-                    } else {
-                        "Select"
-                    }, self.profile_tab_picking)
+                    inspector_pick_button(
+                        if self.profile_tab_picking {
+                            "Done"
+                        } else {
+                            "Select"
+                        },
+                        self.profile_tab_picking,
+                    )
                     .on_press(Message::ProfileTabPickToggle),
                 )
                 .push(inspector_button("Clear").on_press_maybe(
@@ -103,18 +106,7 @@ impl App {
         }
         let (op, z) = self.profile_selection_geometry()?;
         let mut operation = Operation::Profile(op);
-        let parsed = self
-            .fields
-            .iter()
-            .filter_map(|(field, value)| {
-                value
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .map(|v| (*field, v))
-            })
-            .collect();
+        let parsed = self.parsed_operation_fields();
         apply_op_fields(&mut operation, &parsed);
         let Operation::Profile(op) = operation else {
             return None;
@@ -238,7 +230,11 @@ impl TabOverlay {
     }
 
     fn project(&self, point: [f64; 2], bounds: iced::Rectangle) -> Option<iced::Point> {
-        let world = rotary_view::index_point_to_world(&self.frame, self.index.as_ref(), [point[0], point[1], self.z]);
+        let world = rotary_view::index_point_to_world(
+            &self.frame,
+            self.index.as_ref(),
+            [point[0], point[1], self.z],
+        );
         picking_view::project(self.camera, bounds, world)
             .map(|p| p.0)
             .filter(|p| p.x.is_finite() && p.y.is_finite())
@@ -385,9 +381,8 @@ impl canvas::Program<Message> for TabOverlay {
             .triangles
             .iter()
             .filter_map(|(index, triangle)| {
-                let projected = triangle.map(|point| {
-                    picking_view::project(self.camera, local, point)
-                });
+                let projected =
+                    triangle.map(|point| picking_view::project(self.camera, local, point));
                 let points = projected;
                 let points = [points[0]?, points[1]?, points[2]?];
                 let depth = points.iter().map(|(_, depth)| depth).sum::<f32>() / 3.0;
@@ -675,23 +670,37 @@ mod tests {
         app.rotary_action(rotary_view::Action::IndexMode(rotary_view::IndexMode::Face));
         app.rotary_action(rotary_view::Action::Pick(rotary_view::Pick::IndexFace));
         let viewport = app.machining_viewport();
-        assert!(!viewport.picking, "orientation picking must bypass planar picking");
+        assert!(
+            !viewport.picking,
+            "orientation picking must bypass planar picking"
+        );
         assert_eq!(viewport.cad_filter, EntityKind::Face);
         let face = EntityRef {
-            asset_id: 1, revision: 1, instance_id: 1, body_id: 1,
-            kind: EntityKind::Face, id: 102,
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Face,
+            id: 102,
         };
         let _ = app.update(Message::CadPicked(vec![PickCandidate {
-            entity: face.clone(), depth: 1., occluded: false,
+            entity: face.clone(),
+            depth: 1.,
+            occluded: false,
         }]));
-        assert_eq!(app.rotary_index_draft.as_ref().unwrap().face.as_ref(), Some(&face));
+        assert_eq!(
+            app.rotary_index_draft.as_ref().unwrap().face.as_ref(),
+            Some(&face)
+        );
         assert!(app.controller.cad_selection().is_empty());
         app.profile_entry_message(super::super::profile_entries_view::EntryMessage::Add(
             cam_model::ProfileGeometryKind::FaceContours,
         ));
         app.rotary_action(rotary_view::Action::Pick(rotary_view::Pick::IndexFace));
         let _ = app.update(Message::CadPicked(vec![PickCandidate {
-            entity: face.clone(), depth: 1., occluded: false,
+            entity: face.clone(),
+            depth: 1.,
+            occluded: false,
         }]));
         assert!(app.rotary_pick.is_none());
         assert!(matches!(
@@ -702,17 +711,41 @@ mod tests {
         let scene = app.machining_viewport();
         let marker = app.index_face_overlay(&scene.cad_scene);
         assert!(marker.strips.len() >= 3);
-        assert!(marker.strips.iter().all(|s| s.color == rotary_view::INDEX_FACE_COLOR));
-        assert!(scene.vertices.iter().any(|v| v.color == rotary_view::INDEX_FACE_COLOR));
+        assert!(marker
+            .strips
+            .iter()
+            .all(|s| s.color == rotary_view::INDEX_FACE_COLOR));
+        assert!(scene
+            .vertices
+            .iter()
+            .any(|v| v.color == rotary_view::INDEX_FACE_COLOR));
         let arrow = &marker.strips[marker.strips.len() - 2].points;
-        let original = [arrow[0][0] - arrow[1][0], arrow[0][1] - arrow[1][1], arrow[0][2] - arrow[1][2]];
+        let original = [
+            arrow[0][0] - arrow[1][0],
+            arrow[0][1] - arrow[1][1],
+            arrow[0][2] - arrow[1][2],
+        ];
         app.rotary_action(rotary_view::Action::IndexFlip(true));
         let flipped = app.index_face_overlay(&scene.cad_scene);
         let arrow = &flipped.strips[flipped.strips.len() - 2].points;
-        let reversed = [arrow[0][0] - arrow[1][0], arrow[0][1] - arrow[1][1], arrow[0][2] - arrow[1][2]];
-        assert!(original.iter().zip(reversed).map(|(a, b)| a * b).sum::<f32>() < 0.);
+        let reversed = [
+            arrow[0][0] - arrow[1][0],
+            arrow[0][1] - arrow[1][1],
+            arrow[0][2] - arrow[1][2],
+        ];
+        assert!(
+            original
+                .iter()
+                .zip(reversed)
+                .map(|(a, b)| a * b)
+                .sum::<f32>()
+                < 0.
+        );
         // Hidden model instances do not draw an orientation marker.
-        let hidden = cam_render::CadScene::from_geometry(app.controller.geometry_state(), &BTreeSet::from([1]));
+        let hidden = cam_render::CadScene::from_geometry(
+            app.controller.geometry_state(),
+            &BTreeSet::from([1]),
+        );
         assert!(app.index_face_overlay(&hidden).strips.is_empty());
     }
 
@@ -723,7 +756,12 @@ mod tests {
         app.rotary_action(rotary_view::Action::IndexMode(rotary_view::IndexMode::Face));
         let geometry = app.controller.setup_geometry_state().unwrap();
         let reference = |kind, id| EntityRef {
-            asset_id: 1, revision: 1, instance_id: 1, body_id: 1, kind, id,
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind,
+            id,
         };
         let chain = reference(EntityKind::Loop, 202);
         let direction = cam_geometry3d::index_selection_direction(&geometry, &chain).unwrap();
@@ -731,9 +769,15 @@ mod tests {
         app.rotary_action(rotary_view::Action::Pick(rotary_view::Pick::IndexLoop));
         assert_eq!(app.machining_viewport().cad_filter, EntityKind::Loop);
         assert!(app.rotary_cad_pick(&chain));
-        assert_eq!(app.rotary_index_draft.as_ref().unwrap().face.as_ref(), Some(&chain));
+        assert_eq!(
+            app.rotary_index_draft.as_ref().unwrap().face.as_ref(),
+            Some(&chain)
+        );
         assert!((app.rotary_index_draft.as_ref().unwrap().angle.abs() - 90.).abs() < 1e-6);
-        assert!(!app.index_face_overlay(&app.machining_viewport().cad_scene).strips.is_empty());
+        assert!(!app
+            .index_face_overlay(&app.machining_viewport().cad_scene)
+            .strips
+            .is_empty());
 
         let edge_id = geometry.asset(1).unwrap().topology.edges.iter().find(|edge| {
             matches!(edge.curve, cam_model::CadCurve::Line { start, end }
@@ -743,7 +787,10 @@ mod tests {
         app.rotary_action(rotary_view::Action::Pick(rotary_view::Pick::IndexEdge));
         assert_eq!(app.machining_viewport().cad_filter, EntityKind::Edge);
         assert!(app.rotary_cad_pick(&edge));
-        assert_eq!(app.rotary_index_draft.as_ref().unwrap().face.as_ref(), Some(&edge));
+        assert_eq!(
+            app.rotary_index_draft.as_ref().unwrap().face.as_ref(),
+            Some(&edge)
+        );
         let angle = app.rotary_index_draft.as_ref().unwrap().angle;
         app.rotary_action(rotary_view::Action::IndexFlip(true));
         assert!((app.rotary_index_draft.as_ref().unwrap().angle - angle - 180.).abs() < 1e-6);
@@ -800,7 +847,8 @@ mod tests {
         app.log_geometry_validation();
         assert!(
             app.output_last_geometry_error.is_none(),
-            "{:?}", app.output_last_geometry_error
+            "{:?}",
+            app.output_last_geometry_error
         );
         app.profile_entry_message(EntryMessage::Confirm);
         assert!(app.profile_entry_editor.is_none(), "{}", app.status);
@@ -840,8 +888,12 @@ mod tests {
         use cam_model::{ProfileGeometryEntry, ProfileGeometryKind, ProfileGeometrySource};
         let (mut app, _) = selected_cad_profile();
         let face = EntityRef {
-            asset_id: 1, revision: 1, instance_id: 1, body_id: 1,
-            kind: EntityKind::Face, id: 104,
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Face,
+            id: 104,
         };
         app.rotary_action(rotary_view::Action::Indexed(true));
         app.rotary_action(rotary_view::Action::IndexMode(rotary_view::IndexMode::Face));
@@ -860,18 +912,40 @@ mod tests {
         let reference = cam_cldata::Point3::new(0., 20., 0.);
         let center = cam_cldata::Point3::new(index.center[0], index.center[1], index.center[2]);
         let expected = index.axis.material_point(reference, center, -index.angle);
-        assert!((z - expected.z).abs() < 1e-7, "preview height {z}, expected {}", expected.z);
+        assert!(
+            (z - expected.z).abs() < 1e-7,
+            "preview height {z}, expected {}",
+            expected.z
+        );
         let preview = app.operation_geometry_preview();
         assert!(!preview.strips.is_empty());
-        assert!(preview.strips.iter().flat_map(|s| &s.points).all(|p| (p[1] - 20.).abs() < 1e-4));
+        assert!(preview
+            .strips
+            .iter()
+            .flat_map(|s| &s.points)
+            .all(|p| (p[1] - 20.).abs() < 1e-4));
         let camera = OrbitCamera::framed([-20.; 3], [80.; 3]);
         let bounds = iced::Rectangle::with_size(iced::Size::new(900., 700.));
         let point = profile.chain.points()[0];
-        let world = index.axis.material_point(cam_cldata::Point3::new(point.x, point.y, z), center, index.angle);
-        let expected_screen = picking_view::project(camera, bounds, [world.x, world.y, world.z]).unwrap().0;
-        let tab_screen = app.profile_tab_overlay(camera, 0.).unwrap().project([point.x, point.y], bounds).unwrap();
+        let world = index.axis.material_point(
+            cam_cldata::Point3::new(point.x, point.y, z),
+            center,
+            index.angle,
+        );
+        let expected_screen = picking_view::project(camera, bounds, [world.x, world.y, world.z])
+            .unwrap()
+            .0;
+        let tab_screen = app
+            .profile_tab_overlay(camera, 0.)
+            .unwrap()
+            .project([point.x, point.y], bounds)
+            .unwrap();
         assert!(tab_screen.distance(expected_screen) < 0.01);
-        let side_screen = app.profile_side_overlay(camera, 0.).unwrap().project([point.x, point.y], bounds).unwrap();
+        let side_screen = app
+            .profile_side_overlay(camera, 0.)
+            .unwrap()
+            .project([point.x, point.y], bounds)
+            .unwrap();
         assert!(side_screen.distance(expected_screen) < 0.01);
         app.rotary_action(rotary_view::Action::IndexFlip(true));
         let index = app.rotary_index_draft.as_ref().unwrap();
@@ -880,36 +954,83 @@ mod tests {
         assert!((flipped_z - expected.z).abs() < 1e-7);
         let preview = app.operation_geometry_preview();
         assert!(!preview.strips.is_empty());
-        assert!(preview.strips.iter().flat_map(|s| &s.points).all(|p| (p[1] - 20.).abs() < 1e-4));
+        assert!(preview
+            .strips
+            .iter()
+            .flat_map(|s| &s.points)
+            .all(|p| (p[1] - 20.).abs() < 1e-4));
         let (profile, z) = app.profile_selection_geometry().unwrap();
         let point = profile.chain.points()[0];
-        let world = index.axis.material_point(cam_cldata::Point3::new(point.x, point.y, z), center, index.angle);
-        let expected_screen = picking_view::project(camera, bounds, [world.x, world.y, world.z]).unwrap().0;
-        assert!(app.profile_tab_overlay(camera, 0.).unwrap().project([point.x, point.y], bounds).unwrap().distance(expected_screen) < 0.01);
-        assert!(app.profile_side_overlay(camera, 0.).unwrap().project([point.x, point.y], bounds).unwrap().distance(expected_screen) < 0.01);
+        let world = index.axis.material_point(
+            cam_cldata::Point3::new(point.x, point.y, z),
+            center,
+            index.angle,
+        );
+        let expected_screen = picking_view::project(camera, bounds, [world.x, world.y, world.z])
+            .unwrap()
+            .0;
+        assert!(
+            app.profile_tab_overlay(camera, 0.)
+                .unwrap()
+                .project([point.x, point.y], bounds)
+                .unwrap()
+                .distance(expected_screen)
+                < 0.01
+        );
+        assert!(
+            app.profile_side_overlay(camera, 0.)
+                .unwrap()
+                .project([point.x, point.y], bounds)
+                .unwrap()
+                .distance(expected_screen)
+                < 0.01
+        );
     }
 
     #[test]
     fn indexed_height_snapshot_uses_the_newly_resolved_face_binding() {
-        use cam_model::{HeightDefinition, HeightPlaneKind as P, HeightReference as R, RotaryIndex};
+        use cam_model::{
+            HeightDefinition, HeightPlaneKind as P, HeightReference as R, RotaryIndex,
+        };
         let (mut app, _) = selected_cad_profile();
         let face = EntityRef {
-            asset_id: 1, revision: 1, instance_id: 1, body_id: 1,
-            kind: EntityKind::Face, id: 100,
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Face,
+            id: 100,
         };
-        let id = app.controller.create_cad_operation(OpKind::Profile, vec![face]).unwrap();
+        let id = app
+            .controller
+            .create_cad_operation(OpKind::Profile, vec![face])
+            .unwrap();
         let mut document = app.controller.document().clone();
         document.setup_mut().operations.retain(|op| op.id() == id);
-        document.rotary_indexes.insert(id, RotaryIndex { angle: 180., ..Default::default() });
+        document.rotary_indexes.insert(
+            id,
+            RotaryIndex {
+                angle: 180.,
+                ..Default::default()
+            },
+        );
         let settings = document.setup_mut().height_settings.entry(id).or_default();
         *settings.definition_mut(P::Top) = HeightDefinition::new(R::StockTop, 0.);
         *settings.definition_mut(P::Bottom) = HeightDefinition::new(R::SelectedContours, 0.);
         let old_bottom = document.geometry.bindings[&id].heights.bottom;
         let resolved = crate::cad_operations::resolve_document(&document).unwrap();
         let fresh_bottom = resolved.geometry.bindings[&id].heights.bottom;
-        assert!((old_bottom - fresh_bottom).abs() > 1., "the fixture must have stale source heights");
+        assert!(
+            (old_bottom - fresh_bottom).abs() > 1.,
+            "the fixture must have stale source heights"
+        );
         let heights = resolved.setup().height_settings[&id].resolved.unwrap();
-        assert!((heights.bottom - fresh_bottom).abs() < 1e-7, "height {}, binding {}", heights.bottom, fresh_bottom);
+        assert!(
+            (heights.bottom - fresh_bottom).abs() < 1e-7,
+            "height {}, binding {}",
+            heights.bottom,
+            fresh_bottom
+        );
         app.controller.select(Selection::Operation(id));
         app.begin_operation_draft(id);
         app.rotary_index_draft = document.rotary_indexes.get(&id).cloned();
@@ -922,22 +1043,50 @@ mod tests {
         assert!((preview.bottom - heights.bottom).abs() < 1e-7);
         assert!((preview.top - heights.top).abs() < 1e-7);
         let result = cam_toolpath::build_job(
-            &resolved, 1000., cam_cldata::SpindleDir::Cw, None, 100.,
+            &resolved,
+            1000.,
+            cam_cldata::SpindleDir::Cw,
+            None,
+            100.,
             &cam_toolpath::CancelToken::new(),
         );
-        assert_eq!(result.completion, cam_toolpath::JobCompletion::Complete, "{:?}", result.diagnostics);
-        let cut_z = result.program.steps().iter().filter_map(|step| match step {
-            cam_cldata::Step::Rotary { to, feed: Some(_), tag, .. }
-                if tag.kind == cam_cldata::MoveKind::Cutting => Some(to.z),
-            _ => None,
-        }).fold(f64::INFINITY, f64::min);
-        assert!((cut_z - heights.bottom).abs() < 1e-6, "cut {cut_z}, bottom {}", heights.bottom);
+        assert_eq!(
+            result.completion,
+            cam_toolpath::JobCompletion::Complete,
+            "{:?}",
+            result.diagnostics
+        );
+        let cut_z = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                cam_cldata::Step::Rotary {
+                    to,
+                    feed: Some(_),
+                    tag,
+                    ..
+                } if tag.kind == cam_cldata::MoveKind::Cutting => Some(to.z),
+                _ => None,
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (cut_z - heights.bottom).abs() < 1e-6,
+            "cut {cut_z}, bottom {}",
+            heights.bottom
+        );
         let mut selection_settings = document.setup().height_settings[&id].clone();
         let mut selected = HeightDefinition::new(R::Selection, 0.);
         selected.entities = document.geometry.bindings[&id].selected.clone();
         *selection_settings.definition_mut(P::Top) = selected;
-        *selection_settings.definition_mut(P::Bottom) = HeightDefinition::new(R::Plane(P::Top), -1.);
-        let operation = document.setup().operations.iter().find(|op| op.id() == id).unwrap();
+        *selection_settings.definition_mut(P::Bottom) =
+            HeightDefinition::new(R::Plane(P::Top), -1.);
+        let operation = document
+            .setup()
+            .operations
+            .iter()
+            .find(|op| op.id() == id)
+            .unwrap();
         let selection_heights = selection_settings.resolve(&document, operation).unwrap();
         assert!((selection_heights.top + 5.).abs() < 1e-7);
         assert!((selection_heights.bottom + 6.).abs() < 1e-7);
@@ -945,23 +1094,32 @@ mod tests {
 
     #[test]
     fn selected_face_contour_is_bottom_on_both_accessible_indexed_sides() {
-        use cam_model::{HeightDefinition, HeightPlaneKind as P, HeightReference as R,
-            ProfileGeometryEntry, ProfileGeometryKind, ProfileGeometrySource, Stock};
+        use cam_model::{
+            HeightDefinition, HeightPlaneKind as P, HeightReference as R, ProfileGeometryEntry,
+            ProfileGeometryKind, ProfileGeometrySource, Stock,
+        };
         let (mut app, id) = selected_cad_profile();
-        app.controller.edit_stock(|stock| *stock = Stock::RelativeBox {
-            offsets: [[2., 2., 2.], [2., 2., 2.]],
+        app.controller.edit_stock(|stock| {
+            *stock = Stock::RelativeBox {
+                offsets: [[2., 2., 2.], [2., 2., 2.]],
+            }
         });
         app.rotary_action(rotary_view::Action::Indexed(true));
         app.rotary_action(rotary_view::Action::IndexMode(rotary_view::IndexMode::Face));
         app.rotary_action(rotary_view::Action::IndexValue(2, "10".into()));
         for face_id in [102, 104] {
             let face = EntityRef {
-                asset_id: 1, revision: 1, instance_id: 1, body_id: 1,
-                kind: EntityKind::Face, id: face_id,
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                kind: EntityKind::Face,
+                id: face_id,
             };
             app.rotary_action(rotary_view::Action::Pick(rotary_view::Pick::IndexFace));
             assert!(app.rotary_cad_pick(&face));
-            let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::FaceContours, "Face".into());
+            let mut entry =
+                ProfileGeometryEntry::new(ProfileGeometryKind::FaceContours, "Face".into());
             entry.source = ProfileGeometrySource::Cad(vec![face.clone()]);
             app.edit_operation_draft(|op| {
                 if let Operation::Profile(profile) = op {
@@ -969,59 +1127,132 @@ mod tests {
                     profile.tabs.enabled = false;
                 }
             });
-            *app.height_draft.as_mut().unwrap().definition_mut(P::Top) = HeightDefinition::new(R::StockTop, 0.);
-            *app.height_draft.as_mut().unwrap().definition_mut(P::Bottom) = HeightDefinition::new(R::SelectedContours, 0.);
+            *app.height_draft.as_mut().unwrap().definition_mut(P::Top) =
+                HeightDefinition::new(R::StockTop, 0.);
+            *app.height_draft.as_mut().unwrap().definition_mut(P::Bottom) =
+                HeightDefinition::new(R::SelectedContours, 0.);
             app.height_offsets.insert(P::Top, "0".into());
             app.height_offsets.insert(P::Bottom, "0".into());
             let mut document = app.rotary_draft_document();
             let view = document.indexed_view(id).unwrap().unwrap();
             let face_z = view.height_selection_bounds(&[face.clone()]).unwrap().1[2];
             let instance = view.geometry.instance(1).unwrap();
-            let normal = if face_id == 102 { [0., -1., 0.] } else { [0., 1., 0.] };
+            let normal = if face_id == 102 {
+                [0., -1., 0.]
+            } else {
+                [0., 1., 0.]
+            };
             assert!(instance.placement.transform_vector(normal)[2] > 0.999999);
             let preview = app.resolve_height_editor(id).unwrap();
-            assert!((preview.bottom - face_z).abs() < 1e-7, "face {face_id}: bottom {}, face {face_z}", preview.bottom);
+            assert!(
+                (preview.bottom - face_z).abs() < 1e-7,
+                "face {face_id}: bottom {}, face {face_z}",
+                preview.bottom
+            );
             assert!(preview.top > preview.bottom);
             app.operation_tab = OperationTab::Heights;
-            let overlay = app.height_preview(OrbitCamera::framed([-20.; 3], [80.; 3]), 0.).unwrap();
-            let bottom = overlay.planes.iter().find(|plane| plane.name == "Bottom").unwrap();
+            let overlay = app
+                .height_preview(OrbitCamera::framed([-20.; 3], [80.; 3]), 0.)
+                .unwrap();
+            let bottom = overlay
+                .planes
+                .iter()
+                .find(|plane| plane.name == "Bottom")
+                .unwrap();
             let index = app.rotary_index_draft.as_ref().unwrap();
             let center = cam_cldata::Point3::new(index.center[0], index.center[1], index.center[2]);
             for point in bottom.corners {
-                let p = app.controller.inspection_setup().frame.to_setup_vector(point.map(f64::from));
-                let machine = index.axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -index.angle);
+                let p = app
+                    .controller
+                    .inspection_setup()
+                    .frame
+                    .to_setup_vector(point.map(f64::from));
+                let machine = index.axis.material_point(
+                    cam_cldata::Point3::new(p[0], p[1], p[2]),
+                    center,
+                    -index.angle,
+                );
                 assert!((machine.z - face_z).abs() < 1e-4);
             }
             let mut op = app.operation_draft.clone().unwrap();
-            let Operation::Profile(profile) = &mut op else { panic!("profile") };
-            let binding = crate::cad_operations::resolve_profile_entries(&document, profile).unwrap().unwrap();
+            let Operation::Profile(profile) = &mut op else {
+                panic!("profile")
+            };
+            let binding = crate::cad_operations::resolve_profile_entries(&document, profile)
+                .unwrap()
+                .unwrap();
             document.geometry.bindings.insert(id, binding);
-            *document.setup_mut().operations.iter_mut().find(|op| op.id() == id).unwrap() = op;
+            *document
+                .setup_mut()
+                .operations
+                .iter_mut()
+                .find(|op| op.id() == id)
+                .unwrap() = op;
             document.setup_mut().operations.retain(|op| op.id() == id);
-            document.setup_mut().height_settings.insert(id, app.edited_height_settings().unwrap());
+            document
+                .setup_mut()
+                .height_settings
+                .insert(id, app.edited_height_settings().unwrap());
             let resolved = crate::cad_operations::resolve_document(&document).unwrap();
             let heights = resolved.setup().height_settings[&id].resolved.unwrap();
             assert!((heights.bottom - face_z).abs() < 1e-7);
-            let result = cam_toolpath::build_job(&resolved, 1000., cam_cldata::SpindleDir::Cw, None, 100., &cam_toolpath::CancelToken::new());
-            assert_eq!(result.completion, cam_toolpath::JobCompletion::Complete, "{:?}", result.diagnostics);
-            let cut_z = result.program.steps().iter().filter_map(|step| match step {
-                cam_cldata::Step::Rotary { to, feed: Some(_), tag, .. } if tag.kind == cam_cldata::MoveKind::Cutting => Some(to.z),
-                _ => None,
-            }).fold(f64::INFINITY, f64::min);
+            let result = cam_toolpath::build_job(
+                &resolved,
+                1000.,
+                cam_cldata::SpindleDir::Cw,
+                None,
+                100.,
+                &cam_toolpath::CancelToken::new(),
+            );
+            assert_eq!(
+                result.completion,
+                cam_toolpath::JobCompletion::Complete,
+                "{:?}",
+                result.diagnostics
+            );
+            let cut_z = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    cam_cldata::Step::Rotary {
+                        to,
+                        feed: Some(_),
+                        tag,
+                        ..
+                    } if tag.kind == cam_cldata::MoveKind::Cutting => Some(to.z),
+                    _ => None,
+                })
+                .fold(f64::INFINITY, f64::min);
             assert!((cut_z - face_z).abs() < 1e-6, "cut {cut_z}, face {face_z}");
         }
         let mut document = app.rotary_draft_document();
-        let faces: Vec<_> = [102, 104].into_iter().map(|id| EntityRef {
-            asset_id: 1, revision: 1, instance_id: 1, body_id: 1,
-            kind: EntityKind::Face, id,
-        }).collect();
-        let mut entry = ProfileGeometryEntry::new(ProfileGeometryKind::FaceContours, "Both sides".into());
+        let faces: Vec<_> = [102, 104]
+            .into_iter()
+            .map(|id| EntityRef {
+                asset_id: 1,
+                revision: 1,
+                instance_id: 1,
+                body_id: 1,
+                kind: EntityKind::Face,
+                id,
+            })
+            .collect();
+        let mut entry =
+            ProfileGeometryEntry::new(ProfileGeometryKind::FaceContours, "Both sides".into());
         entry.source = ProfileGeometrySource::Cad(faces.clone());
         let binding = document.geometry.bindings.get_mut(&id).unwrap();
         binding.selected = faces;
-        binding.recipe = cam_model::ExtractionRecipe::ProfileEntries { entries: vec![entry] };
+        binding.recipe = cam_model::ExtractionRecipe::ProfileEntries {
+            entries: vec![entry],
+        };
         let op = app.operation_draft.as_ref().unwrap();
-        assert!(app.edited_height_settings().unwrap().resolve(&document, op).unwrap_err().contains("one plane"));
+        assert!(app
+            .edited_height_settings()
+            .unwrap()
+            .resolve(&document, op)
+            .unwrap_err()
+            .contains("one plane"));
     }
 
     #[test]

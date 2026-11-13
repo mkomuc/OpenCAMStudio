@@ -60,6 +60,7 @@
 #include <cstring>
 #include <iomanip>
 #include <sstream>
+#include <fstream>
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
@@ -488,10 +489,43 @@ TopoDS_Shape solidify_closed_surfaces(const TopoDS_Shape& shape,double precision
         throw std::runtime_error(format+" contains wire geometry; only solids and closed surface shells are supported");
     return result;
 }
-TopoDS_Shape read_step(const char* path,double precision,std::string& units) {
+TopoDS_Shape read_step(const char* path,double precision,std::string& units,bool& repaired) {
     STEPControl_Reader reader;
     configure_precision(precision);
-    if(reader.ReadFile(path)!=IFSelect_RetDone) throw std::runtime_error("OCCT could not read STEP data");
+    // Recognize the broken escaped header before touching any STEP string data.
+    std::ifstream file(path,std::ios::binary);
+    char header[15]{};
+    file.read(header,sizeof(header));
+    IFSelect_ReturnStatus status;
+    if(std::string(header,static_cast<size_t>(file.gcount()))=="ISO-10303-21;\\n") {
+        file.clear(); file.seekg(0);
+        std::ostringstream contents; contents<<file.rdbuf();
+        if(file.bad()) throw std::runtime_error("Could not read escaped STEP data");
+        const std::string source=contents.str();
+        std::string normalized; normalized.reserve(source.size());
+        bool quoted=false,comment=false;
+        for(size_t i=0;i<source.size();++i) {
+            const char c=source[i];
+            const char next=i+1<source.size()?source[i+1]:'\0';
+            if(!quoted && !comment && c=='/' && next=='*') {
+                comment=true; normalized+="/*"; ++i;
+            } else if(comment && c=='*' && next=='/') {
+                comment=false; normalized+="*/"; ++i;
+            } else if(!comment && c=='\'') {
+                normalized+=c;
+                if(quoted && next=='\'') { normalized+=next; ++i; }
+                else quoted=!quoted;
+            } else if(!quoted && c=='\\' && next=='n') {
+                normalized+='\n'; ++i;
+            } else if(!quoted && c=='\\' && next=='r') {
+                normalized+='\r'; ++i;
+            } else normalized+=c;
+        }
+        std::istringstream stream(normalized);
+        status=reader.ReadStream(path,stream);
+        repaired=true;
+    } else status=reader.ReadFile(path);
+    if(status!=IFSelect_RetDone) throw std::runtime_error("OCCT could not read STEP data");
     TColStd_SequenceOfAsciiString length,angle,solidangle; reader.FileUnits(length,angle,solidangle);
     units="Unknown";
     if(length.Length()==1) {
@@ -570,8 +604,10 @@ TopoDS_Shape repaired_solid(const TopoDS_Shape& original,double precision) {
 }
 std::string translate(const char* path,bool iges,double deflection,double precision) {
     std::string units;
-    const TopoDS_Shape shape=iges?read_iges(path,precision,units):read_step(path,precision,units);
+    bool repaired=false;
+    const TopoDS_Shape shape=iges?read_iges(path,precision,units):read_step(path,precision,units,repaired);
     Array bodies,faces,edges,loops,vertices,meshvertices,triangles,trianglefaces,placements,warnings;
+    if(repaired) warnings.add(quote("Repaired escaped STEP line breaks during import; the source file was not changed."));
     size_t unsupported_surfaces=0,unsupported_curves=0;
     Array projectionvertices,projectiontriangles,projectionfaces;
     int projectionbase=0;

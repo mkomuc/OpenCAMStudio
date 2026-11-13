@@ -68,3 +68,23 @@ impl PocketFinishing {
         Ok(())
     }
 }
+
+/// Axial scheduling for pocket roughing.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MultipleDepths {
+    pub enabled: bool,
+    pub even_stepdowns: bool,
+    pub order_by_depth: bool,
+    pub order_by_area: bool,
+}
+impl Default for MultipleDepths {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            even_stepdowns: false,
+            order_by_depth: false,
+            order_by_area: false,
+        }
+    }
+}

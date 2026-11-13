@@ -3,7 +3,7 @@ use crate::{CuttingHeights, Document, EntityKind, EntityRef, Heights, Operation}
 use serde::{Deserialize, Serialize};
 
 /// Round blank frame and bounds expressed in that frame.
-pub type RoundStockGeometry = (crate::SetupFrame, [f64;3], [f64;3]);
+pub type RoundStockGeometry = (crate::SetupFrame, [f64; 3], [f64; 3]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HeightPlaneKind {
@@ -260,7 +260,9 @@ impl OperationHeightSettings {
         if let Some(resolved) = self.resolved {
             return Ok(resolved);
         }
-        if let Some(view)=document.indexed_view(operation.id())? {return self.resolve(&view,operation);}
+        if let Some(view) = document.indexed_view(operation.id())? {
+            return self.resolve(&view, operation);
+        }
         self.validate_structure()?;
         let mut values = [None; 5];
         let mut visiting = [false; 5];
@@ -271,7 +273,11 @@ impl OperationHeightSettings {
             wrap.stock_top(document)?
         } else {
             let (model_min, model_max) = document.height_model_bounds();
-            document.setup().stock.resolve_bounds(model_min, model_max).1[2]
+            document
+                .setup()
+                .stock
+                .resolve_bounds(model_min, model_max)
+                .1[2]
         };
         let resolved = ResolvedOperationHeights {
             stock_top,
@@ -286,7 +292,7 @@ impl OperationHeightSettings {
             if op.faces.is_empty() {
                 let minimum = document.chamfer_minimum_depth(op);
                 if resolved.top - resolved.bottom < minimum - 1e-9 {
-                    return Err(format!("Bottom height must allow at least {minimum:.3} mm below top for this chamfer width and cutter angle"));
+                    return Err(format!("Bottom height must allow at least {minimum:.3} mm below top for the selected chamfer and cutter geometry"));
                 }
             }
         }
@@ -482,9 +488,9 @@ impl Document {
                 if entries.iter().all(|entry| {
                     matches!(
                         entry.kind,
-                        crate::ProfileGeometryKind::Chain | crate::ProfileGeometryKind::FaceContours
-                    )
-                        && matches!(&entry.source, crate::ProfileGeometrySource::Cad(_))
+                        crate::ProfileGeometryKind::Chain
+                            | crate::ProfileGeometryKind::FaceContours
+                    ) && matches!(&entry.source, crate::ProfileGeometrySource::Cad(_))
                 }) =>
             {
                 entries
@@ -523,6 +529,18 @@ impl Document {
         Ok(max[2])
     }
     fn chamfer_minimum_depth(&self, op: &crate::ChamferOp) -> f64 {
+        if let Some(crate::ToolKind::RadiusMill {
+            corner_radius,
+            tip_length,
+        }) = self
+            .setup()
+            .tools
+            .iter()
+            .find(|tool| tool.number == op.tool)
+            .map(|tool| tool.kind)
+        {
+            return corner_radius + tip_length;
+        }
         let angle = self
             .setup()
             .tools
@@ -543,9 +561,16 @@ impl Document {
     /// A chamfer's zero depth means its natural cutter depth, rather than a zero
     /// cutting interval. All other strategies store their target interval directly.
     pub fn operation_base_cutting_heights(&self, op: &Operation) -> CuttingHeights {
-        if let Some(wrap)=op.rotary_wrap() {
-            let depth=match op {Operation::Profile(p)=>p.depth,Operation::Pocket(p)=>p.depth,_=>unreachable!()};
-            return CuttingHeights {top:wrap.surface_z,bottom:wrap.surface_z-depth};
+        if let Some(wrap) = op.rotary_wrap() {
+            let depth = match op {
+                Operation::Profile(p) => p.depth,
+                Operation::Pocket(p) => p.depth,
+                _ => unreachable!(),
+            };
+            return CuttingHeights {
+                top: wrap.surface_z,
+                bottom: wrap.surface_z - depth,
+            };
         }
         if matches!(op, Operation::Adaptive(_) | Operation::Parallel(_)) {
             if let Some(binding) = self.geometry.bindings.get(&op.id()) {
@@ -799,10 +824,20 @@ impl Document {
     /// oversized bounding boxes through a chain of rotated setups.
     pub fn stock_bounds_for(&self, setup: &crate::Setup) -> ([f64; 3], [f64; 3]) {
         if let crate::Stock::FromSolid { instance } = setup.stock {
-            if let Some((instance, body)) = instance.and_then(|id| self.geometry.instance(id)).and_then(|instance| {
-                self.geometry.asset(instance.asset_id).and_then(|a| a.topology.bodies.iter().find(|b| b.id == instance.body_id)).map(|body| (instance, body))
-            }) {
-                let points = box_corners(body.bounds).map(|p| setup.frame.to_setup_vector(instance.placement.transform_point(p)));
+            if let Some((instance, body)) = instance
+                .and_then(|id| self.geometry.instance(id))
+                .and_then(|instance| {
+                    self.geometry
+                        .asset(instance.asset_id)
+                        .and_then(|a| a.topology.bodies.iter().find(|b| b.id == instance.body_id))
+                        .map(|body| (instance, body))
+                })
+            {
+                let points = box_corners(body.bounds).map(|p| {
+                    setup
+                        .frame
+                        .to_setup_vector(instance.placement.transform_point(p))
+                });
                 return bounds(&points).unwrap_or(([0.; 3], [0.; 3]));
             }
             return ([0.; 3], [0.; 3]);
@@ -1005,6 +1040,7 @@ mod tests {
     fn doc() -> Document {
         let mut doc:Document=serde_json::from_value(serde_json::json!({"schema_version":18,"setups":[{"id":1,"name":"reference test","heights":{"clearance":5.,"retract":2.,"top_of_stock":0.},"stock":{"BoundingBox":{"x_offset":0.,"y_offset":0.,"top":10.,"thickness":15.}},"tools":[],"operations":[]}]})).unwrap();
         doc.setup_mut().operations.push(Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             id: 1,
             tool: 1,
             points: vec![[0., 0.]],
@@ -1151,6 +1187,7 @@ mod tests {
     fn adaptive_height_helpers_are_safe_before_and_after_binding() {
         let mut doc = doc();
         let mut op = AdaptiveOp {
+            parameter_expressions: Default::default(),
             id: 2,
             tool: 1,
             spindle_rpm: 1000.,

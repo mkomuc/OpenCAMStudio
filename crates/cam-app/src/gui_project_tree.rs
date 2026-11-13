@@ -18,6 +18,9 @@ pub(super) struct TreeDrag {
 #[derive(Clone, Debug)]
 pub(super) enum TreeMessage {
     Press(TreeNode),
+    RenameStart(u32, String),
+    RenameChanged(String),
+    RenameCommit,
     View(TreeNode),
     ToggleModels,
     ToggleSetups,
@@ -296,6 +299,20 @@ impl App {
 
     pub(super) fn update_tree(&mut self, message: TreeMessage) -> iced::Task<Message> {
         match message {
+            TreeMessage::RenameStart(id, name) => {
+                self.operation_rename = Some((id, name));
+                return iced::widget::operation::focus("operation-rename");
+            }
+            TreeMessage::RenameChanged(name) => {
+                if let Some((_, value)) = &mut self.operation_rename {
+                    *value = name;
+                }
+            }
+            TreeMessage::RenameCommit => {
+                if let Some((id, name)) = self.operation_rename.take() {
+                    self.controller.rename_operation(id, name);
+                }
+            }
             TreeMessage::ToggleModels => self.models_collapsed = !self.models_collapsed,
             TreeMessage::ToggleSetups => self.setups_collapsed = !self.setups_collapsed,
             TreeMessage::View(node) => {
@@ -325,6 +342,9 @@ impl App {
                 }
             }
             TreeMessage::Press(node) => {
+                if let Some((id, name)) = self.operation_rename.take() {
+                    self.controller.rename_operation(id, name);
+                }
                 self.tree_menu = None;
                 self.pattern_menu_y = None;
                 self.open_op_menu = None;
@@ -839,7 +859,13 @@ impl App {
                 let kind = op_kind(op);
                 let count = operation_counts.entry(kind).or_insert(0usize);
                 *count += 1;
-                let operation_label = format!("[T{}] {kind} {count}", op.tool());
+                let operation_name = self
+                    .controller
+                    .document()
+                    .operation_names
+                    .get(&op.id())
+                    .cloned()
+                    .unwrap_or_else(|| format!("{kind} {count}"));
                 if origins.len() > 1 && group != Some(op.work_offset()) {
                     list = list.push(tree_note(&format!("    Work origin {}", op.work_offset())));
                     group = Some(op.work_offset());
@@ -883,6 +909,33 @@ impl App {
                     }
                 }
                 let expanded = self.expanded_operations.contains(&id);
+                let name_control: Element<'_, Message> = if let Some((_, value)) = self
+                    .operation_rename
+                    .as_ref()
+                    .filter(|(editing, _)| *editing == id)
+                {
+                    iced::widget::text_input::<Message, iced::Theme, iced::Renderer>(
+                        "Operation name",
+                        value,
+                    )
+                    .id("operation-rename")
+                    .on_input(|value| Message::Tree(TreeMessage::RenameChanged(value)))
+                    .on_submit(Message::Tree(TreeMessage::RenameCommit))
+                    .size(TREE_TEXT_SIZE)
+                    .width(Length::Fixed(140.0))
+                    .into()
+                } else {
+                    let label = text(operation_name.clone())
+                        .size(TREE_TEXT_SIZE)
+                        .width(Length::Shrink);
+                    if self.focus_ops.len() == 1 && self.focus_ops.contains(&id) {
+                        mouse_area(label)
+                            .on_press(Message::Tree(TreeMessage::RenameStart(id, operation_name)))
+                            .into()
+                    } else {
+                        label.into()
+                    }
+                };
                 let controls = row![
                     self.browser_disclosure(expanded, Message::ToggleOperationExpanded(id)),
                     self.browser_visibility(
@@ -895,9 +948,8 @@ impl App {
                         &status_fingerprints,
                     ),
                     icon_svg(operation_icon(op), 18.0),
-                    text(operation_label)
-                        .size(TREE_TEXT_SIZE)
-                        .width(Length::Shrink)
+                    text(format!("[T{}]", op.tool())).size(TREE_TEXT_SIZE),
+                    name_control
                 ]
                 .spacing(3)
                 .align_y(Alignment::Center);
@@ -1303,6 +1355,7 @@ mod tests {
         for _ in 0..3 {
             app.controller
                 .add_operation(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool: 1,
                     points: vec![[10., 10.]],

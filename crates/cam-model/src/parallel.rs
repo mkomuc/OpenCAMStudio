@@ -128,6 +128,7 @@ mod tests {
             assert_eq!(restored, configured);
         }
         let mut operation = crate::Operation::Parallel(crate::ParallelOp {
+            parameter_expressions: Default::default(),
             id: 3,
             tool: 1,
             spindle_rpm: 4000.,

@@ -331,8 +331,11 @@ pub(crate) fn model_bounds(geometry: &GeometryState, setup: &Setup) -> ([f64; 3]
 fn stock_top(document: &Document) -> f64 {
     document.stock_bounds_for(document.setup()).1[2]
 }
-fn operation_stock_top(document:&Document,id:u32)->Result<f64,String> {
-    Ok(document.indexed_view(id)?.as_ref().map_or_else(||stock_top(document),stock_top))
+fn operation_stock_top(document: &Document, id: u32) -> Result<f64, String> {
+    Ok(document
+        .indexed_view(id)?
+        .as_ref()
+        .map_or_else(|| stock_top(document), stock_top))
 }
 /// Validate the complete selection before strategy extraction. A mixed geometry
 /// field cannot become a valid operation by dropping its incompatible members.
@@ -395,7 +398,7 @@ pub(crate) fn resolve_profile_entries(
     document: &Document,
     profile: &mut ProfileOp,
 ) -> Result<Option<GeometryBinding>, String> {
-    let geometry = geometry_for_operation(document,profile.id)?;
+    let geometry = geometry_for_operation(document, profile.id)?;
     let entries = profile
         .selections
         .as_mut()
@@ -428,7 +431,7 @@ pub(crate) fn resolve_profile_entries(
         ExtractionRecipe::ProfileEntries {
             entries: entries.clone(),
         },
-        operation_stock_top(document,profile.id)?,
+        operation_stock_top(document, profile.id)?,
     )?;
     if !certified_heights {
         // Open paths use the operator's depth, rather than a default wall
@@ -460,7 +463,7 @@ pub(crate) fn create_operation(
     work_offset: u32,
     defaults: JobParams,
 ) -> Result<(Operation, GeometryBinding), String> {
-    let geometry = geometry_for_operation(document,id)?;
+    let geometry = geometry_for_operation(document, id)?;
     if matches!(kind, OpKind::Adaptive | OpKind::Parallel) {
         cam_geometry3d::validate_adaptive_selection(&geometry, &selected)?;
     } else {
@@ -470,7 +473,7 @@ pub(crate) fn create_operation(
         &geometry,
         &selected,
         recipe(kind, &geometry, &selected)?,
-        operation_stock_top(document,id)?,
+        operation_stock_top(document, id)?,
     )?;
     let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
     let depth = if binding.recipe == ExtractionRecipe::PocketBoundary {
@@ -487,6 +490,7 @@ pub(crate) fn create_operation(
     };
     let op = match kind {
         OpKind::Pocket => Operation::Pocket(PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: resolved.regions.iter().skip(1).cloned().collect(),
             stock_contours: Default::default(),
@@ -504,8 +508,11 @@ pub(crate) fn create_operation(
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
-                lift_height: 0.0,
+                lift_height: 0.2,
                 stepdown: defaults.stepdown,
                 overlap: 0.5,
                 offset: 0.0,
@@ -513,12 +520,13 @@ pub(crate) fn create_operation(
                 plunge_feed: defaults.plunge_feed,
                 plunge: Plunge::Straight,
                 lead_overlap: 0.0,
-                lead_in: Lead::None,
-                lead_out: Lead::None,
+                lead_in: Lead::Arc { radius: 0.6 },
+                lead_out: Lead::Arc { radius: 0.6 },
                 clearing: Clearing::default(),
             },
         }),
         OpKind::Profile => Operation::Profile(ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: cam_model::ProfilePasses {
                 lead_end_distance: 0.6,
@@ -572,6 +580,7 @@ pub(crate) fn create_operation(
             clearing: Clearing::default(),
         }),
         OpKind::Drill => Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -591,6 +600,9 @@ pub(crate) fn create_operation(
             feed: defaults.plunge_feed,
         }),
         OpKind::Face => Operation::Face(FaceOp {
+            absolute_overlap: None,
+            multiple_depths: Default::default(),
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -609,6 +621,8 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
         }),
         OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+            parameter_expressions: Default::default(),
+            contour_roughing: Default::default(),
             tip_offset: 1.0,
             lead_in_enabled: Some(true),
             same_lead_out: false,
@@ -653,6 +667,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Engrave => Operation::Engrave(EngraveOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -671,6 +686,7 @@ pub(crate) fn create_operation(
             start: None,
         }),
         OpKind::Carve => Operation::Carve(CarveOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -715,6 +731,7 @@ pub(crate) fn create_operation(
             ..Default::default()
         }),
         OpKind::Thread => Operation::Thread(ThreadOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -746,6 +763,7 @@ pub(crate) fn create_operation(
             plunge_feed: defaults.plunge_feed,
         }),
         OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -760,6 +778,7 @@ pub(crate) fn create_operation(
             },
         }),
         OpKind::Parallel => Operation::Parallel(ParallelOp {
+            parameter_expressions: Default::default(),
             id,
             tool,
             work_offset,
@@ -788,43 +807,85 @@ pub(crate) fn resolve_document(document: &Document) -> Result<Document, String> 
     resolve_document_checked(document, &|| false).map_err(|diagnostic| diagnostic.message)
 }
 
-pub(crate) fn geometry_for_operation(document:&Document,id:u32)->Result<GeometryState,String> {
-    let geometry=geometry_for_setup(document)?;
-    if let Some(index)=document.rotary_indexes.get(&id) {index.validate()?;Ok(index.geometry(&geometry))}else{Ok(geometry)}
+pub(crate) fn geometry_for_operation(
+    document: &Document,
+    id: u32,
+) -> Result<GeometryState, String> {
+    let geometry = geometry_for_setup(document)?;
+    if let Some(index) = document.rotary_indexes.get(&id) {
+        index.validate()?;
+        Ok(index.geometry(&geometry))
+    } else {
+        Ok(geometry)
+    }
 }
 
-pub(crate) fn resolve_wrapped_operation(geometry:&GeometryState, operation:&mut Operation)->Result<(),String> {
-    let Some(mut wrap)=operation.rotary_wrap().cloned() else {return Ok(());};
+pub(crate) fn resolve_wrapped_operation(
+    geometry: &GeometryState,
+    operation: &mut Operation,
+) -> Result<(), String> {
+    let Some(mut wrap) = operation.rotary_wrap().cloned() else {
+        return Ok(());
+    };
     wrap.validate()?;
-    if let Some(cylinder)=wrap.cylinder.clone() {
-        wrap=cam_geometry3d::wrap_cylinder(geometry,&cylinder,wrap)?;
+    if let Some(cylinder) = wrap.cylinder.clone() {
+        wrap = cam_geometry3d::wrap_cylinder(geometry, &cylinder, wrap)?;
     }
-    wrap.boundary_z=if wrap.unwrap_geometry {cam_geometry3d::wrapped_boundary_height(geometry,&wrap)?}else{None};
-    wrap.periodic=wrap.unwrap_geometry && cam_geometry3d::periodic_cylinder_selection(geometry,&wrap)?;
+    wrap.boundary_z = if wrap.unwrap_geometry {
+        cam_geometry3d::wrapped_boundary_height(geometry, &wrap)?
+    } else {
+        None
+    };
+    wrap.periodic =
+        wrap.unwrap_geometry && cam_geometry3d::periodic_cylinder_selection(geometry, &wrap)?;
     if !wrap.geometry.is_empty() {
-        let contours=if wrap.unwrap_geometry {cam_geometry3d::unwrap_boundaries(geometry,&wrap)?}else{
-            let recipe=if matches!(operation,Operation::Pocket(_)){ExtractionRecipe::PocketBoundary}else{ExtractionRecipe::ProfileContours};
-            let binding=cam_geometry3d::resolve_selection_advisory(geometry,&wrap.geometry,recipe,wrap.surface_z)?;
-            let input=cam_geometry3d::resolve_binding_advisory(geometry,&binding)?;
-            if !input.profiles.is_empty(){input.profiles}else{
-                input.regions.iter().flat_map(|r|std::iter::once(r.outer()).chain(r.holes().iter())).map(|chain|ProfileContour{chain:chain.clone(),closed:true,side:Side::On}).collect()
+        let contours = if wrap.unwrap_geometry {
+            cam_geometry3d::unwrap_boundaries(geometry, &wrap)?
+        } else {
+            let recipe = if matches!(operation, Operation::Pocket(_)) {
+                ExtractionRecipe::PocketBoundary
+            } else {
+                ExtractionRecipe::ProfileContours
+            };
+            let binding = cam_geometry3d::resolve_selection_advisory(
+                geometry,
+                &wrap.geometry,
+                recipe,
+                wrap.surface_z,
+            )?;
+            let input = cam_geometry3d::resolve_binding_advisory(geometry, &binding)?;
+            if !input.profiles.is_empty() {
+                input.profiles
+            } else {
+                input
+                    .regions
+                    .iter()
+                    .flat_map(|r| std::iter::once(r.outer()).chain(r.holes().iter()))
+                    .map(|chain| ProfileContour {
+                        chain: chain.clone(),
+                        closed: true,
+                        side: Side::On,
+                    })
+                    .collect()
             }
         };
         match operation {
-            Operation::Profile(profile)=>{
-                let mut contours=contours.into_iter();
-                let first=contours.next().ok_or("Empty wrapped contour")?;
-                profile.chain=first.chain; profile.closed=first.closed;
-                profile.additional_chains=contours.collect();
-                profile.selections=None;
+            Operation::Profile(profile) => {
+                let mut contours = contours.into_iter();
+                let first = contours.next().ok_or("Empty wrapped contour")?;
+                profile.chain = first.chain;
+                profile.closed = first.closed;
+                profile.additional_chains = contours.collect();
+                profile.selections = None;
             }
-            Operation::Pocket(pocket)=>{
-                let mut regions=cam_geometry3d::wrapped_regions(&contours)?.into_iter();
-                let first=regions.next().ok_or("Empty wrapped pocket")?;
-                pocket.boundary=first.outer().clone();pocket.islands=first.holes().to_vec();
-                pocket.additional_regions=regions.collect();
+            Operation::Pocket(pocket) => {
+                let mut regions = cam_geometry3d::wrapped_regions(&contours)?.into_iter();
+                let first = regions.next().ok_or("Empty wrapped pocket")?;
+                pocket.boundary = first.outer().clone();
+                pocket.islands = first.holes().to_vec();
+                pocket.additional_regions = regions.collect();
             }
-            _=>return Err("Rotary wrapping supports Profile and Pocket operations".into()),
+            _ => return Err("Rotary wrapping supports Profile and Pocket operations".into()),
         }
     }
     if matches!(operation,Operation::Profile(profile) if profile.comp!=Comp::Computed) {
@@ -853,13 +914,26 @@ pub(crate) fn resolve_document_checked(
     }
     document.geometry.validate().map_err(error)?;
     let mut resolved = document.clone();
+    let tools = resolved.setup().tools.clone();
+    for operation in &mut resolved.setup_mut().operations {
+        if document.operation_is_included(document.setup().id, operation.id()) {
+            operation
+                .resolve_parameter_expressions(&tools)
+                .map_err(|reason| error(reason).for_op(operation.id()))?;
+        }
+    }
+    let prepared_operations = resolved.setup().operations.clone();
     // Resolve all reference geometry in its source placement, before rotating
     // instances for the strategy adapters. Keep a worker-only absolute snapshot.
-    for operation in &document.setup().operations {
+    for operation in &prepared_operations {
         if !document.operation_is_included(document.setup().id, operation.id()) {
             continue;
         }
-        if operation.rotary_wrap().is_some() || document.rotary_indexes.contains_key(&operation.id()) {continue;}
+        if operation.rotary_wrap().is_some()
+            || document.rotary_indexes.contains_key(&operation.id())
+        {
+            continue;
+        }
         if let Some(settings) = document.setup().height_settings.get(&operation.id()) {
             let heights = settings.resolve(document, operation).map_err(|reason| {
                 error(format!("Operation {}: {reason}", operation.id())).for_op(operation.id())
@@ -883,24 +957,31 @@ pub(crate) fn resolve_document_checked(
                 .with_code(cam_toolpath::DiagnosticCode::Cancelled));
         }
         let id = operation.id();
-        let base_instances=resolved.geometry.instances.clone();
-        if let Some(index)=document.rotary_indexes.get(&id) {
+        let base_instances = resolved.geometry.instances.clone();
+        if let Some(index) = document.rotary_indexes.get(&id) {
             index.validate().map_err(error)?;
-            resolved.geometry=index.geometry(&resolved.geometry);
+            resolved.geometry = index.geometry(&resolved.geometry);
         }
         let resolved_operation: Result<(), String> = (|| {
+            operation.resolve_parameter_expressions(&resolved.setup().tools)?;
             if operation.rotary_wrap().is_some() {
-                resolve_wrapped_operation(&resolved.geometry,operation)?;
+                resolve_wrapped_operation(&resolved.geometry, operation)?;
                 resolved.geometry.bindings.remove(&id);
                 resolved.cad_linked_operations.remove(&id);
-                if let Some(settings)=resolved.setup().height_settings.get(&id).cloned() {
-                    let mut settings=settings;settings.resolved=None;
+                if let Some(settings) = resolved.setup().height_settings.get(&id).cloned() {
+                    let mut settings = settings;
+                    settings.resolved = None;
                     // The wrap now carries its developed CAD floor, but stock
                     // references still belong to the original world geometry.
                     // Resolving against the rotated worker geometry would apply
                     // the setup frame twice when measuring the round blank.
-                    let heights=settings.resolve(document,operation)?;
-                    resolved.setup_mut().height_settings.get_mut(&id).unwrap().resolved=Some(heights);
+                    let heights = settings.resolve(document, operation)?;
+                    resolved
+                        .setup_mut()
+                        .height_settings
+                        .get_mut(&id)
+                        .unwrap()
+                        .resolved = Some(heights);
                 }
                 return Ok(());
             }
@@ -933,7 +1014,7 @@ pub(crate) fn resolve_document_checked(
                 current_binding.heights.bottom = current_binding.heights.top - cutting.depth();
             }
             if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
-                current_binding.heights.top = operation_stock_top(document,id)?;
+                current_binding.heights.top = operation_stock_top(document, id)?;
             }
             let input =
                 cam_geometry3d::resolve_binding_advisory(&resolved.geometry, &current_binding)
@@ -1157,7 +1238,7 @@ pub(crate) fn resolve_document_checked(
                 .resolved_fingerprint = Some(fingerprint);
             Ok(())
         })();
-        resolved.geometry.instances=base_instances;
+        resolved.geometry.instances = base_instances;
         resolved_operation.map_err(|message| error(message).for_op(id))?;
         if document.rotary_indexes.contains_key(&id) {
             if let Some(settings) = document.setup().height_settings.get(&id) {
@@ -1170,10 +1251,15 @@ pub(crate) fn resolve_document_checked(
                 }
                 let mut settings = settings.clone();
                 settings.resolved = None;
-                let heights = settings.resolve(&source, operation).map_err(|reason| {
-                    error(format!("Operation {id}: {reason}")).for_op(id)
-                })?;
-                resolved.setup_mut().height_settings.get_mut(&id).unwrap().resolved = Some(heights);
+                let heights = settings
+                    .resolve(&source, operation)
+                    .map_err(|reason| error(format!("Operation {id}: {reason}")).for_op(id))?;
+                resolved
+                    .setup_mut()
+                    .height_settings
+                    .get_mut(&id)
+                    .unwrap()
+                    .resolved = Some(heights);
             }
         }
     }
@@ -1327,9 +1413,10 @@ pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<
         base.heights.bottom = base.heights.top - cutting.depth();
     }
     if matches!(base.recipe, ExtractionRecipe::FaceRegion) {
-        base.heights.top = operation_stock_top(document,id)?;
+        base.heights.top = operation_stock_top(document, id)?;
     }
-    let input = cam_geometry3d::resolve_binding_advisory(&geometry_for_operation(document,id)?, &base)?;
+    let input =
+        cam_geometry3d::resolve_binding_advisory(&geometry_for_operation(document, id)?, &base)?;
     let binding = document.geometry.bindings.get_mut(&id).unwrap();
     binding.heights = input.heights;
     binding.resolved_fingerprint = None;

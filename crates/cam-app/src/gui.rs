@@ -43,10 +43,10 @@ use inspector_style::*;
 mod height_editor;
 #[path = "gui_height_planes.rs"]
 mod height_planes;
-#[path = "gui_icon_picker.rs"]
-mod icon_picker;
 #[path = "gui_height_reference.rs"]
 mod height_reference;
+#[path = "gui_icon_picker.rs"]
+mod icon_picker;
 #[path = "gui_inspector.rs"]
 mod inspector_view;
 #[path = "gui_jobs.rs"]
@@ -69,12 +69,12 @@ mod operation_metadata;
 mod operation_sections;
 #[path = "gui_operation_tabs.rs"]
 mod operation_tabs;
-#[path = "gui_rotary.rs"]
-mod rotary_view;
 #[path = "gui_operation_tool_selector.rs"]
 mod operation_tool_selector;
 #[path = "gui_pattern_editor.rs"]
 mod pattern_editor_view;
+#[path = "gui_rotary.rs"]
+mod rotary_view;
 #[path = "gui_setup_editor.rs"]
 mod setup_editor_view;
 #[path = "gui_thread_parameters.rs"]
@@ -117,6 +117,8 @@ mod illustrated_help;
 mod operation_positions;
 #[path = "gui_operation_preview.rs"]
 mod operation_preview;
+#[path = "gui_parameter_expressions.rs"]
+mod parameter_expressions;
 #[path = "gui_picking.rs"]
 mod picking_view;
 #[path = "gui_pocket_parameters.rs"]
@@ -725,9 +727,14 @@ enum StockEditorKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StockSolidChoice { id: u64, name: String }
+struct StockSolidChoice {
+    id: u64,
+    name: String,
+}
 impl std::fmt::Display for StockSolidChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.name) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -767,19 +774,32 @@ impl std::fmt::Display for BoxAnchor {
 }
 
 impl StockEditorKind {
-    const ALL: [Self; 8] = [Self::FixedBox, Self::RelativeBox, Self::FixedCylinder, Self::RelativeCylinder, Self::FixedTube, Self::RelativeTube, Self::FromSolid, Self::PreviousSetup];
+    const ALL: [Self; 8] = [
+        Self::FixedBox,
+        Self::RelativeBox,
+        Self::FixedCylinder,
+        Self::RelativeCylinder,
+        Self::FixedTube,
+        Self::RelativeTube,
+        Self::FromSolid,
+        Self::PreviousSetup,
+    ];
 }
 
 impl StockEditorKind {
     fn icon(self) -> &'static [u8] {
         match self {
             Self::FixedBox => include_bytes!("../assets/icons/stock/fixed_box.svg"),
-            Self::RelativeBox | Self::LegacyBox => include_bytes!("../assets/icons/stock/relative_box.svg"),
+            Self::RelativeBox | Self::LegacyBox => {
+                include_bytes!("../assets/icons/stock/relative_box.svg")
+            }
             Self::FixedCylinder => include_bytes!("../assets/icons/stock/fixed_cylinder.svg"),
             Self::RelativeCylinder => include_bytes!("../assets/icons/stock/relative_cylinder.svg"),
             Self::FixedTube => include_bytes!("../assets/icons/stock/fixed_tube.svg"),
             Self::RelativeTube => include_bytes!("../assets/icons/stock/relative_tube.svg"),
-            Self::FromSolid | Self::PreviousSetup => include_bytes!("../assets/icons/stock/solid.svg"),
+            Self::FromSolid | Self::PreviousSetup => {
+                include_bytes!("../assets/icons/stock/solid.svg")
+            }
         }
     }
 }
@@ -1014,6 +1034,7 @@ impl std::fmt::Display for ThreadForm {
 fn tool_kind_fields(kind: ToolKind) -> Vec<Field> {
     match kind {
         ToolKind::BullNose { .. } => vec![Field::CornerRadius],
+        ToolKind::RadiusMill { .. } => vec![Field::CornerRadius, Field::TipLength],
         ToolKind::ChamferMill { .. } => vec![Field::ChamferAngle, Field::TipDiameter],
         ToolKind::Drill { .. } => vec![Field::PointAngle],
         ToolKind::ThreadMill { .. } => vec![Field::ToolThreadPitch],
@@ -1027,7 +1048,11 @@ fn tool_kind_fields(kind: ToolKind) -> Vec<Field> {
 /// Read a tool's kind-specific parameter for a field, if it applies.
 fn tool_kind_field(kind: ToolKind, field: Field) -> Option<f64> {
     match (kind, field) {
-        (ToolKind::BullNose { corner_radius }, Field::CornerRadius) => Some(corner_radius),
+        (
+            ToolKind::BullNose { corner_radius } | ToolKind::RadiusMill { corner_radius, .. },
+            Field::CornerRadius,
+        ) => Some(corner_radius),
+        (ToolKind::RadiusMill { tip_length, .. }, Field::TipLength) => Some(tip_length),
         (
             ToolKind::ChamferMill {
                 included_angle_deg, ..
@@ -1107,6 +1132,17 @@ fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
         ToolKind::BullNose { corner_radius } => {
             if let Some(v) = get(Field::CornerRadius) {
                 *corner_radius = v;
+            }
+        }
+        ToolKind::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => {
+            if let Some(v) = get(Field::CornerRadius) {
+                *corner_radius = v;
+            }
+            if let Some(v) = get(Field::TipLength) {
+                *tip_length = v;
             }
         }
         ToolKind::ChamferMill {
@@ -1212,6 +1248,7 @@ enum Field {
     NominalPlungeFeed,
     /// Bull-nose corner radius (mm).
     CornerRadius,
+    TipLength,
     /// Chamfer/V mill included point angle (deg).
     ChamferAngle,
     /// Chamfer/V mill flat-tip diameter (mm).
@@ -1298,6 +1335,9 @@ enum Field {
     ChamferTipOffset,
     /// Chamfer width increment per pass (mm); 0 cuts in one pass.
     ChamferStep,
+    ContourRoughStepover,
+    ContourRoughSmoothing,
+    ContourRoughCount,
     /// Lead-in size (length for Linear, radius for Arc).
     LeadInSize,
     /// Lead-out size.
@@ -1309,6 +1349,9 @@ enum Field {
     FaceStartOffset,
     /// Face: pass overlap as a percentage of the tool diameter.
     Overlap,
+    /// Absolute overlap between concentric pocket passes.
+    PocketOverlap,
+    FaceOverlap,
     /// Face: overshoot past the stock edge before the turnaround (mm).
     FaceOvershoot,
     /// Adaptive-clearing stepover: the radial width of cut along a *straight* wall
@@ -1355,7 +1398,9 @@ fn set_machine_z_limits(envelope: &mut cam_model::Envelope, travel: f64, max_z: 
 
 impl Field {
     fn label(self) -> &'static str {
-        if let Self::Wrap(number)=self {return number.label();}
+        if let Self::Wrap(number) = self {
+            return number.label();
+        }
         match self {
             Self::Wrap(_) => unreachable!(),
             Field::OperationTop => "Cutting top Z (mm)",
@@ -1394,6 +1439,7 @@ impl Field {
             Field::NominalFeed => "Nominal feed (mm/min)",
             Field::NominalPlungeFeed => "Nominal plunge (mm/min)",
             Field::CornerRadius => "Corner radius (mm)",
+            Field::TipLength => "Tip length (mm)",
             Field::ChamferAngle => "Point angle (deg)",
             Field::TipDiameter => "Tip ⌀ (mm)",
             Field::TipRadius => "Tip radius (mm)",
@@ -1439,9 +1485,9 @@ impl Field {
             Field::Feed => "Feed (mm/min)",
             Field::FeedPerTooth => "Feed per tooth (mm/tooth)",
             Field::PlungeFeed => "Plunge feed (mm/min)",
-            Field::RampFeed => "Ramp feed (0=cutting)",
-            Field::LeadInFeed => "Lead-in feed (0=cutting)",
-            Field::LeadOutFeed => "Lead-out feed (0=cutting)",
+            Field::RampFeed => "Ramp feed (mm/min)",
+            Field::LeadInFeed => "Lead-in feed (mm/min)",
+            Field::LeadOutFeed => "Lead-out feed (mm/min)",
             Field::MajorDia => "Major ⌀ (mm)",
             Field::Pitch => "Pitch (mm)",
             Field::ThreadTop => "Thread top (mm)",
@@ -1455,11 +1501,15 @@ impl Field {
             Field::ChamferDepth => "Tip depth (mm, 0=tip)",
             Field::ChamferTipOffset => "Chamfer tip offset (mm)",
             Field::ChamferStep => "Step (mm, 0=one pass)",
+            Field::ContourRoughStepover => "Maximum stepover (mm)",
+            Field::ContourRoughCount => "Number of stepovers",
+            Field::ContourRoughSmoothing => "Smoothing deviation (mm)",
             Field::LeadInSize => "Lead-in size (mm)",
             Field::LeadOutSize => "Lead-out size (mm)",
             Field::LeadOverlap => "Lead overlap (mm)",
             Field::FaceStartOffset => "Start offset (mm)",
             Field::Overlap => "Overlap (%)",
+            Field::PocketOverlap | Field::FaceOverlap => "Overlap (mm)",
             Field::FaceOvershoot => "Overshoot (mm)",
             Field::Engagement => "Adaptive stepover (mm, 0=off)",
             Field::RingStep => "Ring step (mm, 0=auto)",
@@ -1613,6 +1663,7 @@ impl Field {
                 "Default plunge (Z-entry) feed for this tool (mm/min). Seeds a new \
                  operation's plunge feed; the operation can override it. 0 = unset."
             }
+            Field::TipLength => "Length of the cylindrical tip below the rounded cutting edge.",
             Field::CornerRadius => {
                 "Corner radius of the rounded-edge (bull-nose) end mill — the fillet \
                  between the flat bottom and the side. Must be smaller than the tool \
@@ -1734,13 +1785,16 @@ impl Field {
                  chamfer the rim of a pocket or a step that an earlier operation cut."
             }
             Field::ChamferWidth => {
-                "Horizontal width of the chamfer from the selected edge. Together with the tool angle it determines the bevel depth."
+                "Horizontal width of the chamfer from the selected edge. For a radius mill, the tool corner radius determines the roundover width instead."
             }
             Field::ChamferDepth => {
                 "How far below the top edge the tool tip rides (mm), which picks where \
                  on the tool's flank the cut lands. 0 = cut at the tip."
             }
-            Field::ChamferTipOffset => "Additional distance below the chamfer edge. The tool moves outward by the corresponding amount to keep the cutting flank on the same bevel.",
+            Field::ChamferTipOffset => "Additional distance below the chamfer edge. The tool moves outward by the corresponding amount to keep the cutting flank on the same bevel. Radius mills require zero tip offset.",
+            Field::ContourRoughStepover => "Distance between adjacent contour roughing passes in the XY plane.",
+            Field::ContourRoughSmoothing => "Maximum arc-fitting deviation for roughing contours; must not exceed the stepover.",
+            Field::ContourRoughCount => "Additional passes on the air side before the final contour.",
             Field::ChamferStep => {
                 "Chamfer width added per pass (mm) for a multi-pass chamfer. 0 = cut the \
                  whole chamfer in a single pass."
@@ -1761,6 +1815,8 @@ impl Field {
                 "Height of the first facing cut above the drawing reference (mm) — start \
                  above the true top to skim scale, or at 0 to cut to size."
             }
+            Field::PocketOverlap => "Distance shared by neighboring concentric cutting passes, in millimetres.",
+            Field::FaceOverlap => "Distance shared by neighboring facing passes, in millimetres.",
             Field::Overlap => {
                 "How much each facing pass overlaps the previous, as a percent of tool \
                  diameter. Higher = smoother floor, more passes."
@@ -2178,6 +2234,7 @@ struct App {
     operation_tab: OperationTab,
     collapsed_operation_sections: BTreeSet<operation_sections::Section>,
     focused_height: Option<String>,
+    parameter_editor: parameter_expressions::Editor,
     height_draft_id: Option<u32>,
     height_draft: Option<cam_model::OperationHeightSettings>,
     height_disabled_feed_reference: Option<cam_model::HeightReference>,
@@ -2189,6 +2246,7 @@ struct App {
     show_project_browser: bool,
     planar_selection: Vec<LoopRef>,
     tree_drag: Option<TreeDrag>,
+    operation_rename: Option<(u32, String)>,
     tree_hover: Option<(TreeNode, bool)>,
     tree_menu: Option<TreeNode>,
     pattern_menu_y: Option<f32>,
@@ -2702,7 +2760,8 @@ enum Message {
     ProfileCompChanged(cam_model::Comp),
     ProfilePassToggle(profile_parameters::Toggle, bool),
     PocketFinishToggle(pocket_parameters::Toggle, bool),
-    ProfileOrder(cam_model::ProfileOrder),
+    PocketDepthToggle(pocket_parameters::DepthToggle, bool),
+    PocketAdaptiveToggled(bool),
     ProfileTabShape(cam_model::TabShape),
     ProfileCorner(cam_model::ProfileCorner),
     ProfileStockBoundary(profile_parameters::StockChoice),
@@ -2796,6 +2855,9 @@ enum Message {
     SetSetupVisible(u64, bool),
     SetOperationVisible(u32, bool),
     FieldChanged(Field, String),
+    ParameterInputState(Field, bool, usize),
+    ParameterComplete(Field, &'static str, usize),
+    ParameterSuggestionMove(Field, i32),
     HeightReferenceChanged(cam_model::HeightPlaneKind, cam_model::HeightReference),
     HeightOffsetChanged(cam_model::HeightPlaneKind, String),
     HeightSourceToggled(cam_model::HeightPlaneKind, cam_model::HeightReference, bool),
@@ -2806,6 +2868,8 @@ enum Message {
     HeightEntityRemove(cam_model::HeightPlaneKind, usize),
     HeightDefaults,
     CheckHeightFocus,
+    CheckOperationRenameFocus,
+    OperationRenameFocus(u32, bool),
     HeightFocus(String, bool),
     /// Rename the machine.
     MachineNameChanged(String),
@@ -3068,6 +3132,7 @@ enum Message {
     AdaptiveContainmentChanged(cam_model::AdaptiveContainment),
     /// Toggle the selected chamfer's gradual (equal-material) stepping.
     ChamferGradualToggled(bool),
+    ContourRoughingToggled(bool),
     /// Toggle the selected thread's gradual (equal-material) radial infeed.
     ThreadGradualToggled(bool),
     /// Create a new default tool and select it.
@@ -3379,8 +3444,8 @@ impl App {
     }
 
     fn begin_operation_draft(&mut self, id: u32) {
-        self.rotary_pick=None;
-        self.rotary_wrap_draft=None;
+        self.rotary_pick = None;
+        self.rotary_wrap_draft = None;
         self.seed_rotary_index_draft(id);
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
@@ -3399,6 +3464,27 @@ impl App {
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
+        if let Some(Operation::Pocket(p)) = &mut self.operation_draft {
+            if p.clear.pocket_overlap.is_none() {
+                if let Some(tool) = self
+                    .controller
+                    .inspection_setup()
+                    .tools
+                    .iter()
+                    .find(|t| t.number == p.tool)
+                {
+                    p.clear.pocket_overlap = Some(tool.diameter * p.clear.overlap);
+                    if p.parameter_expressions
+                        .contains_key(&cam_model::OperationParameter::Overlap)
+                    {
+                        cam_model::OperationParameter::PocketOverlap.set_source(
+                            self.operation_draft.as_mut().unwrap(),
+                            "=overlap * tool_diameter / 100",
+                        );
+                    }
+                }
+            }
+        }
         self.stock_to_leave_draft = Some(self.controller.inspection_setup().stock_to_leave_for(id));
         self.stock_to_leave_initialized = self.stock_to_leave_value().enabled;
         if matches!(self.operation_draft, Some(Operation::Profile(_))) {
@@ -3423,7 +3509,15 @@ impl App {
 
     fn seed_rotary_index_draft(&mut self, id: u32) {
         self.rotary_index_draft = self.controller.document().rotary_indexes.get(&id).cloned();
-        self.rotary_index_mode = if self.rotary_index_draft.as_ref().is_some_and(|i| i.face.is_some()) { rotary_view::IndexMode::Face } else { rotary_view::IndexMode::Manual };
+        self.rotary_index_mode = if self
+            .rotary_index_draft
+            .as_ref()
+            .is_some_and(|i| i.face.is_some())
+        {
+            rotary_view::IndexMode::Face
+        } else {
+            rotary_view::IndexMode::Manual
+        };
         self.seed_rotary_index_values();
     }
 
@@ -3474,7 +3568,9 @@ impl App {
         let Selection::Operation(id) = self.controller.selection() else {
             return false;
         };
-        if self.rotary_index_draft.as_ref()!=self.controller.document().rotary_indexes.get(&id) {return true;}
+        if self.rotary_index_draft.as_ref() != self.controller.document().rotary_indexes.get(&id) {
+            return true;
+        }
         if self.height_rules_dirty() {
             return true;
         }
@@ -3530,7 +3626,14 @@ impl App {
         (self.cad_override_top, self.cad_override_bottom) = overrides;
         let supported = self.inspector_fields();
         for (field, value) in previous {
-            if supported.contains(&field) {
+            if supported.contains(&field)
+                || (value.trim().parse::<f64>().is_err()
+                    && parameter_expressions::parameter(field).is_some_and(|p| {
+                        self.operation_draft
+                            .as_ref()
+                            .is_some_and(|op| p.value(op).is_some())
+                    }))
+            {
                 self.fields.insert(field, value);
             }
         }
@@ -3548,7 +3651,9 @@ impl App {
         match &mut candidate.stock {
             cam_model::Stock::FixedRound { axis, .. }
             | cam_model::Stock::RelativeRound { axis, .. } => {
-                *axis = Some(cam_model::StockAxis::Edge(cam_model::StockAxisReference::from(&entity)))
+                *axis = Some(cam_model::StockAxis::Edge(
+                    cam_model::StockAxisReference::from(&entity),
+                ))
             }
             _ => return false,
         }
@@ -3795,6 +3900,7 @@ impl App {
             operation_tab: OperationTab::default(),
             collapsed_operation_sections: BTreeSet::new(),
             focused_height: None,
+            parameter_editor: Default::default(),
             height_draft_id: None,
             height_draft: None,
             height_disabled_feed_reference: None,
@@ -3806,6 +3912,7 @@ impl App {
             show_project_browser: true,
             planar_selection: Vec::new(),
             tree_drag: None,
+            operation_rename: None,
             tree_hover: None,
             tree_menu: None,
             pattern_menu_y: None,
@@ -3988,6 +4095,10 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
+        if matches!(message, Message::CadEscape) && self.operation_rename.is_some() {
+            self.operation_rename = None;
+            return iced::Task::none();
+        }
         if let Message::DiscardConfirmed = message {
             if let Some(action) = self.pending_discard.take() {
                 self.discarding_confirmed = true;
@@ -4090,7 +4201,10 @@ impl App {
         let previous_result = self.controller.outcome().and_then(|o| o.stamp.clone());
         let context = self.output_context();
         let task = self.update_message(message);
-        if self.controller.outcome().and_then(|o| o.stamp.as_ref())
+        if self
+            .controller
+            .outcome()
+            .and_then(|o| o.stamp.as_ref())
             .is_some_and(|stamp| stamp.request_id == 0 && Some(stamp) != previous_result.as_ref())
         {
             self.record_status_messages();
@@ -4724,6 +4838,60 @@ impl App {
                     }
                 });
             }
+            Message::PocketAdaptiveToggled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                let mut seed = false;
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Pocket(p) = op {
+                        seed = enabled
+                            && p.clear.clearing.engagement <= 0.0
+                            && !p
+                                .parameter_expressions
+                                .contains_key(&cam_model::OperationParameter::Engagement);
+                        p.clear.adaptive_enabled = Some(enabled);
+                    }
+                    if seed {
+                        cam_model::OperationParameter::Engagement
+                            .set_source(op, "=tool_diameter * 0.4");
+                    }
+                });
+                self.refresh_operation_fields();
+                if seed {
+                    self.fields
+                        .insert(Field::Engagement, "=tool_diameter * 0.4".into());
+                }
+            }
+            Message::PocketDepthToggle(toggle, value) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    match op {
+                        Operation::Pocket(p) => toggle.set(&mut p.clear.multiple_depths, value),
+                        Operation::Face(f) => toggle.set(&mut f.multiple_depths, value),
+                        _ => {}
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::PocketFinishToggle(toggle, value) => {
                 let parsed = self
                     .fields
@@ -4743,6 +4911,27 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::ContourRoughingToggled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    match op {
+                        Operation::Profile(p) => p.passes.contour_roughing.enabled = enabled,
+                        Operation::Chamfer(c) => c.contour_roughing.enabled = enabled,
+                        _ => {}
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::ProfilePassToggle(toggle, value) => {
                 let parsed = self
                     .fields
@@ -4758,14 +4947,6 @@ impl App {
                     apply_op_fields(op, &parsed);
                     if let Operation::Profile(p) = op {
                         toggle.set(p, value);
-                    }
-                });
-                self.refresh_operation_fields();
-            }
-            Message::ProfileOrder(order) => {
-                self.edit_operation_draft(|op| {
-                    if let Operation::Profile(p) = op {
-                        p.passes.order = order;
                     }
                 });
                 self.refresh_operation_fields();
@@ -5314,15 +5495,22 @@ impl App {
             Message::SetupStockAxisClear => {
                 if let Some(draft) = &mut self.setup_draft {
                     match &mut draft.stock {
-                        cam_model::Stock::FixedRound { axis, .. } | cam_model::Stock::RelativeRound { axis, .. } => *axis = None,
+                        cam_model::Stock::FixedRound { axis, .. }
+                        | cam_model::Stock::RelativeRound { axis, .. } => *axis = None,
                         _ => {}
                     }
                 }
-                if self.setup_axis_pick == Some(3) { self.setup_axis_pick = None; }
+                if self.setup_axis_pick == Some(3) {
+                    self.setup_axis_pick = None;
+                }
                 self.cad_candidates.clear();
             }
             Message::SetupStockSolidChanged(choice) => {
-                if let Some(draft) = &mut self.setup_draft { draft.stock = cam_model::Stock::FromSolid { instance: Some(choice.id) }; }
+                if let Some(draft) = &mut self.setup_draft {
+                    draft.stock = cam_model::Stock::FromSolid {
+                        instance: Some(choice.id),
+                    };
+                }
             }
             Message::SetupStockNumberChanged(index, value) => {
                 self.setup_values.insert(20 + index, value.clone());
@@ -5344,8 +5532,32 @@ impl App {
                                 offsets[index / 3][index % 3] = v;
                             }
                         }
-                        cam_model::Stock::FixedRound { diameter, inner_diameter, length, position, .. } => match index { 0 => *diameter = v, 1 => *inner_diameter = v, 2 => *length = v, 3 => *position = v, _ => {} },
-                        cam_model::Stock::RelativeRound { radial, inner_diameter, bottom, top, .. } => match index { 0 => *radial = v, 1 => *inner_diameter = v, 2 => *bottom = v, 3 => *top = v, _ => {} },
+                        cam_model::Stock::FixedRound {
+                            diameter,
+                            inner_diameter,
+                            length,
+                            position,
+                            ..
+                        } => match index {
+                            0 => *diameter = v,
+                            1 => *inner_diameter = v,
+                            2 => *length = v,
+                            3 => *position = v,
+                            _ => {}
+                        },
+                        cam_model::Stock::RelativeRound {
+                            radial,
+                            inner_diameter,
+                            bottom,
+                            top,
+                            ..
+                        } => match index {
+                            0 => *radial = v,
+                            1 => *inner_diameter = v,
+                            2 => *bottom = v,
+                            3 => *top = v,
+                            _ => {}
+                        },
                         cam_model::Stock::BoundingBox {
                             x_offset,
                             y_offset,
@@ -5382,7 +5594,10 @@ impl App {
                 self.status = if axis == 3 {
                     "Select a straight model edge or an origin axis for the stock.".into()
                 } else {
-                    format!("Select a straight model or stock edge for {}.", ["X", "Y", "Z"][axis])
+                    format!(
+                        "Select a straight model or stock edge for {}.",
+                        ["X", "Y", "Z"][axis]
+                    )
                 };
             }
             Message::PatternTabChanged(tab) => self.pattern_tab = tab,
@@ -5993,6 +6208,25 @@ impl App {
                     self.selected_tool_parameter = Some(field);
                 }
             }
+            Message::CheckOperationRenameFocus => {
+                if let Some((id, _)) = &self.operation_rename {
+                    let id = *id;
+                    return iced::widget::operation::is_focused("operation-rename")
+                        .map(move |focused| Message::OperationRenameFocus(id, focused));
+                }
+            }
+            Message::OperationRenameFocus(id, focused) => {
+                if !focused
+                    && self
+                        .operation_rename
+                        .as_ref()
+                        .is_some_and(|(editing, _)| *editing == id)
+                {
+                    if let Some((id, name)) = self.operation_rename.take() {
+                        self.controller.rename_operation(id, name);
+                    }
+                }
+            }
             Message::CheckHeightFocus => {
                 if self.library_mode() {
                     return iced::Task::batch(self.inspector_fields().into_iter().map(|field| {
@@ -6016,6 +6250,15 @@ impl App {
                 } else if self.focused_height.as_ref() == Some(&id) {
                     self.focused_height = None;
                 }
+            }
+            Message::ParameterInputState(field, focused, cursor) => {
+                self.parameter_input_state(field, focused, cursor);
+            }
+            Message::ParameterComplete(field, name, cursor) => {
+                return self.complete_parameter(field, name, cursor);
+            }
+            Message::ParameterSuggestionMove(field, delta) => {
+                self.move_parameter_suggestion(field, delta);
             }
             Message::FieldChanged(field, value) => {
                 if self.library_mode() {
@@ -6117,7 +6360,7 @@ impl App {
                 }
             }
             Message::CancelOperationDraft => {
-                self.rotary_pick=None;
+                self.rotary_pick = None;
                 self.drawing_editing_op = None;
                 self.controller.cancel_operation();
                 if let Selection::Operation(id) = self.controller.selection() {
@@ -6583,8 +6826,16 @@ impl App {
                     return iced::Task::none();
                 }
                 if let (Some(axis), [candidate]) = (self.setup_axis_pick, candidates.as_slice()) {
-                    let selected = if axis == 3 { self.set_round_stock_axis(candidate.entity.clone()) } else { self.set_setup_axis_reference(axis, Some(candidate.entity.clone())); true };
-                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
+                    let selected = if axis == 3 {
+                        self.set_round_stock_axis(candidate.entity.clone())
+                    } else {
+                        self.set_setup_axis_reference(axis, Some(candidate.entity.clone()));
+                        true
+                    };
+                    if selected {
+                        self.setup_axis_pick = None;
+                        self.cad_candidates.clear();
+                    }
                 } else if self.setup_axis_pick.is_some() && candidates.len() > 1 {
                     self.cad_candidates = candidates.clone();
                     self.status = "Choose the intended overlapping edge in the right panel.".into();
@@ -6650,8 +6901,16 @@ impl App {
                     return iced::Task::none();
                 }
                 if let Some(axis) = self.setup_axis_pick {
-                    let selected = if axis == 3 { self.set_round_stock_axis(entity) } else { self.set_setup_axis_reference(axis, Some(entity)); true };
-                    if selected { self.setup_axis_pick = None; self.cad_candidates.clear(); }
+                    let selected = if axis == 3 {
+                        self.set_round_stock_axis(entity)
+                    } else {
+                        self.set_setup_axis_reference(axis, Some(entity));
+                        true
+                    };
+                    if selected {
+                        self.setup_axis_pick = None;
+                        self.cad_candidates.clear();
+                    }
                 } else {
                     self.select_cad_entity(entity);
                 }
@@ -6680,7 +6939,10 @@ impl App {
                 }
             }
             Message::CadEscape => {
-                if self.rotary_pick.take().is_some() {self.status="Rotary geometry selection finished.".into();return iced::Task::none();}
+                if self.rotary_pick.take().is_some() {
+                    self.status = "Rotary geometry selection finished.".into();
+                    return iced::Task::none();
+                }
                 if self
                     .pattern_draft
                     .as_mut()
@@ -7253,7 +7515,7 @@ impl App {
                 }
             }
             Message::CancelOp => {
-                self.rotary_pick=None;
+                self.rotary_pick = None;
                 self.cad_selected_project_tool = None;
                 self.cutting_force_inputs
                     .remove(&(self.controller.inspection_setup().id, None));
@@ -7554,8 +7816,11 @@ impl App {
                 if let Some(axis) = self.setup_axis_pick.take() {
                     if axis == 3 {
                         self.setup_axis_pick = Some(3);
-                        self.status = "Select a straight model edge or an origin axis for the stock.".into();
-                    } else { self.set_setup_stock_axis(axis, direction); }
+                        self.status =
+                            "Select a straight model edge or an origin axis for the stock.".into();
+                    } else {
+                        self.set_setup_stock_axis(axis, direction);
+                    }
                 }
                 self.setup_hover = SetupHover::default();
                 self.cad_candidates.clear();
@@ -8301,6 +8566,9 @@ impl App {
                             (true, Some(tool)) => Some(CarveClearing {
                                 tool,
                                 params: ClearParams {
+                                    multiple_depths: Default::default(),
+                                    adaptive_enabled: None,
+                                    pocket_overlap: None,
                                     feed: c.feed,
                                     plunge_feed: c.plunge_feed,
                                     ..Default::default()
@@ -8873,6 +9141,12 @@ impl App {
             iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
+                )) => Some(Message::CheckOperationRenameFocus),
+                _ => None,
+            }),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
                 )) => Some(Message::ToolColumnRelease),
                 _ => None,
             }),
@@ -9233,13 +9507,14 @@ impl App {
     /// Reload the inspector edit buffers from the model for the current
     /// selection.
     fn refresh_fields(&mut self) {
+        self.parameter_editor = Default::default();
         self.edited_tool_input = None;
         if self.creating_operation() {
             self.focused_height = None;
             self.fields.clear();
             for field in self.inspector_fields() {
-                if let Some(value) = self.field_value(field) {
-                    self.fields.insert(field, fmt_num(value));
+                if let Some(source) = self.saved_field_source(field) {
+                    self.fields.insert(field, source);
                 }
             }
             return;
@@ -9264,8 +9539,8 @@ impl App {
             }
         }
         for field in self.inspector_fields() {
-            if let Some(value) = self.field_value(field) {
-                self.fields.insert(field, fmt_num(value));
+            if let Some(source) = self.saved_field_source(field) {
+                self.fields.insert(field, source);
             }
         }
     }
@@ -9429,7 +9704,20 @@ impl App {
     /// its shaft, not a (variable) flute diameter, so `ToolDiameter` reads "Shank
     /// diameter" there.
     fn field_label(&self, field: Field) -> &'static str {
+        if field == Field::Engagement && matches!(self.operation_draft, Some(Operation::Pocket(_)))
+        {
+            return "Adaptive stepover (mm)";
+        }
+        if field == Field::Stepdown
+            && matches!(
+                self.operation_draft,
+                Some(Operation::Pocket(_) | Operation::Face(_) | Operation::Profile(_))
+            )
+        {
+            return "Maximum Roughing Stepdown (mm)";
+        }
         match (self.inspected_tool_kind(), field) {
+            (Some(ToolKind::RadiusMill { .. }), Field::ToolDiameter) => "Tip diameter (mm)",
             // V-bit and chamfer mill: the single transverse ⌀ is the shaft they flare to.
             (Some(ToolKind::VBit { .. } | ToolKind::ChamferMill { .. }), Field::ToolDiameter) => {
                 "Shank diameter (mm)"
@@ -9464,6 +9752,10 @@ impl App {
     /// the cutting disc, …), so the help matches the (kind-aware) label. Non-tool fields,
     /// and kinds where the generic wording already fits, fall back to `field.help()`.
     fn field_help(&self, field: Field) -> &'static str {
+        if field == Field::Engagement && matches!(self.operation_draft, Some(Operation::Pocket(_)))
+        {
+            return "Target radial width of cut along a straight wall. Tight curves can exceed this value; adaptive clearing reduces full-width slotting.";
+        }
         if field == Field::ProfileOffset && self.geometry_operation_kind() == Some(OpKind::Profile)
         {
             return profile_parameters::WALL_ALLOWANCE_HELP;
@@ -9473,6 +9765,8 @@ impl App {
         }
         use ToolKind::*;
         match (self.inspected_tool_kind(), field) {
+            (Some(RadiusMill { .. }), Field::ToolDiameter) => "Diameter of the cylindrical tip. The maximum cutting diameter is this value plus twice the corner radius.",
+            (Some(RadiusMill { .. }), Field::CornerRadius) => "Radius of the concave cutting edge, measured from the tip to the outer cutting diameter.",
             // Cutting/flute diameter — the meaning turns on the kind.
             (Some(EndMill | RoughingMill | BallMill | BullNose { .. }), Field::ToolDiameter) => {
                 "Diameter across the flutes — the end mill's cutting diameter."
@@ -9544,12 +9838,7 @@ impl App {
     /// - **Flute length** > 0 everywhere; ≥ corner radius (rounded-edge); ≥ flute radius
     ///   ⌀/2 (ball nose) — the cutting-end feature must fit inside the flute.
     fn field_invalid(&self, field: Field) -> bool {
-        let Some(value) = self
-            .fields
-            .get(&field)
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .filter(|v| v.is_finite())
-        else {
+        let Ok(value) = self.parsed_field_value(field) else {
             return true;
         };
         if self.creating_operation() {
@@ -9586,7 +9875,18 @@ impl App {
                         && buf(Field::MachineMinSpindleRpm).is_some_and(|min| min > value))
             }
             Field::MachineToolChangeSeconds => value < 0.0,
+            Field::TipLength => {
+                value < 0.0
+                    || matches!((buf(Field::FluteLength), buf(Field::CornerRadius)), (Some(fl), Some(cr)) if value + cr > fl + 1e-9)
+            }
             Field::CornerRadius => {
+                if matches!(
+                    self.inspected_tool_kind(),
+                    Some(ToolKind::RadiusMill { .. })
+                ) {
+                    return value <= 0.0
+                        || matches!((buf(Field::FluteLength), buf(Field::TipLength)), (Some(fl), Some(tip)) if value + tip > fl + 1e-9);
+                }
                 matches!((buf(Field::CornerRadius), buf(Field::ToolDiameter)),
                     (Some(cr), Some(d)) if cr > d * 0.5 + 1e-9)
             }
@@ -9662,6 +9962,9 @@ impl App {
                     return true; // flute length cannot be 0 (anywhere)
                 }
                 match self.inspected_tool_kind() {
+                    Some(ToolKind::RadiusMill { .. }) => {
+                        matches!((buf(Field::CornerRadius), buf(Field::TipLength)), (Some(cr), Some(tip)) if fl < cr + tip - 1e-9)
+                    }
                     Some(ToolKind::BullNose { .. }) => {
                         matches!(buf(Field::CornerRadius), Some(cr) if fl < cr - 1e-9)
                     }
@@ -9683,11 +9986,24 @@ impl App {
 
     /// Whether any inspector field is currently invalid (Apply is disabled if so).
     fn any_field_invalid(&self) -> bool {
-        if let Some(op)=self.operation_draft.as_ref().filter(|op|op.rotary_wrap().is_some()) {
-            let mut op=op.clone();
-            let values=self.fields.iter().filter_map(|(f,v)|v.parse::<f64>().ok().map(|v|(*f,v))).collect();
-            apply_op_fields(&mut op,&values);
-            if op.rotary_wrap().is_some_and(|wrap|wrap.validate().is_err()) {return true;}
+        if let Some(op) = self
+            .operation_draft
+            .as_ref()
+            .filter(|op| op.rotary_wrap().is_some())
+        {
+            let mut op = op.clone();
+            let values = self
+                .fields
+                .iter()
+                .filter_map(|(f, v)| v.parse::<f64>().ok().map(|v| (*f, v)))
+                .collect();
+            apply_op_fields(&mut op, &values);
+            if op
+                .rotary_wrap()
+                .is_some_and(|wrap| wrap.validate().is_err())
+            {
+                return true;
+            }
         }
         if self.profile_parameter_error().is_some() {
             return true;
@@ -9817,9 +10133,16 @@ impl App {
             // by `refresh_fields`, so an untouched inspector compares equal all the way
             // down and the button stays grey — which is what tells the operator, at a
             // glance, whether an edit has been committed or is still sitting in the box.
-            return fields_are_dirty(&self.inspector_fields(), &self.fields, |f| {
-                self.field_value(f)
-            });
+            return self.parameter_fields_dirty()
+                || fields_are_dirty(
+                    &self
+                        .inspector_fields()
+                        .into_iter()
+                        .filter(|f| parameter_expressions::parameter(*f).is_none())
+                        .collect::<Vec<_>>(),
+                    &self.fields,
+                    |f| self.field_value(f),
+                );
         }
         match (self.tool_edit.clone(), self.library.tools.get(self.lib_sel)) {
             (Some(edit), Some(saved)) => {
@@ -9886,6 +10209,16 @@ impl App {
                 Some(ToolKind::BullNose { .. }) => vec![
                     Field::ToolDiameter,
                     Field::CornerRadius,
+                    Field::FluteLength,
+                    Field::ShankDiameter,
+                    Field::ShankLength,
+                    Field::ToolLength,
+                    Field::Flutes,
+                ],
+                Some(ToolKind::RadiusMill { .. }) => vec![
+                    Field::ToolDiameter,
+                    Field::CornerRadius,
+                    Field::TipLength,
                     Field::FluteLength,
                     Field::ShankDiameter,
                     Field::ShankLength,
@@ -10037,6 +10370,46 @@ impl App {
     }
     /// The model value backing a field for the current selection, if any.
     fn field_value(&self, field: Field) -> Option<f64> {
+        if !self.library_mode() {
+            if let Some(parameter) = parameter_expressions::parameter(field) {
+                let op = self.operation_draft.as_ref().or_else(|| {
+                    if let Selection::Operation(id) = self.controller.selection() {
+                        self.controller.operation(id)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(op) = op {
+                    if matches!(field, Field::CuttingSpeed | Field::FeedPerTooth)
+                        && ![
+                            cam_model::OperationParameter::CuttingSpeed,
+                            cam_model::OperationParameter::FeedPerTooth,
+                            cam_model::OperationParameter::SpindleRpm,
+                            cam_model::OperationParameter::Feed,
+                        ]
+                        .iter()
+                        .any(|p| p.expression(op).is_some())
+                    {
+                        return self.operation_cutting_value(op, field);
+                    }
+                    let tool = self
+                        .operation_tools
+                        .iter()
+                        .chain(self.controller.inspection_setup().tools.iter())
+                        .find(|t| t.number == op.tool());
+                    if !op.has_parameter_expressions() {
+                        if let Some(value) = op_field(op, field) {
+                            return Some(value);
+                        }
+                    }
+                    if let Ok(values) = op.evaluate_parameter_sources(tool, &BTreeMap::new()) {
+                        if let Some(value) = values.get(&parameter) {
+                            return Some(*value);
+                        }
+                    }
+                }
+            }
+        }
         if matches!(field, Field::CuttingSpeed | Field::FeedPerTooth) {
             let operation = self.operation_draft.as_ref().or_else(|| {
                 if let Selection::Operation(id) = self.controller.selection() {
@@ -10254,11 +10627,11 @@ impl App {
         self.apply_machine_edit();
         let mut parsed: BTreeMap<Field, f64> = BTreeMap::new();
         let supported = self.inspector_fields();
-        for (&field, text) in &self.fields {
+        for &field in self.fields.keys() {
             if !supported.contains(&field) {
                 continue;
             }
-            match text.trim().parse::<f64>() {
+            match self.parsed_field_value(field) {
                 Ok(v) => {
                     parsed.insert(field, v);
                 }
@@ -10300,6 +10673,10 @@ impl App {
                 return;
             };
             apply_op_fields(&mut operation, &parsed);
+            if let Err(error) = self.apply_parameter_sources(&mut operation) {
+                self.report_error(error);
+                return;
+            }
             let parse_override = |value: &str| -> Result<Option<f64>, String> {
                 if value.trim().is_empty() {
                     Ok(None)
@@ -10328,7 +10705,10 @@ impl App {
                 None
             };
             let used_tools = operation.tools();
-            if let Err(reason)=self.validate_rotary_index_draft() {self.report_error(reason);return;}
+            if let Err(reason) = self.validate_rotary_index_draft() {
+                self.report_error(reason);
+                return;
+            }
             let tools = self
                 .operation_tools
                 .iter()
@@ -10344,15 +10724,17 @@ impl App {
                     .contains_key(&id)
             {
                 match self.edited_height_settings() {
-                    Ok(settings) => self.controller.apply_operation_height_settings_and_stock_and_index(
-                        operation,
-                        overrides,
-                        tools,
-                        self.operation_geometry.clone(),
-                        settings,
-                        self.stock_to_leave_with_fields(),
-                        self.rotary_index_draft.clone(),
-                    ),
+                    Ok(settings) => self
+                        .controller
+                        .apply_operation_height_settings_and_stock_and_index(
+                            operation,
+                            overrides,
+                            tools,
+                            self.operation_geometry.clone(),
+                            settings,
+                            self.stock_to_leave_with_fields(),
+                            self.rotary_index_draft.clone(),
+                        ),
                     Err(reason) => Err(reason),
                 }
             } else {
@@ -10513,13 +10895,15 @@ impl App {
         // Opening a stale/legacy project must not initiate a recalculation.
         let statuses = self.controller.toolpath_statuses();
         let document = self.controller.document();
-        if self.controller.outcome().is_none() && document.active_setup().is_some_and(|setup| {
-            setup
-                .operations
-                .iter()
-                .filter(|op| document.operation_is_included(document.setup().id, op.id()))
-                .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
-        }) {
+        if self.controller.outcome().is_none()
+            && document.active_setup().is_some_and(|setup| {
+                setup
+                    .operations
+                    .iter()
+                    .filter(|op| document.operation_is_included(document.setup().id, op.id()))
+                    .all(|op| statuses.get(&op.id()).copied().unwrap_or(false))
+            })
+        {
             self.rerun();
         } else if self.controller.outcome().is_some() {
             self.record_status_messages();
@@ -11809,7 +12193,8 @@ impl App {
         if self.rotary_cad_pick(&entity) {
             return;
         }
-        let wrapped_pocket = matches!(self.operation_draft.as_ref(), Some(Operation::Pocket(p)) if p.wrap.is_some());
+        let wrapped_pocket =
+            matches!(self.operation_draft.as_ref(), Some(Operation::Pocket(p)) if p.wrap.is_some());
         if wrapped_pocket
             && self.operation_tab == OperationTab::Geometry
             && self.geometry_editor.is_none()
@@ -11913,7 +12298,8 @@ impl App {
             && self.profile_coplanar
             && entity.kind == EntityKind::Face
         {
-            let result = self.indexed_draft_geometry()
+            let result = self
+                .indexed_draft_geometry()
                 .and_then(|geometry| cam_geometry3d::coplanar_profile_faces(&geometry, &entity));
             match result {
                 Ok(references) => {
@@ -12299,13 +12685,11 @@ impl App {
                 raw,
                 self.edited_tool_input == Some(field) || field == Field::Flutes,
             );
-            list = list.push(field_row_labeled(
+            list = list.push(self.parameter_field_row(
                 field,
                 self.field_label(field),
                 self.field_help(field),
                 &value,
-                self.tooltips,
-                self.field_invalid(field),
             ));
         }
         if let Some(tool) = &self.tool_edit {
@@ -13016,7 +13400,9 @@ fn op_kind(op: &Operation) -> &'static str {
 
 /// Read an operation's value for a given field, if the op has it.
 fn op_field(op: &Operation, field: Field) -> Option<f64> {
-    if let Field::Wrap(number)=field {return op.rotary_wrap().map(|w|number.get(w));}
+    if let Field::Wrap(number) = field {
+        return op.rotary_wrap().map(|w| number.get(w));
+    }
     match (op, field) {
         (Operation::Pocket(o), Field::LiftHeight) => Some(o.clear.lift_height),
         (Operation::Adaptive(o), Field::LiftHeight) => Some(o.params.lift_height),
@@ -13030,6 +13416,22 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (op, Field::RampFeed) => Some(op.entry_feeds().ramp.unwrap_or(0.)),
         (op, Field::LeadInFeed) => Some(op.entry_feeds().lead_in.unwrap_or(0.)),
         (op, Field::LeadOutFeed) => Some(op.entry_feeds().lead_out.unwrap_or(0.)),
+        (Operation::Profile(o), Field::ContourRoughStepover) => {
+            Some(o.passes.contour_roughing.stepover)
+        }
+        (Operation::Profile(o), Field::ContourRoughSmoothing) => {
+            Some(o.passes.contour_roughing.smoothing_deviation)
+        }
+        (Operation::Chamfer(o), Field::ContourRoughSmoothing) => {
+            Some(o.contour_roughing.smoothing_deviation)
+        }
+        (Operation::Profile(o), Field::ContourRoughCount) => {
+            Some(o.passes.contour_roughing.stepovers as f64)
+        }
+        (Operation::Chamfer(o), Field::ContourRoughStepover) => Some(o.contour_roughing.stepover),
+        (Operation::Chamfer(o), Field::ContourRoughCount) => {
+            Some(o.contour_roughing.stepovers as f64)
+        }
         (Operation::Profile(o), Field::Depth) => Some(o.depth),
         (Operation::Profile(o), Field::Profile(n)) => Some(n.get(o)),
         (Operation::Chamfer(o), Field::Profile(profile_parameters::Number::LeadInSweep)) => {
@@ -13081,6 +13483,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Pocket(o), Field::Depth) => Some(o.depth),
         (Operation::Pocket(o), Field::Stepdown) => Some(o.clear.stepdown),
         (Operation::Pocket(o), Field::Overlap) => Some(o.clear.overlap * 100.0),
+        (Operation::Pocket(o), Field::PocketOverlap) => Some(o.clear.pocket_overlap.unwrap_or(0.0)),
         (Operation::Pocket(o), Field::ProfileOffset) => Some(o.clear.offset),
         (Operation::Pocket(o), Field::LeadInSize) => Some(lead_size(o.clear.lead_in)),
         (Operation::Pocket(o), Field::LeadOutSize) => Some(lead_size(o.clear.lead_out)),
@@ -13094,6 +13497,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Face(o), Field::Depth) => Some(o.depth),
         (Operation::Face(o), Field::Stepdown) => Some(o.stepdown),
         (Operation::Face(o), Field::Overlap) => Some(o.overlap * 100.0),
+        (Operation::Face(o), Field::FaceOverlap) => Some(o.absolute_overlap.unwrap_or(0.0)),
         (Operation::Face(o), Field::FaceOvershoot) => Some(o.overshoot),
         (Operation::Face(o), Field::Feed) => Some(o.feed),
         (Operation::Face(o), Field::PlungeFeed) => Some(o.plunge_feed),
@@ -13166,11 +13570,15 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
 
 /// Write the parsed inspector fields onto an operation.
 fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
-    if let Some(mut wrap)=op.rotary_wrap().cloned() {
-        for (field,value) in parsed {if let Field::Wrap(number)=field {
-            if number.cylinder_dimension() && (number.get(&wrap)-value).abs()>1e-9 {wrap.cylinder=None;}
-            number.set(&mut wrap,*value);
-        }}
+    if let Some(mut wrap) = op.rotary_wrap().cloned() {
+        for (field, value) in parsed {
+            if let Field::Wrap(number) = field {
+                if number.cylinder_dimension() && (number.get(&wrap) - value).abs() > 1e-9 {
+                    wrap.cylinder = None;
+                }
+                number.set(&mut wrap, *value);
+            }
+        }
         op.set_rotary_wrap(Some(wrap));
     }
     let get = |f: Field| parsed.get(&f).copied();
@@ -13206,6 +13614,24 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             Operation::Engrave(op) => op.top = value,
             Operation::Carve(op) => op.top = value,
             _ => {}
+        }
+    }
+    let rough = match op {
+        Operation::Profile(o) => Some(&mut o.passes.contour_roughing),
+        Operation::Chamfer(o) => Some(&mut o.contour_roughing),
+        _ => None,
+    };
+    if let Some(rough) = rough {
+        if let Some(v) = get(Field::ContourRoughStepover).filter(|v| v.is_finite() && *v > 0.) {
+            rough.stepover = v;
+        }
+        if let Some(v) = get(Field::ContourRoughSmoothing).filter(|v| v.is_finite() && *v > 0.) {
+            rough.smoothing_deviation = v;
+        }
+        if let Some(v) = get(Field::ContourRoughCount)
+            .filter(|v| v.is_finite() && *v >= 1. && *v <= 1000. && v.fract() == 0.)
+        {
+            rough.stepovers = v as u32;
         }
     }
     match op {
@@ -13275,8 +13701,8 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             if let Some(v) = get(Field::Stepdown) {
                 o.clear.stepdown = v;
             }
-            if let Some(v) = get(Field::Overlap) {
-                o.clear.overlap = (v / 100.0).clamp(0.0, 0.99);
+            if let Some(v) = get(Field::PocketOverlap) {
+                o.clear.pocket_overlap = Some(v);
             }
             if let Some(v) = get(Field::Engagement) {
                 o.clear.clearing.engagement = v.max(0.0);
@@ -13314,10 +13740,8 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             if let Some(v) = get(Field::Stepdown) {
                 o.stepdown = v;
             }
-            if let Some(v) = get(Field::Overlap) {
-                // Stored as a fraction; the field edits a percentage. Clamp below
-                // 100 % so the pass spacing stays positive.
-                o.overlap = (v / 100.0).clamp(0.0, 0.99);
+            if let Some(v) = get(Field::FaceOverlap) {
+                o.absolute_overlap = Some(v);
             }
             if let Some(v) = get(Field::FaceOvershoot) {
                 // Negative is allowed — it plunges into the stock (the strategy warns).
@@ -13665,6 +14089,12 @@ fn library_extra(t: &cam_model::Tool) -> Option<String> {
             flute_count(t.flutes),
             dir(t.cutting_direction)
         )),
+        ToolKind::RadiusMill { corner_radius, .. } => Some(format!(
+            "({}, D{}, R{})",
+            flute_count(t.flutes),
+            t.diameter,
+            corner_radius
+        )),
         ToolKind::BullNose { corner_radius } => Some(format!(
             "{}, {}, r{}",
             flute_count(t.flutes),
@@ -13710,6 +14140,7 @@ fn kind_order(kind: ToolKind) -> u8 {
         ToolKind::RoughingMill => 1,
         ToolKind::BallMill => 2,
         ToolKind::BullNose { .. } => 3,
+        ToolKind::RadiusMill { .. } => 9,
         ToolKind::FaceMill => 4,
         ToolKind::ChamferMill { .. } => 5,
         ToolKind::VBit { .. } => 6,
@@ -14116,11 +14547,18 @@ impl Viewport {
         } else {
             preview
                 .or_else(|| controller.run_preview())
-                .or_else(|| controller.outcome().filter(|verified| {
-                    !focus_ops.is_empty() && focus_ops.iter().all(|id| {
-                        verified.scene.strips.iter().any(|strip| strip.op == Some(*id))
+                .or_else(|| {
+                    controller.outcome().filter(|verified| {
+                        !focus_ops.is_empty()
+                            && focus_ops.iter().all(|id| {
+                                verified
+                                    .scene
+                                    .strips
+                                    .iter()
+                                    .any(|strip| strip.op == Some(*id))
+                            })
                     })
-                }))
+                })
                 .or(operation_preview)
                 .or_else(|| controller.outcome())
         };
@@ -14349,31 +14787,33 @@ impl Viewport {
         } else if focus_ops.is_empty() || editor_geometry.is_some() {
             None
         } else {
-            operation_preview.filter(|result| !result.stock_indices.is_empty()).or_else(|| {
-                let operations = &controller.inspection_setup().operations;
-                let through = operations
-                    .iter()
-                    .rposition(|op| focus_ops.contains(&op.id()))?;
-                let expected: BTreeSet<_> = operations[..=through]
-                    .iter()
-                    .filter(|op| {
-                        controller
-                            .document()
-                            .operation_is_included(controller.active_setup_id(), op.id())
-                    })
-                    .map(Operation::id)
-                    .collect();
-                controller.outcome().filter(|result| {
-                    let actual: BTreeSet<_> = result
-                        .program
-                        .steps()
+            operation_preview
+                .filter(|result| !result.stock_indices.is_empty())
+                .or_else(|| {
+                    let operations = &controller.inspection_setup().operations;
+                    let through = operations
                         .iter()
-                        .filter_map(Step::tag)
-                        .map(|tag| tag.op_id)
+                        .rposition(|op| focus_ops.contains(&op.id()))?;
+                    let expected: BTreeSet<_> = operations[..=through]
+                        .iter()
+                        .filter(|op| {
+                            controller
+                                .document()
+                                .operation_is_included(controller.active_setup_id(), op.id())
+                        })
+                        .map(Operation::id)
                         .collect();
-                    actual == expected
+                    controller.outcome().filter(|result| {
+                        let actual: BTreeSet<_> = result
+                            .program
+                            .steps()
+                            .iter()
+                            .filter_map(Step::tag)
+                            .map(|tag| tag.op_id)
+                            .collect();
+                        actual == expected
+                    })
                 })
-            })
         };
         let (mut mesh_vertices, mut mesh_indices) = match (show_stock, stock_draft, stock_outcome) {
             (true, Some(draft), _) => workspace_view::uncut_stock_mesh_for_setup(controller, draft),
@@ -14395,7 +14835,9 @@ impl Viewport {
         let transparent_stock_convex = preview.is_none()
             && (stock_draft.is_some() || stock_outcome.is_none())
             && matches!(
-                stock_draft.unwrap_or_else(|| controller.inspection_setup()).stock,
+                stock_draft
+                    .unwrap_or_else(|| controller.inspection_setup())
+                    .stock,
                 cam_model::Stock::BoundingBox { .. }
                     | cam_model::Stock::FixedBox { .. }
                     | cam_model::Stock::RelativeBox { .. }
@@ -14441,7 +14883,11 @@ impl Viewport {
         // geometry is loaded.
         let frame_bounds = if controller.has_geometry() {
             union_bounds(
-                stock_draft.and_then(|setup| workspace_view::stock_world_bounds_for_setup(controller, setup)).or_else(|| workspace_view::stock_world_bounds(controller)),
+                stock_draft
+                    .and_then(|setup| {
+                        workspace_view::stock_world_bounds_for_setup(controller, setup)
+                    })
+                    .or_else(|| workspace_view::stock_world_bounds(controller)),
                 cad_scene.bounds(),
             )
         } else {
@@ -15418,8 +15864,7 @@ impl shader::Primitive for ScenePrimitive {
             ) || !Arc::ptr_eq(
                 &p.transparent_stock_indices,
                 &self.transparent_stock_indices,
-            )
-                || p.transparent_stock_convex != self.transparent_stock_convex
+            ) || p.transparent_stock_convex != self.transparent_stock_convex
         }) {
             let upload = if self.transparent_stock_convex {
                 cam_render::MeshRenderer::upload_transparent_convex
@@ -15953,6 +16398,7 @@ mod multi_setup_draft_tests {
         let tool = app.controller.use_tool(vbit);
         app.controller
             .add_operation(Operation::Carve(cam_model::CarveOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 clear: None,
@@ -15995,53 +16441,94 @@ mod multi_setup_draft_tests {
 
     #[test]
     fn rotary_wrap_editor_stages_numbers_and_commits_all_tabs_in_one_undo_step() {
-        let (mut app,id)=stock_profile_app();
+        let (mut app, id) = stock_profile_app();
         // The proposed radius plus offset must fit inside a physical blank.
-        app.controller.edit_stock(|stock| *stock = cam_model::Stock::FixedRound {
-            diameter: 200., inner_diameter: 0., length: 60., position: 0.5,
-            tube: false,
-            axis: Some(cam_model::StockAxis::Origin { origin_axis: cam_model::StockOriginAxis::X }),
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::FixedRound {
+                diameter: 200.,
+                inner_diameter: 0.,
+                length: 60.,
+                position: 0.5,
+                tube: false,
+                axis: Some(cam_model::StockAxis::Origin {
+                    origin_axis: cam_model::StockOriginAxis::X,
+                }),
+            }
         });
-        let before=app.controller.document().clone();
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        let field=Field::Wrap(rotary_view::Number::Offset);
+        let before = app.controller.document().clone();
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        let field = Field::Wrap(rotary_view::Number::Offset);
         assert!(app.inspector_fields().contains(&field));
-        send(&mut app,Message::FieldChanged(field,"40".into()));
-        assert!(app.controller.operation(id).unwrap().rotary_wrap().is_none());
-        assert!(!app.any_field_invalid(),"{}",app.status);
-        send(&mut app,Message::Apply);
-        assert_eq!(app.controller.operation(id).unwrap().rotary_wrap().unwrap().offset,40.,"{}",app.status);
+        send(&mut app, Message::FieldChanged(field, "40".into()));
+        assert!(app
+            .controller
+            .operation(id)
+            .unwrap()
+            .rotary_wrap()
+            .is_none());
+        assert!(!app.any_field_invalid(), "{}", app.status);
+        send(&mut app, Message::Apply);
+        assert_eq!(
+            app.controller
+                .operation(id)
+                .unwrap()
+                .rotary_wrap()
+                .unwrap()
+                .offset,
+            40.,
+            "{}",
+            app.status
+        );
         assert!(app.controller.undo());
-        assert_eq!(*app.controller.document(),before);
+        assert_eq!(*app.controller.document(), before);
         app.begin_operation_draft(id);
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        send(&mut app,Message::CancelOperationDraft);
-        assert_eq!(*app.controller.document(),before);
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app, Message::CancelOperationDraft);
+        assert_eq!(*app.controller.document(), before);
     }
 
     #[test]
     fn rotary_mode_switch_preserves_wrap_and_existing_tab_settings() {
-        let (mut app,_)=stock_profile_app();
-        let heights=app.height_draft.clone();
-        let offsets=app.height_offsets.clone();
-        app.edit_operation_draft(|op|op.set_rotary_wrap(Some(cam_model::RotaryWrap{radius:100.,unwrap_geometry:false,..Default::default()})));
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(false)));
-        assert!(app.operation_draft.as_ref().unwrap().rotary_wrap().is_none());
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        let wrap=app.operation_draft.as_ref().unwrap().rotary_wrap().unwrap();
-        assert_eq!(wrap.radius,100.);assert!(!wrap.unwrap_geometry);
-        assert_eq!(app.height_draft,heights);assert_eq!(app.height_offsets,offsets);
+        let (mut app, _) = stock_profile_app();
+        let heights = app.height_draft.clone();
+        let offsets = app.height_offsets.clone();
+        app.edit_operation_draft(|op| {
+            op.set_rotary_wrap(Some(cam_model::RotaryWrap {
+                radius: 100.,
+                unwrap_geometry: false,
+                ..Default::default()
+            }))
+        });
+        send(
+            &mut app,
+            Message::Rotary(rotary_view::Action::Enable(false)),
+        );
+        assert!(app
+            .operation_draft
+            .as_ref()
+            .unwrap()
+            .rotary_wrap()
+            .is_none());
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        let wrap = app.operation_draft.as_ref().unwrap().rotary_wrap().unwrap();
+        assert_eq!(wrap.radius, 100.);
+        assert!(!wrap.unwrap_geometry);
+        assert_eq!(app.height_draft, heights);
+        assert_eq!(app.height_offsets, offsets);
     }
 
     #[test]
     fn rotary_wrap_creation_requires_real_boundaries_and_rejects_invalid_offset() {
-        let (mut app,_)=stock_profile_app();
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
-        send(&mut app,Message::FieldChanged(Field::Wrap(rotary_view::Number::Offset),"-25".into()));
+        let (mut app, _) = stock_profile_app();
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::Wrap(rotary_view::Number::Offset), "-25".into()),
+        );
         assert!(app.any_field_invalid());
-        app.cad_pending_kind=Some(OpKind::Pocket);
+        app.cad_pending_kind = Some(OpKind::Pocket);
         app.seed_creation_editor(OpKind::Pocket);
-        send(&mut app,Message::Rotary(rotary_view::Action::Enable(true)));
+        send(&mut app, Message::Rotary(rotary_view::Action::Enable(true)));
         assert!(!app.creation_ready());
     }
 
@@ -16218,9 +16705,10 @@ mod multi_setup_draft_tests {
             }
             let id = operation.id();
             let field = Field::LiftHeight;
+            let initial = if kind == OpKind::Pocket { 0.2 } else { 0.0 };
             assert!(operation_fields(&operation).contains(&field));
             assert_eq!(operation_tabs::field_tab(field), OperationTab::Linking);
-            assert_eq!(op_field(&operation, field), Some(0.));
+            assert_eq!(op_field(&operation, field), Some(initial));
             for value in [-1., f64::NAN, f64::INFINITY] {
                 assert!(operation_tabs::operation_field_invalid(
                     &operation, field, value
@@ -16237,11 +16725,14 @@ mod multi_setup_draft_tests {
             send(&mut app, Message::FieldChanged(field, "2".into()));
             assert_eq!(
                 op_field(app.controller.operation(id).unwrap(), field),
-                Some(0.)
+                Some(initial)
             );
             send(&mut app, Message::CancelOperationDraft);
             app.begin_operation_draft(id);
-            assert_eq!(app.fields.get(&field).map(String::as_str), Some("0"));
+            assert_eq!(
+                app.fields.get(&field).map(String::as_str),
+                Some(if kind == OpKind::Pocket { "0.2" } else { "0" })
+            );
             send(&mut app, Message::FieldChanged(field, "2".into()));
             send(&mut app, Message::Apply);
             assert_eq!(
@@ -16253,7 +16744,7 @@ mod multi_setup_draft_tests {
             assert!(app.controller.undo());
             assert_eq!(
                 op_field(app.controller.operation(id).unwrap(), field),
-                Some(0.)
+                Some(initial)
             );
             assert!(app.controller.redo());
             assert_eq!(
@@ -17183,6 +17674,7 @@ mod inspector_field_tests {
 
     fn drill(peck: Option<f64>, dwell: Option<f64>) -> Operation {
         Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -17210,6 +17702,8 @@ mod inspector_field_tests {
 
     fn chamfer(top: f64) -> Operation {
         Operation::Chamfer(cam_model::ChamferOp {
+            parameter_expressions: Default::default(),
+            contour_roughing: Default::default(),
             tip_offset: 0.0,
             lead_in_enabled: None,
             same_lead_out: false,
@@ -17391,6 +17885,9 @@ mod inspector_field_tests {
         c.clear = Some(CarveClearing {
             tool: 2,
             params: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 plunge: Plunge::Helix {
                     radius: 1.0,
                     pitch: 0.5,
@@ -17560,10 +18057,17 @@ mod ribbon_tests {
             OpKind::Engrave,
             OpKind::Adaptive,
         ] {
-            assert_eq!(families_for(kind), &F::ALL, "{kind:?}");
+            let expected: Vec<_> = F::ALL
+                .into_iter()
+                .filter(|family| *family != F::RadiusMill)
+                .collect();
+            assert_eq!(families_for(kind), expected.as_slice(), "{kind:?}");
         }
         assert_eq!(families_for(OpKind::Thread), &[F::ThreadMill]);
-        assert_eq!(families_for(OpKind::Chamfer), &[F::ChamferMill, F::VBit]);
+        assert_eq!(
+            families_for(OpKind::Chamfer),
+            &[F::ChamferMill, F::VBit, F::RadiusMill]
+        );
         assert_eq!(families_for(OpKind::Carve), &[F::VBit]);
     }
 
@@ -17676,7 +18180,10 @@ mod ribbon_tests {
         assert!(families_for(OpKind::Bore).contains(&F::BallMill));
         assert!(families_for(OpKind::Bore).contains(&F::VBit));
         assert_eq!(families_for(OpKind::Thread), &[F::ThreadMill]);
-        assert_eq!(families_for(OpKind::Chamfer), &[F::ChamferMill, F::VBit]);
+        assert_eq!(
+            families_for(OpKind::Chamfer),
+            &[F::ChamferMill, F::VBit, F::RadiusMill]
+        );
         assert_eq!(families_for(OpKind::Carve), &[F::VBit]);
     }
 
@@ -17775,22 +18282,28 @@ mod ribbon_tests {
     }
 }
 
-
 #[cfg(test)]
 mod indexed_project_restore_tests {
     use super::*;
 
     #[test]
     fn restored_indexed_operation_is_clean_and_can_simulate() {
-        let path = std::env::temp_dir().join(format!("indexed-restore-{}.ocam", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("indexed-restore-{}.ocam", std::process::id()));
         let (mut app, _) = App::new();
         app.controller.open_dxf(SAMPLE_DXF, "profiles.dxf").unwrap();
         app.controller.new_operation(OpKind::Pocket);
         let id = app.controller.inspection_setup().operations[0].id();
-        let index = cam_model::RotaryIndex { angle: -90.0, ..Default::default() };
-        app.controller.set_operation_rotary_index(id, Some(index.clone())).unwrap();
+        let index = cam_model::RotaryIndex {
+            angle: -90.0,
+            ..Default::default()
+        };
+        app.controller
+            .set_operation_rotary_index(id, Some(index.clone()))
+            .unwrap();
         app.controller.select(Selection::Operation(id));
-        app.controller.set_project_view(Some(app.capture_project_view()));
+        app.controller
+            .set_project_view(Some(app.capture_project_view()));
         app.controller.save_project(&path).unwrap();
         app.open_project(&path).unwrap();
         std::fs::remove_file(&path).unwrap();

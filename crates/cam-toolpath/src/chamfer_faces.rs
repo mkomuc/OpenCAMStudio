@@ -8,6 +8,7 @@ pub(super) fn compute(
     env: &JobEnv,
     tool: &Tool,
     included_angle: f64,
+    rough_offset: f64,
     cancel: &CancelToken,
 ) -> StrategyResult {
     let mut diagnostics = Vec::new();
@@ -63,9 +64,22 @@ pub(super) fn compute(
     };
     let bottom = op.top - op.depth;
     let count = (op.depth / step).ceil() as usize;
-    if count == 0 || count > 10_000 || op.faces.len().saturating_mul(count) > 100_000 {
+    let radial_passes = if op.contour_roughing.enabled {
+        op.contour_roughing.stepovers as usize + 1
+    } else {
+        1
+    };
+    if count == 0
+        || count > 10_000
+        || op
+            .faces
+            .len()
+            .saturating_mul(count)
+            .saturating_mul(radial_passes)
+            > 100_000
+    {
         return error(
-            "Chamfer stepdown exceeds the pass resource budget; use a larger stepdown".into(),
+            "Chamfer bands and roughing passes exceed the resource budget; increase stepdown or reduce the number of stepovers".into(),
         );
     }
     for face in &op.faces {
@@ -114,13 +128,24 @@ pub(super) fn compute(
             let z = band_bottom - low - tip_offset;
             let axis = |p: [f64; 2]| {
                 Point::new(
-                    p[0] + face.outward[0] * (radius_at_contact + tip_offset * tan),
-                    p[1] + face.outward[1] * (radius_at_contact + tip_offset * tan),
+                    p[0] + face.outward[0] * (radius_at_contact + tip_offset * tan + rough_offset),
+                    p[1] + face.outward[1] * (radius_at_contact + tip_offset * tan + rough_offset),
                 )
             };
             let start = axis(points[0]);
             let end = axis(points[1]);
             let length = (end.x - start.x).hypot(end.y - start.y);
+            if !start.x.is_finite()
+                || !start.y.is_finite()
+                || !end.x.is_finite()
+                || !end.y.is_finite()
+                || !length.is_finite()
+                || length <= 1e-8
+            {
+                return error(
+                    "Chamfer roughing offset is too large or collapses the face band".into(),
+                );
+            }
             let tangent = ((end.x - start.x) / length, (end.y - start.y) / length);
             let outward = (face.outward[0], face.outward[1]);
             let lead_entry = crate::leads::lead_start_point(start, tangent, outward, op.lead_in);
@@ -158,6 +183,12 @@ pub(super) fn compute(
             };
             let entry = air(lead_entry);
             let exit = air(lead_exit);
+            if ![entry.x, entry.y, exit.x, exit.y, z]
+                .iter()
+                .all(|v| v.is_finite())
+            {
+                return error("Chamfer roughing approach exceeds the coordinate range".into());
+            }
             program.push(Step::Comment(format!(
                 "Chamfer face {} band {}: Z{:.6}",
                 face_index + 1,

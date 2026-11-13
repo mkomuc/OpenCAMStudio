@@ -12,7 +12,9 @@ pub(super) fn index_point_to_world(
     let point = if let Some(index) = index {
         let center = cam_cldata::Point3::new(index.center[0], index.center[1], index.center[2]);
         let p = index.axis.material_point(
-            cam_cldata::Point3::new(point[0], point[1], point[2]), center, index.angle,
+            cam_cldata::Point3::new(point[0], point[1], point[2]),
+            center,
+            index.angle,
         );
         [p.x, p.y, p.z]
     } else {
@@ -250,7 +252,9 @@ fn index_angle_for_normal(
         cam_model::RotaryAxis::B => (n[1], (-n[0]).atan2(n[2]).to_degrees()),
     };
     if along.abs() / length > 1e-6 {
-        return Err("This selection cannot be aligned with Z using the selected rotary axis".into());
+        return Err(
+            "This selection cannot be aligned with Z using the selected rotary axis".into(),
+        );
     }
     Ok(if flip { angle + 180. } else { angle })
 }
@@ -258,13 +262,22 @@ impl App {
     /// Draw the orientation reference independently of machining selections.
     pub(super) fn index_face_overlay(&self, cad_scene: &cam_render::CadScene) -> Scene {
         let mut overlay = Scene::new();
-        let Some(index) = &self.rotary_index_draft else { return overlay };
-        let Some(reference) = &index.face else { return overlay };
-        let geometry = self.controller.geometry_state();
-        let Some(instance) = geometry.instance(reference.instance_id).filter(|i| i.visible) else {
+        let Some(index) = &self.rotary_index_draft else {
             return overlay;
         };
-        let Some(asset) = geometry.asset(reference.asset_id) else { return overlay };
+        let Some(reference) = &index.face else {
+            return overlay;
+        };
+        let geometry = self.controller.geometry_state();
+        let Some(instance) = geometry
+            .instance(reference.instance_id)
+            .filter(|i| i.visible)
+        else {
+            return overlay;
+        };
+        let Some(asset) = geometry.asset(reference.asset_id) else {
+            return overlay;
+        };
         if !geometry.entity_exists(reference) {
             return overlay;
         }
@@ -273,27 +286,74 @@ impl App {
             for strip in outline.strips.into_iter().filter(|s| s.width > 1.0) {
                 overlay.add_highlight(strip.points, INDEX_FACE_COLOR);
             }
-            if overlay.strips.is_empty() { return overlay; }
-            let Ok(setup_geometry) = crate::cad_operations::geometry_for_setup(self.controller.document()) else { return overlay };
-            let Ok(normal) = cam_geometry3d::index_selection_direction(&setup_geometry, reference) else { return overlay };
+            if overlay.strips.is_empty() {
+                return overlay;
+            }
+            let Ok(setup_geometry) =
+                crate::cad_operations::geometry_for_setup(self.controller.document())
+            else {
+                return overlay;
+            };
+            let Ok(normal) = cam_geometry3d::index_selection_direction(&setup_geometry, reference)
+            else {
+                return overlay;
+            };
             let length = normal.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if length < 1e-10 { return overlay; }
+            if length < 1e-10 {
+                return overlay;
+            }
             let frame = &self.controller.document().setup().frame;
-            let direction = frame.to_world_vector(normal.map(|v| v / length * if index.flip { -1. } else { 1. }));
-            let points: Vec<_> = overlay.strips.iter().flat_map(|s| s.points.iter()).collect();
+            let direction = frame
+                .to_world_vector(normal.map(|v| v / length * if index.flip { -1. } else { 1. }));
+            let points: Vec<_> = overlay
+                .strips
+                .iter()
+                .flat_map(|s| s.points.iter())
+                .collect();
             let mut min = [f32::INFINITY; 3];
             let mut max = [f32::NEG_INFINITY; 3];
-            for p in points { for i in 0..3 { min[i] = min[i].min(p[i]); max[i] = max[i].max(p[i]); } }
+            for p in points {
+                for i in 0..3 {
+                    min[i] = min[i].min(p[i]);
+                    max[i] = max[i].max(p[i]);
+                }
+            }
             let tip = std::array::from_fn::<_, 3, _>(|i| (min[i] + max[i]) as f64 * 0.5);
-            let length = (0..3).map(|i| (max[i] - min[i]) as f64).fold(0.0_f64, f64::max).mul_add(0.35, 0.).clamp(1., 15.);
-            let seed = if direction[0].abs() < 0.8 { [1., 0., 0.] } else { [0., 1., 0.] };
-            let wing = [direction[1]*seed[2]-direction[2]*seed[1], direction[2]*seed[0]-direction[0]*seed[2], direction[0]*seed[1]-direction[1]*seed[0]];
-            let wing_length = wing.iter().map(|v| v*v).sum::<f64>().sqrt();
+            let length = (0..3)
+                .map(|i| (max[i] - min[i]) as f64)
+                .fold(0.0_f64, f64::max)
+                .mul_add(0.35, 0.)
+                .clamp(1., 15.);
+            let seed = if direction[0].abs() < 0.8 {
+                [1., 0., 0.]
+            } else {
+                [0., 1., 0.]
+            };
+            let wing = [
+                direction[1] * seed[2] - direction[2] * seed[1],
+                direction[2] * seed[0] - direction[0] * seed[2],
+                direction[0] * seed[1] - direction[1] * seed[0],
+            ];
+            let wing_length = wing.iter().map(|v| v * v).sum::<f64>().sqrt();
             let tail = std::array::from_fn::<_, 3, _>(|i| tip[i] + direction[i] * length);
-            let left = std::array::from_fn::<_, 3, _>(|i| tip[i] + direction[i]*length*0.25 + wing[i]/wing_length*length*0.13);
-            let right = std::array::from_fn::<_, 3, _>(|i| tip[i] + direction[i]*length*0.25 - wing[i]/wing_length*length*0.13);
-            overlay.add_highlight(vec![tail.map(|v| v as f32), tip.map(|v| v as f32)], INDEX_FACE_COLOR);
-            overlay.add_highlight(vec![left.map(|v| v as f32), tip.map(|v| v as f32), right.map(|v| v as f32)], INDEX_FACE_COLOR);
+            let left = std::array::from_fn::<_, 3, _>(|i| {
+                tip[i] + direction[i] * length * 0.25 + wing[i] / wing_length * length * 0.13
+            });
+            let right = std::array::from_fn::<_, 3, _>(|i| {
+                tip[i] + direction[i] * length * 0.25 - wing[i] / wing_length * length * 0.13
+            });
+            overlay.add_highlight(
+                vec![tail.map(|v| v as f32), tip.map(|v| v as f32)],
+                INDEX_FACE_COLOR,
+            );
+            overlay.add_highlight(
+                vec![
+                    left.map(|v| v as f32),
+                    tip.map(|v| v as f32),
+                    right.map(|v| v as f32),
+                ],
+                INDEX_FACE_COLOR,
+            );
             return overlay;
         }
         let Some(face) = asset.topology.faces.iter().find(|f| f.id == reference.id) else {
@@ -316,15 +376,15 @@ impl App {
             return overlay;
         }
         let n = normal.map(|v| v / norm);
-        let center = std::array::from_fn::<_, 3, _>(|i| {
-            (face.bounds[0][i] + face.bounds[1][i]) * 0.5
-        });
+        let center =
+            std::array::from_fn::<_, 3, _>(|i| (face.bounds[0][i] + face.bounds[1][i]) * 0.5);
         let distance: f64 = (0..3).map(|i| (center[i] - origin[i]) * n[i]).sum();
         let center = std::array::from_fn(|i| center[i] - distance * n[i]);
         let tip = instance.placement.transform_point(center);
-        let direction = instance.placement.transform_vector(n).map(|v| {
-            if index.flip { -v } else { v }
-        });
+        let direction = instance
+            .placement
+            .transform_vector(n)
+            .map(|v| if index.flip { -v } else { v });
         let extent = (0..3)
             .map(|i| face.bounds[1][i] - face.bounds[0][i])
             .fold(0.0_f64, f64::max);
@@ -347,7 +407,10 @@ impl App {
         let right = std::array::from_fn::<_, 3, _>(|i| head[i] - wing[i] * length * 0.13);
         let point = |p: [f64; 3]| p.map(|v| v as f32);
         overlay.add_highlight(vec![point(tail), point(tip)], INDEX_FACE_COLOR);
-        overlay.add_highlight(vec![point(left), point(tip), point(right)], INDEX_FACE_COLOR);
+        overlay.add_highlight(
+            vec![point(left), point(tip), point(right)],
+            INDEX_FACE_COLOR,
+        );
         overlay
     }
 
@@ -408,36 +471,35 @@ impl App {
         if op.supports_rotary_wrap() {
             machining_types.push(MachiningType::Wrap);
         }
-        let mut form = column![
-            row![
-                text("Machining Type")
-                    .size(12)
-                    .width(Length::Fill),
-                container(icon_picker::picker(
-                    iced::advanced::widget::Id::from("machining-type-menu"),
-                    machining_types,
-                    selected_mode,
-                    |mode| row![mode.icon(), text(mode.to_string()).size(12).width(Length::Fill)]
-                        .spacing(8).align_y(Alignment::Center).into(),
-                    |_| 0,
-                    |mode| Message::Rotary(match mode {
-                        MachiningType::ThreeAxis => Action::Enable(false),
-                        MachiningType::Indexed => Action::Indexed(true),
-                        MachiningType::Wrap => Action::Enable(true),
-                    }),
-                ))
-                .width(Length::Fixed(INSPECTOR_PICKER_W))
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
+        let mut form = column![row![
+            text("Machining Type").size(12).width(Length::Fill),
+            container(icon_picker::picker(
+                iced::advanced::widget::Id::from("machining-type-menu"),
+                machining_types,
+                selected_mode,
+                |mode| row![
+                    mode.icon(),
+                    text(mode.to_string()).size(12).width(Length::Fill)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into(),
+                |_| 0,
+                |mode| Message::Rotary(match mode {
+                    MachiningType::ThreeAxis => Action::Enable(false),
+                    MachiningType::Indexed => Action::Indexed(true),
+                    MachiningType::Wrap => Action::Enable(true),
+                }),
+            ))
+            .width(Length::Fixed(INSPECTOR_PICKER_W))
         ]
+        .spacing(8)
+        .align_y(Alignment::Center)]
         .spacing(12);
         if let Some(index) = &self.rotary_index_draft {
             form = form.push(
                 row![
-                    text("Rotary axis")
-                        .size(12)
-                        .width(Length::Fill),
+                    text("Rotary axis").size(12).width(Length::Fill),
                     pick_list(
                         ["A (X)", "B (Y)"],
                         Some(if index.axis == cam_model::RotaryAxis::A {
@@ -445,13 +507,11 @@ impl App {
                         } else {
                             "B (Y)"
                         }),
-                        |axis| Message::Rotary(Action::IndexAxis(
-                            if axis == "A (X)" {
-                                cam_model::RotaryAxis::A
-                            } else {
-                                cam_model::RotaryAxis::B
-                            },
-                        )),
+                        |axis| Message::Rotary(Action::IndexAxis(if axis == "A (X)" {
+                            cam_model::RotaryAxis::A
+                        } else {
+                            cam_model::RotaryAxis::B
+                        },)),
                     )
                     .text_size(12)
                     .padding([7, 9])
@@ -463,9 +523,7 @@ impl App {
             );
             form = form.push(
                 row![
-                    text("Angle mode")
-                        .size(12)
-                        .width(Length::Fill),
+                    text("Angle mode").size(12).width(Length::Fill),
                     pick_list(
                         [IndexMode::Manual, IndexMode::Face],
                         Some(self.rotary_index_mode),
@@ -482,16 +540,23 @@ impl App {
             if self.rotary_index_mode == IndexMode::Face {
                 form = form.push(
                     row![
-                        text("Index reference")
-                            .size(12)
-                            .width(Length::Fill),
+                        text("Index reference").size(12).width(Length::Fill),
                         row![
-                            inspector_pick_button("Face…", self.rotary_pick == Some(Pick::IndexFace))
-                                .on_press(Message::Rotary(Action::Pick(Pick::IndexFace))),
-                            inspector_pick_button("Chain…", self.rotary_pick == Some(Pick::IndexLoop))
-                                .on_press(Message::Rotary(Action::Pick(Pick::IndexLoop))),
-                            inspector_pick_button("Edge…", self.rotary_pick == Some(Pick::IndexEdge))
-                                .on_press(Message::Rotary(Action::Pick(Pick::IndexEdge))),
+                            inspector_pick_button(
+                                "Face…",
+                                self.rotary_pick == Some(Pick::IndexFace)
+                            )
+                            .on_press(Message::Rotary(Action::Pick(Pick::IndexFace))),
+                            inspector_pick_button(
+                                "Chain…",
+                                self.rotary_pick == Some(Pick::IndexLoop)
+                            )
+                            .on_press(Message::Rotary(Action::Pick(Pick::IndexLoop))),
+                            inspector_pick_button(
+                                "Edge…",
+                                self.rotary_pick == Some(Pick::IndexEdge)
+                            )
+                            .on_press(Message::Rotary(Action::Pick(Pick::IndexEdge))),
                         ]
                         .spacing(4),
                     ]
@@ -500,9 +565,7 @@ impl App {
                 );
                 form = form.push(
                     row![
-                        text("Index angle")
-                            .size(12)
-                            .width(Length::Fill),
+                        text("Index angle").size(12).width(Length::Fill),
                         text(format!("{}°", self.settings.format_number(index.angle)))
                             .size(12)
                             .width(Length::Fixed(INSPECTOR_INPUT_W))
@@ -530,9 +593,7 @@ impl App {
             } else {
                 form = form.push(
                     row![
-                        text("Index angle (degrees)")
-                            .size(12)
-                            .width(Length::Fill),
+                        text("Index angle (degrees)").size(12).width(Length::Fill),
                         inspector_input("0", &self.rotary_index_values[0])
                             .on_input(|v| Message::Rotary(Action::IndexValue(0, v)))
                             .width(Length::Fixed(INSPECTOR_INPUT_W))
@@ -576,9 +637,7 @@ impl App {
         form = form.push(text("Wrap").size(14));
         form = form.push(
             row![
-                text("Unwrap Geometry")
-                    .size(12)
-                    .width(Length::Fill),
+                text("Unwrap Geometry").size(12).width(Length::Fill),
                 checkbox(wrap.unwrap_geometry)
                     .on_toggle(|v| Message::Rotary(Action::Unwrap(v)))
                     .width(Length::Fixed(INSPECTOR_INPUT_W))
@@ -588,14 +647,15 @@ impl App {
         );
         form = form.push(
             row![
-                text("Wrap Cylinder")
-                    .size(12)
-                    .width(Length::Fill),
-                inspector_pick_button(if wrap.cylinder.is_some() {
-                    "Face"
-                } else {
-                    "Select face…"
-                }, self.rotary_pick == Some(Pick::Cylinder))
+                text("Wrap Cylinder").size(12).width(Length::Fill),
+                inspector_pick_button(
+                    if wrap.cylinder.is_some() {
+                        "Face"
+                    } else {
+                        "Select face…"
+                    },
+                    self.rotary_pick == Some(Pick::Cylinder)
+                )
                 .width(Length::Fixed(INSPECTOR_INPUT_W))
                 .on_press(Message::Rotary(Action::Pick(Pick::Cylinder))),
                 inspector_button("×").on_press(Message::Rotary(Action::ClearCylinder))
@@ -609,19 +669,10 @@ impl App {
             .get(&field)
             .cloned()
             .unwrap_or_else(|| fmt_num(wrap.offset));
-        form = form.push(field_row_labeled(
-            field,
-            "Offset (mm)",
-            field.help(),
-            &value,
-            self.tooltips,
-            self.field_invalid(field),
-        ));
+        form = form.push(self.parameter_field_row(field, "Offset (mm)", field.help(), &value));
         form = form.push(
             row![
-                text("Radius")
-                    .size(12)
-                    .width(Length::Fill),
+                text("Radius").size(12).width(Length::Fill),
                 text(format!(
                     "{} mm",
                     self.settings

@@ -174,13 +174,11 @@ impl App {
                 continue;
             }
             let value = self.fields.get(&field).cloned().unwrap_or_default();
-            list = list.push(field_row_labeled(
+            list = list.push(self.parameter_field_row(
                 field,
                 self.field_label(field),
                 self.field_help(field),
                 &value,
-                self.tooltips,
-                self.field_invalid(field),
             ));
         }
         // A non-base origin is a reorientation: note the operator stop so the part can be

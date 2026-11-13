@@ -26,6 +26,7 @@ fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile_square(id: u32, chain: Contour) -> ProfileOp {
     ProfileOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         passes: Default::default(),
         selections: None,
@@ -123,6 +124,7 @@ fn run(doc: &Document) -> cam_sim::SimResult {
 #[test]
 fn a_pocket_clears_its_floor_without_collisions() {
     let op = PocketOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
@@ -140,6 +142,9 @@ fn a_pocket_clears_its_floor_without_collisions() {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             clearing: cam_model::Clearing::default(),
@@ -202,6 +207,7 @@ fn pocket_target(intended_depth: f64) -> Heightfield {
 
 fn pocket_op() -> PocketOp {
     PocketOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
@@ -219,6 +225,9 @@ fn pocket_op() -> PocketOp {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             clearing: cam_model::Clearing::default(),

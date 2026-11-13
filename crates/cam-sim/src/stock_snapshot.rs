@@ -241,7 +241,6 @@ impl StockSnapshot {
     }
 }
 
-
 fn valid_tool(tool: ToolProfile) -> bool {
     if !tool.radius.is_finite() || tool.radius <= 0. {
         return false;
@@ -250,6 +249,16 @@ fn valid_tool(tool: ToolProfile) -> bool {
         crate::ProfileShape::Flat | crate::ProfileShape::Ball => true,
         crate::ProfileShape::BullNose { corner_radius } => {
             corner_radius.is_finite() && corner_radius >= 0.
+        }
+        crate::ProfileShape::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => {
+            corner_radius.is_finite()
+                && corner_radius > 0.0
+                && corner_radius <= tool.radius
+                && tip_length.is_finite()
+                && tip_length >= 0.0
         }
         crate::ProfileShape::Cone {
             half_angle_rad,

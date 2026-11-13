@@ -128,6 +128,40 @@ impl Strategy for ProfileStrategy {
         "profile"
     }
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty()
+            && self.op.passes.finish_stepover_expression.is_none()
+            && self
+                .op
+                .passes
+                .contour_roughing
+                .stepover_expression
+                .is_none()
+        {
+            return self.compute_resolved(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Profile(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Profile(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved(env, cancel)
+    }
+}
+impl ProfileStrategy {
+    fn compute_resolved(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if !self.op.passes.multiple_depths {
+            let mut op = self.op.clone();
+            op.passes.multiple_depths = true;
+            op.passes.even_stepdowns = false;
+            op.passes.finishing_depths = 0;
+            op.stepdown = env.heights.top_of_stock + op.depth - op.passes.floor_allowance;
+            return Self::new(op).compute_resolved(env, cancel);
+        }
         if cancel.is_cancelled() {
             return StrategyResult {
                 cancelled: true,
@@ -144,7 +178,55 @@ impl Strategy for ProfileStrategy {
                 ..Default::default()
             };
         }
-        schedule::compute(&self.op, env, cancel)
+        let rough = &self.op.passes.contour_roughing;
+        if !rough.enabled {
+            return schedule::compute(&self.op, env, cancel);
+        }
+        let mut result = StrategyResult::default();
+        let finish_allowance = if self.op.passes.finishing {
+            self.op.passes.finish_count as f64 * self.op.passes.finish_stepover
+        } else {
+            0.
+        };
+        for i in (0..=rough.stepovers).rev() {
+            let mut pass = self.op.clone();
+            pass.passes.contour_roughing.enabled = false;
+            if i > 0 {
+                pass.offset += finish_allowance + i as f64 * rough.stepover;
+                if !pass.offset.is_finite() {
+                    return StrategyResult {
+                        diagnostics: vec![Diagnostic::error(
+                            "Contour roughing offset is too large",
+                        )],
+                        ..Default::default()
+                    };
+                }
+                pass.passes.tolerance = rough.smoothing_deviation;
+                pass.passes.finishing = false;
+                pass.passes.finish_only_final = false;
+            }
+            let part = schedule::compute(&pass, env, cancel);
+            result.diagnostics.extend(part.diagnostics.clone());
+            if part.cancelled || part.has_errors() {
+                result.program = Program::new();
+                result.cancelled = part.cancelled;
+                return result;
+            }
+            if result
+                .program
+                .steps()
+                .len()
+                .saturating_add(part.program.steps().len())
+                > cam_model::MAX_PROFILE_MOVES
+            {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error("Profile motion budget exceeded")],
+                    ..Default::default()
+                };
+            }
+            result.program.extend(part.program);
+        }
+        result
     }
 }
 impl ProfileStrategy {
@@ -2682,6 +2764,7 @@ mod tests {
 
     fn inner_op(hole: f64, lead_r: f64, start: Option<[f64; 2]>) -> ProfileOp {
         ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,
@@ -2717,6 +2800,45 @@ mod tests {
             lead_out: Lead::Arc { radius: lead_r },
             lead_overlap: 0.0,
         }
+    }
+
+    #[test]
+    fn parameter_formulas_reach_toolpath_and_errors_emit_no_motion() {
+        let mut numeric = inner_op(30., 1., None);
+        numeric.side = Side::Outside;
+        numeric.lead_in = Lead::None;
+        numeric.lead_out = Lead::None;
+        numeric.passes.finishing = true;
+        numeric.passes.finish_stepover = 0.6;
+        numeric.passes.contour_roughing.enabled = true;
+        numeric.passes.contour_roughing.stepover = 5.7;
+        let expected = run_inner(numeric.clone());
+        assert!(!expected.has_errors(), "{:?}", expected.diagnostics);
+        let mut formula = numeric.clone();
+        formula.passes.finish_stepover = 99.; // stale snapshots must not reach machining
+        formula.passes.contour_roughing.stepover = 99.;
+        formula.passes.finish_stepover_expression =
+            Some("Math.min(tool_diameter * 0.1; maximumStepover)".into());
+        formula.passes.contour_roughing.stepover_expression = Some(
+            "Math.max((tool_diameter - 2 * tool_cornerRadius) * 0.95; tool_diameter * 0.20)".into(),
+        );
+        let actual = run_inner(formula.clone());
+        assert!(!actual.has_errors(), "{:?}", actual.diagnostics);
+        // Use the exact floating-point calculations of the expressions.
+        numeric.passes.finish_stepover = 6. * 0.1;
+        numeric.passes.contour_roughing.stepover = 6. * 0.95;
+        assert_eq!(actual.program, run_inner(numeric.clone()).program);
+        formula.passes.finish_stepover_expression = None;
+        formula.passes.finish_stepover = 0.25;
+        numeric.passes.finish_stepover = 0.25;
+        assert_eq!(
+            run_inner(formula.clone()).program,
+            run_inner(numeric).program
+        );
+        formula.passes.contour_roughing.stepover_expression = Some("tool_diameter / 0".into());
+        let invalid = run_inner(formula);
+        assert!(invalid.has_errors());
+        assert!(invalid.program.steps().is_empty());
     }
 
     fn run_inner(op: ProfileOp) -> StrategyResult {
@@ -2816,6 +2938,7 @@ mod tests {
     /// the stock frames, with a stepover and (optionally) an engagement cap.
     fn outside_rough_op(engagement: f64) -> ProfileOp {
         ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,
@@ -3317,6 +3440,68 @@ mod tests {
                 .all(|p| p.z == 5. && (p.y - expected_y).abs() < 1e-9));
             assert_eq!(retracts[0].x, cuts[0].x);
         }
+    }
+
+    #[test]
+    fn contour_roughing_approaches_open_profiles_from_the_air_side() {
+        for (side, expected) in [
+            (Side::Outside, vec![15., 14., 13.]),
+            (Side::Inside, vec![5., 6., 7.]),
+        ] {
+            let mut op = outside_rough_op(0.);
+            op.closed = false;
+            op.chain = Contour::new(vec![Point::new(10., 10.), Point::new(30., 10.)]);
+            op.side = side;
+            op.stepover = 0.;
+            op.passes.contour_roughing.enabled = true;
+            op.passes.contour_roughing.stepovers = 2;
+            let result = run_outside_rough(op);
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let ys: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(to.y),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ys, expected);
+        }
+    }
+
+    #[test]
+    fn closed_contour_roughing_preserves_the_original_finishing_schedule() {
+        for side in [Side::Inside, Side::Outside] {
+            let mut op = outside_rough_op(0.);
+            op.stepover = 0.;
+            op.side = side;
+            op.passes.finishing = true;
+            let baseline = run_outside_rough(op.clone());
+            assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+            op.passes.contour_roughing.enabled = true;
+            op.passes.contour_roughing.stepovers = 2;
+            let rough = run_outside_rough(op);
+            assert!(!rough.has_errors(), "{:?}", rough.diagnostics);
+            assert!(rough.program.steps().len() > baseline.program.steps().len());
+            assert!(rough.program.steps().ends_with(baseline.program.steps()));
+        }
+    }
+
+    #[test]
+    fn contour_roughing_rejects_incompatible_and_collapsed_paths_atomically() {
+        let mut op = inner_op(8., 0., None);
+        op.lead_in = Lead::None;
+        op.lead_out = Lead::None;
+        op.passes.contour_roughing.enabled = true;
+        op.passes.contour_roughing.stepovers = 2;
+        let result = run_inner(op.clone());
+        assert!(result.has_errors());
+        assert!(result.program.steps().is_empty());
+        op.side = Side::On;
+        let result = run_inner(op);
+        assert!(result.has_errors());
+        assert!(result.program.steps().is_empty());
     }
 
     #[test]

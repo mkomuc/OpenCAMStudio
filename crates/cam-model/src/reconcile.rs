@@ -42,6 +42,10 @@ enum ToolKindId {
     BullNose {
         corner_um: i64,
     },
+    RadiusMill {
+        corner_um: i64,
+        tip_length_um: i64,
+    },
     ChamferMill {
         angle_mdeg: i64,
         tip_um: i64,
@@ -67,6 +71,13 @@ fn kind_id(k: &ToolKind) -> ToolKindId {
         ToolKind::FaceMill => ToolKindId::FaceMill,
         ToolKind::BullNose { corner_radius } => ToolKindId::BullNose {
             corner_um: q(corner_radius),
+        },
+        ToolKind::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => ToolKindId::RadiusMill {
+            corner_um: q(corner_radius),
+            tip_length_um: q(tip_length),
         },
         ToolKind::ChamferMill {
             included_angle_deg,
@@ -406,6 +417,7 @@ mod tests {
     fn operation_tool_references_are_rewritten() {
         let mk_drill = |id: u32, tool: u32| {
             Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 spindle_rpm: 0.0,
                 tool_preset: None,
                 cooling: Default::default(),

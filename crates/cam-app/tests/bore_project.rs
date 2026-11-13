@@ -49,6 +49,7 @@ fn prepare_thread_bore(app: &mut AppController) {
         ..Default::default()
     });
     app.add_operation(Operation::Drill(cam_model::DrillOp {
+        parameter_expressions: Default::default(),
         id: 0,
         tool,
         points: vec![[-30., 10.]],

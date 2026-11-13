@@ -125,7 +125,6 @@ impl OcamFile {
     }
 
     fn from_value(mut value: serde_json::Value) -> Result<Self, LoadError> {
-
         // The tag decides what this is. A project — tagged or, for a pre-tag file,
         // untagged — is migrated before serde sees it; anything else goes straight
         // through. Checking the tag rather than trying and retrying keeps a *migration*
@@ -370,10 +369,27 @@ impl Project {
                 }
             }
             if let cam_model::Stock::FromSolid { instance } = setup.stock {
-                let valid = instance.and_then(|id| self.document.geometry.instance(id)).and_then(|body| {
-                    self.document.geometry.asset(body.asset_id).and_then(|asset| asset.topology.bodies.iter().find(|b| b.id == body.body_id && b.valid_solid))
-                }).is_some();
-                if !valid { return Err(format!("setup {} refers to an unavailable stock solid", setup.name)); }
+                let valid = instance
+                    .and_then(|id| self.document.geometry.instance(id))
+                    .and_then(|body| {
+                        self.document
+                            .geometry
+                            .asset(body.asset_id)
+                            .and_then(|asset| {
+                                asset
+                                    .topology
+                                    .bodies
+                                    .iter()
+                                    .find(|b| b.id == body.body_id && b.valid_solid)
+                            })
+                    })
+                    .is_some();
+                if !valid {
+                    return Err(format!(
+                        "setup {} refers to an unavailable stock solid",
+                        setup.name
+                    ));
+                }
             }
             if let cam_model::Stock::FixedBox {
                 size,
@@ -502,7 +518,9 @@ pub(crate) fn atomic_save(path: &std::path::Path, project: &Project) -> Result<(
         drop(file);
         let check = std::fs::File::open(&temp).map_err(|e| e.to_string())?;
         let restored = archive::read(check, true).map_err(|e| e.to_string())?;
-        if let OcamFile::Project(restored) = restored { restored.document.geometry.validate()?; }
+        if let OcamFile::Project(restored) = restored {
+            restored.document.geometry.validate()?;
+        }
         std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
         Ok(())
     })();

@@ -18,15 +18,15 @@
 
 mod parallel;
 mod rotary;
+pub use parallel::ParallelStrategy;
+pub use rotary::index_program;
 pub use rotary::wrap_program;
 pub use rotary::ROTARY_WRAP_REVISION;
-pub use rotary::index_program;
-pub use parallel::ParallelStrategy;
 mod bore;
 pub use bore::BoreStrategy;
+mod adaptive_linking;
 mod adaptive_safety;
 mod adaptive_strategy;
-mod adaptive_linking;
 mod carve;
 mod chamfer;
 mod clearing;
@@ -60,7 +60,10 @@ pub use chamfer::ChamferStrategy;
 pub use drill::DrillStrategy;
 pub use engrave::EngraveStrategy;
 pub use face::FaceStrategy;
-pub use plan::{build_job, build_job_cached, build_job_cached_with_progress, CalculationProgress, JobCompletion, JobResult, PlanRequest};
+pub use plan::{
+    build_job, build_job_cached, build_job_cached_with_progress, CalculationProgress,
+    JobCompletion, JobResult, PlanRequest,
+};
 mod cache;
 pub use pocket::PocketStrategy;
 pub use profile::{profile_tab_preview, ProfileStrategy, ProfileTabPreview};

@@ -26,7 +26,8 @@ fn recommended_families(kind: OpKind) -> &'static [ToolKindPick] {
         OpKind::Drill => &[F::Drill],
         OpKind::Parallel => &[F::BallMill],
         OpKind::Thread => &[F::ThreadMill],
-        OpKind::Chamfer | OpKind::Engrave => &[F::ChamferMill, F::VBit],
+        OpKind::Chamfer => &[F::ChamferMill, F::VBit, F::RadiusMill],
+        OpKind::Engrave => &[F::ChamferMill, F::VBit],
         OpKind::Carve => &[F::VBit],
     }
 }

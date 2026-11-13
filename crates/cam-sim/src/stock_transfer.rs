@@ -101,7 +101,7 @@ impl Heightfield {
                 field.bounded.insert(index, voids);
             }
         }
-        field.uncut_z=field.z.clone();
+        field.uncut_z = field.z.clone();
         Some(field)
     }
 }

@@ -1,5 +1,5 @@
 //! The chamfering strategy: run a chamfer/V mill along an edge or connected chain at a
-//! computed depth so its cone flank forms a bevel.
+//! computed depth so its cone flank forms a bevel, or a radius mill forms a roundover.
 //!
 //! ## Geometry
 //!
@@ -52,6 +52,78 @@ impl Strategy for ChamferStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty()
+            && self.op.contour_roughing.stepover_expression.is_none()
+        {
+            return self.compute_resolved(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Chamfer(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Chamfer(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved(env, cancel)
+    }
+}
+impl ChamferStrategy {
+    fn compute_resolved(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        let rough = &self.op.contour_roughing;
+        if let Err(message) = rough.validate() {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        if rough.enabled {
+            if self.op.faces.is_empty() && self.op.side == Side::On {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(
+                        "Contour roughing requires an Inside or Outside edge chain",
+                    )],
+                    ..Default::default()
+                };
+            }
+            let mut result = StrategyResult::default();
+            for i in (0..=rough.stepovers).rev() {
+                let part = self.compute_offset(env, cancel, i as f64 * rough.stepover);
+                result.diagnostics.extend(part.diagnostics.clone());
+                if part.cancelled || part.has_errors() {
+                    result.program = Program::new();
+                    result.cancelled = part.cancelled;
+                    return result;
+                }
+                if result
+                    .program
+                    .steps()
+                    .len()
+                    .saturating_add(part.program.steps().len())
+                    > cam_model::MAX_PROFILE_MOVES
+                {
+                    return StrategyResult {
+                        diagnostics: vec![Diagnostic::error("Chamfer motion budget exceeded")],
+                        ..Default::default()
+                    };
+                }
+                result.program.extend(part.program);
+            }
+            return result;
+        }
+        self.compute_offset(env, cancel, 0.)
+    }
+}
+
+impl ChamferStrategy {
+    fn compute_offset(
+        &self,
+        env: &JobEnv,
+        cancel: &CancelToken,
+        rough_offset: f64,
+    ) -> StrategyResult {
         let mut effective = self.op.clone();
         let entry_enabled = effective
             .lead_in_enabled
@@ -135,7 +207,46 @@ impl Strategy for ChamferStrategy {
         //   `rt·(1 − sin α)/cos α` — so the ball tucks *under* the flank and the tool
         //   sits closer to the edge than its tip radius would suggest. Every formula
         //   below then carries over unchanged, since the flank line is identical.
+        let radius_mill = match tool.kind {
+            ToolKind::RadiusMill {
+                corner_radius,
+                tip_length,
+            } => Some((corner_radius, tip_length)),
+            _ => None,
+        };
         let (included_angle_deg, tip_offset) = match tool.kind {
+            ToolKind::RadiusMill {
+                corner_radius,
+                tip_length,
+            } => {
+                if !corner_radius.is_finite()
+                    || corner_radius <= 0.0
+                    || !tip_length.is_finite()
+                    || tip_length < 0.0
+                    || !tool.diameter.is_finite()
+                    || tool.diameter <= 0.0
+                    || !tool.flute_len().is_finite()
+                    || tool.flute_len() + 1e-9 < corner_radius + tip_length
+                {
+                    diagnostics.push(Diagnostic::error(format!(
+                        "operation {}: invalid radius mill geometry or insufficient flute length",
+                        op.id
+                    )));
+                    bail!();
+                }
+                if !op.faces.is_empty() {
+                    diagnostics.push(Diagnostic::error(format!("operation {}: radius mills require an edge chain; modeled chamfer faces require a straight-flank cutter", op.id)));
+                    bail!();
+                }
+                if op.side == Side::On || op.tip_offset > 0.0 {
+                    diagnostics.push(Diagnostic::error(format!(
+                        "operation {}: radius mills require Inside or Outside and zero tip offset",
+                        op.id
+                    )));
+                    bail!();
+                }
+                (90.0, tool.radius())
+            }
             ToolKind::ChamferMill {
                 included_angle_deg,
                 tip_diameter,
@@ -155,8 +266,7 @@ impl Strategy for ChamferStrategy {
             }
             _ => {
                 diagnostics.push(Diagnostic::error(format!(
-                    "operation {}: tool {} is a {}; a chamfer needs an angled tool \
-                     (a chamfer mill or a V-bit) whose flank forms the bevel",
+                    "operation {}: tool {} is a {}; a chamfer needs a chamfer mill, V-bit, or radius mill",
                     op.id, op.tool, tool.kind
                 )));
                 bail!();
@@ -164,7 +274,7 @@ impl Strategy for ChamferStrategy {
         };
 
         if !op.faces.is_empty() {
-            return faces::compute(op, env, tool, included_angle_deg, cancel);
+            return faces::compute(op, env, tool, included_angle_deg, rough_offset, cancel);
         }
         if (op.closed && !op.chain.is_valid()) || (!op.closed && op.chain.len() < 2) {
             diagnostics.push(Diagnostic::error(format!(
@@ -206,8 +316,20 @@ impl Strategy for ChamferStrategy {
         // `delta·tan α`, and — crucially — that shift is the *same* for every
         // partial-width pass, so a multi-pass chamfer is one XY contour cut at a
         // sequence of Z depths.
-        let d_min = op.width / tan_a;
-        let tip_depth = op.depth.max(d_min) + op.tip_offset;
+        let width = radius_mill.map_or(op.width, |(radius, _)| radius);
+        if radius_mill.is_some() && (op.width - width).abs() > 1e-6 {
+            diagnostics.push(Diagnostic::warning(format!("operation {}: radius mill produces a {:.3} mm roundover; chamfer width {:.3} mm is ignored", op.id, width, op.width)));
+        }
+        let d_min = width / tan_a;
+        let tip_depth = if let Some((_, tip_length)) = radius_mill {
+            let depth = width + tip_length;
+            if op.depth > 0.0 && (op.depth - depth).abs() > 1e-6 {
+                diagnostics.push(Diagnostic::warning(format!("operation {}: radius mill uses a {:.3} mm tip depth; the selected depth {:.3} mm is ignored", op.id, depth, op.depth)));
+            }
+            depth
+        } else {
+            op.depth.max(d_min) + op.tip_offset
+        };
         let delta = tip_depth - d_min;
         if op.side == Side::On && op.tip_offset > 0. {
             diagnostics.push(Diagnostic::error(format!(
@@ -216,13 +338,16 @@ impl Strategy for ChamferStrategy {
             )));
             bail!();
         }
-        if op.depth > 0.0 && op.depth < d_min {
+        if radius_mill.is_none() && op.depth > 0.0 && op.depth < d_min {
             diagnostics.push(Diagnostic::warning(format!(
                 "operation {}: depth {:.3} is above the tip's natural depth {:.3}; using the tip",
                 op.id, op.depth, d_min
             )));
         }
-        if op.side == Side::Inside && delta > 1e-9 {
+        if radius_mill.is_some() && op.side == Side::Inside {
+            diagnostics.push(Diagnostic::warning(format!("operation {}: check that the radius mill's full cutting diameter and shank clear the opposite wall and floor", op.id)));
+        }
+        if radius_mill.is_none() && op.side == Side::Inside && delta > 1e-9 {
             diagnostics.push(Diagnostic::warning(format!(
                 "operation {}: internal chamfer plunges the tip {:.3} mm past the bevel — not collision-checked against the bore floor/opposite wall",
                 op.id, delta
@@ -238,14 +363,33 @@ impl Strategy for ChamferStrategy {
         // Offset the tool axis to the air side by the deep-plunge shift plus the tip
         // radius (0 for a sharp V at the tip keeps it on the edge). Sign follows the
         // profile convention.
-        let off = delta * tan_a + tip_offset;
+        let off = if radius_mill.is_some() {
+            tip_offset
+        } else {
+            delta * tan_a + tip_offset
+        };
         let signed = match op.side {
-            Side::Outside => off,
-            Side::Inside => -off,
+            Side::Outside => off + rough_offset,
+            Side::Inside => -off - rough_offset,
             Side::On => 0.0,
         };
+        let tolerance = if rough_offset > 0. {
+            op.contour_roughing.smoothing_deviation
+        } else {
+            crate::emit::ARCFIT_TOL
+        };
         if !op.closed {
-            return open_chamfer(op, env, cancel, signed, tan_a, delta, diagnostics);
+            return open_chamfer(
+                op,
+                env,
+                cancel,
+                signed,
+                tan_a,
+                delta,
+                width,
+                tolerance,
+                diagnostics,
+            );
         }
         let region = match Polygon::new(op.chain.clone()) {
             Ok(p) => p,
@@ -293,15 +437,22 @@ impl Strategy for ChamferStrategy {
         // Cumulative bevel widths per pass, ending exactly at the target width. The
         // deepest (final) pass reaches `tip_depth`; shallower passes ride the same
         // XY contour at a smaller plunge.
-        let widths = pass_widths(op.width, op.step, op.gradual);
+        let widths = pass_widths(width, op.step, op.gradual);
 
         let mut program = Program::new();
-        program.push(Step::Comment(format!(
-            "Chamfer: {:.3} mm wide at {}\u{00b0} in {}",
-            op.width,
-            included_angle_deg,
-            crate::passes_phrase(widths.len())
-        )));
+        program.push(Step::Comment(if radius_mill.is_some() {
+            format!(
+                "Radius roundover: R{width:.3} mm in {}",
+                crate::passes_phrase(widths.len())
+            )
+        } else {
+            format!(
+                "Chamfer: {:.3} mm wide at {}\u{00b0} in {}",
+                width,
+                included_angle_deg,
+                crate::passes_phrase(widths.len())
+            )
+        }));
 
         for poly in &loops {
             if cancel.is_cancelled() {
@@ -407,7 +558,14 @@ impl Strategy for ChamferStrategy {
                     op.entry_feeds.lead_in(op.feed),
                     lead,
                 );
-                crate::emit::cut_polyline(&mut program, &loop_pts, op.feed, cut, z);
+                crate::emit::cut_polyline_tolerance(
+                    &mut program,
+                    &loop_pts,
+                    op.feed,
+                    cut,
+                    z,
+                    tolerance,
+                );
                 crate::leads::emit_lead(
                     &mut program,
                     exit_on,
@@ -441,6 +599,7 @@ impl Strategy for ChamferStrategy {
 
 /// Open paths end at their last selected vertex and retract before each return.
 /// Side follows Profile: Outside offsets left, Inside offsets right.
+#[allow(clippy::too_many_arguments)]
 fn open_chamfer(
     op: &ChamferOp,
     env: &JobEnv,
@@ -448,6 +607,8 @@ fn open_chamfer(
     offset: f64,
     tan_a: f64,
     delta: f64,
+    width: f64,
+    tolerance: f64,
     mut diagnostics: Vec<Diagnostic>,
 ) -> StrategyResult {
     let points = match crate::profile::offset_open_chain(op.chain.points(), offset) {
@@ -484,7 +645,7 @@ fn open_chamfer(
     let entry = crate::leads::lead_start_point(start, tin, nin, op.lead_in);
     let exit = crate::leads::lead_end_point(end, tout, nout, op.lead_out);
     let mut program = Program::new();
-    for width in pass_widths(op.width, op.step, op.gradual) {
+    for width in pass_widths(width, op.step, op.gradual) {
         if cancel.is_cancelled() {
             return StrategyResult {
                 program,
@@ -521,12 +682,13 @@ fn open_chamfer(
             op.entry_feeds.lead_in(op.feed),
             Tag::new(op.id, MoveKind::LeadIn),
         );
-        crate::emit::cut_polyline(
+        crate::emit::cut_polyline_tolerance(
             &mut program,
             &points,
             op.feed,
             Tag::new(op.id, MoveKind::Cutting),
             z,
+            tolerance,
         );
         crate::leads::emit_lead(
             &mut program,
@@ -537,7 +699,7 @@ fn open_chamfer(
             op.lead_out,
             z,
             op.entry_feeds.lead_out(op.feed),
-            Tag::new(op.id, MoveKind::LeadIn),
+            Tag::new(op.id, MoveKind::LeadOut),
         );
         program.push(Step::Rapid {
             to: Point3::new(exit.x, exit.y, env.heights.clearance),
@@ -634,6 +796,8 @@ mod tests {
 
     fn op(width: f64) -> ChamferOp {
         ChamferOp {
+            parameter_expressions: Default::default(),
+            contour_roughing: Default::default(),
             tip_offset: 0.0,
             lead_in_enabled: None,
             same_lead_out: false,
@@ -681,6 +845,66 @@ mod tests {
             Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(to.z),
             _ => None,
         })
+    }
+
+    #[test]
+    fn contour_roughing_offsets_open_chamfers_and_retains_final_bevel() {
+        for (side, expected) in [
+            (Side::Outside, vec![2., 1., 0.]),
+            (Side::Inside, vec![-2., -1., 0.]),
+        ] {
+            let mut op = op(1.);
+            op.closed = false;
+            op.chain = Contour::new(vec![Point::new(0., 0.), Point::new(20., 0.)]);
+            op.side = side;
+            op.contour_roughing.enabled = true;
+            op.contour_roughing.stepovers = 2;
+            let result = run(op, chamfer_tool(90., 0.));
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let cuts: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(cuts.len(), 3);
+            for (cut, y) in cuts.iter().zip(expected) {
+                assert!((cut.y - y).abs() < 1e-8);
+                assert!((cut.z + 1.).abs() < 1e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn closed_chamfer_roughing_preserves_the_final_bevel() {
+        for side in [Side::Inside, Side::Outside] {
+            let mut op = op(1.);
+            op.side = side;
+            let baseline = run(op.clone(), chamfer_tool(90., 0.));
+            assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+            op.contour_roughing.enabled = true;
+            op.contour_roughing.stepovers = 2;
+            let rough = run(op, chamfer_tool(90., 0.));
+            assert!(!rough.has_errors(), "{:?}", rough.diagnostics);
+            assert!(rough.program.steps().len() > baseline.program.steps().len());
+            assert!(rough.program.steps().ends_with(baseline.program.steps()));
+        }
+    }
+
+    #[test]
+    fn contour_roughing_rejects_invalid_spacing_and_on_side() {
+        let mut op = op(1.);
+        op.contour_roughing.enabled = true;
+        op.contour_roughing.stepover = 0.;
+        let result = run(op.clone(), chamfer_tool(90., 0.));
+        assert!(result.has_errors() && result.program.steps().is_empty());
+        op.contour_roughing.stepover = 1.;
+        op.side = Side::On;
+        let result = run(op, chamfer_tool(90., 0.));
+        assert!(result.has_errors() && result.program.steps().is_empty());
     }
 
     #[test]
@@ -768,6 +992,82 @@ mod tests {
     }
 
     #[test]
+    fn modeled_face_roughing_offsets_each_band_toward_its_air_side() {
+        let mut operation = op(1.);
+        operation.side = Side::On; // Each modeled face supplies its own air direction.
+        operation.depth = 1.;
+        operation.stepdown = 0.5;
+        operation.faces = vec![
+            cam_model::ChamferFace {
+                upper: [[0., 0.], [20., 0.]],
+                lower: [[0., -1.], [20., -1.]],
+                top: 0.,
+                bottom: -1.,
+                outward: [0., -1.],
+            },
+            cam_model::ChamferFace {
+                upper: [[30., 20.], [30., 0.]],
+                lower: [[31., 20.], [31., 0.]],
+                top: 0.,
+                bottom: -1.,
+                outward: [1., 0.],
+            },
+        ];
+        let baseline = run(operation.clone(), chamfer_tool(90., 0.));
+        assert!(!baseline.has_errors(), "{:?}", baseline.diagnostics);
+        operation.contour_roughing.enabled = true;
+        operation.contour_roughing.stepovers = 2;
+        let result = run(operation, chamfer_tool(90., 0.));
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        result.program.validate().unwrap();
+        assert!(result.program.steps().ends_with(baseline.program.steps()));
+        let cuts: Vec<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cuts.len(), 12);
+        for (stage, extra) in [2., 1., 0.].into_iter().enumerate() {
+            let band = &cuts[stage * 4..stage * 4 + 4];
+            assert!((band[0].y + 0.5 + extra).abs() < 1e-8);
+            assert!((band[1].y + 1.0 + extra).abs() < 1e-8);
+            assert!((band[2].x - 30.5 - extra).abs() < 1e-8);
+            assert!((band[3].x - 31.0 - extra).abs() < 1e-8);
+            assert_eq!(
+                band.iter().map(|p| p.z).collect::<Vec<_>>(),
+                vec![-0.5, -1., -0.5, -1.]
+            );
+        }
+    }
+
+    #[test]
+    fn modeled_face_roughing_enforces_the_combined_band_budget() {
+        let mut operation = op(1.);
+        operation.depth = 1.;
+        operation.stepdown = 0.001;
+        operation.faces = vec![cam_model::ChamferFace {
+            upper: [[0., 0.], [20., 0.]],
+            lower: [[0., -1.], [20., -1.]],
+            top: 0.,
+            bottom: -1.,
+            outward: [0., -1.],
+        }];
+        operation.contour_roughing.enabled = true;
+        operation.contour_roughing.stepovers = 1000;
+        let result = run(operation, chamfer_tool(90., 0.));
+        assert!(result.has_errors());
+        assert!(result.program.is_empty());
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("resource budget")));
+    }
+
+    #[test]
     fn modeled_face_band_approaches_cut_stock_instead_of_colliding() {
         let mut operation = op(10.);
         operation.id = 9;
@@ -790,8 +1090,12 @@ mod tests {
             stock: Some(([-5., -15.], [25., 5.])),
             spindle: cam_cldata::SpindleDir::Cw,
         };
-        let result = ChamferStrategy::new(operation).compute(&env, &CancelToken::new());
+        let result = ChamferStrategy::new(operation.clone()).compute(&env, &CancelToken::new());
         assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        operation.contour_roughing.enabled = true;
+        operation.contour_roughing.stepovers = 2;
+        let rough_result = ChamferStrategy::new(operation).compute(&env, &CancelToken::new());
+        assert!(!rough_result.has_errors(), "{:?}", rough_result.diagnostics);
         let mut program = result.program;
         program.steps.insert(0, Step::ToolChange { tool: 1 });
         let simulate = |program: &Program| {
@@ -834,6 +1138,15 @@ mod tests {
         let simulation = simulate(&program);
         assert!(simulation.is_clean(), "{:?}", simulation.collisions);
         assert!(simulation.removed_volume > 0.);
+        let mut rough_program = rough_result.program;
+        rough_program.steps.insert(0, Step::ToolChange { tool: 1 });
+        let rough_simulation = simulate(&rough_program);
+        assert!(
+            rough_simulation.is_clean(),
+            "{:?}",
+            rough_simulation.collisions
+        );
+        assert!(rough_simulation.removed_volume > 0.);
     }
 
     #[test]
@@ -884,6 +1197,102 @@ mod tests {
                 2
             );
         }
+    }
+
+    fn radius_tool() -> Tool {
+        Tool {
+            number: 1,
+            diameter: 12.0,
+            length: 30.0,
+            flute_length: 12.0,
+            shank_diameter: 24.0,
+            flutes: 4,
+            kind: ToolKind::RadiusMill {
+                corner_radius: 6.0,
+                tip_length: 2.0,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn radius_mill_rounds_open_edge_with_correct_offsets_and_passes() {
+        for (side, y) in [(Side::Outside, 6.0), (Side::Inside, -6.0)] {
+            let mut operation = op(6.0);
+            operation.closed = false;
+            operation.chain = Contour::new(vec![Point::new(0.0, 0.0), Point::new(20.0, 0.0)]);
+            operation.side = side;
+            operation.step = 3.0;
+            let result = run(operation, radius_tool());
+            assert!(!result.has_errors(), "{:?}", result.diagnostics);
+            let cuts: Vec<_> = result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Cutting => Some(*to),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(cuts.len(), 2);
+            assert!((cuts[0].y - y).abs() < 1e-9 && (cuts[1].y - y).abs() < 1e-9);
+            assert!((cuts[0].z + 5.0).abs() < 1e-9);
+            assert!((cuts[1].z + 8.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn radius_mill_rejects_unsupported_settings_and_invalid_geometry() {
+        let mut operation = op(6.0);
+        operation.side = Side::On;
+        assert!(run(operation.clone(), radius_tool()).has_errors());
+        operation.side = Side::Outside;
+        operation.tip_offset = 1.0;
+        assert!(run(operation.clone(), radius_tool()).has_errors());
+        operation.tip_offset = 0.0;
+        let mut tool = radius_tool();
+        tool.flute_length = 7.0;
+        assert!(run(operation, tool).has_errors());
+    }
+
+    #[test]
+    fn open_radius_mill_exit_is_tagged_as_lead_out() {
+        let mut operation = op(6.0);
+        operation.closed = false;
+        operation.chain = Contour::new(vec![Point::new(0.0, 0.0), Point::new(20.0, 0.0)]);
+        operation.lead_out = Lead::Linear { length: 1.0 };
+        let result = run(operation, radius_tool());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(result.program.steps().iter().any(|step| matches!(step,
+            Step::Linear { tag, .. } if tag.kind == MoveKind::LeadOut)));
+        assert!(!result.program.steps().iter().any(|step| matches!(step,
+            Step::Linear { tag, .. } if tag.kind == MoveKind::LeadIn)));
+    }
+
+    #[test]
+    fn radius_mill_rejects_modeled_bevel_faces() {
+        let mut operation = op(6.0);
+        operation.faces = vec![cam_model::ChamferFace {
+            upper: [[0.0, 0.0], [20.0, 0.0]],
+            lower: [[0.0, -1.0], [20.0, -1.0]],
+            top: 0.0,
+            bottom: -1.0,
+            outward: [0.0, -1.0],
+        }];
+        let result = run(operation, radius_tool());
+        assert!(result.has_errors());
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("edge chain")));
+    }
+
+    #[test]
+    fn radius_mill_uses_tool_radius_even_when_chamfer_width_differs() {
+        let result = run(op(1.0), radius_tool());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!((cut_depth(&result.program).unwrap() + 8.0).abs() < 1e-9);
+        assert!(!result.diagnostics.is_empty());
     }
 
     /// A 90° mill (α=45°, tan=1) chamfers to a depth equal to the width.
@@ -1368,6 +1777,8 @@ mod tests {
             .filter(|d| d.severity == crate::Severity::Error)
             .collect();
         assert_eq!(errs.len(), 1, "{:?}", r.diagnostics);
-        assert!(errs[0].message.contains("chamfer mill or a V-bit"));
+        assert!(errs[0]
+            .message
+            .contains("chamfer mill, V-bit, or radius mill"));
     }
 }

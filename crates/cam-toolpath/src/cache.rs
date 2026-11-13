@@ -209,6 +209,7 @@ mod tests {
     use cam_model::DrillOp;
     fn operation(id: u32) -> Operation {
         Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             id,
             tool: 1,
             points: vec![[1., 1.]],
@@ -228,6 +229,7 @@ mod tests {
     #[test]
     fn persisted_adaptive_paths_with_outdated_safety_revisions_are_recomputed() {
         let adaptive = Operation::Adaptive(cam_model::AdaptiveOp {
+            parameter_expressions: Default::default(),
             id: 17,
             tool: 1,
             spindle_rpm: 1000.0,
@@ -278,6 +280,7 @@ mod tests {
     #[test]
     fn changed_resolved_cutting_heights_do_not_reuse_adaptive_fragments() {
         let adaptive = Operation::Adaptive(cam_model::AdaptiveOp {
+            parameter_expressions: Default::default(),
             id: 17,
             tool: 1,
             spindle_rpm: 1000.0,

@@ -3,8 +3,8 @@
 use super::*;
 use crate::jobs::{JobInputs, JobService};
 use crate::settings::{
-    SimulationPrefs, SimulationRotaryView, SimulationStockColoring, SimulationToolDisplay, SimulationToolpathColoring,
-    SimulationToolpathMode,
+    SimulationPrefs, SimulationRotaryView, SimulationStockColoring, SimulationToolDisplay,
+    SimulationToolpathColoring, SimulationToolpathMode,
 };
 use cam_cldata::{ArcDir, Point3, Program, Step};
 use iced::widget::column;
@@ -108,18 +108,30 @@ impl Timeline {
         let mut steps = Vec::with_capacity(expanded.len());
         let mut position = None;
         let mut duration = 0.;
-        let mut rotary_angle=0.;
+        let mut rotary_angle = 0.;
         let mut rotary_frame = None;
         for step in expanded {
-            if let Step::Rotary { axis, center, .. } = &step { rotary_frame = Some((*axis, *center)); }
+            if let Step::Rotary { axis, center, .. } = &step {
+                rotary_frame = Some((*axis, *center));
+            }
             let from = position;
-            let rotary_from=rotary_angle;
+            let rotary_from = rotary_angle;
             let seconds = match &step {
-                Step::Rotary {to,angle,length,feed,..}=>{
-                    position=Some(*to);rotary_angle = *angle;
-                    length/feed.unwrap_or(rapid_rate).max(1e-6)*60.
+                Step::Rotary {
+                    to,
+                    angle,
+                    length,
+                    feed,
+                    ..
+                } => {
+                    position = Some(*to);
+                    rotary_angle = *angle;
+                    length / feed.unwrap_or(rapid_rate).max(1e-6) * 60.
                 }
-                Step::Datum(_)=>{position=None;0.}
+                Step::Datum(_) => {
+                    position = None;
+                    0.
+                }
                 Step::Rapid { to, .. } => {
                     position = Some(*to);
                     from.map_or(0., |a| distance(a, *to) / rapid_rate.max(1.) * 60.)
@@ -170,10 +182,16 @@ impl Timeline {
                 let mut step = timed.step.clone();
                 if let Some(a) = timed.from {
                     match &mut step {
-                        Step::Rotary {to,angle,length,..}=>{
-                            *to=Point3::new(a.x+(to.x-a.x)*t,a.y+(to.y-a.y)*t,a.z+(to.z-a.z)*t);
-                            *angle=timed.rotary_from+(*angle-timed.rotary_from)*t;
-                            *length*=t;
+                        Step::Rotary {
+                            to, angle, length, ..
+                        } => {
+                            *to = Point3::new(
+                                a.x + (to.x - a.x) * t,
+                                a.y + (to.y - a.y) * t,
+                                a.z + (to.z - a.z) * t,
+                            );
+                            *angle = timed.rotary_from + (*angle - timed.rotary_from) * t;
+                            *length *= t;
                         }
                         Step::Rapid { to, .. } | Step::Linear { to, .. } => {
                             *to = Point3::new(
@@ -261,7 +279,8 @@ impl SimulationPlayer {
             .and_then(|id| {
                 timeline.steps.iter().find_map(|step| {
                     let tag = match &step.step {
-                        Step::Rotary {tag,..} | Step::Rapid { tag, .. }
+                        Step::Rotary { tag, .. }
+                        | Step::Rapid { tag, .. }
                         | Step::Linear { tag, .. }
                         | Step::Arc { tag, .. } => Some(tag),
                         _ => None,
@@ -369,7 +388,10 @@ impl SimulationPlayer {
             .filter(|step| {
                 matches!(
                     &step.step,
-                    Step::Rotary {..} | Step::Rapid { .. } | Step::Linear { .. } | Step::Arc { .. }
+                    Step::Rotary { .. }
+                        | Step::Rapid { .. }
+                        | Step::Linear { .. }
+                        | Step::Arc { .. }
                 )
             })
             .map(|step| if forward { step.end } else { step.start })
@@ -392,9 +414,10 @@ impl SimulationPlayer {
         let mut operations: Vec<(u32, f64)> = Vec::new();
         for step in &self.timeline.steps {
             let op_id = match &step.step {
-                Step::Rotary {tag,..} | Step::Rapid { tag, .. } | Step::Linear { tag, .. } | Step::Arc { tag, .. } => {
-                    Some(tag.op_id)
-                }
+                Step::Rotary { tag, .. }
+                | Step::Rapid { tag, .. }
+                | Step::Linear { tag, .. }
+                | Step::Arc { tag, .. } => Some(tag.op_id),
                 _ => None,
             };
             if let Some(id) = op_id {
@@ -440,11 +463,16 @@ impl SimulationPlayer {
             } else {
                 self.playing = false;
                 self.rendered = self.requested;
-                let reason = result.outcome.diagnostics.iter()
+                let reason = result
+                    .outcome
+                    .diagnostics
+                    .iter()
                     .find(|diagnostic| diagnostic.severity == cam_toolpath::Severity::Error)
                     .map(|diagnostic| diagnostic.message.as_str())
                     .unwrap_or("Unknown error");
-                self.error = Some(format!("Simulation preview failed: {reason}. Seek again to retry."));
+                self.error = Some(format!(
+                    "Simulation preview failed: {reason}. Seek again to retry."
+                ));
             }
         }
         if let Some(classes) = self.comparison.poll() {
@@ -569,10 +597,20 @@ impl SimulationPlayer {
             || self.comparison.pending()
     }
     pub(super) fn rotary_pose(&self) -> Option<(cam_cldata::RotaryAxis, Point3, f64)> {
-        self.preview.program.steps.iter().rev().find_map(|step| match step {
-            Step::Rotary { axis, center, angle, .. } => Some((*axis, *center, *angle)),
-            _ => None,
-        })
+        self.preview
+            .program
+            .steps
+            .iter()
+            .rev()
+            .find_map(|step| match step {
+                Step::Rotary {
+                    axis,
+                    center,
+                    angle,
+                    ..
+                } => Some((*axis, *center, *angle)),
+                _ => None,
+            })
     }
 
     /// Follow the rendered frame, including its active tool, when seeking in
@@ -583,7 +621,7 @@ impl SimulationPlayer {
         }
         let program = &self.preview.program;
         let tip = program.steps.iter().rev().find_map(|step| match step {
-            Step::Rotary {to,..} | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+            Step::Rotary { to, .. } | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
             Step::Arc { end, .. } => Some(*end),
             _ => None,
         });
@@ -593,7 +631,8 @@ impl SimulationPlayer {
         });
         let setup = self.inputs.document.setup();
         let rotary = (self.options.rotary_view == SimulationRotaryView::FixedStock)
-            .then(|| self.rotary_pose()).flatten();
+            .then(|| self.rotary_pose())
+            .flatten();
         let tool = setup.tools.iter().find(|tool| Some(tool.number) == number);
         let (Some(tip), Some(tool)) = (tip, tool) else {
             return (vec![], vec![]);
@@ -647,20 +686,27 @@ impl SimulationPlayer {
             if self.options.transparent_tool {
                 vertex.color[3] = 0.3;
             }
-            let mut point=Point3::new(
-                    tip.x + vertex.position[0] as f64,
-                    tip.y + vertex.position[1] as f64,
-                    tip.z + vertex.position[2] as f64,
-                );
-            let mut normal=Point3::new(vertex.normal[0] as f64,vertex.normal[1] as f64,vertex.normal[2] as f64);
-            if let Some((axis,center,angle))=rotary {
-                point=axis.material_point(point,center,angle);
-                normal=axis.material_point(normal,Point3::new(0.,0.,0.),angle);
+            let mut point = Point3::new(
+                tip.x + vertex.position[0] as f64,
+                tip.y + vertex.position[1] as f64,
+                tip.z + vertex.position[2] as f64,
+            );
+            let mut normal = Point3::new(
+                vertex.normal[0] as f64,
+                vertex.normal[1] as f64,
+                vertex.normal[2] as f64,
+            );
+            if let Some((axis, center, angle)) = rotary {
+                point = axis.material_point(point, center, angle);
+                normal = axis.material_point(normal, Point3::new(0., 0., 0.), angle);
             }
-            vertex.position=setup.frame.to_world_vector([point.x,point.y,point.z]).map(|v|v as f32);
+            vertex.position = setup
+                .frame
+                .to_world_vector([point.x, point.y, point.z])
+                .map(|v| v as f32);
             vertex.normal = setup
                 .frame
-                .to_world_vector([normal.x,normal.y,normal.z])
+                .to_world_vector([normal.x, normal.y, normal.z])
                 .map(|v| v as f32);
         }
         (vertices, indices)
@@ -1158,6 +1204,7 @@ mod tests {
             }
         });
         controller.add_operation(Operation::Drill(cam_model::DrillOp {
+            parameter_expressions: Default::default(),
             id: 0,
             tool: 1,
             points: vec![[4., 4.]],
@@ -1449,7 +1496,11 @@ mod tests {
         // Direct cutting entries have main-path markers even without leads.
         // Hiding leads must not remove markers for the visible cutting moves.
         assert_eq!(
-            player.preview.scene.path_cones.iter()
+            player
+                .preview
+                .scene
+                .path_cones
+                .iter()
                 .map(|cone| (cone.op, cone.at, cone.color))
                 .collect::<Vec<_>>(),
             vec![
@@ -1474,6 +1525,77 @@ mod tests {
         assert!(player.preview.scene.strips.is_empty());
         assert!(player.preview.scene.path_cones.is_empty());
     }
+    #[test]
+    fn continuous_arc_playback_has_only_actual_entry_and_exit_markers() {
+        let tag = Tag::new(7, MoveKind::Cutting);
+        let with_kind = |kind| Tag { kind, ..tag };
+        let program = Program {
+            steps: vec![
+                Step::Rapid {
+                    to: Point3::new(1., 0., 5.),
+                    tag: with_kind(MoveKind::Link),
+                },
+                Step::Linear {
+                    to: Point3::new(1., 0., 0.),
+                    feed: 60.,
+                    tag: with_kind(MoveKind::Plunge),
+                },
+                Step::Arc {
+                    end: Point3::new(0., 1., 0.),
+                    center: Point3::new(0., 0., 0.),
+                    dir: ArcDir::Ccw,
+                    feed: 60.,
+                    tag,
+                },
+                Step::Arc {
+                    end: Point3::new(-1., 0., 0.),
+                    center: Point3::new(0., 0., 0.),
+                    dir: ArcDir::Ccw,
+                    feed: 60.,
+                    tag,
+                },
+                Step::Arc {
+                    end: Point3::new(0., -1., 0.),
+                    center: Point3::new(0., 0., 0.),
+                    dir: ArcDir::Ccw,
+                    feed: 60.,
+                    tag,
+                },
+                Step::Arc {
+                    end: Point3::new(1., 0., 0.),
+                    center: Point3::new(0., 0., 0.),
+                    dir: ArcDir::Ccw,
+                    feed: 60.,
+                    tag,
+                },
+                Step::Rapid {
+                    to: Point3::new(1., 0., 5.),
+                    tag: with_kind(MoveKind::Retract),
+                },
+            ],
+        };
+        let mut player = display_player(0.);
+        player.timeline = Timeline::new(&program, 60.).unwrap();
+        player.rendered = player.timeline.duration;
+        player.options.toolpath_mode = SimulationToolpathMode::All;
+        player.options.show_links = true;
+        player.options.show_leads = true;
+        player.options.show_cutting = true;
+        player.refresh_display();
+        let cones = &player.preview.scene.path_cones;
+        assert_eq!(
+            cones.len(),
+            2,
+            "continuous path produced spurious arrows: {cones:?}"
+        );
+        assert_eq!(
+            (cones[0].color, cones[1].color),
+            (cam_render::PATH_IN, cam_render::PATH_OUT)
+        );
+        assert_eq!(cones[0].direction, [0., 0., -1.]);
+        assert_eq!(cones[1].direction, [0., 0., 1.]);
+    }
+
     #[test]
     fn leading_and_trailing_arc_paths_meet_at_the_helical_tip() {
         let mut player = display_player(0.);
@@ -1791,14 +1913,39 @@ mod tests {
         let tag = Tag::new(7, MoveKind::Cutting);
         let start = Point3::new(0., 0., 10.);
         let end = Point3::new(5., 0., 10.);
-        let program = Program { steps: vec![
-            Step::ToolChange { tool: 2 },
-            Step::Rapid { to: start, tag: Tag { kind: MoveKind::Traverse, ..tag } },
-            Step::Rotary { to: start, angle: 90., axis: cam_cldata::RotaryAxis::A,
-                center: Point3::new(0., 0., 0.), feed: None, length: 15., tag: Tag { kind: MoveKind::Traverse, ..tag } },
-            Step::Rotary { to: end, angle: 90., axis: cam_cldata::RotaryAxis::A,
-                center: Point3::new(0., 0., 0.), feed: Some(60.), length: 5., tag },
-        ]};
+        let program = Program {
+            steps: vec![
+                Step::ToolChange { tool: 2 },
+                Step::Rapid {
+                    to: start,
+                    tag: Tag {
+                        kind: MoveKind::Traverse,
+                        ..tag
+                    },
+                },
+                Step::Rotary {
+                    to: start,
+                    angle: 90.,
+                    axis: cam_cldata::RotaryAxis::A,
+                    center: Point3::new(0., 0., 0.),
+                    feed: None,
+                    length: 15.,
+                    tag: Tag {
+                        kind: MoveKind::Traverse,
+                        ..tag
+                    },
+                },
+                Step::Rotary {
+                    to: end,
+                    angle: 90.,
+                    axis: cam_cldata::RotaryAxis::A,
+                    center: Point3::new(0., 0., 0.),
+                    feed: Some(60.),
+                    length: 5.,
+                    tag,
+                },
+            ],
+        };
         let mut player = collision_player();
         player.timeline = Timeline::new(&program, 60.).unwrap();
         player.rendered = player.timeline.duration;
@@ -1806,7 +1953,13 @@ mod tests {
         player.options.show_links = false;
         player.options.toolpath_mode = SimulationToolpathMode::All;
         player.refresh_display();
-        let cutting: Vec<_> = player.preview.scene.strips.iter().filter(|s| s.op == Some(7)).collect();
+        let cutting: Vec<_> = player
+            .preview
+            .scene
+            .strips
+            .iter()
+            .filter(|s| s.op == Some(7))
+            .collect();
         assert!(!cutting.is_empty());
         for point in cutting.iter().flat_map(|s| &s.points) {
             assert!((point[1] - 10.).abs() < 1e-4, "{point:?}");
@@ -1819,8 +1972,14 @@ mod tests {
         let (machine_tool, _) = player.tool_mesh();
         let machine_tip = machine_tool[0].position;
         let mapped = cam_cldata::RotaryAxis::A.material_point(
-            Point3::new(fixed_tip[0] as f64, fixed_tip[1] as f64, fixed_tip[2] as f64),
-            Point3::new(0., 0., 0.), -90.);
+            Point3::new(
+                fixed_tip[0] as f64,
+                fixed_tip[1] as f64,
+                fixed_tip[2] as f64,
+            ),
+            Point3::new(0., 0., 0.),
+            -90.,
+        );
         assert!((machine_tip[0] - mapped.x as f32).abs() < 1e-4);
         assert!((machine_tip[1] - mapped.y as f32).abs() < 1e-4);
         assert!((machine_tip[2] - mapped.z as f32).abs() < 1e-4);
@@ -1829,22 +1988,53 @@ mod tests {
     #[test]
     fn indexed_operation_can_simulate_from_start_through_end() {
         let mut controller = AppController::new(crate::default_machine());
-        controller.edit_stock(|stock| *stock = cam_model::Stock::FixedBox {
-            size: [8., 8., 4.], model_position: [0.; 3],
+        controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::FixedBox {
+                size: [8., 8., 4.],
+                model_position: [0.; 3],
+            }
         });
         controller.add_operation(Operation::Drill(cam_model::DrillOp {
-            id: 0, tool: 1, points: vec![[2., 2.]], depth: 2., start_offset: 0.,
-            peck: None, dwell: None, spindle_rpm: 1000., tool_preset: None,
-            cooling: Default::default(), entry_feeds: Default::default(), work_offset: 1, feed: 100.,
+            parameter_expressions: Default::default(),
+            id: 0,
+            tool: 1,
+            points: vec![[2., 2.]],
+            depth: 2.,
+            start_offset: 0.,
+            peck: None,
+            dwell: None,
+            spindle_rpm: 1000.,
+            tool_preset: None,
+            cooling: Default::default(),
+            entry_feeds: Default::default(),
+            work_offset: 1,
+            feed: 100.,
         }));
-        controller.set_operation_rotary_index(0, Some(cam_model::RotaryIndex {
-            axis: cam_cldata::RotaryAxis::B, angle: 90., center: [4., 4., 2.], ..Default::default()
-        })).unwrap();
+        controller
+            .set_operation_rotary_index(
+                0,
+                Some(cam_model::RotaryIndex {
+                    axis: cam_cldata::RotaryAxis::B,
+                    angle: 90.,
+                    center: [4., 4., 2.],
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
         controller.start_run();
         let deadline = Instant::now() + std::time::Duration::from_secs(30);
-        while controller.run_needs_poll() { controller.poll_run(); assert!(Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(1)); }
+        while controller.run_needs_poll() {
+            controller.poll_run();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let outcome = controller.outcome().unwrap();
-        assert_eq!(outcome.completion, JobCompletion::Complete, "{:?}", outcome.diagnostics);
+        assert_eq!(
+            outcome.completion,
+            JobCompletion::Complete,
+            "{:?}",
+            outcome.diagnostics
+        );
         let mut player = SimulationPlayer::new_for_operation(&controller, Some(0)).unwrap();
         drain_player(&mut player);
         assert!(player.error.is_none(), "{:?}", player.error);
@@ -1856,7 +2046,11 @@ mod tests {
         assert!(!player.preview.stock_indices.is_empty());
         let (axis, center, angle) = player.rotary_pose().unwrap();
         let first = player.preview.stock_vertices[0].position;
-        let expected = axis.material_point(Point3::new(first[0] as f64, first[1] as f64, first[2] as f64), center, -angle);
+        let expected = axis.material_point(
+            Point3::new(first[0] as f64, first[1] as f64, first[2] as f64),
+            center,
+            -angle,
+        );
         let (mut app, _) = App::new();
         app.settings = crate::Settings::default();
         app.controller = controller;
@@ -1866,39 +2060,73 @@ mod tests {
         app.simulation = Some(player);
         let fixed = app.machining_viewport();
         assert_eq!(fixed.mesh_vertices[0].position, first);
-        let _ = app.update(Message::SimulationOption(SimulationOption::RotaryView(SimulationRotaryView::RotatingStock)));
+        let _ = app.update(Message::SimulationOption(SimulationOption::RotaryView(
+            SimulationRotaryView::RotatingStock,
+        )));
         let rotating = app.machining_viewport();
-        for (actual, target) in rotating.mesh_vertices[0].position.iter().zip([expected.x, expected.y, expected.z]) {
+        for (actual, target) in rotating.mesh_vertices[0]
+            .position
+            .iter()
+            .zip([expected.x, expected.y, expected.z])
+        {
             assert!((f64::from(*actual) - target).abs() < 1e-4);
         }
     }
 
     #[test]
     fn rotary_playback_interpolates_the_angle_and_material_path_duration() {
-        let tag=cam_cldata::Tag::new(0,cam_cldata::MoveKind::Cutting);
-        let to=Point3::new(0.,0.,20.);
-        let length=10.*std::f64::consts::PI;
-        let program=Program {steps:vec![
-            Step::Rapid{to,tag},
-            Step::Rotary{to,angle:0.,axis:cam_cldata::RotaryAxis::A,center:Point3::new(0.,0.,0.),feed:None,length:0.,tag},
-            Step::Rotary{to,angle:90.,axis:cam_cldata::RotaryAxis::A,center:Point3::new(0.,0.,0.),feed:Some(60.),length,tag},
-        ]};
-        let timeline=Timeline::new(&program,1000.).unwrap();
-        assert!((timeline.duration-length).abs()<1e-9);
-        let prefix=timeline.prefix(length*0.5);
-        assert!(matches!(prefix.steps.last(),Some(Step::Rotary{angle,length:d,..}) if (*angle-45.).abs()<1e-9 && (*d-length*0.5).abs()<1e-9));
-        let material=prefix.rotary_backplot();
-        let Step::Linear{to,..}=material.steps.last().unwrap() else {panic!()};
-        assert!((to.y-10.*2_f64.sqrt()).abs()<1e-9 && (to.z-to.y).abs()<1e-9);
+        let tag = cam_cldata::Tag::new(0, cam_cldata::MoveKind::Cutting);
+        let to = Point3::new(0., 0., 20.);
+        let length = 10. * std::f64::consts::PI;
+        let program = Program {
+            steps: vec![
+                Step::Rapid { to, tag },
+                Step::Rotary {
+                    to,
+                    angle: 0.,
+                    axis: cam_cldata::RotaryAxis::A,
+                    center: Point3::new(0., 0., 0.),
+                    feed: None,
+                    length: 0.,
+                    tag,
+                },
+                Step::Rotary {
+                    to,
+                    angle: 90.,
+                    axis: cam_cldata::RotaryAxis::A,
+                    center: Point3::new(0., 0., 0.),
+                    feed: Some(60.),
+                    length,
+                    tag,
+                },
+            ],
+        };
+        let timeline = Timeline::new(&program, 1000.).unwrap();
+        assert!((timeline.duration - length).abs() < 1e-9);
+        let prefix = timeline.prefix(length * 0.5);
+        assert!(
+            matches!(prefix.steps.last(),Some(Step::Rotary{angle,length:d,..}) if (*angle-45.).abs()<1e-9 && (*d-length*0.5).abs()<1e-9)
+        );
+        let material = prefix.rotary_backplot();
+        let Step::Linear { to, .. } = material.steps.last().unwrap() else {
+            panic!()
+        };
+        assert!((to.y - 10. * 2_f64.sqrt()).abs() < 1e-9 && (to.z - to.y).abs() < 1e-9);
         let mut player = collision_player();
         player.timeline = timeline;
         player.options.toolpath_mode = SimulationToolpathMode::Trailing;
         player.rendered = length * 0.5;
         player.preview.program = prefix;
         player.refresh_display();
-        let last = player.preview.scene.strips.iter().flat_map(|strip| &strip.points).last().unwrap();
+        let last = player
+            .preview
+            .scene
+            .strips
+            .iter()
+            .flat_map(|strip| &strip.points)
+            .last()
+            .unwrap();
         assert!((f64::from(last[1]) - to.y).abs() < 1e-4);
         assert!((f64::from(last[2]) - to.z).abs() < 1e-4);
     }
-
 }

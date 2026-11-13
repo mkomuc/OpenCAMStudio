@@ -23,12 +23,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 fields.push(Field::Stepover);
                 fields.push(Field::Engagement);
             }
-            fields.extend([
-                Field::ProfileOffset,
-                Field::SpindleRpm,
-                Field::Feed,
-                Field::PlungeFeed,
-            ]);
+            fields.extend([Field::SpindleRpm, Field::Feed, Field::PlungeFeed]);
             if p.tabs.enabled {
                 fields.extend([Field::TabWidth, Field::TabHeight]);
                 if !p.tabs.manual && p.tabs.count.is_none() {
@@ -61,9 +56,8 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 Field::LiftHeight,
                 Field::Depth,
                 Field::Stepdown,
-                Field::Overlap,
+                Field::PocketOverlap,
                 Field::Engagement,
-                Field::ProfileOffset,
                 Field::SpindleRpm,
                 Field::Feed,
                 Field::PlungeFeed,
@@ -92,7 +86,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             Field::FaceStartOffset,
             Field::Depth,
             Field::Stepdown,
-            Field::Overlap,
+            Field::FaceOverlap,
             Field::FaceOvershoot,
             Field::SpindleRpm,
             Field::Feed,
@@ -316,6 +310,23 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
     if super::operation_tabs::operation_start(op).is_some() {
         fields.extend([Field::StartX, Field::StartY]);
     }
-    if op.rotary_wrap().is_some() {fields.extend(rotary_view::Number::ALL.into_iter().filter(|n|*n==rotary_view::Number::Offset).map(Field::Wrap));}
+    if op.rotary_wrap().is_some() {
+        fields.extend(
+            rotary_view::Number::ALL
+                .into_iter()
+                .filter(|n| *n == rotary_view::Number::Offset)
+                .map(Field::Wrap),
+        );
+    }
+    if matches!(op, Operation::Profile(p) if p.passes.contour_roughing.enabled)
+        || matches!(op, Operation::Chamfer(c) if c.contour_roughing.enabled)
+    {
+        fields.extend([
+            Field::ContourRoughStepover,
+            Field::ContourRoughSmoothing,
+            Field::ContourRoughCount,
+        ]);
+    }
+
     fields
 }

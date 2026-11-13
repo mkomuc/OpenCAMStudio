@@ -97,8 +97,11 @@ pub(crate) fn emit(
     dialect: &Dialect,
 ) -> Result<String, PostError> {
     crate::validate::preflight(program, machine, options)?;
-    if program.has_rotary_motion() && !matches!(dialect.name,"LinuxCNC"|"Fanuc"|"Haas") {
-        return Err(PostError::Unsupported(format!("{} does not support rotary wrap output; choose LinuxCNC, Fanuc or Haas",dialect.name)));
+    if program.has_rotary_motion() && !matches!(dialect.name, "LinuxCNC" | "Fanuc" | "Haas") {
+        return Err(PostError::Unsupported(format!(
+            "{} does not support rotary wrap output; choose LinuxCNC, Fanuc or Haas",
+            dialect.name
+        )));
     }
     let mut w = Writer::new(machine, options.precision);
 
@@ -130,7 +133,14 @@ pub(crate) fn emit(
 
     for (step_index, step) in program.steps().iter().enumerate() {
         match step {
-            Step::Rotary {to,angle,axis,feed,length,..} => w.rotary(*to,*angle,*axis,*feed,*length)?,
+            Step::Rotary {
+                to,
+                angle,
+                axis,
+                feed,
+                length,
+                ..
+            } => w.rotary(*to, *angle, *axis, *feed, *length)?,
             Step::Comment(text) => {
                 let text = sanitize(text);
                 if header_dedupe {

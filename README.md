@@ -19,12 +19,15 @@ A CAM application for CNC toolpath generation, built in Rust.
 
 ## What works
 
-- **Operations** — profile, pocket, drill, face, chamfer, **thread milling**,
+- **Operations** — profile, pocket, drill, bore, face, chamfer, **thread milling**,
   **V-carve engraving** and **V-carving**; leads and ramp/helix plunges;
   engagement-capped area clearing (adaptive front-advance where it certifies,
   concentric otherwise). Pocket operations offer optional finishing passes with
   separate radial stepover and feed, leads, a repeat pass and closure overlap;
-  cutter compensation is computed in the toolpath.
+  cutter compensation is computed in the toolpath. Profile and chamfer operations
+  also support contour roughing passes; milling operations offer multiple-depth
+  controls for staged cutting. See [Profile milling](docs/profile-operation.md)
+  and [operation compatibility](docs/operation-compatibility.md).
 - **Pocket stock contours** — setup-stock or selected closed footprints for
   open-pocket and 2D adaptive clearing, with cutter runout and protected islands.
   See [selection and behavior](docs/pocket-stock-contours.md).
@@ -39,11 +42,11 @@ A CAM application for CNC toolpath generation, built in Rust.
 - **Stock to Leave** — shared radial and axial finishing allowances for Profile,
   Pocket, 3D Adaptive Clearing and 3D Parallel; axial allowance for Face. Disabled settings
   preserve existing toolpaths.
-- **Fourth-axis wrap milling** — cylindrical Profile, Pocket and 2D adaptive
-  toolpaths with CAD cylinder/boundary selection, continuous A/B motion, rotary
-  backplot/playback and inverse-time LinuxCNC/Fanuc/Haas output. Cylindrical
-  stock-removal and collision simulation remain unavailable; see
-  [workflow and limits](docs/rotary-wrap.md).
+- **Fourth-axis machining** — wrap Profile, Pocket and 2D adaptive toolpaths
+  around a cylinder, or use indexed 3+1 machining with ordinary operations.
+  Wrap supports CAD cylinder/boundary selection, continuous A/B motion and
+  inverse-time LinuxCNC/Fanuc/Haas output. Rotary and mixed jobs support stock
+  removal, collision checks and playback; see the [workflow and limits](docs/rotary-wrap.md).
 - **V-carving** — the boundary outlines an *area*, not a path: the tool never
   touches it, its flanks land on it, and the depth follows from the shape's own
   width. Built on **inward offset rings, not a medial axis** — the ring at inward
@@ -79,8 +82,14 @@ A CAM application for CNC toolpath generation, built in Rust.
   for general path operations. [Material-linked cutting presets](docs/tool-presets.md)
   automatically seed operations from a shared stock-material list; each operation
   can select another preset or override its cutting values.
-- **Setup** — workpiece origin (datum) + program start point; part-relative
-  stock; first-class clearance/retract heights.
+- **Setup and patterns** — multiple setups with independent work coordinates,
+  stock, fixtures and NC programs; inherit remaining stock between machining
+  sides. Repeat compatible operations in linear or circular patterns. See
+  [setups](docs/multi-setup.md) and [operation patterns](docs/operation-patterns.md).
+- **Parameter formulas** — enter expressions using tool dimensions and operation
+  parameters in numeric machining fields, with autocomplete and retained bindings.
+  Display precision does not change calculated values. See [numeric parameter
+  formulas](docs/parameter-expressions.md).
 - **Verify** — heightfield material-removal simulation with gouge,
   rapid-through-stock and non-cutting feed/tip collision detection. Playback pauses
   at stock contact with the cutter highlighted red. Checks are **profile-aware**:
@@ -94,12 +103,15 @@ A CAM application for CNC toolpath generation, built in Rust.
   supported and expanded where not. Estlcam includes configurable coolant/MMS
   outputs; see [Estlcam setup](docs/estlcam.md).
 - **Shell** — a `wgpu` viewport (backplot, solid stock, orientation cube) in an
-  `iced` desktop GUI. Hover over a setup or operation status indicator for its
+  `iced` desktop GUI, with measurements shown in the 3D view. Hover over a setup or operation status indicator for its
   current state; click an indicator with warnings or errors to read the details.
   Toolpath diagnostics do not open dialogs automatically.
 - **CPU acceleration** — multicore Parallel/Scallop surface calculation, stock
   mesh tiles and stock-to-CAD comparison; portable double-precision SIMD uses
   Apple Silicon NEON or x86-64 SSE2. See [performance controls and benchmarks](docs/performance.md).
+- **Planning and automation** — estimate [processing time](docs/processing-time.md)
+  and [cutting forces](docs/cutting-forces.md), or control the application through
+  [MCP commands](docs/mcp.md) in a headless or visible session.
 
 See the [user guides](docs/README.md) for workflows and limits,
 [ARCHITECTURE.md](ARCHITECTURE.md) for a brief overview and [ROADMAP.md](ROADMAP.md)
@@ -196,7 +208,7 @@ state; display meshes rebuild when opened. Legacy JSON projects still open and
 convert on save. Tool libraries remain JSON. See the [project cache policy](docs/project-cache-policy.md)
 for format details and measurements. New project archives require an updated build.
 
-build the distributiable app
+Run the GUI with a local OCCT installation on macOS:
 ```bash
 OCCT_ROOT="$PWD/.local/occt" \
 DYLD_LIBRARY_PATH="$PWD/.local/occt/lib" \

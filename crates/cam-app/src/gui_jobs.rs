@@ -36,11 +36,16 @@ impl App {
             }
             JobPhase::Verification if progress.total > 0 => format!(
                 "Verifying toolpaths{} · {:.0}%",
-                if self.controller.run_preview().is_some() { " · preview is unverified" } else { "" },
+                if self.controller.run_preview().is_some() {
+                    " · preview is unverified"
+                } else {
+                    ""
+                },
                 (progress.completed as f64 / progress.total as f64).clamp(0.0, 1.0) * 100.0
             ),
-            JobPhase::Verification if self.controller.run_preview().is_some() =>
-                "Verifying toolpaths · preview is unverified…".into(),
+            JobPhase::Verification if self.controller.run_preview().is_some() => {
+                "Verifying toolpaths · preview is unverified…".into()
+            }
             JobPhase::Verification => "Verifying toolpaths…".into(),
             JobPhase::RenderPreparation => "Preparing preview…".into(),
         };
@@ -333,6 +338,7 @@ mod tests {
             app.end_setup_draft();
             app.controller
                 .add_operation(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool: 1,
                     points: vec![[10., 10.]],
@@ -373,12 +379,22 @@ mod tests {
         let (mut app, _) = App::new();
         app.library.tools.clear();
         app.open_project(&path).unwrap();
-        assert!(!app.controller.run_needs_poll(), "saved verification must not start a worker");
-        assert_eq!(app.controller.outcome().unwrap().program, source.outcome().unwrap().program);
-        assert_eq!(app.controller.outcome().unwrap().collisions, source.outcome().unwrap().collisions);
+        assert!(
+            !app.controller.run_needs_poll(),
+            "saved verification must not start a worker"
+        );
+        assert_eq!(
+            app.controller.outcome().unwrap().program,
+            source.outcome().unwrap().program
+        );
+        assert_eq!(
+            app.controller.outcome().unwrap().collisions,
+            source.outcome().unwrap().collisions
+        );
 
         let mut legacy: serde_json::Value =
-            serde_json::from_str(&crate::OcamFile::read(&path).unwrap().to_json().unwrap()).unwrap();
+            serde_json::from_str(&crate::OcamFile::read(&path).unwrap().to_json().unwrap())
+                .unwrap();
         legacy.as_object_mut().unwrap().remove("toolpaths");
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         app.open_project(&path).unwrap();

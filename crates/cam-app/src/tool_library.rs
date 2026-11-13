@@ -701,6 +701,7 @@ pub enum ToolKindPick {
     RoughingMill,
     BallMill,
     BullNose,
+    RadiusMill,
     ChamferMill,
     Drill,
     FaceMill,
@@ -709,11 +710,12 @@ pub enum ToolKindPick {
 }
 
 impl ToolKindPick {
-    pub const ALL: [ToolKindPick; 9] = [
+    pub const ALL: [ToolKindPick; 10] = [
         ToolKindPick::EndMill,
         ToolKindPick::RoughingMill,
         ToolKindPick::BallMill,
         ToolKindPick::BullNose,
+        ToolKindPick::RadiusMill,
         ToolKindPick::ChamferMill,
         ToolKindPick::Drill,
         ToolKindPick::FaceMill,
@@ -727,6 +729,7 @@ impl ToolKindPick {
             ToolKind::RoughingMill => ToolKindPick::RoughingMill,
             ToolKind::BallMill => ToolKindPick::BallMill,
             ToolKind::BullNose { .. } => ToolKindPick::BullNose,
+            ToolKind::RadiusMill { .. } => ToolKindPick::RadiusMill,
             ToolKind::ChamferMill { .. } => ToolKindPick::ChamferMill,
             ToolKind::Drill { .. } => ToolKindPick::Drill,
             ToolKind::FaceMill => ToolKindPick::FaceMill,
@@ -742,6 +745,10 @@ impl ToolKindPick {
             ToolKindPick::RoughingMill => ToolKind::RoughingMill,
             ToolKindPick::BallMill => ToolKind::BallMill,
             ToolKindPick::BullNose => ToolKind::BullNose { corner_radius: 1.0 },
+            ToolKindPick::RadiusMill => ToolKind::RadiusMill {
+                corner_radius: 1.0,
+                tip_length: 0.0,
+            },
             // A chamfer mill is always ground with a flat tip; 0 would make it a
             // V-bit. 0.2 mm is a typical small flat.
             ToolKindPick::ChamferMill => ToolKind::ChamferMill {
@@ -776,11 +783,21 @@ pub fn families_for(kind: OpKind) -> &'static [ToolKindPick] {
         | OpKind::Drill
         | OpKind::Bore
         | OpKind::Adaptive
-        | OpKind::Engrave => &F::ALL,
+        | OpKind::Engrave => &[
+            F::EndMill,
+            F::RoughingMill,
+            F::BallMill,
+            F::BullNose,
+            F::ChamferMill,
+            F::Drill,
+            F::FaceMill,
+            F::ThreadMill,
+            F::VBit,
+        ],
         OpKind::Parallel => &[F::BallMill],
         OpKind::Thread => &[F::ThreadMill],
         // A chamfer is cut by the flank, which both of these have.
-        OpKind::Chamfer => &[F::ChamferMill, F::VBit],
+        OpKind::Chamfer => &[F::ChamferMill, F::VBit, F::RadiusMill],
         // Variable-width carving derives its path from the cutter's cone.
         OpKind::Carve => &[F::VBit],
     }

@@ -254,22 +254,62 @@ fn select_all_models(app: &mut AppController) {
 
 #[test]
 fn indexed_cad_resolves_side_faces_in_the_machine_frame_and_invalidates_paths() {
-    let (state,face)=pocket();
-    let mut app=controller();
-    app.add_cad_asset(state.assets[0].clone(),state.instances).unwrap();
+    let (state, face) = pocket();
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
     select_all_models(&mut app);
-    let id=app.create_cad_operation(OpKind::Pocket,vec![face]).unwrap();
-    app.place_cad_instance(1,RigidTransform{rotation:[[1.,0.,0.],[0.,0.,1.],[0.,-1.,0.]],translation:[0.;3]}).unwrap();
-    app.set_operation_rotary_index(id,Some(RotaryIndex{angle:90.,..Default::default()})).unwrap();
-    app.edit_stock(|s|*s=Stock::FixedBox{size:[22.,7.,22.],model_position:[0.5;3]});
-    app.edit_tool(0,|t|{t.flute_length=30.;t.length=30.;});
-    let result=app.run(&CancelToken::new());
-    assert_eq!(result.completion,JobCompletion::Complete,"{:?}",result.diagnostics);
-    assert!(result.program.steps().iter().any(|s|matches!(s,cam_cldata::Step::Rotary{feed:Some(_),angle,..} if (*angle-90.).abs()<1e-9)));
+    let id = app
+        .create_cad_operation(OpKind::Pocket, vec![face])
+        .unwrap();
+    app.place_cad_instance(
+        1,
+        RigidTransform {
+            rotation: [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]],
+            translation: [0.; 3],
+        },
+    )
+    .unwrap();
+    app.set_operation_rotary_index(
+        id,
+        Some(RotaryIndex {
+            angle: 90.,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    app.edit_stock(|s| {
+        *s = Stock::FixedBox {
+            size: [22., 7., 22.],
+            model_position: [0.5; 3],
+        }
+    });
+    app.edit_tool(0, |t| {
+        t.flute_length = 30.;
+        t.length = 30.;
+    });
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    assert!(result.program.steps().iter().any(
+        |s| matches!(s,cam_cldata::Step::Rotary{feed:Some(_),angle,..} if (*angle-90.).abs()<1e-9)
+    ));
     assert!(app.toolpath_is_up_to_date(id));
-    app.set_operation_rotary_index(id,Some(RotaryIndex{angle:180.,..Default::default()})).unwrap();
+    app.set_operation_rotary_index(
+        id,
+        Some(RotaryIndex {
+            angle: 180.,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
     assert!(!app.toolpath_is_up_to_date(id));
-    app.undo();assert!(app.toolpath_is_up_to_date(id));
+    app.undo();
+    assert!(app.toolpath_is_up_to_date(id));
 }
 
 #[test]
@@ -802,6 +842,7 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         ])
     };
     planar.add_operation(Operation::Pocket(PocketOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
@@ -819,8 +860,11 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
-            lift_height: 0.0,
+            lift_height: 0.2,
             stepdown: 2.,
             overlap: 0.5,
             offset: 0.,
@@ -828,8 +872,8 @@ fn positive_world_floor_uses_physical_depth_and_matches_an_independent_planar_cu
             plunge_feed: 100.,
             plunge: Plunge::Straight,
             lead_overlap: 0.,
-            lead_in: Lead::None,
-            lead_out: Lead::None,
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
             clearing: Clearing::default(),
         },
     }));
@@ -1672,11 +1716,13 @@ fn pocket_and_drill_report_obstructed_approaches_as_advisory_findings() {
         };
         app.create_cad_operation_with_tool(kind, vec![selected.clone()], tool)
             .unwrap();
+        let outcome = app.run(&CancelToken::new());
         assert_eq!(
-            app.run(&CancelToken::new()).completion,
+            outcome.completion,
             JobCompletion::Complete
         );
-        assert!(app.export_nc().is_ok());
+        let result = app.export_nc();
+        assert!(result.is_ok(), "{result:?}");
 
         // An unknown curved roof is ignored only when its exact conservative
         // bounds prove it cannot block this feature, including after rotation.

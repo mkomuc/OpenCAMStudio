@@ -410,6 +410,7 @@ mod tests {
         let mut app = app();
         app.controller
             .add_operation(Operation::Drill(cam_model::DrillOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool: 999,
                 points: vec![[0., 0.]],

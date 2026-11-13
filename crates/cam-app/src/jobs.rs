@@ -8,8 +8,8 @@ use cam_model::{Document, Machine};
 use cam_render::{MeshVertex, Scene, PART};
 use cam_sim::{Collision, SimOptions, SimTool, SimulationCache};
 use cam_toolpath::{
-    build_job_cached_with_progress, CancelToken, Diagnostic, DiagnosticCode, JobCompletion, OperationCache,
-    PlanRequest,
+    build_job_cached_with_progress, CancelToken, Diagnostic, DiagnosticCode, JobCompletion,
+    OperationCache, PlanRequest,
 };
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -52,7 +52,9 @@ impl Progress {
     fn calculated(&self, id: u32, success: bool) {
         let mut progress = self.0.lock().unwrap();
         progress.calculated_operations.retain(|old| *old != id);
-        if success { progress.calculated_operations.push(id); }
+        if success {
+            progress.calculated_operations.push(id);
+        }
     }
     fn get(&self) -> JobProgress {
         self.0.lock().unwrap().clone()

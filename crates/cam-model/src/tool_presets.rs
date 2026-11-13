@@ -361,6 +361,21 @@ impl Operation {
             *value = v;
         }
         *slot = Some(preset.clone());
+        if preset.overlap.is_some() {
+            match self {
+                Self::Pocket(o) => {
+                    o.clear.pocket_overlap = None;
+                    o.parameter_expressions
+                        .remove(&crate::OperationParameter::PocketOverlap);
+                }
+                Self::Face(o) => {
+                    o.absolute_overlap = None;
+                    o.parameter_expressions
+                        .remove(&crate::OperationParameter::FaceOverlap);
+                }
+                _ => {}
+            }
+        }
         Ok(())
     }
 }

@@ -89,11 +89,7 @@ impl App {
             |view| view.stock_bounds_for(view.setup()),
         );
         let mut operation = self.current_operation(id)?.clone();
-        let parsed = self
-            .fields
-            .iter()
-            .filter_map(|(f, v)| v.parse::<f64>().ok().map(|v| (*f, v)))
-            .collect();
+        let parsed = self.parsed_operation_fields();
         apply_op_fields(&mut operation, &parsed);
         if operation.rotary_wrap().is_some() {
             let geometry =
@@ -501,18 +497,33 @@ mod tests {
         let (min, max) = app.controller.stock_box();
         let frame = app.controller.inspection_setup().frame.clone();
         let camera = OrbitCamera::framed([-50.; 3], [100.; 3]);
-        for (axis, angle) in [(RotaryAxis::A, 90.), (RotaryAxis::B, -45.), (RotaryAxis::A, 270.)] {
+        for (axis, angle) in [
+            (RotaryAxis::A, 90.),
+            (RotaryAxis::B, -45.),
+            (RotaryAxis::A, 270.),
+        ] {
             app.rotary_action(rotary_view::Action::IndexAxis(axis));
             for (i, value) in [(0, angle), (1, 2.), (2, 3.), (3, -4.)] {
                 app.rotary_action(rotary_view::Action::IndexValue(i, value.to_string()));
             }
             let center = cam_cldata::Point3::new(2., 3., -4.);
-            let rotated: Vec<_> = (0..8).map(|bits| {
-                let p = std::array::from_fn::<_, 3, _>(|i| if bits & (1 << i) == 0 { min[i] } else { max[i] });
-                axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle)
-            }).collect();
+            let rotated: Vec<_> = (0..8)
+                .map(|bits| {
+                    let p = std::array::from_fn::<_, 3, _>(|i| {
+                        if bits & (1 << i) == 0 {
+                            min[i]
+                        } else {
+                            max[i]
+                        }
+                    });
+                    axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle)
+                })
+                .collect();
             let zmin = rotated.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
-            let zmax = rotated.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+            let zmax = rotated
+                .iter()
+                .map(|p| p.z)
+                .fold(f64::NEG_INFINITY, f64::max);
             let heights = app.resolve_height_editor(id).unwrap();
             assert!((heights.top - zmax).abs() < 1e-8);
             assert!((heights.bottom - zmin).abs() < 1e-8);
@@ -522,8 +533,16 @@ mod tests {
             for plane in overlay.planes {
                 for point in plane.corners {
                     let p = frame.to_setup_vector(point.map(f64::from));
-                    let machine = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle);
-                    assert!((machine.z - plane.z).abs() < 1e-4, "{} {axis:?} {angle}", plane.name);
+                    let machine = axis.material_point(
+                        cam_cldata::Point3::new(p[0], p[1], p[2]),
+                        center,
+                        -angle,
+                    );
+                    assert!(
+                        (machine.z - plane.z).abs() < 1e-4,
+                        "{} {axis:?} {angle}",
+                        plane.name
+                    );
                 }
                 assert!((plane.value_label.parse::<f64>().unwrap() - plane.z).abs() < 0.001);
             }
@@ -536,19 +555,30 @@ mod tests {
         let (mut app, id) = operation_editor();
         app.controller.edit_stock(|stock| {
             *stock = cam_model::Stock::FixedRound {
-                diameter: 20., inner_diameter: 0., length: 50., position: 0.5,
-                tube: false, axis: Some(cam_model::StockAxis::Origin {
+                diameter: 20.,
+                inner_diameter: 0.,
+                length: 50.,
+                position: 0.5,
+                tube: false,
+                axis: Some(cam_model::StockAxis::Origin {
                     origin_axis: cam_model::StockOriginAxis::X,
                 }),
             }
         });
         app.rotary_action(rotary_view::Action::Indexed(true));
-        *app.height_draft.as_mut().unwrap().definition_mut(P::Top) = cam_model::HeightDefinition::new(R::StockTop, 0.);
-        *app.height_draft.as_mut().unwrap().definition_mut(P::Bottom) = cam_model::HeightDefinition::new(R::StockBottom, 0.);
+        *app.height_draft.as_mut().unwrap().definition_mut(P::Top) =
+            cam_model::HeightDefinition::new(R::StockTop, 0.);
+        *app.height_draft.as_mut().unwrap().definition_mut(P::Bottom) =
+            cam_model::HeightDefinition::new(R::StockBottom, 0.);
         app.height_offsets.insert(P::Top, "0".into());
         app.height_offsets.insert(P::Bottom, "0".into());
         let setup = app.controller.inspection_setup();
-        let (frame, min, max) = app.controller.document().round_stock_geometry(setup).unwrap().unwrap();
+        let (frame, min, max) = app
+            .controller
+            .document()
+            .round_stock_geometry(setup)
+            .unwrap()
+            .unwrap();
         let setup_frame = setup.frame.clone();
         for (axis, angle) in [(RotaryAxis::A, 47.), (RotaryAxis::B, 90.)] {
             app.rotary_action(rotary_view::Action::IndexAxis(axis));
@@ -561,18 +591,31 @@ mod tests {
                 for i in 0..1440 {
                     let angle_sample = std::f64::consts::TAU * i as f64 / 1440.;
                     let p = [
-                        (min[0]+max[0])*0.5 + (max[0]-min[0])*0.5*angle_sample.cos(),
-                        (min[1]+max[1])*0.5 + (max[0]-min[0])*0.5*angle_sample.sin(), axial,
+                        (min[0] + max[0]) * 0.5 + (max[0] - min[0]) * 0.5 * angle_sample.cos(),
+                        (min[1] + max[1]) * 0.5 + (max[0] - min[0]) * 0.5 * angle_sample.sin(),
+                        axial,
                     ];
                     let p = setup_frame.to_setup_vector(frame.to_world_vector(p));
-                    let p = axis.material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle);
+                    let p = axis.material_point(
+                        cam_cldata::Point3::new(p[0], p[1], p[2]),
+                        center,
+                        -angle,
+                    );
                     lower = lower.min(p.z);
                     upper = upper.max(p.z);
                 }
             }
             let heights = app.resolve_height_editor(id).unwrap();
-            assert!((heights.top - upper).abs() < 0.001, "{axis:?}: {} vs {upper}", heights.top);
-            assert!((heights.bottom - lower).abs() < 0.001, "{axis:?}: {} vs {lower}", heights.bottom);
+            assert!(
+                (heights.top - upper).abs() < 0.001,
+                "{axis:?}: {} vs {upper}",
+                heights.top
+            );
+            assert!(
+                (heights.bottom - lower).abs() < 0.001,
+                "{axis:?}: {} vs {lower}",
+                heights.bottom
+            );
         }
     }
     #[test]
@@ -682,10 +725,8 @@ mod tests {
             if kind == OpKind::Chamfer {
                 assert!((heights.bottom + 1.).abs() < 1e-9);
                 let _ = app.update(Message::HeightOffsetChanged(P::Bottom, "0.5".into()));
-                assert!(app
-                    .resolve_height_editor(id)
-                    .unwrap_err()
-                    .contains("chamfer width"));
+                let error = app.resolve_height_editor(id).unwrap_err();
+                assert!(error.contains("selected chamfer and cutter geometry"), "{error}");
                 let _ = app.update(Message::CancelOperationDraft);
             }
         }

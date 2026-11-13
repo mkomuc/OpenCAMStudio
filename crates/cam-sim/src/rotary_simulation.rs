@@ -745,14 +745,13 @@ impl State {
             // Clip the tool axis to an expanded stock box before projecting it.
             // The capsule encloses every flute/neck/shank section. This rejects
             // air poses and avoids scanning the long stickout outside the blank.
-            let bounds = clip_tool_axis(material_tip, end, c.min, c.max, body_radius + pad).and_then(
-                |(a, b)| match cylinder {
+            let bounds = clip_tool_axis(material_tip, end, c.min, c.max, body_radius + pad)
+                .and_then(|(a, b)| match cylinder {
                     Some((axis, center, radius)) => {
                         clip_cylinder_axis(a, b, axis, center, radius + body_radius + pad)
                     }
                     None => Some((a, b)),
-                },
-            );
+                });
             #[cfg(test)]
             let bounds = if c.tight_bounds {
                 bounds
@@ -1332,7 +1331,9 @@ mod tests {
             let mut samples = Vec::new();
             for (positions, normals) in mesh
                 .positions
-                .as_chunks::<4>().0.iter()
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .zip(mesh.normals.as_chunks::<4>().0.iter())
             {
                 let p: [f32; 3] =

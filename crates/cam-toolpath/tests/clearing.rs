@@ -196,6 +196,7 @@ fn assert_no_rapid_onto_uncut_stock(program: &Program, floor: f64) {
 /// A 60×40 pocket with a 10×10 island, cleared in two levels by a ⌀6 end mill.
 fn pocket_doc() -> Document {
     let op = PocketOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
@@ -213,6 +214,9 @@ fn pocket_doc() -> Document {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             clearing: Clearing::default(),
@@ -233,6 +237,7 @@ fn pocket_doc() -> Document {
 /// An outside profile with radial roughing — the *other* caller of the clearing engine.
 fn roughing_doc() -> Document {
     let op = ProfileOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         passes: Default::default(),
         selections: None,
@@ -271,6 +276,9 @@ fn roughing_doc() -> Document {
 /// separately, and the property below is what says whether that argument holds.
 fn face_doc(overshoot: f64) -> Document {
     let op = FaceOp {
+        absolute_overlap: None,
+        multiple_depths: Default::default(),
+        parameter_expressions: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),
@@ -306,6 +314,7 @@ fn carve_doc() -> Document {
         ..Default::default()
     };
     let op = CarveOp {
+        parameter_expressions: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
         cooling: Default::default(),
@@ -315,7 +324,11 @@ fn carve_doc() -> Document {
         tool: 1,
         clear: Some(cam_model::CarveClearing {
             tool: 2,
-            params: cam_model::ClearParams::default(),
+            params: cam_model::ClearParams {
+                lead_in: cam_model::Lead::None,
+                lead_out: cam_model::Lead::None,
+                ..Default::default()
+            },
         }),
         boundary: rect(0.0, 0.0, 40.0, 40.0),
         islands: Vec::new(),

@@ -1949,6 +1949,30 @@ impl AppController {
     /// Edit operation `id` in place (undoable). Used where the target is explicit
     /// rather than whatever is selected — e.g. changing an operation's tool from the
     /// inspector.
+    pub fn rename_operation(&mut self, id: u32, name: String) {
+        if !self
+            .document()
+            .setups
+            .iter()
+            .any(|s| s.operations.iter().any(|op| op.id() == id))
+        {
+            return;
+        }
+        let name = name.trim().to_owned();
+        if self.document().operation_names.get(&id).map(String::as_str) == Some(name.as_str())
+            || (name.is_empty() && !self.document().operation_names.contains_key(&id))
+        {
+            return;
+        }
+        self.edit_document(move |doc| {
+            if name.is_empty() {
+                doc.operation_names.remove(&id);
+            } else {
+                doc.operation_names.insert(id, name);
+            }
+        });
+    }
+
     pub fn edit_operation(&mut self, id: u32, f: impl FnOnce(&mut Operation)) {
         if self.operation(id).is_none() {
             return;
@@ -2066,7 +2090,12 @@ impl AppController {
         let new_id = self.next_op_id();
         set_op_id(&mut copy, new_id);
         self.edit_document(move |doc| {
-            if let Some(index)=doc.rotary_indexes.get(&sel).cloned(){doc.rotary_indexes.insert(new_id,index);}
+            if let Some(name) = doc.operation_names.get(&sel).cloned() {
+                doc.operation_names.insert(new_id, name);
+            }
+            if let Some(index) = doc.rotary_indexes.get(&sel).cloned() {
+                doc.rotary_indexes.insert(new_id, index);
+            }
             if let Some(binding) = doc.geometry.bindings.get(&sel).cloned() {
                 doc.geometry.bindings.insert(new_id, binding);
             }
@@ -2214,6 +2243,7 @@ impl AppController {
         // id 0 is a placeholder — add_operation renumbers with a fresh id.
         let mut op = match kind {
             OpKind::Profile => Operation::Profile(ProfileOp {
+                parameter_expressions: Default::default(),
                 wrap: None,
                 passes: cam_model::ProfilePasses {
                     lead_end_distance: 0.6,
@@ -2268,6 +2298,7 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Pocket(PocketOp {
+                    parameter_expressions: Default::default(),
                     wrap: None,
                     additional_regions: Vec::new(),
                     stock_contours: Default::default(),
@@ -2285,8 +2316,11 @@ impl AppController {
                     start,
                     end: None,
                     clear: ClearParams {
+                        multiple_depths: Default::default(),
+                        adaptive_enabled: None,
+                        pocket_overlap: None,
                         keep_tool_down: false,
-                        lift_height: 0.0,
+                        lift_height: 0.2,
                         clearing: cam_model::Clearing::default(),
                         stepdown: p.stepdown,
                         overlap: 0.5,
@@ -2295,12 +2329,13 @@ impl AppController {
                         plunge_feed,
                         plunge: Plunge::Straight,
                         lead_overlap: 0.0,
-                        lead_in: Lead::None,
-                        lead_out: Lead::None,
+                        lead_in: Lead::Arc { radius: 0.6 },
+                        lead_out: Lead::Arc { radius: 0.6 },
                     },
                 })
             }
             OpKind::Drill => Operation::Drill(DrillOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 points: vec![centroid(&chain)],
@@ -2324,6 +2359,9 @@ impl AppController {
                     None => Axis::along_longest_edge(chain.points()),
                 };
                 Operation::Face(FaceOp {
+                    absolute_overlap: None,
+                    multiple_depths: Default::default(),
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool,
                     boundary: chain,
@@ -2348,6 +2386,8 @@ impl AppController {
                 })
             }
             OpKind::Chamfer => Operation::Chamfer(ChamferOp {
+                parameter_expressions: Default::default(),
+                contour_roughing: Default::default(),
                 tip_offset: 1.0,
                 lead_in_enabled: Some(true),
                 same_lead_out: false,
@@ -2407,6 +2447,7 @@ impl AppController {
                 }
                 let dia = (xmax - xmin).max(ymax - ymin);
                 Operation::Thread(ThreadOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool,
                     points: vec![centroid(&chain)],
@@ -2445,6 +2486,7 @@ impl AppController {
                     .map(|l| self.loop_contour(*l).cloned())
                     .collect::<Option<Vec<_>>>()?;
                 Operation::Carve(CarveOp {
+                    parameter_expressions: Default::default(),
                     id: 0,
                     tool,
                     // No clearing tool by default: the V-bit alone is the simple case,
@@ -2479,6 +2521,7 @@ impl AppController {
                 })
             }
             OpKind::Engrave => Operation::Engrave(EngraveOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 chain,
@@ -2500,6 +2543,7 @@ impl AppController {
                 end: None,
             }),
             OpKind::Adaptive => Operation::Adaptive(AdaptiveOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 spindle_rpm,
@@ -2510,6 +2554,7 @@ impl AppController {
                 params: AdaptiveParams::default(),
             }),
             OpKind::Parallel => Operation::Parallel(ParallelOp {
+                parameter_expressions: Default::default(),
                 id: 0,
                 tool,
                 spindle_rpm,
@@ -2771,6 +2816,7 @@ impl AppController {
             let mut id = 0u32;
             let outer_profile = |id, chain| {
                 Operation::Profile(ProfileOp {
+                    parameter_expressions: Default::default(),
                     wrap: None,
                     passes: cam_model::ProfilePasses {
                         lead_end_distance: 0.6,
@@ -2825,6 +2871,7 @@ impl AppController {
                     let dia = (xmax - xmin).min(ymax - ymin);
                     if dia <= p.tool_diameter + 1e-9 {
                         operations.push(Operation::Drill(DrillOp {
+                            parameter_expressions: Default::default(),
                             id,
                             tool: 1,
                             points: vec![centroid(hole)],
@@ -2841,6 +2888,7 @@ impl AppController {
                         }));
                     } else {
                         operations.push(Operation::Pocket(PocketOp {
+                            parameter_expressions: Default::default(),
                             wrap: None,
                             additional_regions: Vec::new(),
                             stock_contours: Default::default(),
@@ -2858,8 +2906,11 @@ impl AppController {
                             end: None,
                             start: None,
                             clear: ClearParams {
+                                multiple_depths: Default::default(),
+                                adaptive_enabled: None,
+                                pocket_overlap: None,
                                 keep_tool_down: false,
-                                lift_height: 0.0,
+                                lift_height: 0.2,
                                 clearing: cam_model::Clearing::default(),
                                 stepdown: p.stepdown,
                                 overlap: 0.5,
@@ -2868,8 +2919,8 @@ impl AppController {
                                 plunge_feed: p.plunge_feed,
                                 plunge: Plunge::Straight,
                                 lead_overlap: 0.0,
-                                lead_in: Lead::None,
-                                lead_out: Lead::None,
+                                lead_in: Lead::Arc { radius: 0.6 },
+                                lead_out: Lead::Arc { radius: 0.6 },
                             },
                         }));
                     }
@@ -3196,7 +3247,13 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
     for step in program.steps() {
         match step {
             Step::ToolChange { tool } => current = Some(*tool),
-            Step::Linear { to, tag, .. } | Step::Rotary {to,tag,feed:Some(_),..} if tag.kind == MoveKind::Cutting => {
+            Step::Linear { to, tag, .. }
+            | Step::Rotary {
+                to,
+                tag,
+                feed: Some(_),
+                ..
+            } if tag.kind == MoveKind::Cutting => {
                 if let Some(n) = current {
                     let e = deepest.entry(n).or_insert(f64::INFINITY);
                     *e = e.min(to.z);
@@ -3250,12 +3307,23 @@ pub(crate) fn narrowest_cut_width(program: &Program, tools: &[Tool], surface_z: 
 /// Translate a document [`Tool`] into the simulator's [`ToolProfile`] — how its
 /// bottom removes material (flat, ball, bull-nose corner, or a chamfer/drill cone).
 pub(crate) fn sim_profile(tool: &Tool) -> ToolProfile {
-    let radius = tool.radius();
+    let radius = tool.radius()
+        + match tool.kind {
+            ToolKind::RadiusMill { corner_radius, .. } => corner_radius.max(0.0),
+            _ => 0.0,
+        };
     let shape = match tool.kind {
         ToolKind::EndMill | ToolKind::RoughingMill | ToolKind::FaceMill => ProfileShape::Flat,
         ToolKind::BallMill => ProfileShape::Ball,
         ToolKind::BullNose { corner_radius } => ProfileShape::BullNose {
             corner_radius: corner_radius.clamp(0.0, radius),
+        },
+        ToolKind::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => ProfileShape::RadiusMill {
+            corner_radius,
+            tip_length,
         },
         ToolKind::ChamferMill {
             included_angle_deg,
@@ -3706,6 +3774,7 @@ mod tests {
             doc.setup_mut()
                 .operations
                 .push(Operation::Drill(cam_model::DrillOp {
+                    parameter_expressions: Default::default(),
                     id: third,
                     tool: 1,
                     points: vec![[25.0, 25.0]],
@@ -4060,6 +4129,25 @@ mod tests {
     }
 
     #[test]
+    fn operation_names_persist_and_are_undoable() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        app.rename_operation(0, "  Roughing  ".into());
+        assert_eq!(
+            app.document().operation_names.get(&0).map(String::as_str),
+            Some("Roughing")
+        );
+        let saved = serde_json::to_string(app.document()).unwrap();
+        let restored: Document = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.operation_names.get(&0).map(String::as_str),
+            Some("Roughing")
+        );
+        assert!(app.undo());
+        assert!(!app.document().operation_names.contains_key(&0));
+    }
+
+    #[test]
     fn duplicate_delete_and_reorder_operations() {
         let mut app = AppController::new(machine());
         app.open_dxf(PART_DXF, "part.dxf").unwrap();
@@ -4116,6 +4204,9 @@ mod tests {
         match app.selected_operation() {
             Some(Operation::Pocket(o)) => {
                 assert!(o.islands.is_empty(), "no islands by default");
+                assert_eq!(o.clear.lift_height, 0.2);
+                assert_eq!(o.clear.lead_in, Lead::Arc { radius: 0.6 });
+                assert_eq!(o.clear.lead_out, Lead::Arc { radius: 0.6 });
                 assert!(
                     (0.0..1.0).contains(&o.clear.overlap),
                     "a sane default overlap"

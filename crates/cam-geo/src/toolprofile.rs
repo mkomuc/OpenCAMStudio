@@ -54,6 +54,8 @@ pub enum BottomShape {
     Ball,
     /// Flat centre with a rounded corner of `corner_radius` mm (bull-nose).
     BullNose { corner_radius: f64 },
+    /// Concave quarter-round from the tip radius to the outer cutting radius.
+    RadiusMill { corner_radius: f64, tip_length: f64 },
     /// Conical point (chamfer/V mill, drill), `half_angle_rad` from the axis, with an
     /// optional flat tip of `flat_radius` mm (`0` for a sharp point / twist drill).
     Cone {
@@ -136,6 +138,26 @@ pub fn generatrix(spec: &GeneratrixSpec) -> Profile2D {
             segs.push(arc(Point::new(r, cr), Point::new(r - cr, cr), true, true));
             cr
         }
+        BottomShape::RadiusMill {
+            corner_radius,
+            tip_length,
+        } => {
+            let cr = corner_radius.max(0.0);
+            let tip = tip_length.max(0.0);
+            segs.push(line(Point::new(r, 0.0), true));
+            if tip > EPS {
+                segs.push(line(Point::new(r, tip), true));
+            }
+            if cr > EPS {
+                segs.push(arc(
+                    Point::new(r + cr, tip + cr),
+                    Point::new(r + cr, tip),
+                    false,
+                    true,
+                ));
+            }
+            tip + cr
+        }
         BottomShape::Cone {
             half_angle_rad,
             flat_radius,
@@ -181,6 +203,10 @@ pub fn generatrix(spec: &GeneratrixSpec) -> Profile2D {
     let length = spec.length.max(z_side);
 
     // 2) Flute side (cutting) up to the flute length (clamped into [z_side, length]).
+    let r = match spec.bottom {
+        BottomShape::RadiusMill { corner_radius, .. } => r + corner_radius.max(0.0),
+        _ => r,
+    };
     let flute_top = spec.flute_length.clamp(z_side, length);
     if flute_top - z_side > EPS {
         segs.push(line(Point::new(r, flute_top), true));

@@ -90,7 +90,9 @@ pub fn build_job_cached(
     mut progress: impl FnMut(u32),
 ) -> JobResult {
     build_job_cached_with_progress(request, cancel, cache, |operation| {
-        if let CalculationProgress::Started(id) = operation { progress(id); }
+        if let CalculationProgress::Started(id) = operation {
+            progress(id);
+        }
     })
 }
 
@@ -122,7 +124,10 @@ pub fn build_job_cached_with_progress(
                 .get(&op.id())
                 .map(|binding| geometry.binding_fingerprint(binding));
             if let Some(index) = request.document.rotary_indexes.get(&op.id()) {
-                geometry_fingerprint = Some(format!("{}:index:{index:?}", geometry_fingerprint.unwrap_or_default()));
+                geometry_fingerprint = Some(format!(
+                    "{}:index:{index:?}",
+                    geometry_fingerprint.unwrap_or_default()
+                ));
             }
             if let Some(wrap) = op.rotary_wrap() {
                 geometry_fingerprint = Some(format!(
@@ -178,7 +183,8 @@ pub fn build_job_cached_with_progress(
                 },
                 || {
                     progress(CalculationProgress::Started(op.id()));
-                    let result = compute_with_stock(op, env, token, stock_to_leave, geometry, heights);
+                    let result =
+                        compute_with_stock(op, env, token, stock_to_leave, geometry, heights);
                     progress(CalculationProgress::Finished {
                         operation: op.id(),
                         success: !result.cancelled && !result.has_errors() && !token.is_cancelled(),
@@ -298,24 +304,62 @@ fn build_job_with_compute(
             completion: JobCompletion::Failed,
         };
     }
-    let mut rotary_axes=std::collections::HashMap::new();
-    for operation in setup.operations.iter().filter(|op|doc.operation_is_included(setup.id,op.id())) {
-        if let Some(index)=doc.rotary_indexes.get(&operation.id()) {
-            let reason=index.validate().err().or_else(||operation.rotary_wrap().is_some().then(||"An operation cannot be both indexed and wrapped".to_string())).or_else(|| {
-                let entry=(index.axis,match index.axis {cam_model::RotaryAxis::A=>[index.center[1],index.center[2]],cam_model::RotaryAxis::B=>[index.center[0],index.center[2]]});
-                rotary_axes.insert(0,entry).and_then(|old| (old.0!=entry.0 || old.1.iter().zip(entry.1).any(|(a,b)|(a-b).abs()>1e-6)).then(||"Indexed and wrapped operations must share one rotary axis and centre".to_string()))
-            });
-            if let Some(reason)=reason {return JobResult{completion:JobCompletion::Failed,diagnostics:vec![Diagnostic::error(reason).for_op(operation.id())],..Default::default()};}
+    let mut rotary_axes = std::collections::HashMap::new();
+    for operation in setup
+        .operations
+        .iter()
+        .filter(|op| doc.operation_is_included(setup.id, op.id()))
+    {
+        if let Some(index) = doc.rotary_indexes.get(&operation.id()) {
+            let reason = index
+                .validate()
+                .err()
+                .or_else(|| {
+                    operation
+                        .rotary_wrap()
+                        .is_some()
+                        .then(|| "An operation cannot be both indexed and wrapped".to_string())
+                })
+                .or_else(|| {
+                    let entry = (
+                        index.axis,
+                        match index.axis {
+                            cam_model::RotaryAxis::A => [index.center[1], index.center[2]],
+                            cam_model::RotaryAxis::B => [index.center[0], index.center[2]],
+                        },
+                    );
+                    rotary_axes.insert(0, entry).and_then(|old| {
+                        (old.0 != entry.0
+                            || old.1.iter().zip(entry.1).any(|(a, b)| (a - b).abs() > 1e-6))
+                        .then(|| {
+                            "Indexed and wrapped operations must share one rotary axis and centre"
+                                .to_string()
+                        })
+                    })
+                });
+            if let Some(reason) = reason {
+                return JobResult {
+                    completion: JobCompletion::Failed,
+                    diagnostics: vec![Diagnostic::error(reason).for_op(operation.id())],
+                    ..Default::default()
+                };
+            }
         }
-        if let Some(wrap)=operation.rotary_wrap() {
+        if let Some(wrap) = operation.rotary_wrap() {
             let reason=wrap.validate().err().or_else(|| {
                 let entry=(wrap.axis,match wrap.axis {cam_model::RotaryAxis::A=>[wrap.center[1],wrap.center[2]],cam_model::RotaryAxis::B=>[wrap.center[0],wrap.center[2]]});
                 rotary_axes.insert(0,entry).and_then(|old| {
                     (old.0!=entry.0 || old.1.iter().zip(entry.1).any(|(a,b)|(a-b).abs()>1e-6)).then(||"Wrapped operations in a setup must share one physical rotary axis and centre".to_string())
                 })
             });
-            if let Some(reason)=reason {
-                return JobResult{completion:JobCompletion::Failed,diagnostics:vec![Diagnostic::error(reason).for_op(operation.id()).for_setup(setup.id)],..Default::default()};
+            if let Some(reason) = reason {
+                return JobResult {
+                    completion: JobCompletion::Failed,
+                    diagnostics: vec![Diagnostic::error(reason)
+                        .for_op(operation.id())
+                        .for_setup(setup.id)],
+                    ..Default::default()
+                };
             }
         }
     }
@@ -387,10 +431,28 @@ fn build_job_with_compute(
             completion = JobCompletion::Cancelled;
             break;
         }
-        let indexed_geometry=doc.rotary_indexes.get(&operation.id()).map(|index|index.geometry(&doc.geometry));
-        let operation_geometry=indexed_geometry.as_ref().unwrap_or(&doc.geometry);
+        let mut resolved_operation;
+        let (operation, parameter_error) = if operation.has_parameter_expressions() {
+            resolved_operation = operation.clone();
+            let error = resolved_operation
+                .resolve_parameter_expressions(&setup.tools)
+                .err();
+            if error.is_none() {
+                resolved_operation.freeze_parameter_expressions();
+            }
+            (&resolved_operation, error)
+        } else {
+            (operation, None)
+        };
+        let indexed_geometry = doc
+            .rotary_indexes
+            .get(&operation.id())
+            .map(|index| index.geometry(&doc.geometry));
+        let operation_geometry = indexed_geometry.as_ref().unwrap_or(&doc.geometry);
         env.heights = setup.heights_for(operation.id());
-        if let Some(wrap)=operation.rotary_wrap(){env.heights.top_of_stock=wrap.surface_z;}
+        if let Some(wrap) = operation.rotary_wrap() {
+            env.heights.top_of_stock = wrap.surface_z;
+        }
         let stock_to_leave = setup.stock_to_leave_for(operation.id());
         let configured = setup
             .height_settings
@@ -401,7 +463,12 @@ fn build_job_with_compute(
         }
         env.heights.clearance = env.heights.clearance.max(fixture_top);
         env.heights.retract = env.heights.retract.max(fixture_top);
-        let mut result = if let Some(Err(reason)) = &configured {
+        let mut result = if let Some(reason) = parameter_error {
+            StrategyResult {
+                diagnostics: vec![Diagnostic::error(reason)],
+                ..Default::default()
+            }
+        } else if let Some(Err(reason)) = &configured {
             StrategyResult {
                 diagnostics: vec![Diagnostic::error(reason.clone())],
                 ..Default::default()
@@ -476,9 +543,27 @@ fn build_job_with_compute(
                 false,
             )
         } else if operation.rotary_wrap().is_some() {
-            compute_at_heights(operation,&env,doc.operation_base_cutting_heights(operation),cancel,ComputeContext {stock_to_leave,compute:&mut compute,geometry:&doc.geometry},false)
+            compute_at_heights(
+                operation,
+                &env,
+                doc.operation_base_cutting_heights(operation),
+                cancel,
+                ComputeContext {
+                    stock_to_leave,
+                    compute: &mut compute,
+                    geometry: &doc.geometry,
+                },
+                false,
+            )
         } else {
-            compute(operation, &env, cancel, stock_to_leave, operation_geometry, None)
+            compute(
+                operation,
+                &env,
+                cancel,
+                stock_to_leave,
+                operation_geometry,
+                None,
+            )
         };
         if let Some(Ok(heights)) = configured {
             if let Some(feed_z) = heights.feed {
@@ -709,30 +794,57 @@ fn build_job_with_compute(
 
     // Expand patterns in the unwrapped plane, then wrap each derived instance.
     for pl in &mut planned {
-        if let Some(index)=doc.rotary_indexes.get(&pl.op_id) {
-            match crate::index_program(&pl.fragment,index,cancel) {
-                Ok(fragment)=>pl.fragment=fragment,
-                Err(reason)=> {pl.fragment=Program::new();diagnostics.push(Diagnostic::error(reason).for_op(pl.op_id));completion=if cancel.is_cancelled(){JobCompletion::Cancelled}else{JobCompletion::Failed};}
+        if let Some(index) = doc.rotary_indexes.get(&pl.op_id) {
+            match crate::index_program(&pl.fragment, index, cancel) {
+                Ok(fragment) => pl.fragment = fragment,
+                Err(reason) => {
+                    pl.fragment = Program::new();
+                    diagnostics.push(Diagnostic::error(reason).for_op(pl.op_id));
+                    completion = if cancel.is_cancelled() {
+                        JobCompletion::Cancelled
+                    } else {
+                        JobCompletion::Failed
+                    };
+                }
             }
             continue;
         }
-        let Some(wrap) = setup.operations.iter().find(|op|op.id()==pl.op_id).and_then(Operation::rotary_wrap) else { continue; };
+        let Some(wrap) = setup
+            .operations
+            .iter()
+            .find(|op| op.id() == pl.op_id)
+            .and_then(Operation::rotary_wrap)
+        else {
+            continue;
+        };
         if pl.clearance <= wrap.surface_z {
-            pl.fragment=Program::new();
-            diagnostics.push(Diagnostic::error("Wrapped clearance must be above the unwrapped cylinder surface").for_op(pl.op_id));
-            completion=JobCompletion::Failed;
+            pl.fragment = Program::new();
+            diagnostics.push(
+                Diagnostic::error("Wrapped clearance must be above the unwrapped cylinder surface")
+                    .for_op(pl.op_id),
+            );
+            completion = JobCompletion::Failed;
             continue;
         }
-        match crate::wrap_program(&pl.fragment,wrap,cancel) {
+        match crate::wrap_program(&pl.fragment, wrap, cancel) {
             Ok(fragment) => {
-                pl.fragment=fragment;
-                pl.clearance=wrap.center[2]+wrap.effective_radius()+pl.clearance-wrap.surface_z;
-                tool_change_height=tool_change_height.max(pl.clearance);
+                pl.fragment = fragment;
+                pl.clearance =
+                    wrap.center[2] + wrap.effective_radius() + pl.clearance - wrap.surface_z;
+                tool_change_height = tool_change_height.max(pl.clearance);
             }
             Err(reason) => {
-                pl.fragment=Program::new();
-                diagnostics.push(Diagnostic::error(reason).for_op(pl.op_id).for_setup(setup.id));
-                completion=if cancel.is_cancelled(){JobCompletion::Cancelled}else{JobCompletion::Failed};
+                pl.fragment = Program::new();
+                diagnostics.push(
+                    Diagnostic::error(reason)
+                        .for_op(pl.op_id)
+                        .for_setup(setup.id),
+                );
+                completion = if cancel.is_cancelled() {
+                    JobCompletion::Cancelled
+                } else {
+                    JobCompletion::Failed
+                };
             }
         }
     }
@@ -787,7 +899,10 @@ fn build_job_with_compute(
     if cancel.is_cancelled() {
         completion = JobCompletion::Cancelled;
     }
-    if !fixtures.is_empty() && !program.has_rotary_motion() && completion != JobCompletion::Cancelled && program.validate().is_ok()
+    if !fixtures.is_empty()
+        && !program.has_rotary_motion()
+        && completion != JobCompletion::Cancelled
+        && program.validate().is_ok()
     {
         let profiles = setup
             .operations
@@ -1289,29 +1404,81 @@ fn emit_instance(
     st.spindle_started = true;
     // Index at tool-change clearance before crossing to the next operation.
     // All cutting blocks of an indexed fragment carry the same absolute angle.
-    if let Some(Step::Rotary{angle,axis,center,..})=pl.fragment.steps().iter().find(|s|matches!(s,Step::Rotary{..})) {
-        let previous_angle=program.steps().iter().rev().find_map(|s|if let Step::Rotary{angle,..}=s{Some(*angle)}else{None}).unwrap_or(0.);
-        if (*angle-previous_angle).abs()>1e-9 {
-            lift_to_tool_change(program,tool_change_height.max(clearance),pl.op_id);
+    if let Some(Step::Rotary {
+        angle,
+        axis,
+        center,
+        ..
+    }) = pl
+        .fragment
+        .steps()
+        .iter()
+        .find(|s| matches!(s, Step::Rotary { .. }))
+    {
+        let previous_angle = program
+            .steps()
+            .iter()
+            .rev()
+            .find_map(|s| {
+                if let Step::Rotary { angle, .. } = s {
+                    Some(*angle)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.);
+        if (*angle - previous_angle).abs() > 1e-9 {
+            lift_to_tool_change(program, tool_change_height.max(clearance), pl.op_id);
             if last_position(program).is_none() {
-                if let Some(start)=first_position(&pl.fragment) {program.push(Step::Rapid{to:Point3::new(start.x,start.y,tool_change_height.max(clearance)),tag:pl.tag(MoveKind::Traverse)});}
+                if let Some(start) = first_position(&pl.fragment) {
+                    program.push(Step::Rapid {
+                        to: Point3::new(start.x, start.y, tool_change_height.max(clearance)),
+                        tag: pl.tag(MoveKind::Traverse),
+                    });
+                }
             }
-            if let Some(to)=last_position(program) {
-                let length=(*angle-previous_angle).to_radians().abs()*(to.z-center.z).abs();
-                program.push(Step::Rotary{to,angle:*angle,axis:*axis,center:*center,feed:None,length,tag:pl.tag(MoveKind::Traverse)});
+            if let Some(to) = last_position(program) {
+                let length = (*angle - previous_angle).to_radians().abs() * (to.z - center.z).abs();
+                program.push(Step::Rotary {
+                    to,
+                    angle: *angle,
+                    axis: *axis,
+                    center: *center,
+                    feed: None,
+                    length,
+                    tag: pl.tag(MoveKind::Traverse),
+                });
             }
         }
     }
     // Ordinary machining resumes at rotary zero, with the cutter lifted before
     // indexing. Retain the full turn count rather than choosing a shortest path.
     if !pl.fragment.has_rotary_motion() {
-        if let Some(Step::Rotary {angle,axis,center,..})=program.steps().iter().rev().find(|s|matches!(s,Step::Rotary{..})) {
-            let (angle,axis,center)=(*angle,*axis,*center);
-            if angle.abs()>1e-9 {
-                lift_to_tool_change(program,tool_change_height.max(clearance),pl.op_id);
-                if let Some(to)=last_position(program) {
-                    let length=angle.to_radians().abs()*(to.z-center.z).abs();
-                    program.push(Step::Rotary{to,angle:0.,axis,center,feed:None,length,tag:pl.tag(MoveKind::Traverse)});
+        if let Some(Step::Rotary {
+            angle,
+            axis,
+            center,
+            ..
+        }) = program
+            .steps()
+            .iter()
+            .rev()
+            .find(|s| matches!(s, Step::Rotary { .. }))
+        {
+            let (angle, axis, center) = (*angle, *axis, *center);
+            if angle.abs() > 1e-9 {
+                lift_to_tool_change(program, tool_change_height.max(clearance), pl.op_id);
+                if let Some(to) = last_position(program) {
+                    let length = angle.to_radians().abs() * (to.z - center.z).abs();
+                    program.push(Step::Rotary {
+                        to,
+                        angle: 0.,
+                        axis,
+                        center,
+                        feed: None,
+                        length,
+                        tag: pl.tag(MoveKind::Traverse),
+                    });
                 }
             }
         }
@@ -1367,13 +1534,42 @@ fn emit_instance(
     }
     program.push(Step::Coolant(coolant));
     for step in pl.fragment.steps() {
-        if let Step::Rotary {to,angle,axis,center,feed:None,length,tag}=step {
-            if *length==0. {
-                let previous_angle=program.steps().iter().rev().find_map(|s|match s {Step::Rotary {angle,..}=>Some(*angle),_=>None}).unwrap_or(0.);
-                let previous=last_position(program).unwrap_or(*to);
-                let rotation=(*angle-previous_angle).to_radians()*((previous.z+to.z)*0.5-center.z).abs();
-                let length=(to.x-previous.x).hypot(to.y-previous.y).hypot(to.z-previous.z).hypot(rotation);
-                program.push(Step::Rotary{to:*to,angle:*angle,axis:*axis,center:*center,feed:None,length,tag:*tag});
+        if let Step::Rotary {
+            to,
+            angle,
+            axis,
+            center,
+            feed: None,
+            length,
+            tag,
+        } = step
+        {
+            if *length == 0. {
+                let previous_angle = program
+                    .steps()
+                    .iter()
+                    .rev()
+                    .find_map(|s| match s {
+                        Step::Rotary { angle, .. } => Some(*angle),
+                        _ => None,
+                    })
+                    .unwrap_or(0.);
+                let previous = last_position(program).unwrap_or(*to);
+                let rotation = (*angle - previous_angle).to_radians()
+                    * ((previous.z + to.z) * 0.5 - center.z).abs();
+                let length = (to.x - previous.x)
+                    .hypot(to.y - previous.y)
+                    .hypot(to.z - previous.z)
+                    .hypot(rotation);
+                program.push(Step::Rotary {
+                    to: *to,
+                    angle: *angle,
+                    axis: *axis,
+                    center: *center,
+                    feed: None,
+                    length,
+                    tag: *tag,
+                });
                 continue;
             }
         }
@@ -1440,7 +1636,7 @@ fn lift_to_tool_change(program: &mut Program, z: f64, op_id: u32) {
 /// far. A drill cycle ends above its last hole, at that cycle's retract plane.
 fn last_position(program: &Program) -> Option<Point3> {
     program.steps().iter().rev().find_map(|s| match s {
-        Step::Rotary {to,..} | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+        Step::Rotary { to, .. } | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
         Step::Arc { end, .. } => Some(*end),
         Step::Drill(c) => c.points.last().map(|[x, y]| Point3::new(*x, *y, c.retract)),
         _ => None,
@@ -1451,7 +1647,7 @@ fn last_position(program: &Program) -> Option<Point3> {
 /// the tool-change cross-and-descend at the next operation before handing off.
 fn first_position(program: &Program) -> Option<Point3> {
     program.steps().iter().find_map(|s| match s {
-        Step::Rotary {to,..} | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
+        Step::Rotary { to, .. } | Step::Rapid { to, .. } | Step::Linear { to, .. } => Some(*to),
         Step::Arc { end, .. } => Some(*end),
         Step::Drill(c) => c
             .points
@@ -1660,8 +1856,12 @@ fn compute_with_stock(
                                 let margin = env.tool(op.tool).map_or(0., |t| t.diameter)
                                     + op.clear.offset
                                     + finish;
-                                for value in &mut bounds[0] { *value-=margin; }
-                                for value in &mut bounds[1] { *value+=margin; }
+                                for value in &mut bounds[0] {
+                                    *value -= margin;
+                                }
+                                for value in &mut bounds[1] {
+                                    *value += margin;
+                                }
                                 match cam_geometry3d::pocket_stock_domains(
                                     geometry_state,
                                     selected,
@@ -1804,6 +2004,7 @@ mod tests {
 
     fn profile_operation() -> Operation {
         Operation::Profile(cam_model::ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,
@@ -1881,6 +2082,7 @@ mod tests {
             operations: (0..operations)
                 .map(|id| {
                     Operation::Drill(DrillOp {
+                        parameter_expressions: Default::default(),
                         id,
                         tool: 1,
                         points: vec![[10.0 + id as f64, 10.0]],
@@ -1914,14 +2116,57 @@ mod tests {
         let mut cache = crate::OperationCache::default();
         let cancel = CancelToken::new();
         let mut events = Vec::new();
-        assert_eq!(build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events.push(event)).completion, JobCompletion::Complete);
-        assert_eq!(events, [CalculationProgress::Started(0), CalculationProgress::Finished { operation: 0, success: true }, CalculationProgress::Started(1), CalculationProgress::Finished { operation: 1, success: true }, CalculationProgress::Started(2), CalculationProgress::Finished { operation: 2, success: true }]);
+        assert_eq!(
+            build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events
+                .push(event))
+            .completion,
+            JobCompletion::Complete
+        );
+        assert_eq!(
+            events,
+            [
+                CalculationProgress::Started(0),
+                CalculationProgress::Finished {
+                    operation: 0,
+                    success: true
+                },
+                CalculationProgress::Started(1),
+                CalculationProgress::Finished {
+                    operation: 1,
+                    success: true
+                },
+                CalculationProgress::Started(2),
+                CalculationProgress::Finished {
+                    operation: 2,
+                    success: true
+                }
+            ]
+        );
         events.clear();
-        assert_eq!(build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events.push(event)).completion, JobCompletion::Complete);
+        assert_eq!(
+            build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events
+                .push(event))
+            .completion,
+            JobCompletion::Complete
+        );
         assert!(events.is_empty());
         cache.invalidate_operations(&[2]);
-        assert_eq!(build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events.push(event)).completion, JobCompletion::Complete);
-        assert_eq!(events, [CalculationProgress::Started(2), CalculationProgress::Finished { operation: 2, success: true }]);
+        assert_eq!(
+            build_job_cached_with_progress(plan_request(&doc), &cancel, &mut cache, |event| events
+                .push(event))
+            .completion,
+            JobCompletion::Complete
+        );
+        assert_eq!(
+            events,
+            [
+                CalculationProgress::Started(2),
+                CalculationProgress::Finished {
+                    operation: 2,
+                    success: true
+                }
+            ]
+        );
         assert_eq!(cache.stats.reused, 2);
         assert_eq!(cache.stats.computed, 1);
     }
@@ -2139,6 +2384,7 @@ mod tests {
             spindle: SpindleDir::Cw,
         };
         let mut pocket = PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             id: 2,
             tool: 1,
@@ -2159,6 +2405,9 @@ mod tests {
             end: None,
             finishing: Default::default(),
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: true,
                 lift_height: 0.,
                 stepdown: 2.,
@@ -2289,6 +2538,7 @@ mod tests {
             ])
         };
         let pocket = Operation::Pocket(cam_model::PocketOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             additional_regions: Vec::new(),
             stock_contours: Default::default(),
@@ -2306,6 +2556,9 @@ mod tests {
             start: None,
             end: None,
             clear: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 stepdown: 2.0,
@@ -2347,6 +2600,9 @@ mod tests {
         assert!((min_cut_z(&pocket_allowed.program) - -1.5).abs() < 1e-9);
 
         let face = Operation::Face(cam_model::FaceOp {
+            absolute_overlap: None,
+            multiple_depths: Default::default(),
+            parameter_expressions: Default::default(),
             id: 3,
             tool: 1,
             boundary: square(),
@@ -2752,6 +3008,7 @@ mod tests {
         doc.setup_mut()
             .operations
             .push(Operation::Adaptive(cam_model::AdaptiveOp {
+                parameter_expressions: Default::default(),
                 id: 4,
                 tool: 1,
                 spindle_rpm: 1000.0,

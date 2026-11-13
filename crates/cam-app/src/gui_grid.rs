@@ -236,10 +236,11 @@ fn clipped_line(
         iced::Point::new(a.x + hi * dx, a.y + hi * dy),
     ))
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct GridLabels {
     pub camera: OrbitCamera,
     pub grid_size: [f32; 3],
+    pub measurement: Option<String>,
 }
 impl canvas::Program<Message> for GridLabels {
     type State = ();
@@ -299,6 +300,19 @@ impl canvas::Program<Message> for GridLabels {
                 });
             }
         }
+        if let Some(measurement) = &self.measurement {
+            frame.fill_text(canvas::Text {
+                content: measurement.clone(),
+                position: iced::Point::new(
+                    (size.width - 165.).max(8.),
+                    (size.height - 17.).max(8.),
+                ),
+                align_x: iced::alignment::Horizontal::Right.into(),
+                color: Color::from_rgb(0.85, 0.88, 0.91),
+                size: 11.0.into(),
+                ..Default::default()
+            });
+        }
         frame.fill_text(canvas::Text {
             content: format!(
                 "{} grid · {} mm",
@@ -314,9 +328,206 @@ impl canvas::Program<Message> for GridLabels {
     }
 }
 
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|i| a[i] - b[i])
+}
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    (0..3).map(|i| a[i] * b[i]).sum()
+}
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+fn norm(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
+
+// Closest distance between finite straight edges, including disjoint segments.
+fn segment_distance(p: [f64; 3], q: [f64; 3], r: [f64; 3], s: [f64; 3]) -> f64 {
+    let u = sub(q, p);
+    let v = sub(s, r);
+    let w = sub(p, r);
+    let (a, b, c, d, e) = (dot(u, u), dot(u, v), dot(v, v), dot(u, w), dot(v, w));
+    if a < 1e-20 && c < 1e-20 {
+        return norm(w);
+    }
+    if a < 1e-20 {
+        return norm(sub(w, v.map(|x| x * (e / c).clamp(0., 1.))));
+    }
+    if c < 1e-20 {
+        return norm(std::array::from_fn(|i| {
+            w[i] + u[i] * (-d / a).clamp(0., 1.)
+        }));
+    }
+    let denom = a * c - b * b;
+    let mut t = if denom > 1e-20 {
+        ((b * e - c * d) / denom).clamp(0., 1.)
+    } else {
+        0.
+    };
+    let mut k = (b * t + e) / c;
+    if k < 0. {
+        k = 0.;
+        t = (-d / a).clamp(0., 1.);
+    } else if k > 1. {
+        k = 1.;
+        t = ((b - d) / a).clamp(0., 1.);
+    }
+    norm(std::array::from_fn(|i| w[i] + t * u[i] - k * v[i]))
+}
+
+pub(super) fn selection_measurement(
+    state: &cam_model::GeometryState,
+    selected: &[EntityRef],
+) -> Option<String> {
+    use cam_model::{CadCurve, CadSurface};
+    if selected.is_empty() {
+        return None;
+    }
+    if selected.len() > 2 {
+        return Some(format!("{} features selected", selected.len()));
+    }
+    let resolve = |r: &EntityRef| {
+        if !state.entity_exists(r) {
+            return None;
+        }
+        Some((state.asset(r.asset_id)?, state.instance(r.instance_id)?))
+    };
+    if selected.len() == 1 {
+        let r = &selected[0];
+        let (asset, _) = resolve(r)?;
+        let topology = &asset.topology;
+        return Some(match r.kind {
+            EntityKind::Edge => match &topology.edges.iter().find(|e| e.id == r.id)?.curve {
+                CadCurve::Line { start, end } => {
+                    format!("Line edge | Length: {:.2} mm", norm(sub(*end, *start)))
+                }
+                CadCurve::CircleArc { radius, .. } => {
+                    format!("Circular edge | Radius: {:.2} mm", radius)
+                }
+                CadCurve::BezierSpans { .. } => "Spline edge".into(),
+                CadCurve::Unsupported { .. } => "Edge".into(),
+            },
+            EntityKind::Face => {
+                let face = topology.faces.iter().find(|f| f.id == r.id)?;
+                let mesh = &topology.mesh;
+                let area: f64 = mesh
+                    .triangles
+                    .iter()
+                    .zip(&mesh.triangle_faces)
+                    .filter(|(_, id)| **id == r.id)
+                    .filter_map(|(tri, _)| {
+                        let a = *mesh.vertices.get(tri[0] as usize)?;
+                        let b = *mesh.vertices.get(tri[1] as usize)?;
+                        let c = *mesh.vertices.get(tri[2] as usize)?;
+                        Some(norm(cross(sub(b, a), sub(c, a))) * 0.5)
+                    })
+                    .sum();
+                let kind = match &face.surface {
+                    CadSurface::Plane { .. } => "Planar face",
+                    CadSurface::Cylinder { .. } => "Cylindrical face",
+                    CadSurface::Cone { .. } => "Conical face",
+                    CadSurface::Sphere { .. } => "Spherical face",
+                    CadSurface::Torus { .. } => "Toroidal face",
+                    _ => "Face",
+                };
+                if area > 0. {
+                    format!("{kind} | Area: ≈ {:.2} mm²", area)
+                } else {
+                    kind.into()
+                }
+            }
+            EntityKind::Vertex => "Vertex".into(),
+            EntityKind::Body => "Body".into(),
+            EntityKind::Loop => "Loop".into(),
+            EntityKind::Silhouette => "Silhouette".into(),
+        });
+    }
+    let (a, ia) = resolve(&selected[0])?;
+    let (b, ib) = resolve(&selected[1])?;
+    if selected.iter().all(|r| r.kind == EntityKind::Edge) {
+        let ea = a.topology.edges.iter().find(|e| e.id == selected[0].id)?;
+        let eb = b.topology.edges.iter().find(|e| e.id == selected[1].id)?;
+        if let (CadCurve::Line { start: p, end: q }, CadCurve::Line { start: r, end: s }) =
+            (&ea.curve, &eb.curve)
+        {
+            let (p, q, r, s) = (
+                ia.placement.transform_point(*p),
+                ia.placement.transform_point(*q),
+                ib.placement.transform_point(*r),
+                ib.placement.transform_point(*s),
+            );
+            let (u, v) = (sub(q, p), sub(s, r));
+            let denom = norm(u) * norm(v);
+            if denom > 1e-12 {
+                let cosine = (dot(u, v).abs() / denom).clamp(0., 1.);
+                return Some(if cosine > 1. - 1e-9 {
+                    format!(
+                        "2 line edges | Min distance: {:.2} mm",
+                        segment_distance(p, q, r, s)
+                    )
+                } else {
+                    format!("2 line edges | Angle: {:.2}°", cosine.acos().to_degrees())
+                });
+            }
+        }
+    }
+    if selected.iter().all(|r| r.kind == EntityKind::Face) {
+        let fa = a.topology.faces.iter().find(|f| f.id == selected[0].id)?;
+        let fb = b.topology.faces.iter().find(|f| f.id == selected[1].id)?;
+        if let (
+            CadSurface::Plane {
+                origin: p,
+                normal: u,
+            },
+            CadSurface::Plane {
+                origin: q,
+                normal: v,
+            },
+        ) = (&fa.surface, &fb.surface)
+        {
+            let (p, q, u, v) = (
+                ia.placement.transform_point(*p),
+                ib.placement.transform_point(*q),
+                ia.placement.transform_vector(*u),
+                ib.placement.transform_vector(*v),
+            );
+            let denom = norm(u) * norm(v);
+            if denom > 1e-12 {
+                let cosine = (dot(u, v).abs() / denom).clamp(0., 1.);
+                return Some(if cosine > 1. - 1e-9 {
+                    format!(
+                        "2 planar faces | Plane separation: {:.2} mm",
+                        dot(sub(q, p), u).abs() / norm(u)
+                    )
+                } else {
+                    format!("2 planar faces | Angle: {:.2}°", cosine.acos().to_degrees())
+                });
+            }
+        }
+    }
+    Some("2 features selected | Measurement unavailable".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finite_segment_measurement_handles_disjoint_parallel_edges() {
+        assert!(
+            (segment_distance([0., 0., 0.], [1., 0., 0.], [2., 3., 0.], [3., 3., 0.])
+                - 10_f64.sqrt())
+            .abs()
+                < 1e-10
+        );
+        assert!(
+            (segment_distance([0., 0., 0.], [4., 0., 0.], [1., 3., 0.], [2., 3., 0.]) - 3.).abs()
+                < 1e-10
+        );
+    }
     #[test]
     fn grid_uses_machine_travel_and_adapts_to_zoom() {
         let mut camera = OrbitCamera::framed([-50., -50., 0.], [50., 50., 0.]);

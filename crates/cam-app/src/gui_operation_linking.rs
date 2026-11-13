@@ -70,13 +70,11 @@ impl App {
                 continue;
             }
             let value = self.fields.get(&field).cloned().unwrap_or_default();
-            fields.push(field_row_labeled(
+            fields.push(self.parameter_field_row(
                 field,
                 self.field_label(field),
                 self.field_help(field),
                 &value,
-                self.tooltips,
-                self.field_invalid(field),
             ));
         }
         fields
@@ -107,14 +105,7 @@ impl App {
                         }
                         _ => self.field_label(field),
                     };
-                    field_row_labeled(
-                        field,
-                        label,
-                        self.field_help(field),
-                        &value,
-                        self.tooltips,
-                        self.field_invalid(field),
-                    )
+                    self.parameter_field_row(field, label, self.field_help(field), &value)
                 };
                 let sweep = |number: profile_parameters::Number| {
                     let field = Field::Profile(number);
@@ -123,14 +114,7 @@ impl App {
                         .get(&field)
                         .cloned()
                         .unwrap_or_else(|| fmt_num(number.get(p)));
-                    field_row_labeled(
-                        field,
-                        number.label(),
-                        number.help(),
-                        &value,
-                        self.tooltips,
-                        self.field_invalid(field),
-                    )
+                    self.parameter_field_row(field, number.label(), number.help(), &value)
                 };
                 let keep_down_supported =
                     p.comp == Comp::Computed && !p.tabs.enabled && p.additional_chains.is_empty();
@@ -397,14 +381,7 @@ impl App {
                         }
                         _ => self.field_label(field),
                     };
-                    field_row_labeled(
-                        field,
-                        label,
-                        self.field_help(field),
-                        &value,
-                        self.tooltips,
-                        self.field_invalid(field),
-                    )
+                    self.parameter_field_row(field, label, self.field_help(field), &value)
                 };
                 let entry_enabled = c.lead_in != Lead::None && c.lead_in_enabled.unwrap_or(true);
                 if c.closed && c.faces.is_empty() && !self.chamfer_faces_active() {

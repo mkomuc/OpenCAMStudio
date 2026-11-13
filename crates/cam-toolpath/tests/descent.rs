@@ -220,6 +220,7 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Contour {
 
 fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
     Operation::Profile(ProfileOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         passes: Default::default(),
         selections: None,
@@ -254,6 +255,7 @@ fn profile_with(lead: Lead, stepdown: f64, depth: f64) -> Operation {
 
 fn pocket() -> Operation {
     Operation::Pocket(PocketOp {
+        parameter_expressions: Default::default(),
         wrap: None,
         additional_regions: Vec::new(),
         stock_contours: Default::default(),
@@ -271,6 +273,9 @@ fn pocket() -> Operation {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 2.0,
@@ -289,6 +294,8 @@ fn pocket() -> Operation {
 
 fn chamfer() -> Operation {
     Operation::Chamfer(ChamferOp {
+        parameter_expressions: Default::default(),
+        contour_roughing: Default::default(),
         tip_offset: 0.0,
         lead_in_enabled: None,
         same_lead_out: false,

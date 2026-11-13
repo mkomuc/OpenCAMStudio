@@ -248,7 +248,9 @@ mod tests {
             let mut checked = 0;
             for (positions, normals) in mesh
                 .positions
-                .as_chunks::<4>().0.iter()
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .zip(mesh.normals.as_chunks::<4>().0.iter())
             {
                 let middle: [f32; 3] =

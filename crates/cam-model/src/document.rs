@@ -104,7 +104,9 @@ use crate::{BoreOp, Tool};
 /// v43: optional edge-aligned round stock.
 /// v44: round stock supports axes through the setup origin.
 /// v45: fixed fourth-axis indexes on individual operations.
-pub const SCHEMA_VERSION: u32 = 45;
+/// v46: concave radius mill tool geometry.
+/// v47: persistent numeric-operation parameter formulas.
+pub const SCHEMA_VERSION: u32 = 47;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -635,17 +637,35 @@ impl Stock {
                 });
                 (lo, std::array::from_fn(|i| lo[i] + size[i]))
             }
-            Self::FixedRound { diameter, length, position, .. } => {
+            Self::FixedRound {
+                diameter,
+                length,
+                position,
+                ..
+            } => {
                 let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
                 let z = min[2] - position * (length - (max[2] - min[2]));
-                ([center[0] - diameter / 2., center[1] - diameter / 2., z],
-                 [center[0] + diameter / 2., center[1] + diameter / 2., z + length])
+                (
+                    [center[0] - diameter / 2., center[1] - diameter / 2., z],
+                    [
+                        center[0] + diameter / 2.,
+                        center[1] + diameter / 2.,
+                        z + length,
+                    ],
+                )
             }
-            Self::RelativeRound { radial, bottom, top, .. } => {
+            Self::RelativeRound {
+                radial,
+                bottom,
+                top,
+                ..
+            } => {
                 let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
                 let radius = ((max[0] - min[0]).hypot(max[1] - min[1])) * 0.5 + radial;
-                ([center[0] - radius, center[1] - radius, min[2] - bottom],
-                 [center[0] + radius, center[1] + radius, max[2] + top])
+                (
+                    [center[0] - radius, center[1] - radius, min[2] - bottom],
+                    [center[0] + radius, center[1] + radius, max[2] + top],
+                )
             }
             Self::FromSolid { .. } | Self::PreviousSetup => (min, max),
             Self::RelativeBox { offsets } => (
@@ -811,6 +831,8 @@ fn profile_closed_default() -> bool {
 /// A profile operation may contain several independently retracted contours.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Optional simultaneous fourth-axis cylindrical wrap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<crate::RotaryWrap>,
@@ -950,6 +972,8 @@ impl ProfileOp {
 /// its capabilities (canned `G83` on Fanuc, explicit pecks on grbl).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DrillOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -1060,6 +1084,15 @@ pub struct ClearParams {
     /// Maximum depth removed per pass, mm. `0` clears the full depth in one pass.
     #[serde(default)]
     pub stepdown: f64,
+    /// Explicit pocket adaptive mode. Missing values preserve legacy behavior based on engagement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_enabled: Option<bool>,
+    /// Absolute overlap between concentric pocket passes, mm. Missing values use the legacy fraction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pocket_overlap: Option<f64>,
+    /// Pocket depth scheduling settings. Older operations retain their existing multi-pass behavior.
+    #[serde(default)]
+    pub multiple_depths: crate::pocket::MultipleDepths,
     /// Fraction of the tool diameter that adjacent rings overlap (0..1). The radial
     /// ring spacing is `diameter * (1 - overlap)`.
     #[serde(default)]
@@ -1100,20 +1133,30 @@ pub struct ClearParams {
     pub clearing: Clearing,
 }
 
+impl ClearParams {
+    pub fn pocket_adaptive_enabled(&self) -> bool {
+        self.adaptive_enabled
+            .unwrap_or(self.clearing.engagement > 0.0)
+    }
+}
+
 impl Default for ClearParams {
     fn default() -> Self {
         Self {
             keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 0.0,
+            adaptive_enabled: None,
+            pocket_overlap: None,
+            multiple_depths: Default::default(),
             // Half the diameter: the same spacing a pocket's own default overlap gives.
             overlap: 0.5,
             offset: 0.0,
             feed: 0.0,
             plunge_feed: 0.0,
             plunge: Plunge::Straight,
-            lead_in: Lead::None,
-            lead_out: Lead::None,
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
             lead_overlap: 0.0,
             clearing: Clearing::default(),
         }
@@ -1136,6 +1179,8 @@ pub struct CarveClearing {
 /// stepdown passes, down to a depth.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PocketOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Optional simultaneous fourth-axis cylindrical wrap (including 2D adaptive clearing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<crate::RotaryWrap>,
@@ -1208,6 +1253,8 @@ pub struct PocketOp {
 /// 3D surface finishing over a CAD solid or selected faces.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParallelOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     pub id: u32,
     pub tool: u32,
     #[serde(default)]
@@ -1227,6 +1274,8 @@ pub struct ParallelOp {
 /// 3D adaptive roughing resolved from an independent CAD machining projection.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdaptiveOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     pub id: u32,
     pub tool: u32,
     #[serde(default)]
@@ -1493,6 +1542,8 @@ impl std::fmt::Display for Axis {
 /// number, so the final faced plane is `start_offset - depth`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FaceOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -1514,6 +1565,12 @@ pub struct FaceOp {
     /// cuts a strip of exactly that width along the stock edge.
     #[serde(default)]
     pub overlap: f64,
+    /// Facing overlap in millimetres; absent in older percentage-based projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_overlap: Option<f64>,
+    /// Axial pass scheduling. Older projects retain their original multi-pass behavior.
+    #[serde(default)]
+    pub multiple_depths: crate::MultipleDepths,
     /// Distance the tool overshoots past each stock edge (mm, >= 0) before the
     /// 180-degree turnaround arc, so the arc swings clear of the part.
     #[serde(default)]
@@ -1552,6 +1609,8 @@ pub struct FaceOp {
 /// geometry to cut.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number.
@@ -1709,6 +1768,11 @@ impl ChamferFace {
 /// form the requested width; optional width increments divide the cut into passes.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChamferOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
+    /// Fixed-count passes approaching the edge from the air side.
+    #[serde(default)]
+    pub contour_roughing: crate::ContourRoughing,
     /// Close the path between its last and first vertices. Legacy files use closed rims.
     #[serde(default = "default_true")]
     pub closed: bool,
@@ -1825,6 +1889,8 @@ pub struct ChamferOp {
 /// ([`cam_geo::vtip_half_width`]); it is not specified independently.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EngraveOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// Tool number — must select a V-bit (the strategy reads its angle and tip radius).
@@ -1894,6 +1960,8 @@ pub struct EngraveOp {
 /// - **The path must be closed.** There is no interior to consume otherwise.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CarveOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     /// Operation id.
     pub id: u32,
     /// The V-bit — the defining tool, chosen in the creation wizard. The strategy reads
@@ -2501,6 +2569,9 @@ fn default_origin_index() -> u32 {
 /// The top-level document: shared geometry and an ordered collection of setups.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Document {
+    /// User-defined browser names, keyed by stable operation ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub operation_names: std::collections::BTreeMap<u32, String>,
     /// Per-operation 3+1 indexing; stable operation IDs are document-wide.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub rotary_indexes: std::collections::BTreeMap<u32, crate::RotaryIndex>,
@@ -2543,7 +2614,8 @@ pub struct Document {
 // format and therefore must not make otherwise identical saved documents unequal.
 impl PartialEq for Document {
     fn eq(&self, other: &Self) -> bool {
-        self.schema_version == other.schema_version
+        self.operation_names == other.operation_names
+            && self.schema_version == other.schema_version
             && self.rotary_indexes == other.rotary_indexes
             && self.setups == other.setups
             && self.geometry == other.geometry
@@ -2601,6 +2673,7 @@ impl Document {
     pub fn empty() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            operation_names: Default::default(),
             rotary_indexes: Default::default(),
             active_setup_id: 0,
             setups: Vec::new(),
@@ -2864,12 +2937,23 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_clearing_defaults_to_arc_leads_but_missing_saved_leads_remain_none() {
+        let defaults = super::ClearParams::default();
+        assert_eq!(defaults.lead_in, super::Lead::Arc { radius: 0.6 });
+        assert_eq!(defaults.lead_out, super::Lead::Arc { radius: 0.6 });
+
+        let saved: super::ClearParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(saved.lead_in, super::Lead::None);
+        assert_eq!(saved.lead_out, super::Lead::None);
+    }
     use super::*;
     use crate::{Comp, Lead, Plunge, Side};
     use cam_geo::{Contour, Point};
 
     fn profile(id: u32) -> Operation {
         Operation::Profile(ProfileOp {
+            parameter_expressions: Default::default(),
             wrap: None,
             passes: Default::default(),
             selections: None,
@@ -3004,6 +3088,7 @@ mod tests {
 
     fn carve(clear_tool: Option<u32>) -> Operation {
         Operation::Carve(CarveOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -3135,7 +3220,14 @@ mod tests {
 
     #[test]
     fn round_stock_resolves_and_round_trips() {
-        let stock = Stock::RelativeRound { radial: 2., inner_diameter: 4., bottom: 1., top: 3., tube: true, axis: None };
+        let stock = Stock::RelativeRound {
+            radial: 2.,
+            inner_diameter: 4.,
+            bottom: 1.,
+            top: 3.,
+            tube: true,
+            axis: None,
+        };
         let (lo, hi) = stock.resolve_bounds([-3., -4., 2.], [3., 4., 12.]);
         assert_eq!((lo, hi), ([-7., -7., 1.], [7., 7., 15.]));
         let json = serde_json::to_string(&stock).unwrap();
@@ -3166,6 +3258,7 @@ mod tests {
     fn same_work_across_kinds_is_false() {
         let prof = profile(0);
         let drill = Operation::Drill(DrillOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),

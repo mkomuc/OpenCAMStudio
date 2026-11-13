@@ -155,7 +155,7 @@ impl PostKind {
     }
 
     pub fn supports_rotary_wrap(self) -> bool {
-        matches!(self,Self::LinuxCnc|Self::Fanuc|Self::Haas)
+        matches!(self, Self::LinuxCnc | Self::Fanuc | Self::Haas)
     }
 
     /// Post `program` in this dialect.

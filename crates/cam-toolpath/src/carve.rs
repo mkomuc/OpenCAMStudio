@@ -143,6 +143,24 @@ impl Strategy for CarveStrategy {
     }
 
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty() {
+            return self.compute_resolved_parameters(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Carve(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![crate::Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Carve(op) = operation else {
+            unreachable!()
+        };
+        Self::new(op).compute_resolved_parameters(env, cancel)
+    }
+}
+impl CarveStrategy {
+    fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
         if let Err(reason) = op.entry_feeds.validate() {
             return StrategyResult {
@@ -1418,6 +1436,7 @@ mod tests {
 
     fn op(depth: f64) -> CarveOp {
         CarveOp {
+            parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
             cooling: Default::default(),
@@ -2058,6 +2077,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 stepdown: 0.5,
                 ..Default::default()
             },
@@ -2108,6 +2130,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 stepdown: 0.5,
                 offset: 0.4,
                 ..Default::default()
@@ -2151,6 +2176,9 @@ mod tests {
             o.clear = Some(cam_model::CarveClearing {
                 tool: 2,
                 params: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     offset,
                     ..Default::default()
                 },
@@ -2270,6 +2298,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 plunge: Plunge::Helix {
                     radius: 1.0,
                     pitch: 0.5,
@@ -2457,6 +2488,9 @@ mod tests {
             o.clear = Some(cam_model::CarveClearing {
                 tool: 2,
                 params: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     overlap,
                     ..Default::default()
                 },
@@ -2500,6 +2534,9 @@ mod tests {
             o.clear = Some(cam_model::CarveClearing {
                 tool: 2,
                 params: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     feed,
                     plunge_feed,
                     ..Default::default()
@@ -2538,6 +2575,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 overlap: 1.0,
                 ..Default::default()
             },
@@ -2585,6 +2625,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 stepdown: 0.8,
                 ..Default::default()
             },
@@ -3142,7 +3185,13 @@ mod tests {
         with.stay_down = true;
         with.clear = Some(cam_model::CarveClearing {
             tool: 2,
-            params: cam_model::ClearParams::default(),
+            // This test measures straight clearing segments against the V-bit
+            // path, so keep the clearing entry and exit free of arc leads.
+            params: cam_model::ClearParams {
+                lead_in: cam_model::Lead::None,
+                lead_out: cam_model::Lead::None,
+                ..Default::default()
+            },
         });
         let r = run_with(with, &[vbit(60.0, 0.1), endmill(2, 6.8)]);
         assert!(errors(&r).is_empty(), "{:?}", errors(&r));

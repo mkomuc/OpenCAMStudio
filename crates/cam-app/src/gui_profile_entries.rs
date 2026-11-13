@@ -645,11 +645,14 @@ impl App {
                 })
                 .size(12)
                 .width(90),
-                inspector_pick_button(if editor.picking {
-                    "Selecting…"
-                } else {
-                    "Select"
-                }, editor.picking)
+                inspector_pick_button(
+                    if editor.picking {
+                        "Selecting…"
+                    } else {
+                        "Select"
+                    },
+                    editor.picking
+                )
                 .on_press(Message::ProfileEntry(EntryMessage::Pick)),
                 inspector_button("Clear")
                     .on_press(Message::ProfileEntry(EntryMessage::ClearSource))

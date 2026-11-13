@@ -69,10 +69,10 @@ impl App {
     }
 
     pub(super) fn seed_creation_editor(&mut self, kind: OpKind) {
-        self.rotary_pick=None;
-        self.rotary_wrap_draft=None;
-        self.rotary_index_draft=None;
-        self.rotary_index_mode=rotary_view::IndexMode::Manual;
+        self.rotary_pick = None;
+        self.rotary_wrap_draft = None;
+        self.rotary_index_draft = None;
+        self.rotary_index_mode = rotary_view::IndexMode::Manual;
         self.seed_rotary_index_values();
         self.cutting_force_inputs
             .remove(&(self.controller.inspection_setup().id, None));
@@ -90,6 +90,50 @@ impl App {
         self.operation_binding_preview = None;
         self.operation_geometry = None;
         self.operation_draft = Some(self.controller.operation_template(kind, 0));
+        if let Some(op) = &mut self.operation_draft {
+            if let Operation::Pocket(pocket) = op {
+                pocket.clear.adaptive_enabled = Some(false);
+                cam_model::OperationParameter::Engagement.set_source(op, "=tool_diameter * 0.4");
+                cam_model::OperationParameter::PocketFinishFeed.set_source(op, "=feed");
+                cam_model::OperationParameter::Stepdown
+                    .set_source(op, pocket_parameters::DEFAULT_STEPDOWN);
+                cam_model::OperationParameter::PocketOverlap
+                    .set_source(op, pocket_parameters::DEFAULT_OVERLAP);
+            }
+            if let Operation::Profile(_) = op {
+                cam_model::OperationParameter::Stepdown
+                    .set_source(op, pocket_parameters::DEFAULT_STEPDOWN);
+            }
+            if let Operation::Face(_) = op {
+                cam_model::OperationParameter::Stepdown
+                    .set_source(op, pocket_parameters::DEFAULT_STEPDOWN);
+                cam_model::OperationParameter::FaceOverlap.set_source(op, "=tool_diameter * 0.5");
+                cam_model::OperationParameter::FaceOvershoot
+                    .set_source(op, "=tool_diameter / 2 + 0.1");
+            }
+            let fields = operation_fields(op);
+            for (field, parameter, source) in [
+                (
+                    Field::RampFeed,
+                    cam_model::OperationParameter::RampFeed,
+                    "=plungeFeed",
+                ),
+                (
+                    Field::LeadInFeed,
+                    cam_model::OperationParameter::LeadInFeed,
+                    "=feed",
+                ),
+                (
+                    Field::LeadOutFeed,
+                    cam_model::OperationParameter::LeadOutFeed,
+                    "=feed",
+                ),
+            ] {
+                if fields.contains(&field) {
+                    parameter.set_source(op, source);
+                }
+            }
+        }
         self.stock_to_leave_draft = Some(
             self.controller
                 .pending_op()
@@ -203,21 +247,30 @@ impl App {
             .inspector_fields()
             .into_iter()
             .map(|field| {
-                self.fields
-                    .get(&field)
-                    .and_then(|s| s.trim().parse::<f64>().ok())
-                    .filter(|v| {
-                        v.is_finite() && !operation_tabs::operation_field_invalid(&draft, field, *v)
-                    })
-                    .map(|v| (field, v))
-                    .ok_or("Correct invalid operation fields")
+                let value = self.parsed_field_value(field).map_err(|error| {
+                    format!(
+                        "Correct invalid operation fields: {} ({error})",
+                        self.field_label(field)
+                    )
+                })?;
+                if operation_tabs::operation_field_invalid(&draft, field, value) {
+                    return Err(format!(
+                        "Correct invalid operation fields: {} is outside its allowed range",
+                        self.field_label(field)
+                    ));
+                }
+                Ok((field, value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
-        if draft.rotary_wrap().is_some_and(|wrap|!wrap.geometry.is_empty()) {
-            let geometry=crate::cad_operations::geometry_for_setup(self.controller.document())?;
-            crate::cad_operations::resolve_wrapped_operation(&geometry,&mut draft)?;
-            return Ok((draft,None));
+        self.apply_parameter_sources(&mut draft)?;
+        if draft
+            .rotary_wrap()
+            .is_some_and(|wrap| !wrap.geometry.is_empty())
+        {
+            let geometry = crate::cad_operations::geometry_for_setup(self.controller.document())?;
+            crate::cad_operations::resolve_wrapped_operation(&geometry, &mut draft)?;
+            return Ok((draft, None));
         }
         if self.cad_pending_kind.is_some() && draft.rotary_wrap().is_some() {
             return Err("Select machining geometry on the Geometry tab".into());

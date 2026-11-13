@@ -275,7 +275,10 @@ impl App {
         }
         if let Some(progress) = self.controller.run_progress() {
             if progress.phase == crate::JobPhase::Generation {
-                lines.push(format!("Generation: {} fragments calculated", progress.completed));
+                lines.push(format!(
+                    "Generation: {} fragments calculated",
+                    progress.completed
+                ));
             } else {
                 lines.push(format!(
                     "{:?}: {} / {}",

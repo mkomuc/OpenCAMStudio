@@ -38,6 +38,8 @@ impl std::fmt::Display for BoreOrder {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct BoreOp {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_expressions: std::collections::BTreeMap<crate::OperationParameter, String>,
     pub id: u32,
     pub tool: u32,
     pub points: Vec<[f64; 2]>,
@@ -78,6 +80,7 @@ pub struct BoreOp {
 impl Default for BoreOp {
     fn default() -> Self {
         Self {
+            parameter_expressions: Default::default(),
             id: 0,
             tool: 1,
             points: Vec::new(),

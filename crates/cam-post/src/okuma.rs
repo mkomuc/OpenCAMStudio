@@ -100,7 +100,9 @@ pub(crate) fn emit(
     let steps = program.steps();
     for (i, step) in steps.iter().enumerate() {
         match step {
-            Step::Rotary {..} => return Err(PostError::Unsupported("Okuma rotary wrap output".into())),
+            Step::Rotary { .. } => {
+                return Err(PostError::Unsupported("Okuma rotary wrap output".into()))
+            }
             Step::Comment(text) => {
                 let text = sanitize(text);
                 if header_dedupe {

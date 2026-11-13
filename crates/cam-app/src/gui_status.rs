@@ -97,12 +97,18 @@ impl StatusMessages {
     }
 }
 
-fn target_calculating(target: StatusTarget, setup_active: bool, progress: Option<&crate::JobProgress>) -> bool {
-    setup_active && progress.is_some_and(|progress| match target {
-        StatusTarget::Setup(_) => true,
-        StatusTarget::Operation(id) => progress.phase == crate::JobPhase::Generation
-            && progress.operation == Some(id),
-    })
+fn target_calculating(
+    target: StatusTarget,
+    setup_active: bool,
+    progress: Option<&crate::JobProgress>,
+) -> bool {
+    setup_active
+        && progress.is_some_and(|progress| match target {
+            StatusTarget::Setup(_) => true,
+            StatusTarget::Operation(id) => {
+                progress.phase == crate::JobPhase::Generation && progress.operation == Some(id)
+            }
+        })
 }
 
 impl App {
@@ -240,10 +246,16 @@ impl App {
         let notice = self.status_notice(target, fingerprints);
         let running = !suppressed
             && !operations.is_empty()
-            && target_calculating(target, setup.id == self.controller.active_setup_id(), self.controller.run_progress().as_ref());
+            && target_calculating(
+                target,
+                setup.id == self.controller.active_setup_id(),
+                self.controller.run_progress().as_ref(),
+            );
         let calculated = match target {
-            StatusTarget::Operation(id) if setup.id == self.controller.active_setup_id() => self.controller
-                .run_progress().is_some_and(|p| p.calculated_operations.contains(&id)),
+            StatusTarget::Operation(id) if setup.id == self.controller.active_setup_id() => self
+                .controller
+                .run_progress()
+                .is_some_and(|p| p.calculated_operations.contains(&id)),
             _ => false,
         };
         let (symbol, label, color) = if suppressed {
@@ -259,7 +271,11 @@ impl App {
         } else if ready {
             ("✓", "Ready", Color::from_rgb8(70, 175, 85))
         } else if calculated {
-            ("◌", "Calculated · verification pending", palette::ACCENT_BLUE)
+            (
+                "◌",
+                "Calculated · verification pending",
+                palette::ACCENT_BLUE,
+            )
         } else if operations.is_empty() {
             ("–", "Empty", palette::GROUP_LABEL)
         } else {
@@ -429,15 +445,43 @@ mod tests {
             operation: Some(3),
             ..Default::default()
         };
-        assert!(target_calculating(StatusTarget::Setup(1), true, Some(&progress)));
-        assert!(target_calculating(StatusTarget::Operation(3), true, Some(&progress)));
-        assert!(!target_calculating(StatusTarget::Operation(1), true, Some(&progress)));
-        assert!(!target_calculating(StatusTarget::Operation(3), false, Some(&progress)));
+        assert!(target_calculating(
+            StatusTarget::Setup(1),
+            true,
+            Some(&progress)
+        ));
+        assert!(target_calculating(
+            StatusTarget::Operation(3),
+            true,
+            Some(&progress)
+        ));
+        assert!(!target_calculating(
+            StatusTarget::Operation(1),
+            true,
+            Some(&progress)
+        ));
+        assert!(!target_calculating(
+            StatusTarget::Operation(3),
+            false,
+            Some(&progress)
+        ));
         progress.operation = Some(4);
-        assert!(!target_calculating(StatusTarget::Operation(3), true, Some(&progress)));
-        assert!(target_calculating(StatusTarget::Operation(4), true, Some(&progress)));
+        assert!(!target_calculating(
+            StatusTarget::Operation(3),
+            true,
+            Some(&progress)
+        ));
+        assert!(target_calculating(
+            StatusTarget::Operation(4),
+            true,
+            Some(&progress)
+        ));
         progress.phase = crate::JobPhase::Verification;
-        assert!(!target_calculating(StatusTarget::Operation(4), true, Some(&progress)));
+        assert!(!target_calculating(
+            StatusTarget::Operation(4),
+            true,
+            Some(&progress)
+        ));
     }
 
     #[test]

@@ -295,6 +295,24 @@ impl Strategy for ParallelStrategy {
         "parallel"
     }
     fn compute(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if self.op.parameter_expressions.is_empty() {
+            return self.compute_resolved_parameters(env, cancel);
+        }
+        let mut operation = cam_model::Operation::Parallel(self.op.clone());
+        if let Err(message) = operation.resolve_parameter_expressions(env.tools) {
+            return StrategyResult {
+                diagnostics: vec![crate::Diagnostic::error(message)],
+                ..Default::default()
+            };
+        }
+        let cam_model::Operation::Parallel(op) = operation else {
+            unreachable!()
+        };
+        Self { op, ..self.clone() }.compute_resolved_parameters(env, cancel)
+    }
+}
+impl ParallelStrategy {
+    fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let mut out = StrategyResult::default();
         let op = &self.op;
         let p = op.params;
@@ -1012,6 +1030,7 @@ mod tests {
     }
     fn op() -> ParallelOp {
         ParallelOp {
+            parameter_expressions: Default::default(),
             id: 7,
             tool: 1,
             work_offset: 1,

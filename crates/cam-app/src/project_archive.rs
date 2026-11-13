@@ -278,7 +278,6 @@ pub(super) fn read<R: Read + Seek>(reader: R, strict: bool) -> Result<OcamFile, 
     Ok(OcamFile::Project(project))
 }
 
-
 impl OcamFile {
     /// Read either a versioned project archive or legacy tagged/untagged JSON.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, LoadError> {
@@ -343,6 +342,22 @@ mod tests {
             }
         }
         output.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn v45_project_archive_opens_with_current_schema() {
+        let project = project();
+        let bytes = project.to_archive().unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&entry(&mut zip, "project.json").unwrap()).unwrap();
+        manifest["project"]["document"]["schema_version"] = 45.into();
+        let bytes = rewrite(
+            &bytes,
+            "project.json",
+            Some(&serde_json::to_vec(&manifest).unwrap()),
+        );
+        assert_eq!(unpack(&bytes), project);
     }
 
     #[test]
