@@ -137,6 +137,11 @@ fn pocket_supports_rotary_adaptive_clearing_and_invalid_wraps_block_export() {
     };
     op.depth = 2.;
     op.clear.clearing.engagement = 0.5;
+    // Exercise wrapped adaptive cutting without local lead-link moves, which
+    // may require clearance not present on the curved stock.
+    op.clear.lead_in = cam_model::Lead::None;
+    op.clear.lead_out = cam_model::Lead::None;
+    op.clear.lift_height = 0.0;
     op.wrap = Some(RotaryWrap {
         radius: 20.,
         ..Default::default()
