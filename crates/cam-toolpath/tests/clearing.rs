@@ -324,7 +324,11 @@ fn carve_doc() -> Document {
         tool: 1,
         clear: Some(cam_model::CarveClearing {
             tool: 2,
-            params: cam_model::ClearParams::default(),
+            params: cam_model::ClearParams {
+                lead_in: cam_model::Lead::None,
+                lead_out: cam_model::Lead::None,
+                ..Default::default()
+            },
         }),
         boundary: rect(0.0, 0.0, 40.0, 40.0),
         islands: Vec::new(),
