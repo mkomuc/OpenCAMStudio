@@ -3185,7 +3185,13 @@ mod tests {
         with.stay_down = true;
         with.clear = Some(cam_model::CarveClearing {
             tool: 2,
-            params: cam_model::ClearParams::default(),
+            // This test measures straight clearing segments against the V-bit
+            // path, so keep the clearing entry and exit free of arc leads.
+            params: cam_model::ClearParams {
+                lead_in: cam_model::Lead::None,
+                lead_out: cam_model::Lead::None,
+                ..Default::default()
+            },
         });
         let r = run_with(with, &[vbit(60.0, 0.1), endmill(2, 6.8)]);
         assert!(errors(&r).is_empty(), "{:?}", errors(&r));
