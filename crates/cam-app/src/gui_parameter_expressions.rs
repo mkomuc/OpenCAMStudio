@@ -54,6 +54,8 @@ pub(super) fn parameter(field: Field) -> Option<OperationParameter> {
         Field::ClearPlungeB => Some(OperationParameter::ClearPlungeB),
         Field::Engagement => Some(OperationParameter::Engagement),
         Field::Overlap => Some(OperationParameter::Overlap),
+        Field::PocketOverlap => Some(OperationParameter::PocketOverlap),
+        Field::FaceOverlap => Some(OperationParameter::FaceOverlap),
         Field::FaceStartOffset => Some(OperationParameter::FaceStartOffset),
         Field::FaceOvershoot => Some(OperationParameter::FaceOvershoot),
         Field::DrillStartOffset => Some(OperationParameter::DrillStartOffset),
@@ -483,6 +485,25 @@ impl App {
         op.resolve_parameter_expressions(&tools)
     }
     pub(super) fn saved_field_source(&self, field: Field) -> Option<String> {
+        if field == Field::FaceOverlap {
+            if let Some(op @ Operation::Face(face)) = self.parameter_operation() {
+                if face.absolute_overlap.is_none()
+                    && cam_model::OperationParameter::FaceOverlap
+                        .expression(op)
+                        .is_none()
+                {
+                    if cam_model::OperationParameter::Overlap
+                        .expression(op)
+                        .is_some()
+                    {
+                        return Some("=overlap * tool_diameter / 100".into());
+                    }
+                    if let Some(tool) = self.parameter_tool(op) {
+                        return Some(fmt_num(face.overlap * tool.diameter));
+                    }
+                }
+            }
+        }
         if let (Some(parameter), Some(op)) = (parameter(field), self.parameter_operation()) {
             if let Some(source) = parameter.expression(op) {
                 return Some(format!("={source}"));

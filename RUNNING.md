@@ -198,9 +198,13 @@ right-to-left; a collapsed group opens as a popup under its button).
 
 A Pocket, and an outside Profile's roughing, can clear the bulk **adaptively**: instead
 of concentric rings at a fixed spacing, the tool advances a front that keeps its radial
-width of cut roughly constant. Set **Adaptive stepover** above `0` to turn it on (`0` is
-plain concentric clearing); it is **climb-only**, and requesting a lead-in/out sends the
-whole clear back to concentric.
+width of cut roughly constant. For a Pocket, turn on **Adaptive clearing** and set the
+**Adaptive stepover**; new pockets start with 40% of the tool diameter. Turning it off
+uses concentric clearing and retains the stepover. In concentric mode, **Overlap**
+is the distance in millimetres shared by neighboring passes; it must be less than the
+tool diameter. Outside Profile roughing uses a positive adaptive stepover to enable it (`0` selects concentric clearing). Adaptive
+clearing is **climb-only**, and requesting a lead-in/out sends the whole clear back to
+concentric.
 
 The number you type is the **straight-wall stepover** — the width the tool takes where
 the path runs straight. It is *not* a ceiling the toolpath will never exceed, and the

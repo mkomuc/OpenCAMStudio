@@ -508,6 +508,9 @@ pub(crate) fn create_operation(
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 stepdown: defaults.stepdown,
@@ -597,6 +600,8 @@ pub(crate) fn create_operation(
             feed: defaults.plunge_feed,
         }),
         OpKind::Face => Operation::Face(FaceOp {
+            absolute_overlap: None,
+            multiple_depths: Default::default(),
             parameter_expressions: Default::default(),
             id,
             tool,

@@ -232,6 +232,53 @@ fn invalid_and_excessive_depth_requests_fail_atomically() {
 }
 
 #[test]
+fn disabling_multiple_depths_cuts_once_and_restores_saved_settings() {
+    let mut op = profile();
+    op.depth = 7.;
+    op.stepdown = 3.;
+    op.passes.finishing_depths = 2;
+    op.passes.finishing_stepdown = 0.5;
+    op.passes.even_stepdowns = true;
+    op.passes.multiple_depths = false;
+    let result = run(op.clone());
+    assert!(!result.has_errors(), "{:?}", result.diagnostics);
+    assert_eq!(
+        plunges(&result).iter().map(|p| p.z).collect::<Vec<_>>(),
+        vec![-7.]
+    );
+    op.passes.multiple_depths = true;
+    assert_eq!(
+        plunges(&run(op)).iter().map(|p| p.z).collect::<Vec<_>>(),
+        vec![-3., -6., -6.5, -7.]
+    );
+}
+
+#[test]
+fn profile_area_order_prioritizes_larger_contours_at_each_depth() {
+    let mut op = profile();
+    op.additional_chains.push(ProfileContour {
+        chain: Contour::new(vec![
+            Point::new(50., 0.),
+            Point::new(90., 0.),
+            Point::new(90., 40.),
+            Point::new(50., 40.),
+        ]),
+        closed: true,
+        side: Side::Outside,
+    });
+    op.passes.order = ProfileOrder::Depth;
+    op.passes.order_by_area = true;
+    let result = run(op);
+    assert!(!result.has_errors(), "{:?}", result.diagnostics);
+    let points = plunges(&result);
+    assert_eq!(
+        points.iter().map(|p| p.z).collect::<Vec<_>>(),
+        vec![-2., -2., -4., -4.]
+    );
+    assert!(points[0].x > 30. && points[1].x < 30. && points[2].x > 30. && points[3].x < 30.);
+}
+
+#[test]
 fn even_and_finishing_depths_reach_the_exact_allowanced_floor() {
     let mut op = profile();
     op.depth = 7.;

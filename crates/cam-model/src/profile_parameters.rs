@@ -129,7 +129,11 @@ pub struct ProfilePasses {
     pub spring_passes: u32,
     pub finish_only_final: bool,
     pub floor_allowance: f64,
+    /// Enable multiple axial levels; disabling it cuts the full depth in one level.
+    pub multiple_depths: bool,
     pub even_stepdowns: bool,
+    /// Process larger closed contours first.
+    pub order_by_area: bool,
     pub finishing_depths: u32,
     pub finishing_stepdown: f64,
     /// Apply the smaller bottom increments to intermediate radial/roughing cuts too.
@@ -174,7 +178,9 @@ impl Default for ProfilePasses {
             spring_passes: 0,
             finish_only_final: false,
             floor_allowance: 0.,
+            multiple_depths: true,
             even_stepdowns: false,
+            order_by_area: false,
             finishing_depths: 0,
             finishing_stepdown: 0.5,
             rough_final: true,
@@ -291,6 +297,14 @@ impl ProfileOp {
 
     /// Independent of GUI callers and checked before allocating motion buffers.
     pub fn validate_profile(&self, top: f64) -> Result<(), String> {
+        if !self.passes.multiple_depths {
+            let mut effective = self.clone();
+            effective.passes.multiple_depths = true;
+            effective.passes.even_stepdowns = false;
+            effective.passes.finishing_depths = 0;
+            effective.stepdown = top + self.depth - self.passes.floor_allowance;
+            return effective.validate_profile(top);
+        }
         self.entry_feeds.validate()?;
         self.passes.contour_roughing.validate()?;
         if self.passes.contour_roughing.enabled

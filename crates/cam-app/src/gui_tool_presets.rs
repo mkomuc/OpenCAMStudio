@@ -1025,17 +1025,81 @@ impl App {
             .operation_preset_tool()
             .and_then(|t| t.preset_for_material(self.controller.inspection_setup().material_id))
             .cloned();
-        if let Some(preset) = preset {
+        if let Some(mut preset) = preset {
+            if self.creating_operation()
+                && matches!(
+                    self.operation_draft,
+                    Some(Operation::Pocket(_) | Operation::Face(_) | Operation::Profile(_))
+                )
+                && preset.stepdown == Some(0.0)
+            {
+                preset.stepdown = None;
+            }
             self.apply_operation_preset(&preset);
+        }
+        if self.creating_operation()
+            && !self.creation_edited_fields.contains(&Field::Stepdown)
+            && matches!(
+                self.operation_draft,
+                Some(Operation::Pocket(_) | Operation::Face(_) | Operation::Profile(_))
+            )
+        {
+            self.edit_operation_draft(|op| {
+                cam_model::OperationParameter::Stepdown
+                    .set_source(op, pocket_parameters::DEFAULT_STEPDOWN)
+            });
+            self.fields
+                .insert(Field::Stepdown, pocket_parameters::DEFAULT_STEPDOWN.into());
         }
     }
     fn apply_operation_preset(&mut self, preset: &ToolPreset) {
+        let creating = self.creating_operation();
+        let tool_diameter = self.operation_preset_tool().map(|tool| tool.diameter);
         let Some(op) = &mut self.operation_draft else {
             return;
         };
         if let Err(error) = op.apply_tool_preset(preset) {
             self.status = error;
             return;
+        }
+        if matches!(
+            op,
+            Operation::Pocket(_) | Operation::Face(_) | Operation::Profile(_)
+        ) {
+            if let Some(stepdown) = preset.stepdown {
+                cam_model::OperationParameter::Stepdown.set_source(op, &stepdown.to_string());
+            }
+        }
+        if let (Operation::Pocket(pocket), Some(overlap), Some(diameter)) =
+            (&mut *op, preset.overlap, tool_diameter)
+        {
+            if creating {
+                pocket.clear.pocket_overlap = None;
+                cam_model::OperationParameter::PocketOverlap
+                    .set_source(op, pocket_parameters::DEFAULT_OVERLAP);
+                self.fields.insert(
+                    Field::PocketOverlap,
+                    pocket_parameters::DEFAULT_OVERLAP.into(),
+                );
+            } else {
+                pocket.clear.pocket_overlap = Some(overlap * diameter);
+                self.fields
+                    .insert(Field::PocketOverlap, fmt_num(overlap * diameter));
+            }
+        }
+        if let (Operation::Face(face), Some(overlap), Some(diameter)) =
+            (&mut *op, preset.overlap, tool_diameter)
+        {
+            if creating {
+                face.absolute_overlap = None;
+                cam_model::OperationParameter::FaceOverlap.set_source(op, "=tool_diameter * 0.5");
+                self.fields
+                    .insert(Field::FaceOverlap, "=tool_diameter * 0.5".into());
+            } else {
+                face.absolute_overlap = Some(overlap * diameter);
+                self.fields
+                    .insert(Field::FaceOverlap, fmt_num(overlap * diameter));
+            }
         }
         // Refresh only the cutting values, preserving unrelated in-progress text.
         for field in [
@@ -1918,6 +1982,27 @@ mod tests {
         );
         assert_eq!(app.fields[&Field::Feed], "200");
     }
+    #[test]
+    fn pocket_default_stepdown_formula_survives_automatic_preset() {
+        let mut app = app();
+        send(&mut app, Message::BeginOp(OpKind::Pocket));
+        assert_eq!(
+            app.fields[&Field::Stepdown],
+            pocket_parameters::DEFAULT_STEPDOWN
+        );
+        send(
+            &mut app,
+            Message::OperationPresetPicked(PresetChoice {
+                id: Some(2),
+                name: "Preset 2".into(),
+            }),
+        );
+        assert_eq!(app.fields[&Field::Stepdown], "0.5");
+        assert!(cam_model::OperationParameter::Stepdown
+            .expression(app.operation_draft.as_ref().unwrap())
+            .is_none());
+    }
+
     #[test]
     fn absent_optional_preset_values_preserve_manual_cutting_buffers() {
         let mut app = app();

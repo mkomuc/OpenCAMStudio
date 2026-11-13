@@ -142,6 +142,9 @@ fn a_pocket_clears_its_floor_without_collisions() {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             clearing: cam_model::Clearing::default(),
@@ -222,6 +225,9 @@ fn pocket_op() -> PocketOp {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             clearing: cam_model::Clearing::default(),

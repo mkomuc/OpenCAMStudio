@@ -2,6 +2,10 @@
 use super::*;
 use cam_model::PocketFinishing;
 
+pub(super) const DEFAULT_STEPDOWN: &str = "=min(tool_fluteLength * 0.75; tool_diameter * 2.5)";
+pub(super) const DEFAULT_OVERLAP: &str =
+    "=Math.max((tool_diameter - (2 * tool_cornerRadius)) * 0.95; tool_diameter * 0.20)";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Number {
     Count,
@@ -15,7 +19,7 @@ impl Number {
         match self {
             Self::Count => "Number of finishing passes",
             Self::Stepover => "Finishing stepover (mm)",
-            Self::Feed => "Finishing feed (mm/min, 0=same)",
+            Self::Feed => "Finishing feed (mm/min)",
             Self::Overlap => "Finishing overlap (mm)",
         }
     }
@@ -23,7 +27,7 @@ impl Number {
         match self {
             Self::Count => "Radial finishing cuts on the pocket walls and islands after roughing at each depth, or only at the final depth when selected. Includes the final wall pass.",
             Self::Stepover => "Material reserved for each finishing cut. Roughing leaves the pass count times this stepover in addition to the wall stock to leave.",
-            Self::Feed => "Cutting feed for finishing passes and the repeat pass. Zero uses the pocket cutting feed. Entry feed overrides still apply.",
+            Self::Feed => "Cutting feed for finishing passes and the repeat pass. Defaults to the pocket cutting feed. Entry feed overrides still apply.",
             Self::Overlap => "Extra cutting distance past each finishing loop's start to blend the closure mark.",
         }
     }
@@ -71,7 +75,88 @@ impl Toggle {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum DepthToggle {
+    Enabled,
+    Even,
+    ByDepth,
+    ByArea,
+}
+impl DepthToggle {
+    pub fn set(self, p: &mut cam_model::MultipleDepths, value: bool) {
+        match self {
+            Self::Enabled => p.enabled = value,
+            Self::Even => p.even_stepdowns = value,
+            Self::ByDepth => p.order_by_depth = value,
+            Self::ByArea => p.order_by_area = value,
+        }
+    }
+}
+
 impl App {
+    pub(super) fn multiple_depth_controls(
+        &self,
+        d: cam_model::MultipleDepths,
+        stepdown: f64,
+        face: bool,
+    ) -> operation_sections::Form<'_> {
+        let mut list = operation_sections::Form::new(self, OperationTab::Passes, None)
+            .optional_section(
+                "Multiple Depths",
+                d.enabled,
+                Some(|v| Message::PocketDepthToggle(DepthToggle::Enabled, v)),
+            );
+        if !d.enabled {
+            return list;
+        }
+        let field = Field::Stepdown;
+        let value = self
+            .fields
+            .get(&field)
+            .cloned()
+            .unwrap_or_else(|| fmt_num(stepdown));
+        list = list.push(self.parameter_field_row(
+            field,
+            "Maximum Roughing Stepdown (mm)",
+            "Maximum axial depth removed in a roughing pass.",
+            &value,
+        ));
+        for (label, help, value, toggle) in [
+            (
+                "Use Even Stepdowns",
+                "Distribute the total depth evenly without exceeding the maximum stepdown.",
+                d.even_stepdowns,
+                DepthToggle::Even,
+            ),
+            (
+                "Order by Depth",
+                "Clear every pocket region at each depth before descending to the next depth.",
+                d.order_by_depth,
+                DepthToggle::ByDepth,
+            ),
+            (
+                "Order By Area",
+                "Clear larger disconnected pocket regions first.",
+                d.order_by_area,
+                DepthToggle::ByArea,
+            ),
+        ] {
+            if face && matches!(toggle, DepthToggle::ByDepth | DepthToggle::ByArea) {
+                continue;
+            }
+            list = list.push(
+                row![
+                    label_help(label, help, self.tooltips),
+                    checkbox(value)
+                        .size(15)
+                        .on_toggle(move |v| Message::PocketDepthToggle(toggle, v))
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        list
+    }
     pub(super) fn pocket_finishing_controls(
         &self,
         p: &PocketFinishing,
@@ -140,6 +225,161 @@ mod tests {
             .id();
         app.begin_operation_draft(id);
         (app, id)
+    }
+
+    #[test]
+    fn adaptive_toggle_retains_the_stepover_and_initializes_legacy_pockets() {
+        let (mut app, _) = editor();
+        let _ = app.update(Message::PocketAdaptiveToggled(true));
+        assert_eq!(app.fields[&Field::Engagement], "=tool_diameter * 0.4");
+        let _ = app.update(Message::FieldChanged(Field::Engagement, "1.25".into()));
+        let _ = app.update(Message::PocketAdaptiveToggled(false));
+        assert!(
+            matches!(&app.operation_draft, Some(Operation::Pocket(p)) if !p.clear.pocket_adaptive_enabled() && p.clear.clearing.engagement == 1.25)
+        );
+        let _ = app.update(Message::PocketAdaptiveToggled(true));
+        assert_eq!(app.fields[&Field::Engagement], "1.25");
+        assert!(
+            matches!(&app.operation_draft, Some(Operation::Pocket(p)) if p.clear.pocket_adaptive_enabled())
+        );
+    }
+
+    #[test]
+    fn new_pockets_use_tool_diameter_for_adaptive_stepover() {
+        let (mut app, _) = editor();
+        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let op = app.operation_draft.as_ref().unwrap();
+        let Operation::Pocket(p) = op else {
+            panic!("pocket")
+        };
+        assert!(!p.clear.pocket_adaptive_enabled());
+        assert_eq!(
+            cam_model::OperationParameter::Engagement.expression(op),
+            Some("tool_diameter * 0.4")
+        );
+        let _ = app.update(Message::PocketAdaptiveToggled(true));
+        let tool = app.wizard_tool().unwrap();
+        assert!(
+            (app.parsed_field_value(Field::Engagement).unwrap() - tool.diameter * 0.4).abs() < 1e-9
+        );
+    }
+
+    #[test]
+    fn face_defaults_and_multiple_depth_controls() {
+        let (mut app, _) = editor();
+        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::BeginOp(OpKind::Face));
+        let tool = app.wizard_tool().unwrap();
+        assert!(
+            (app.parsed_field_value(Field::FaceOverlap).unwrap() - tool.diameter * 0.5).abs()
+                < 1e-8
+        );
+        assert!(
+            (app.parsed_field_value(Field::FaceOvershoot).unwrap() - (tool.diameter / 2.0 + 0.1))
+                .abs()
+                < 1e-8
+        );
+        let mut larger = tool.clone();
+        larger.diameter *= 2.0;
+        let values = app
+            .operation_draft
+            .as_ref()
+            .unwrap()
+            .evaluate_parameter_sources(Some(&larger), &Default::default())
+            .unwrap();
+        assert!(
+            (values[&cam_model::OperationParameter::FaceOvershoot] - (larger.diameter / 2.0 + 0.1))
+                .abs()
+                < 1e-8
+        );
+        let _ = app.update(Message::PocketDepthToggle(DepthToggle::Even, true));
+        let _ = app.update(Message::PocketDepthToggle(DepthToggle::Enabled, false));
+        assert!(
+            matches!(&app.operation_draft, Some(Operation::Face(f)) if f.multiple_depths.even_stepdowns && !f.multiple_depths.enabled)
+        );
+        let _ = app.update(Message::PocketDepthToggle(DepthToggle::Enabled, true));
+        assert!(
+            matches!(&app.operation_draft, Some(Operation::Face(f)) if f.multiple_depths.even_stepdowns && f.multiple_depths.enabled)
+        );
+    }
+
+    #[test]
+    fn finishing_feed_defaults_to_cutting_feed_formula() {
+        let (mut app, _) = editor();
+        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let _ = app.update(Message::PocketFinishToggle(Toggle::Enabled, true));
+        let field = Field::PocketFinish(Number::Feed);
+        assert_eq!(app.fields[&field], "=feed");
+        let _ = app.update(Message::FieldChanged(Field::Feed, "420".into()));
+        assert!((app.parsed_field_value(field).unwrap() - 420.).abs() < 1e-9);
+        assert_eq!(Number::Feed.label(), "Finishing feed (mm/min)");
+    }
+
+    #[test]
+    fn pocket_stepdown_defaults_to_tool_formula() {
+        let (mut app, _) = editor();
+        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let op = app.operation_draft.as_ref().unwrap();
+        assert_eq!(
+            cam_model::OperationParameter::Stepdown.expression(op),
+            Some("min(tool_fluteLength * 0.75; tool_diameter * 2.5)")
+        );
+        let tool = app.wizard_tool().unwrap();
+        assert!(
+            (app.parsed_field_value(Field::Stepdown).unwrap()
+                - (tool.flute_len() * 0.75).min(tool.diameter * 2.5))
+            .abs()
+                < 1e-8
+        );
+        let mut long_tool = tool.clone();
+        long_tool.flute_length = tool.diameter * 10.0;
+        let values = op
+            .evaluate_parameter_sources(Some(&long_tool), &Default::default())
+            .unwrap();
+        assert!(
+            (values[&cam_model::OperationParameter::Stepdown] - tool.diameter * 2.5).abs() < 1e-8
+        );
+    }
+
+    #[test]
+    fn pocket_overlap_defaults_to_tool_formula_and_legacy_values_convert_to_mm() {
+        let (mut app, _) = editor();
+        let Operation::Pocket(p) = app.operation_draft.as_ref().unwrap() else {
+            panic!("pocket")
+        };
+        let tool = app
+            .controller
+            .inspection_setup()
+            .tools
+            .iter()
+            .find(|t| t.number == p.tool)
+            .unwrap();
+        assert!(
+            (app.parsed_field_value(Field::PocketOverlap).unwrap()
+                - p.clear.overlap * tool.diameter)
+                .abs()
+                < 1e-8
+        );
+        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::BeginOp(OpKind::Pocket));
+        let tool = app.wizard_tool().unwrap();
+        let expected = (tool.diameter * 0.95).max(tool.diameter * 0.20);
+        assert!((app.parsed_field_value(Field::PocketOverlap).unwrap() - expected).abs() < 1e-8);
+        let mut ball = tool.clone();
+        ball.kind = ToolKind::BallMill;
+        let values = app
+            .operation_draft
+            .as_ref()
+            .unwrap()
+            .evaluate_parameter_sources(Some(&ball), &Default::default())
+            .unwrap();
+        assert!(
+            (values[&cam_model::OperationParameter::PocketOverlap] - ball.diameter * 0.20).abs()
+                < 1e-8
+        );
     }
 
     #[test]

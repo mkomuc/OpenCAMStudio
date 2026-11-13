@@ -1084,6 +1084,15 @@ pub struct ClearParams {
     /// Maximum depth removed per pass, mm. `0` clears the full depth in one pass.
     #[serde(default)]
     pub stepdown: f64,
+    /// Explicit pocket adaptive mode. Missing values preserve legacy behavior based on engagement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_enabled: Option<bool>,
+    /// Absolute overlap between concentric pocket passes, mm. Missing values use the legacy fraction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pocket_overlap: Option<f64>,
+    /// Pocket depth scheduling settings. Older operations retain their existing multi-pass behavior.
+    #[serde(default)]
+    pub multiple_depths: crate::pocket::MultipleDepths,
     /// Fraction of the tool diameter that adjacent rings overlap (0..1). The radial
     /// ring spacing is `diameter * (1 - overlap)`.
     #[serde(default)]
@@ -1124,12 +1133,22 @@ pub struct ClearParams {
     pub clearing: Clearing,
 }
 
+impl ClearParams {
+    pub fn pocket_adaptive_enabled(&self) -> bool {
+        self.adaptive_enabled
+            .unwrap_or(self.clearing.engagement > 0.0)
+    }
+}
+
 impl Default for ClearParams {
     fn default() -> Self {
         Self {
             keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 0.0,
+            adaptive_enabled: None,
+            pocket_overlap: None,
+            multiple_depths: Default::default(),
             // Half the diameter: the same spacing a pocket's own default overlap gives.
             overlap: 0.5,
             offset: 0.0,
@@ -1546,6 +1565,12 @@ pub struct FaceOp {
     /// cuts a strip of exactly that width along the stock edge.
     #[serde(default)]
     pub overlap: f64,
+    /// Facing overlap in millimetres; absent in older percentage-based projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_overlap: Option<f64>,
+    /// Axial pass scheduling. Older projects retain their original multi-pass behavior.
+    #[serde(default)]
+    pub multiple_depths: crate::MultipleDepths,
     /// Distance the tool overshoots past each stock edge (mm, >= 0) before the
     /// 180-degree turnaround arc, so the arc swings clear of the part.
     #[serde(default)]

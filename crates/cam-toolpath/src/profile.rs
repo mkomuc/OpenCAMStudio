@@ -154,6 +154,14 @@ impl Strategy for ProfileStrategy {
 }
 impl ProfileStrategy {
     fn compute_resolved(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+        if !self.op.passes.multiple_depths {
+            let mut op = self.op.clone();
+            op.passes.multiple_depths = true;
+            op.passes.even_stepdowns = false;
+            op.passes.finishing_depths = 0;
+            op.stepdown = env.heights.top_of_stock + op.depth - op.passes.floor_allowance;
+            return Self::new(op).compute_resolved(env, cancel);
+        }
         if cancel.is_cancelled() {
             return StrategyResult {
                 cancelled: true,

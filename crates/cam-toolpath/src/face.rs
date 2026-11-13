@@ -74,11 +74,8 @@ impl FaceStrategy {
         if !op.boundary.is_valid() {
             fail!("operation {}: face boundary is not a closed area", op.id);
         }
-        if op.stepdown <= 0.0 {
+        if op.multiple_depths.enabled && (!op.stepdown.is_finite() || op.stepdown <= 0.0) {
             fail!("operation {}: stepdown must be positive", op.id);
-        }
-        if !(0.0..1.0).contains(&op.overlap) {
-            fail!("operation {}: overlap must be a fraction in [0, 1)", op.id);
         }
         if op.depth <= 0.0 {
             diagnostics.push(Diagnostic::warning(format!(
@@ -92,8 +89,15 @@ impl FaceStrategy {
         }
 
         let r = tool.radius();
-        let p = tool.diameter * (1.0 - op.overlap); // pass spacing
-        if p <= 1e-9 {
+        let overlap = op.absolute_overlap.unwrap_or(tool.diameter * op.overlap);
+        if !overlap.is_finite() || overlap < 0.0 || overlap >= tool.diameter {
+            fail!(
+                "operation {}: overlap must be nonnegative and less than the tool diameter",
+                op.id
+            );
+        }
+        let p = tool.diameter - overlap; // pass spacing
+        if !p.is_finite() || p <= 1e-9 {
             fail!("operation {}: overlap leaves no stepover", op.id);
         }
 
@@ -149,7 +153,21 @@ impl FaceStrategy {
 
         let top = op.start_offset;
         let bottom = op.start_offset - op.depth;
-        let levels = depth_levels(top, bottom, op.stepdown);
+        let stepdown = if !op.multiple_depths.enabled {
+            op.depth
+        } else if op.multiple_depths.even_stepdowns {
+            let count = (op.depth / op.stepdown).ceil();
+            if !count.is_finite() || count < 1.0 || count > cam_model::MAX_PROFILE_LEVELS as f64 {
+                fail!(
+                    "operation {}: invalid or excessive facing levels; check depth and stepdown",
+                    op.id
+                );
+            }
+            op.depth / count
+        } else {
+            op.stepdown
+        };
+        let levels = depth_levels(top, bottom, stepdown);
         if levels.is_empty() {
             diagnostics.push(Diagnostic::error(format!(
                 "operation {}: invalid or excessive facing levels; check depth and stepdown",
@@ -362,6 +380,8 @@ mod tests {
 
     fn face_op() -> FaceOp {
         FaceOp {
+            absolute_overlap: None,
+            multiple_depths: Default::default(),
             parameter_expressions: Default::default(),
             spindle_rpm: 0.0,
             tool_preset: None,
@@ -395,6 +415,37 @@ mod tests {
 
     fn count<F: Fn(&Step) -> bool>(r: &StrategyResult, f: F) -> usize {
         r.program.steps().iter().filter(|s| f(s)).count()
+    }
+
+    #[test]
+    fn facing_multiple_depths_and_absolute_overlap() {
+        let mut op = face_op();
+        op.depth = 5.0;
+        op.stepdown = 2.0;
+        let plunge_levels = |result: &StrategyResult| -> Vec<f64> {
+            result
+                .program
+                .steps()
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some(to.z),
+                    _ => None,
+                })
+                .collect()
+        };
+        let legacy = run(op.clone());
+        assert_eq!(plunge_levels(&legacy), vec![-1.0, -3.0, -4.0]);
+        op.absolute_overlap = Some(5.0);
+        assert_eq!(legacy.program, run(op.clone()).program);
+        op.multiple_depths.even_stepdowns = true;
+        let even = run(op.clone());
+        let z = plunge_levels(&even);
+        assert_eq!(z.len(), 3);
+        assert!((z[0] - (1.0 - 5.0 / 3.0)).abs() < 1e-9);
+        assert!((z[1] - (1.0 - 10.0 / 3.0)).abs() < 1e-9);
+        assert!((z[2] + 4.0).abs() < 1e-9);
+        op.multiple_depths.enabled = false;
+        assert_eq!(plunge_levels(&run(op)), vec![-4.0]);
     }
 
     #[test]

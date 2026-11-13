@@ -7,6 +7,7 @@ pub(super) fn compute(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> Str
     let advanced = p.finishing
         || p.floor_allowance != 0.
         || p.even_stepdowns
+        || p.order_by_area
         || p.finishing_depths > 0
         || p.order != ProfileOrder::Contour
         || !p.preserve_order
@@ -174,7 +175,12 @@ fn scheduled(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> StrategyResu
     let contour_rough = usize::from(p.finishing && op.stepover == 0.);
     let stages = contour_rough + count + repeats;
     let mut contours: Vec<_> = op.contours().enumerate().collect();
-    if !p.preserve_order {
+    if p.order_by_area {
+        contours.sort_by(|(_, a), (_, b)| {
+            let area = |c: &cam_model::ProfileContour| if c.closed { c.chain.area() } else { 0.0 };
+            area(b).total_cmp(&area(a))
+        });
+    } else if !p.preserve_order {
         let mut from = op.start.unwrap_or([0., 0.]);
         let mut ordered = Vec::new();
         while !contours.is_empty() {

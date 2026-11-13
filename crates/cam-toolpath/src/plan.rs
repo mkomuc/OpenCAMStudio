@@ -2405,6 +2405,9 @@ mod tests {
             end: None,
             finishing: Default::default(),
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: true,
                 lift_height: 0.,
                 stepdown: 2.,
@@ -2553,6 +2556,9 @@ mod tests {
             start: None,
             end: None,
             clear: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 stepdown: 2.0,
@@ -2594,6 +2600,8 @@ mod tests {
         assert!((min_cut_z(&pocket_allowed.program) - -1.5).abs() < 1e-9);
 
         let face = Operation::Face(cam_model::FaceOp {
+            absolute_overlap: None,
+            multiple_depths: Default::default(),
             parameter_expressions: Default::default(),
             id: 3,
             tool: 1,

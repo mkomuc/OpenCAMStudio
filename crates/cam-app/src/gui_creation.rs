@@ -91,6 +91,26 @@ impl App {
         self.operation_geometry = None;
         self.operation_draft = Some(self.controller.operation_template(kind, 0));
         if let Some(op) = &mut self.operation_draft {
+            if let Operation::Pocket(pocket) = op {
+                pocket.clear.adaptive_enabled = Some(false);
+                cam_model::OperationParameter::Engagement.set_source(op, "=tool_diameter * 0.4");
+                cam_model::OperationParameter::PocketFinishFeed.set_source(op, "=feed");
+                cam_model::OperationParameter::Stepdown
+                    .set_source(op, pocket_parameters::DEFAULT_STEPDOWN);
+                cam_model::OperationParameter::PocketOverlap
+                    .set_source(op, pocket_parameters::DEFAULT_OVERLAP);
+            }
+            if let Operation::Profile(_) = op {
+                cam_model::OperationParameter::Stepdown
+                    .set_source(op, pocket_parameters::DEFAULT_STEPDOWN);
+            }
+            if let Operation::Face(_) = op {
+                cam_model::OperationParameter::Stepdown
+                    .set_source(op, pocket_parameters::DEFAULT_STEPDOWN);
+                cam_model::OperationParameter::FaceOverlap.set_source(op, "=tool_diameter * 0.5");
+                cam_model::OperationParameter::FaceOvershoot
+                    .set_source(op, "=tool_diameter / 2 + 0.1");
+            }
             let fields = operation_fields(op);
             for (field, parameter, source) in [
                 (

@@ -273,6 +273,9 @@ fn pocket() -> Operation {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             stepdown: 2.0,

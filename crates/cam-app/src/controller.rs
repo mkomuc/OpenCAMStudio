@@ -2316,6 +2316,9 @@ impl AppController {
                     start,
                     end: None,
                     clear: ClearParams {
+                        multiple_depths: Default::default(),
+                        adaptive_enabled: None,
+                        pocket_overlap: None,
                         keep_tool_down: false,
                         lift_height: 0.0,
                         clearing: cam_model::Clearing::default(),
@@ -2356,6 +2359,8 @@ impl AppController {
                     None => Axis::along_longest_edge(chain.points()),
                 };
                 Operation::Face(FaceOp {
+                    absolute_overlap: None,
+                    multiple_depths: Default::default(),
                     parameter_expressions: Default::default(),
                     id: 0,
                     tool,
@@ -2901,6 +2906,9 @@ impl AppController {
                             end: None,
                             start: None,
                             clear: ClearParams {
+                                multiple_depths: Default::default(),
+                                adaptive_enabled: None,
+                                pocket_overlap: None,
                                 keep_tool_down: false,
                                 lift_height: 0.0,
                                 clearing: cam_model::Clearing::default(),

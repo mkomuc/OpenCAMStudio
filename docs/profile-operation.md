@@ -23,13 +23,17 @@ requires computed compensation and cannot be combined with profile tabs or taper
 For modeled chamfer faces, each additional pass offsets every straight face band toward its air side; the existing stepdown still sets band height. Smoothing deviation has no effect on these straight bands.
 
 
-Passes controls axial stepdown, radial finishing passes, finishing feed, spring
-repeats and execution order. Even stepdowns distribute depth evenly; smaller
-bottom increments can apply to roughing too or only to the final wall passes.
-Stock allowances retain material on the wall and floor. Drawing-based radial
+In **Passes → Multiple Depths**, set the maximum roughing stepdown or turn the
+section off to cut the full depth in one level. Even stepdowns distribute depth
+evenly; smaller bottom increments can apply to roughing too or only to the final
+wall passes. Order by Depth visits contours at each depth; Order By Area cuts
+larger closed contours first. Order by radial pass completes each radial stage
+before the next. The depth and radial ordering options are mutually exclusive.
+Passes also controls radial finishing, finishing feed and spring repeats.
+Use Stock to Leave to retain material on the wall and floor. Drawing-based radial
 roughing requires one closed outside contour and enclosing stock. With finishing
 enabled, roughing leaves one finish spacing for each finishing pass; the final
-pass reaches the profile, subject to the wall stock allowance. With radial
+pass reaches the profile, subject to radial Stock to Leave. With radial
 roughing stepover set to zero, a contour roughing pass still leaves this allowance
 before the finishing cuts.
 

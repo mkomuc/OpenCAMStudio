@@ -1349,6 +1349,9 @@ enum Field {
     FaceStartOffset,
     /// Face: pass overlap as a percentage of the tool diameter.
     Overlap,
+    /// Absolute overlap between concentric pocket passes.
+    PocketOverlap,
+    FaceOverlap,
     /// Face: overshoot past the stock edge before the turnaround (mm).
     FaceOvershoot,
     /// Adaptive-clearing stepover: the radial width of cut along a *straight* wall
@@ -1506,6 +1509,7 @@ impl Field {
             Field::LeadOverlap => "Lead overlap (mm)",
             Field::FaceStartOffset => "Start offset (mm)",
             Field::Overlap => "Overlap (%)",
+            Field::PocketOverlap | Field::FaceOverlap => "Overlap (mm)",
             Field::FaceOvershoot => "Overshoot (mm)",
             Field::Engagement => "Adaptive stepover (mm, 0=off)",
             Field::RingStep => "Ring step (mm, 0=auto)",
@@ -1811,6 +1815,8 @@ impl Field {
                 "Height of the first facing cut above the drawing reference (mm) — start \
                  above the true top to skim scale, or at 0 to cut to size."
             }
+            Field::PocketOverlap => "Distance shared by neighboring concentric cutting passes, in millimetres.",
+            Field::FaceOverlap => "Distance shared by neighboring facing passes, in millimetres.",
             Field::Overlap => {
                 "How much each facing pass overlaps the previous, as a percent of tool \
                  diameter. Higher = smoother floor, more passes."
@@ -2754,7 +2760,8 @@ enum Message {
     ProfileCompChanged(cam_model::Comp),
     ProfilePassToggle(profile_parameters::Toggle, bool),
     PocketFinishToggle(pocket_parameters::Toggle, bool),
-    ProfileOrder(cam_model::ProfileOrder),
+    PocketDepthToggle(pocket_parameters::DepthToggle, bool),
+    PocketAdaptiveToggled(bool),
     ProfileTabShape(cam_model::TabShape),
     ProfileCorner(cam_model::ProfileCorner),
     ProfileStockBoundary(profile_parameters::StockChoice),
@@ -3457,6 +3464,27 @@ impl App {
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
         self.operation_draft = self.controller.operation(id).cloned();
+        if let Some(Operation::Pocket(p)) = &mut self.operation_draft {
+            if p.clear.pocket_overlap.is_none() {
+                if let Some(tool) = self
+                    .controller
+                    .inspection_setup()
+                    .tools
+                    .iter()
+                    .find(|t| t.number == p.tool)
+                {
+                    p.clear.pocket_overlap = Some(tool.diameter * p.clear.overlap);
+                    if p.parameter_expressions
+                        .contains_key(&cam_model::OperationParameter::Overlap)
+                    {
+                        cam_model::OperationParameter::PocketOverlap.set_source(
+                            self.operation_draft.as_mut().unwrap(),
+                            "=overlap * tool_diameter / 100",
+                        );
+                    }
+                }
+            }
+        }
         self.stock_to_leave_draft = Some(self.controller.inspection_setup().stock_to_leave_for(id));
         self.stock_to_leave_initialized = self.stock_to_leave_value().enabled;
         if matches!(self.operation_draft, Some(Operation::Profile(_))) {
@@ -4810,6 +4838,60 @@ impl App {
                     }
                 });
             }
+            Message::PocketAdaptiveToggled(enabled) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                let mut seed = false;
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    if let Operation::Pocket(p) = op {
+                        seed = enabled
+                            && p.clear.clearing.engagement <= 0.0
+                            && !p
+                                .parameter_expressions
+                                .contains_key(&cam_model::OperationParameter::Engagement);
+                        p.clear.adaptive_enabled = Some(enabled);
+                    }
+                    if seed {
+                        cam_model::OperationParameter::Engagement
+                            .set_source(op, "=tool_diameter * 0.4");
+                    }
+                });
+                self.refresh_operation_fields();
+                if seed {
+                    self.fields
+                        .insert(Field::Engagement, "=tool_diameter * 0.4".into());
+                }
+            }
+            Message::PocketDepthToggle(toggle, value) => {
+                let parsed = self
+                    .fields
+                    .iter()
+                    .filter_map(|(f, s)| {
+                        s.parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .map(|v| (*f, v))
+                    })
+                    .collect();
+                self.edit_operation_draft(|op| {
+                    apply_op_fields(op, &parsed);
+                    match op {
+                        Operation::Pocket(p) => toggle.set(&mut p.clear.multiple_depths, value),
+                        Operation::Face(f) => toggle.set(&mut f.multiple_depths, value),
+                        _ => {}
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::PocketFinishToggle(toggle, value) => {
                 let parsed = self
                     .fields
@@ -4865,14 +4947,6 @@ impl App {
                     apply_op_fields(op, &parsed);
                     if let Operation::Profile(p) = op {
                         toggle.set(p, value);
-                    }
-                });
-                self.refresh_operation_fields();
-            }
-            Message::ProfileOrder(order) => {
-                self.edit_operation_draft(|op| {
-                    if let Operation::Profile(p) = op {
-                        p.passes.order = order;
                     }
                 });
                 self.refresh_operation_fields();
@@ -8492,6 +8566,9 @@ impl App {
                             (true, Some(tool)) => Some(CarveClearing {
                                 tool,
                                 params: ClearParams {
+                                    multiple_depths: Default::default(),
+                                    adaptive_enabled: None,
+                                    pocket_overlap: None,
                                     feed: c.feed,
                                     plunge_feed: c.plunge_feed,
                                     ..Default::default()
@@ -9627,6 +9704,18 @@ impl App {
     /// its shaft, not a (variable) flute diameter, so `ToolDiameter` reads "Shank
     /// diameter" there.
     fn field_label(&self, field: Field) -> &'static str {
+        if field == Field::Engagement && matches!(self.operation_draft, Some(Operation::Pocket(_)))
+        {
+            return "Adaptive stepover (mm)";
+        }
+        if field == Field::Stepdown
+            && matches!(
+                self.operation_draft,
+                Some(Operation::Pocket(_) | Operation::Face(_) | Operation::Profile(_))
+            )
+        {
+            return "Maximum Roughing Stepdown (mm)";
+        }
         match (self.inspected_tool_kind(), field) {
             (Some(ToolKind::RadiusMill { .. }), Field::ToolDiameter) => "Tip diameter (mm)",
             // V-bit and chamfer mill: the single transverse ⌀ is the shaft they flare to.
@@ -9663,6 +9752,10 @@ impl App {
     /// the cutting disc, …), so the help matches the (kind-aware) label. Non-tool fields,
     /// and kinds where the generic wording already fits, fall back to `field.help()`.
     fn field_help(&self, field: Field) -> &'static str {
+        if field == Field::Engagement && matches!(self.operation_draft, Some(Operation::Pocket(_)))
+        {
+            return "Target radial width of cut along a straight wall. Tight curves can exceed this value; adaptive clearing reduces full-width slotting.";
+        }
         if field == Field::ProfileOffset && self.geometry_operation_kind() == Some(OpKind::Profile)
         {
             return profile_parameters::WALL_ALLOWANCE_HELP;
@@ -13390,6 +13483,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Pocket(o), Field::Depth) => Some(o.depth),
         (Operation::Pocket(o), Field::Stepdown) => Some(o.clear.stepdown),
         (Operation::Pocket(o), Field::Overlap) => Some(o.clear.overlap * 100.0),
+        (Operation::Pocket(o), Field::PocketOverlap) => Some(o.clear.pocket_overlap.unwrap_or(0.0)),
         (Operation::Pocket(o), Field::ProfileOffset) => Some(o.clear.offset),
         (Operation::Pocket(o), Field::LeadInSize) => Some(lead_size(o.clear.lead_in)),
         (Operation::Pocket(o), Field::LeadOutSize) => Some(lead_size(o.clear.lead_out)),
@@ -13403,6 +13497,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Face(o), Field::Depth) => Some(o.depth),
         (Operation::Face(o), Field::Stepdown) => Some(o.stepdown),
         (Operation::Face(o), Field::Overlap) => Some(o.overlap * 100.0),
+        (Operation::Face(o), Field::FaceOverlap) => Some(o.absolute_overlap.unwrap_or(0.0)),
         (Operation::Face(o), Field::FaceOvershoot) => Some(o.overshoot),
         (Operation::Face(o), Field::Feed) => Some(o.feed),
         (Operation::Face(o), Field::PlungeFeed) => Some(o.plunge_feed),
@@ -13606,8 +13701,8 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             if let Some(v) = get(Field::Stepdown) {
                 o.clear.stepdown = v;
             }
-            if let Some(v) = get(Field::Overlap) {
-                o.clear.overlap = (v / 100.0).clamp(0.0, 0.99);
+            if let Some(v) = get(Field::PocketOverlap) {
+                o.clear.pocket_overlap = Some(v);
             }
             if let Some(v) = get(Field::Engagement) {
                 o.clear.clearing.engagement = v.max(0.0);
@@ -13645,10 +13740,8 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             if let Some(v) = get(Field::Stepdown) {
                 o.stepdown = v;
             }
-            if let Some(v) = get(Field::Overlap) {
-                // Stored as a fraction; the field edits a percentage. Clamp below
-                // 100 % so the pass spacing stays positive.
-                o.overlap = (v / 100.0).clamp(0.0, 0.99);
+            if let Some(v) = get(Field::FaceOverlap) {
+                o.absolute_overlap = Some(v);
             }
             if let Some(v) = get(Field::FaceOvershoot) {
                 // Negative is allowed — it plunges into the stock (the strategy warns).
@@ -17788,6 +17881,9 @@ mod inspector_field_tests {
         c.clear = Some(CarveClearing {
             tool: 2,
             params: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 plunge: Plunge::Helix {
                     radius: 1.0,
                     pitch: 0.5,

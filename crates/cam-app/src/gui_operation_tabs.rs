@@ -204,6 +204,15 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         Field::StockLeaveRadial | Field::StockLeaveAxial | Field::ChamferTipOffset => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
+        Field::Engagement if matches!(op, Operation::Pocket(p) if p.clear.pocket_adaptive_enabled()) => {
+            value <= 0.0
+        }
+        Field::Stepdown
+            if matches!(op, Operation::Face(f) if !f.multiple_depths.enabled)
+                || matches!(op, Operation::Profile(p) if !p.passes.multiple_depths) =>
+        {
+            false
+        }
         Field::Stepdown
             if matches!(
                 op,
@@ -224,6 +233,7 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         Field::ThreadPasses => value < 1.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::ThreadSpringPasses => value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64,
         Field::Overlap | Field::ClearOverlap => !(0.0..=99.0).contains(&value),
+        Field::PocketOverlap | Field::FaceOverlap => value < 0.0,
         Field::PlungeA | Field::ClearPlungeA => {
             let (main, clear) = App::op_plunge_styles(op);
             match if field == Field::ClearPlungeA {
@@ -636,6 +646,18 @@ impl App {
             ) {
                 continue; // Grouped beneath their section toggles.
             }
+            if matches!(op, Operation::Pocket(_))
+                && matches!(
+                    field,
+                    Field::Stepdown | Field::Engagement | Field::PocketOverlap
+                )
+            {
+                continue;
+            }
+            if matches!(op, Operation::Face(_) | Operation::Profile(_)) && field == Field::Stepdown
+            {
+                continue;
+            }
             if let Operation::Chamfer(chamfer) = op {
                 if matches!(field, Field::ChamferWidth | Field::ChamferTipOffset)
                     || (chamfer.faces.is_empty() && field == Field::Stepdown)
@@ -816,8 +838,44 @@ impl App {
             }
             Operation::Pocket(p) => {
                 if tab == OperationTab::Passes {
+                    list = list.extend(self.multiple_depth_controls(
+                        p.clear.multiple_depths,
+                        p.clear.stepdown,
+                        false,
+                    ));
                     list = list.extend(self.pocket_finishing_controls(&p.finishing));
                     list = list.section("Passes");
+                    let adaptive = p.clear.pocket_adaptive_enabled();
+                    list = list.push(row![
+                        label_help("Adaptive clearing", "Use adaptive clearing to limit radial engagement; otherwise use concentric clearing.", self.tooltips),
+                        checkbox(adaptive).size(15).on_toggle(Message::PocketAdaptiveToggled)
+                    ].spacing(8).align_y(Alignment::Center));
+                    if !adaptive {
+                        let value = self
+                            .fields
+                            .get(&Field::PocketOverlap)
+                            .cloned()
+                            .unwrap_or_default();
+                        list = list.push(self.parameter_field_row(
+                            Field::PocketOverlap,
+                            "Overlap (mm)",
+                            self.field_help(Field::PocketOverlap),
+                            &value,
+                        ));
+                    }
+                    if adaptive {
+                        let value = self
+                            .fields
+                            .get(&Field::Engagement)
+                            .cloned()
+                            .unwrap_or_default();
+                        list = list.push(self.parameter_field_row(
+                            Field::Engagement,
+                            "Adaptive stepover (mm)",
+                            self.field_help(Field::Engagement),
+                            &value,
+                        ));
+                    }
                     list = list.push(
                         row![
                             label_help("Climb", help::CLIMB, self.tooltips),
@@ -830,6 +888,8 @@ impl App {
                 }
             }
             Operation::Face(f) if tab == OperationTab::Passes => {
+                list =
+                    list.extend(self.multiple_depth_controls(f.multiple_depths, f.stepdown, true));
                 list = list.section("Passes").push(profile_picker(
                     "Direction",
                     help::FACE_DIRECTION,
@@ -1925,6 +1985,25 @@ mod tests {
     }
     fn linked_face_app() -> (App, u32) {
         linked_face_app_at_heights(-1., -5., -1.)
+    }
+
+    #[test]
+    fn existing_face_overlap_displays_in_millimetres_without_dirtying_the_draft() {
+        let (mut app, id) = linked_face_app();
+        let Operation::Face(face) = app.controller.operation(id).unwrap() else {
+            panic!("face")
+        };
+        let tool = app
+            .controller
+            .inspection_setup()
+            .tools
+            .iter()
+            .find(|tool| tool.number == face.tool)
+            .unwrap();
+        let expected = tool.diameter * face.overlap;
+        app.begin_operation_draft(id);
+        assert!(!app.operation_draft_dirty());
+        assert!((app.fields[&Field::FaceOverlap].parse::<f64>().unwrap() - expected).abs() < 1e-8);
     }
 
     #[test]

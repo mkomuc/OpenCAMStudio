@@ -23,12 +23,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 fields.push(Field::Stepover);
                 fields.push(Field::Engagement);
             }
-            fields.extend([
-                Field::ProfileOffset,
-                Field::SpindleRpm,
-                Field::Feed,
-                Field::PlungeFeed,
-            ]);
+            fields.extend([Field::SpindleRpm, Field::Feed, Field::PlungeFeed]);
             if p.tabs.enabled {
                 fields.extend([Field::TabWidth, Field::TabHeight]);
                 if !p.tabs.manual && p.tabs.count.is_none() {
@@ -61,9 +56,8 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
                 Field::LiftHeight,
                 Field::Depth,
                 Field::Stepdown,
-                Field::Overlap,
+                Field::PocketOverlap,
                 Field::Engagement,
-                Field::ProfileOffset,
                 Field::SpindleRpm,
                 Field::Feed,
                 Field::PlungeFeed,
@@ -92,7 +86,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             Field::FaceStartOffset,
             Field::Depth,
             Field::Stepdown,
-            Field::Overlap,
+            Field::FaceOverlap,
             Field::FaceOvershoot,
             Field::SpindleRpm,
             Field::Feed,

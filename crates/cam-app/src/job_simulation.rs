@@ -1275,6 +1275,9 @@ mod tests {
                 start: None,
                 end: None,
                 clear: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     stepdown: 2.,
                     overlap: 0.4,
                     feed: 300.,

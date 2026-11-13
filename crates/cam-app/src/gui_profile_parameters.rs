@@ -41,6 +41,27 @@ mod tests {
         (app, id)
     }
     #[test]
+    fn multiple_depths_toggles_keep_settings_and_map_ordering() {
+        let (mut app, id) = editor();
+        let _ = app.update(Message::ProfilePassToggle(Toggle::Even, true));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::OrderDepth, true));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::OrderArea, true));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::MultipleDepths, false));
+        let _ = app.update(Message::ProfilePassToggle(Toggle::MultipleDepths, true));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Profile(p)) if p.passes.even_stepdowns && p.passes.order_by_area && p.passes.order == ProfileOrder::Depth)
+        );
+        let _ = app.update(Message::ProfilePassToggle(Toggle::OrderRadial, true));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Profile(p)) if p.passes.order == ProfileOrder::Radial)
+        );
+        let _ = app.update(Message::ProfilePassToggle(Toggle::Preserve, true));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Profile(p)) if !p.passes.order_by_area)
+        );
+    }
+
+    #[test]
     fn keep_tool_down_draft_applies_cancels_and_undoes() {
         let (mut app, id) = editor();
         let checked =
@@ -452,7 +473,11 @@ impl Number {
 pub(super) enum Toggle {
     Finishing,
     FinishOnlyFinal,
+    MultipleDepths,
     Even,
+    OrderDepth,
+    OrderArea,
+    OrderRadial,
     Preserve,
     BothWays,
     KeepToolDown,
@@ -468,7 +493,11 @@ impl Toggle {
         match self {
             Self::Finishing => "Finishing passes",
             Self::FinishOnlyFinal => "Finish only at final depth",
-            Self::Even => "Even stepdowns",
+            Self::MultipleDepths => "Multiple Depths",
+            Self::Even => "Use Even Stepdowns",
+            Self::OrderDepth => "Order by Depth",
+            Self::OrderArea => "Order By Area",
+            Self::OrderRadial => "Order by radial pass",
             Self::Preserve => "Preserve contour order",
             Self::BothWays => "Both ways",
             Self::KeepToolDown => "Keep tool down",
@@ -484,6 +513,10 @@ impl Toggle {
         match self {
             Self::Finishing => "Enable radial finishing cuts after roughing. Finish spacing, finishing feed and spring passes control how the final wall is cut.",
             Self::FinishOnlyFinal => "Run radial finishing cuts only at the final depth instead of after every depth level.",
+            Self::MultipleDepths => "Cut in multiple axial levels. Disable to cut the full depth in one level.",
+            Self::OrderDepth => "Visit each contour at the current depth before moving deeper. Selecting this clears radial-pass ordering.",
+            Self::OrderArea => "Cut larger closed contours first; open contours follow in their selected order.",
+            Self::OrderRadial => "Complete each radial stage across contours and depths before the next. Selecting this clears depth ordering.",
             Self::Even => "Divide the regular depth range into equal increments no larger than the maximum stepdown. Reserved bottom increments retain their specified finishing step.",
             Self::Preserve => "Keep contours in their selected order instead of reordering them to reduce travel.",
             Self::BothWays => "Alternate travel direction on successive passes of an open contour. The contour remains open.",
@@ -509,7 +542,11 @@ impl Toggle {
         match self {
             Self::Finishing => p.finishing,
             Self::FinishOnlyFinal => p.finish_only_final,
+            Self::MultipleDepths => p.multiple_depths,
             Self::Even => p.even_stepdowns,
+            Self::OrderDepth => p.order == ProfileOrder::Depth,
+            Self::OrderArea => p.order_by_area,
+            Self::OrderRadial => p.order == ProfileOrder::Radial,
             Self::Preserve => p.preserve_order,
             Self::BothWays => p.both_ways,
             Self::KeepToolDown => p.keep_tool_down,
@@ -561,8 +598,34 @@ impl Toggle {
         match self {
             Self::Finishing => p.finishing = v,
             Self::FinishOnlyFinal => p.finish_only_final = v,
+            Self::MultipleDepths => p.multiple_depths = v,
             Self::Even => p.even_stepdowns = v,
-            Self::Preserve => p.preserve_order = v,
+            Self::OrderDepth => {
+                if v {
+                    p.order = ProfileOrder::Depth;
+                } else if p.order == ProfileOrder::Depth {
+                    p.order = ProfileOrder::Contour;
+                }
+            }
+            Self::OrderArea => {
+                p.order_by_area = v;
+                if v {
+                    p.preserve_order = false;
+                }
+            }
+            Self::OrderRadial => {
+                if v {
+                    p.order = ProfileOrder::Radial;
+                } else if p.order == ProfileOrder::Radial {
+                    p.order = ProfileOrder::Contour;
+                }
+            }
+            Self::Preserve => {
+                p.preserve_order = v;
+                if v {
+                    p.order_by_area = false;
+                }
+            }
             Self::BothWays => p.both_ways = v,
             Self::KeepToolDown => p.keep_tool_down = v,
             Self::FeedRetract => p.feed_retract = v,
@@ -582,7 +645,6 @@ impl Toggle {
 
 pub(super) fn numeric_fields(p: &ProfileOp) -> Vec<Field> {
     let mut values = vec![
-        Number::FloorLeave,
         Number::FinishDepths,
         Number::FinishDepthStep,
         Number::Tolerance,
@@ -741,25 +803,35 @@ impl App {
                 }
                 list=list.push(row![label_help("Roughing boundary","Setup stock or a saved snapshot of a drawing outline. The boundary must contain the allowanced part. Reselect a snapshot after editing its source.",self.tooltips),pick_list(choices,Some(selected),Message::ProfileStockBoundary).text_size(12).padding([7,9]).style(inspector_picker).width(Length::Fill)].spacing(8).align_y(Alignment::Center));
             }
-            list = list.section("Passes").push(toggle(Toggle::Even));
-            for n in [
-                Number::FloorLeave,
-                Number::FinishDepths,
-                Number::FinishDepthStep,
-            ] {
-                list = list.push(number(n));
+            list = list.optional_section(
+                "Multiple Depths",
+                p.passes.multiple_depths,
+                Some(|v| Message::ProfilePassToggle(Toggle::MultipleDepths, v)),
+            );
+            if p.passes.multiple_depths {
+                let field = Field::Stepdown;
+                let value = self
+                    .fields
+                    .get(&field)
+                    .cloned()
+                    .unwrap_or_else(|| fmt_num(p.stepdown));
+                list = list.push(self.parameter_field_row(
+                    field,
+                    "Maximum Roughing Stepdown (mm)",
+                    "Maximum axial depth removed per pass.",
+                    &value,
+                ));
+                list = list.push(toggle(Toggle::Even));
+                list = list.push(toggle(Toggle::OrderDepth));
+                list = list.push(toggle(Toggle::OrderArea));
+                list = list.push(toggle(Toggle::OrderRadial));
+                list = list.push(number(Number::FinishDepths));
+                list = list.push(number(Number::FinishDepthStep));
+                if p.passes.finishing_depths > 0 {
+                    list = list.push(toggle(Toggle::RoughFinal));
+                }
             }
-            if p.passes.finishing_depths > 0 {
-                list = list.push(toggle(Toggle::RoughFinal));
-            }
-            list = list.push(profile_picker(
-                "Cut order",
-                CUT_ORDER_HELP,
-                self.tooltips,
-                p.passes.order,
-                &ProfileOrder::ALL[..],
-                Message::ProfileOrder,
-            ));
+            list = list.section("Passes");
             list = list.push(toggle(Toggle::Preserve));
             if p.contours().any(|c| !c.closed) {
                 list = list.push(toggle(Toggle::BothWays));

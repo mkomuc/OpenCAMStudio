@@ -86,6 +86,10 @@ pub enum OperationParameter {
     Engagement,
     #[serde(rename = "overlap")]
     Overlap,
+    #[serde(rename = "pocketOverlap")]
+    PocketOverlap,
+    #[serde(rename = "faceOverlap")]
+    FaceOverlap,
     #[serde(rename = "faceStartOffset")]
     FaceStartOffset,
     #[serde(rename = "faceOvershoot")]
@@ -208,7 +212,7 @@ pub enum OperationParameter {
     StartY,
 }
 impl OperationParameter {
-    pub const ALL: [Self; 100] = [
+    pub const ALL: [Self; 102] = [
         Self::CuttingSpeed,
         Self::FeedPerTooth,
         Self::LiftHeight,
@@ -249,6 +253,8 @@ impl OperationParameter {
         Self::ClearPlungeB,
         Self::Engagement,
         Self::Overlap,
+        Self::PocketOverlap,
+        Self::FaceOverlap,
         Self::FaceStartOffset,
         Self::FaceOvershoot,
         Self::DrillStartOffset,
@@ -352,6 +358,8 @@ impl OperationParameter {
             Self::ClearPlungeB => "clearPlungeB",
             Self::Engagement => "engagement",
             Self::Overlap => "overlap",
+            Self::PocketOverlap => "pocketOverlap",
+            Self::FaceOverlap => "faceOverlap",
             Self::FaceStartOffset => "faceStartOffset",
             Self::FaceOvershoot => "faceOvershoot",
             Self::DrillStartOffset => "drillStartOffset",
@@ -498,6 +506,9 @@ impl OperationParameter {
             (Operation::Pocket(o), Self::Depth) => Some(o.depth),
             (Operation::Pocket(o), Self::Stepdown) => Some(o.clear.stepdown),
             (Operation::Pocket(o), Self::Overlap) => Some(o.clear.overlap * 100.0),
+            (Operation::Pocket(o), Self::PocketOverlap) => {
+                Some(o.clear.pocket_overlap.unwrap_or(0.0))
+            }
             (Operation::Pocket(o), Self::ProfileOffset) => Some(o.clear.offset),
             (Operation::Pocket(o), Self::LeadInSize) => Some(lead_size(o.clear.lead_in)),
             (Operation::Pocket(o), Self::LeadOutSize) => Some(lead_size(o.clear.lead_out)),
@@ -511,6 +522,7 @@ impl OperationParameter {
             (Operation::Face(o), Self::Depth) => Some(o.depth),
             (Operation::Face(o), Self::Stepdown) => Some(o.stepdown),
             (Operation::Face(o), Self::Overlap) => Some(o.overlap * 100.0),
+            (Operation::Face(o), Self::FaceOverlap) => Some(o.absolute_overlap.unwrap_or(0.0)),
             (Operation::Face(o), Self::FaceOvershoot) => Some(o.overshoot),
             (Operation::Face(o), Self::Feed) => Some(o.feed),
             (Operation::Face(o), Self::PlungeFeed) => Some(o.plunge_feed),
@@ -876,6 +888,9 @@ impl OperationParameter {
             (Operation::Pocket(o), Self::Overlap) => {
                 o.clear.overlap = value / 100.;
             }
+            (Operation::Pocket(o), Self::PocketOverlap) => {
+                o.clear.pocket_overlap = Some(value);
+            }
             (Operation::Pocket(o), Self::ProfileOffset) => {
                 o.clear.offset = value;
             }
@@ -916,6 +931,9 @@ impl OperationParameter {
             }
             (Operation::Face(o), Self::Overlap) => {
                 o.overlap = value / 100.;
+            }
+            (Operation::Face(o), Self::FaceOverlap) => {
+                o.absolute_overlap = Some(value);
             }
             (Operation::Face(o), Self::FaceOvershoot) => {
                 o.overshoot = value;
@@ -1322,6 +1340,15 @@ impl OperationParameter {
             Self::ProfileLeadInSweep | Self::ProfileLeadOutSweep => value <= 0. || value > 170.,
             Self::ProfileTaper => value <= -80. || value > 0.,
             Self::Overlap | Self::ClearOverlap => !(0. ..=99.).contains(&value),
+            Self::Engagement if matches!(op, Operation::Pocket(p) if p.clear.pocket_adaptive_enabled()) => {
+                value <= 0.
+            }
+            Self::Stepdown
+                if matches!(op, Operation::Face(f) if !f.multiple_depths.enabled)
+                    || matches!(op, Operation::Profile(p) if !p.passes.multiple_depths) =>
+            {
+                false
+            }
             Self::Stepdown
                 if matches!(
                     op,

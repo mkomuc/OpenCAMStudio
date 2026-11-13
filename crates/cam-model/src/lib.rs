@@ -15,7 +15,7 @@ pub use rotary::{RotaryAxis, RotaryIndex, RotaryWrap};
 mod cutting_forces;
 pub use cutting_forces::{CuttingEngagement, CuttingForceEstimate, CuttingLoad};
 mod pocket;
-pub use pocket::{PocketFinishing, StockContours};
+pub use pocket::{MultipleDepths, PocketFinishing, StockContours};
 mod parallel;
 pub use parallel::*;
 mod bore;

@@ -2077,6 +2077,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 stepdown: 0.5,
                 ..Default::default()
             },
@@ -2127,6 +2130,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 stepdown: 0.5,
                 offset: 0.4,
                 ..Default::default()
@@ -2170,6 +2176,9 @@ mod tests {
             o.clear = Some(cam_model::CarveClearing {
                 tool: 2,
                 params: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     offset,
                     ..Default::default()
                 },
@@ -2289,6 +2298,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 plunge: Plunge::Helix {
                     radius: 1.0,
                     pitch: 0.5,
@@ -2476,6 +2488,9 @@ mod tests {
             o.clear = Some(cam_model::CarveClearing {
                 tool: 2,
                 params: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     overlap,
                     ..Default::default()
                 },
@@ -2519,6 +2534,9 @@ mod tests {
             o.clear = Some(cam_model::CarveClearing {
                 tool: 2,
                 params: cam_model::ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     feed,
                     plunge_feed,
                     ..Default::default()
@@ -2557,6 +2575,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 overlap: 1.0,
                 ..Default::default()
             },
@@ -2604,6 +2625,9 @@ mod tests {
         o.clear = Some(cam_model::CarveClearing {
             tool: 2,
             params: cam_model::ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 stepdown: 0.8,
                 ..Default::default()
             },

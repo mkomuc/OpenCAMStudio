@@ -74,12 +74,29 @@ impl Strategy for PocketStrategy {
         let cam_model::Operation::Pocket(op) = operation else {
             unreachable!()
         };
-        Self::new(op).compute_resolved_parameters(env, cancel)
+        let mut resolved = self.clone();
+        resolved.op = op;
+        resolved.compute_resolved_parameters(env, cancel)
     }
 }
 impl PocketStrategy {
     fn compute_resolved_parameters(&self, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
         let op = &self.op;
+        if !op.clear.pocket_adaptive_enabled() && op.clear.clearing.engagement != 0.0 {
+            let mut plain = self.clone();
+            plain.op.clear.clearing.engagement = 0.0;
+            return plain.compute_resolved_parameters(env, cancel);
+        }
+        if op.clear.pocket_adaptive_enabled()
+            && (!op.clear.clearing.engagement.is_finite() || op.clear.clearing.engagement <= 0.0)
+        {
+            return StrategyResult {
+                diagnostics: vec![Diagnostic::error(
+                    "Adaptive stepover must be finite and positive",
+                )],
+                ..Default::default()
+            };
+        }
         if op.wrap.as_ref().is_some_and(|wrap| wrap.periodic) {
             let Some(tool) = env.tool(op.tool) else {
                 return StrategyResult {
@@ -162,13 +179,90 @@ impl PocketStrategy {
         if !op.additional_regions.is_empty() {
             let mut single = op.clone();
             single.additional_regions.clear();
+            let mut regions = vec![Polygon::with_holes(op.boundary.clone(), op.islands.clone())];
+            regions.extend(op.additional_regions.iter().cloned().map(Ok));
+            let Ok(mut regions) = regions.into_iter().collect::<Result<Vec<_>, _>>() else {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error("Invalid pocket region")],
+                    ..Default::default()
+                };
+            };
+            if op.clear.multiple_depths.order_by_area {
+                regions.sort_by(|a, b| b.area().total_cmp(&a.area()));
+            }
+            let depths = pocket_levels(op, env.heights.top_of_stock, -op.depth);
+            if depths.is_empty() {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error(
+                        "Invalid or excessive pocket depth levels",
+                    )],
+                    ..Default::default()
+                };
+            }
+            let by_depth =
+                op.clear.multiple_depths.enabled && op.clear.multiple_depths.order_by_depth;
+            if by_depth && depths.len().saturating_mul(regions.len()) > cam_model::MAX_PROFILE_MOVES
+            {
+                return StrategyResult {
+                    diagnostics: vec![Diagnostic::error("Too many pocket region depth passes")],
+                    ..Default::default()
+                };
+            }
+            let passes: Vec<_> = if by_depth {
+                depths
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, &z)| regions.iter().map(move |r| (r, Some((i, z)))))
+                    .collect()
+            } else {
+                regions.iter().map(|r| (r, None)).collect()
+            };
             let mut combined = StrategyResult::default();
-            for region in std::iter::once(None).chain(op.additional_regions.iter().map(Some)) {
-                if let Some(region) = region {
-                    single.boundary = region.outer().clone();
-                    single.islands = region.holes().to_vec();
+            for (region, level) in passes {
+                single.boundary = region.outer().clone();
+                single.islands = region.holes().to_vec();
+                let previous = level
+                    .map(|(i, _)| {
+                        if i == 0 {
+                            env.heights.top_of_stock
+                        } else {
+                            depths[i - 1]
+                        }
+                    })
+                    .unwrap_or(env.heights.top_of_stock);
+                // Final-only finishing must approach its still-uncut wall stock from the original top.
+                let previous = if level.is_some_and(|(i, _)| {
+                    op.finishing.enabled && op.finishing.finish_only_final && i + 1 == depths.len()
+                }) {
+                    env.heights.top_of_stock
+                } else {
+                    previous
+                };
+                single.depth = level.map(|(_, z)| -z).unwrap_or(op.depth);
+                single.clear.multiple_depths.enabled = false;
+                if level.is_none() {
+                    single.clear.multiple_depths = op.clear.multiple_depths;
                 }
-                let result = Self::new(single.clone()).compute(env, cancel);
+                if let Some((i, _)) = level {
+                    if op.finishing.enabled
+                        && op.finishing.finish_only_final
+                        && i + 1 < depths.len()
+                    {
+                        single.finishing.enabled = false;
+                        single.clear.offset += op.finishing.count as f64 * op.finishing.stepover;
+                    }
+                }
+                let local = JobEnv {
+                    heights: cam_model::Heights::new(
+                        env.heights.clearance,
+                        env.heights.retract,
+                        previous,
+                    ),
+                    tools: env.tools,
+                    stock: env.stock,
+                    spindle: env.spindle,
+                };
+                let result = Self::new(single.clone()).compute(&local, cancel);
                 let failed = result.has_errors() || result.cancelled;
                 combined.diagnostics.extend(result.diagnostics);
                 if failed {
@@ -219,10 +313,9 @@ impl PocketStrategy {
         if !op.boundary.is_valid() {
             fail!("operation {}: pocket boundary is not a closed area", op.id);
         }
-        if !(0.0..1.0).contains(&op.clear.overlap) {
-            fail!("operation {}: overlap must be a fraction in [0, 1)", op.id);
-        }
-        if op.clear.stepdown <= 0.0 {
+        if op.clear.multiple_depths.enabled
+            && (!op.clear.stepdown.is_finite() || op.clear.stepdown <= 0.0)
+        {
             fail!("operation {}: stepdown must be positive", op.id);
         }
         // `depth` is a positive magnitude below the reference; the floor sits at Z = -depth.
@@ -247,8 +340,22 @@ impl PocketStrategy {
         // the finishing allowance (so the skin is left on the boundary and every
         // island), then by the ring spacing set by the overlap.
         let r = tool.radius();
-        let spacing = tool.diameter * (1.0 - op.clear.overlap);
-        if spacing <= 1e-9 {
+        let overlap = op
+            .clear
+            .pocket_overlap
+            .unwrap_or(tool.diameter * op.clear.overlap);
+        let spacing = if op.clear.pocket_adaptive_enabled() {
+            tool.diameter
+        } else {
+            if !overlap.is_finite() || overlap < 0.0 || overlap >= tool.diameter {
+                fail!(
+                    "operation {}: overlap must be nonnegative and less than the tool diameter",
+                    op.id
+                );
+            }
+            tool.diameter - overlap
+        };
+        if !spacing.is_finite() || spacing <= 1e-9 {
             fail!("operation {}: overlap leaves no stepover", op.id);
         }
         let finish_allowance = if op.finishing.enabled {
@@ -267,7 +374,7 @@ impl PocketStrategy {
         let guard =
             offset(std::slice::from_ref(&region), -first, JoinStyle::Round).unwrap_or_default();
 
-        let levels = depth_levels(env.heights.top_of_stock, floor, op.clear.stepdown);
+        let levels = pocket_levels(op, env.heights.top_of_stock, floor);
         if levels.is_empty() {
             fail!(
                 "operation {}: invalid or excessive depth levels; increase stepdown",
@@ -552,7 +659,12 @@ impl PocketStrategy {
         // Open-stock domains introduce corners at the transition to real
         // walls. Never ship a frontier or link that crosses their cutter envelope.
         if op.clear.clearing.engagement > 0. {
+            let diameter = env.tool(op.tool).unwrap().diameter;
+            op.clear.pocket_overlap = Some((diameter - op.clear.clearing.engagement).max(0.0));
+            op.parameter_expressions
+                .remove(&cam_model::OperationParameter::PocketOverlap);
             op.clear.clearing.engagement = 0.;
+            op.clear.adaptive_enabled = Some(false);
             let mut fallback = Self::compute_stock_levels(&op, env, cancel);
             if fallback.has_errors() || fallback.cancelled {
                 return fallback;
@@ -590,7 +702,7 @@ impl PocketStrategy {
         {
             return result;
         }
-        let levels = depth_levels(env.heights.top_of_stock, -op.depth, op.clear.stepdown);
+        let levels = pocket_levels(op, env.heights.top_of_stock, -op.depth);
         if levels.len() <= 1 {
             return result;
         }
@@ -642,6 +754,22 @@ impl PocketStrategy {
         }
         combined
     }
+}
+
+fn pocket_levels(op: &PocketOp, top: f64, floor: f64) -> Vec<f64> {
+    let settings = op.clear.multiple_depths;
+    let step = if !settings.enabled {
+        top - floor
+    } else if settings.even_stepdowns {
+        let count = ((top - floor) / op.clear.stepdown).ceil();
+        if !count.is_finite() || count < 1.0 || count > cam_model::MAX_PROFILE_LEVELS as f64 {
+            return Vec::new();
+        }
+        (top - floor) / count
+    } else {
+        op.clear.stepdown
+    };
+    depth_levels(top, floor, step)
 }
 
 /// Finish each cleared depth, or only the final depth when selected. Each disconnected loop
@@ -828,6 +956,9 @@ mod tests {
                 end: None,
                 finishing: Default::default(),
                 clear: ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     stepdown: 1.,
                     feed: 300.,
                     plunge_feed: 100.,
@@ -980,6 +1111,9 @@ mod tests {
             start: None,
             end: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 stepdown: 1.5,
                 feed: 300.,
                 plunge_feed: 100.,
@@ -1055,6 +1189,9 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
@@ -1107,6 +1244,9 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
@@ -1174,6 +1314,9 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
@@ -1238,6 +1381,9 @@ mod tests {
                 end: None,
                 start: None,
                 clear: ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     keep_tool_down: false,
                     lift_height: 0.0,
                     clearing: cam_model::Clearing::default(),
@@ -1294,6 +1440,9 @@ mod tests {
                 end: None,
                 start: None,
                 clear: ClearParams {
+                    multiple_depths: Default::default(),
+                    adaptive_enabled: None,
+                    pocket_overlap: None,
                     keep_tool_down: false,
                     lift_height: 0.0,
                     clearing: cam_model::Clearing::default(),
@@ -1366,6 +1515,9 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),
@@ -1379,6 +1531,78 @@ mod tests {
                 lead_in: Lead::Arc { radius: 2.0 },
                 lead_out: Lead::Arc { radius: 2.0 },
             },
+        }
+    }
+
+    #[test]
+    fn absolute_overlap_matches_legacy_fraction_and_is_ignored_by_adaptive() {
+        let mut op = leaded_op(vec![]);
+        let legacy = finishing_result(op.clone());
+        op.clear.pocket_overlap = Some(4.0); // 50% of the test's 8 mm tool.
+        let absolute = finishing_result(op.clone());
+        assert!(!absolute.has_errors(), "{:?}", absolute.diagnostics);
+        assert_eq!(legacy.program, absolute.program);
+        op.clear.clearing.engagement = 2.0;
+        op.clear.clearing.climb = false; // Exercise the concentric adaptive fallback.
+        let first = finishing_result(op.clone());
+        op.clear.pocket_overlap = Some(7.0);
+        let second = finishing_result(op);
+        assert!(!first.has_errors() && !second.has_errors());
+        assert_eq!(first.program, second.program);
+    }
+
+    #[test]
+    fn disabling_adaptive_preserves_the_value_but_uses_concentric_clearing() {
+        let mut op = leaded_op(vec![]);
+        op.clear.clearing.engagement = 2.0;
+        op.clear.adaptive_enabled = Some(false);
+        let disabled = finishing_result(op.clone());
+        op.clear.clearing.engagement = 0.0;
+        let plain = finishing_result(op);
+        assert!(!disabled.has_errors(), "{:?}", disabled.diagnostics);
+        assert_eq!(disabled.program, plain.program);
+    }
+
+    #[test]
+    fn pocket_depth_settings_schedule_levels_and_regions() {
+        let mut op = leaded_op(vec![]);
+        op.depth = 5.;
+        op.clear.stepdown = 2.;
+        assert_eq!(pocket_levels(&op, 0., -5.), vec![-2., -4., -5.]);
+        op.clear.multiple_depths.even_stepdowns = true;
+        let levels = pocket_levels(&op, 0., -5.);
+        assert_eq!(levels.len(), 3);
+        assert!((levels[0] + 5. / 3.).abs() < 1e-9);
+        op.clear.multiple_depths.enabled = false;
+        assert_eq!(pocket_levels(&op, 0., -5.), vec![-5.]);
+        op.clear.multiple_depths.enabled = true;
+        op.clear.multiple_depths.even_stepdowns = false;
+        op.clear.multiple_depths.order_by_depth = true;
+        op.additional_regions.push(
+            Polygon::new(Contour::new(vec![
+                Point::new(60., 0.),
+                Point::new(80., 0.),
+                Point::new(80., 20.),
+                Point::new(60., 20.),
+            ]))
+            .unwrap(),
+        );
+        let result = finishing_result(op);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let plunges: Vec<_> = result
+            .program
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Linear { to, tag, .. } if tag.kind == MoveKind::Plunge => Some((to.x, to.z)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(plunges.len(), 6);
+        for (i, z) in [-2., -4., -5.].iter().enumerate() {
+            assert!((plunges[i * 2].1 - z).abs() < 1e-9);
+            assert!((plunges[i * 2 + 1].1 - z).abs() < 1e-9);
+            assert!(plunges[i * 2].0 < 50. && plunges[i * 2 + 1].0 > 50.);
         }
     }
 
@@ -2050,6 +2274,9 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: Clearing {
@@ -2205,6 +2432,9 @@ mod tests {
             end: None,
             start: None,
             clear: ClearParams {
+                multiple_depths: Default::default(),
+                adaptive_enabled: None,
+                pocket_overlap: None,
                 keep_tool_down: false,
                 lift_height: 0.0,
                 clearing: cam_model::Clearing::default(),

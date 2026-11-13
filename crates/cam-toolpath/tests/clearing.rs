@@ -214,6 +214,9 @@ fn pocket_doc() -> Document {
         end: None,
         start: None,
         clear: ClearParams {
+            multiple_depths: Default::default(),
+            adaptive_enabled: None,
+            pocket_overlap: None,
             keep_tool_down: false,
             lift_height: 0.0,
             clearing: Clearing::default(),
@@ -273,6 +276,8 @@ fn roughing_doc() -> Document {
 /// separately, and the property below is what says whether that argument holds.
 fn face_doc(overshoot: f64) -> Document {
     let op = FaceOp {
+        absolute_overlap: None,
+        multiple_depths: Default::default(),
         parameter_expressions: Default::default(),
         spindle_rpm: 0.0,
         tool_preset: None,
