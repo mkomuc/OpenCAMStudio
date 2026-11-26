@@ -42,7 +42,6 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
             diameter: 4.8,       // min cutting ⌀ (smallest hole it threads)
             neck_diameter: 3.5,  // reduced neck (sets max thread depth = (4.8−3.5)/2)
             flute_length: 15.0,  // length of cut (reach)
-            shank_diameter: 6.0, // shank ⌀
             length: 55.0,        // overall
             flutes: 3,
             kind, // carries the pitch (None = single-point by default)
@@ -82,7 +81,6 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
         number,
         diameter,
         flute_length: flute,
-        shank_diameter: diameter, // explicit shank ⌀ (= flute ⌀ by default)
         length: flute + shank,
         flutes: 2,
         kind,

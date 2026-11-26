@@ -1106,6 +1106,24 @@ fn tool_kind_fields(kind: ToolKind) -> Vec<Field> {
     }
 }
 
+fn geometry_common_or_cutting_data(field: Field) -> bool {
+    matches!(
+        field,
+        Field::ToolDiameter
+            | Field::ShankDiameter
+            | Field::ToolLength
+            | Field::FluteLength
+            | Field::Flutes
+            | Field::ThreadTeeth
+            | Field::ThreadProfileAngle
+            | Field::LengthBelowHolder
+            | Field::ShoulderLength
+            | Field::NominalRpm
+            | Field::NominalFeed
+            | Field::NominalPlungeFeed
+    )
+}
+
 fn disc_tool_field_label(kind: ToolKind, field: Field) -> Option<&'static str> {
     match (kind, field) {
         (ToolKind::GrooveCutter, Field::FluteLength) => Some("Cutter width (mm)"),
@@ -1148,13 +1166,9 @@ fn tool_kind_field(kind: ToolKind, field: Field) -> Option<f64> {
     }
 }
 
-/// Write the parsed inspector fields onto a tool's kind-specific parameters.
-/// Write the parsed common tool dimensions onto `t`, enforcing the length constraint
-/// **overall = flute + shank**: editing flute or shank recomputes overall; editing
-/// overall recomputes the shank (flute held fixed), with shank floored at 0. The
-/// effective flute (`flute_len()`) is materialised into `flute_length` on any edit so
-/// the three stay consistent. Kind-specific parameters are handled separately by
-/// [`apply_tool_kind_fields`].
+const TOOL_DIAMETER_FORMULA: &str = "=tool_diameter";
+
+/// Write the parsed common tool dimensions onto the working tool.
 fn apply_tool_dims(t: &mut cam_model::Tool, parsed: &BTreeMap<Field, f64>) {
     if let Some(&v) = parsed.get(&Field::ToolDiameter) {
         t.diameter = v.max(0.0);
@@ -1167,6 +1181,19 @@ fn apply_tool_dims(t: &mut cam_model::Tool, parsed: &BTreeMap<Field, f64>) {
     }
     if let Some(&v) = parsed.get(&Field::NeckDiameter) {
         t.neck_diameter = v.max(0.0);
+    }
+    if let Some(&v) = parsed.get(&Field::LengthBelowHolder) {
+        t.length_below_holder = v;
+    }
+    if let Some(&v) = parsed.get(&Field::ThreadTeeth) {
+        if v.fract() == 0.0 && v <= u32::MAX as f64 {
+            t.thread_teeth = v as u32;
+        }
+    }
+    if let Some(&angle) = parsed.get(&Field::ThreadProfileAngle) {
+        if angle > 0.0 && angle < 180.0 {
+            t.thread_profile_angle_deg = angle;
+        }
     }
     if let Some(&v) = parsed.get(&Field::Flutes) {
         t.flutes = v.round().max(1.0) as u32;
@@ -1182,40 +1209,21 @@ fn apply_tool_dims(t: &mut cam_model::Tool, parsed: &BTreeMap<Field, f64>) {
         t.nominal_plunge_feed = v.max(0.0);
     }
 
-    // A face mill's cutting length, body height and overall length are independent.
-    if matches!(t.kind, ToolKind::FaceMill) {
-        let body = t.face_body_height();
-        t.face_body_height = parsed.get(&Field::FaceBodyHeight).copied().unwrap_or(body);
-        if let Some(&flute) = parsed.get(&Field::FluteLength) { t.flute_length = flute; }
-        if let Some(&length) = parsed.get(&Field::ToolLength) { t.length = length; }
-        return;
+    if let Some(&length) = parsed.get(&Field::ToolLength) {
+        t.length = length;
     }
-    // Disc width and assembly length are separate catalogue dimensions.
-    if t.kind.is_side_cutting_disc() {
-        if let Some(&width) = parsed.get(&Field::FluteLength) {
-            t.flute_length = width;
-        }
-        if let Some(&length) = parsed.get(&Field::ToolLength) {
-            t.length = length;
-        }
-        return;
+    if let Some(&body) = parsed.get(&Field::FaceBodyHeight) {
+        t.face_body_height = body;
+    } else if matches!(t.kind, ToolKind::FaceMill) && parsed.contains_key(&Field::FluteLength) {
+        // Older face mills used the flute length as their body height.
+        t.face_body_height = t.face_body_height();
     }
-    // overall = flute + shank. Snapshot the effective flute/shank *before* the edit.
-    let old_flute = t.flute_len();
-    let old_shank = (t.length - old_flute).max(0.0);
-    let new_flute = parsed
-        .get(&Field::FluteLength)
-        .map(|&v| v.max(0.0))
-        .unwrap_or(old_flute);
-    t.flute_length = new_flute; // materialise (drops the 0-sentinel)
-    let new_length = if let Some(&sh) = parsed.get(&Field::ShankLength) {
-        new_flute + sh.max(0.0) // shank edited ⇒ overall follows
-    } else if let Some(&ov) = parsed.get(&Field::ToolLength) {
-        ov // overall edited ⇒ shank absorbs (derived below)
-    } else {
-        new_flute + old_shank // flute may have changed; preserve the shank
-    };
-    t.length = new_length.max(new_flute); // shank ≥ 0
+    if let Some(&flute) = parsed.get(&Field::FluteLength) {
+        t.flute_length = flute;
+    }
+    if let Some(&shoulder) = parsed.get(&Field::ShoulderLength) {
+        t.shoulder_length = shoulder;
+    }
 }
 
 fn apply_tool_kind_fields(kind: &mut ToolKind, parsed: &BTreeMap<Field, f64>) {
@@ -1322,14 +1330,16 @@ enum Field {
     OriginIndex,
     ToolDiameter,
     ToolLength,
+    LengthBelowHolder,
+    ThreadTeeth,
+    ThreadProfileAngle,
     /// Length of cut (flute length) from the tip, mm.
     FluteLength,
     FaceBodyHeight,
     /// Shank diameter, mm (a face mill's arbor diameter, kind-aware).
     ShankDiameter,
-    /// Shank length, mm — a *derived* field: overall = flute + shank (editing it moves
-    /// overall length; editing overall moves it back).
-    ShankLength,
+    /// Axial length from the tool tip to the start of the shank, mm.
+    ShoulderLength,
     /// Reduced-neck length from the cutting end, mm; 0 = no reduced neck.
     NeckLength,
     /// Reduced-neck diameter, mm; 0 = same as the cutting diameter.
@@ -1536,12 +1546,15 @@ impl Field {
             Field::OriginY => "Origin Y (mm)",
             Field::OriginZ => "Origin Z (mm)",
             Field::OriginIndex => "H index",
-            Field::ToolDiameter => "Flute diameter (mm)",
+            Field::ToolDiameter => "Diameter (mm)",
             Field::ToolLength => "Overall length (mm)",
+            Field::LengthBelowHolder => "Length below holder (mm)",
+            Field::ThreadTeeth => "Number of teeth",
+            Field::ThreadProfileAngle => "Thread profile angle (deg)",
             Field::FluteLength => "Flute length (mm)",
             Field::FaceBodyHeight => "Body height (mm)",
             Field::ShankDiameter => "Shank diameter (mm)",
-            Field::ShankLength => "Shank length (mm)",
+            Field::ShoulderLength => "Shoulder length (mm)",
             Field::NeckLength => "Neck length (mm, 0=none)",
             Field::NeckDiameter => "Neck ⌀ (mm, 0=cut ⌀)",
             Field::Flutes => "Flutes",
@@ -1753,9 +1766,12 @@ impl Field {
             }
             Field::ToolDiameter => "The tool's cutting diameter (mm).",
             Field::ToolLength => {
-                "Overall length of the tool — the stickout below the holder. Used for \
-                 reach checks and the backplot; does not change the cutting geometry."
+                "Overall length of the tool. Currently used for reach checks and the backplot; \
+                 length below holder is stored separately."
             }
+            Field::LengthBelowHolder => "Length from the tool tip to the holder; zero means unspecified. This catalog value does not change simulation reach.",
+            Field::ThreadTeeth => "Number of axial thread-form teeth, separate from the flute count; zero means unspecified.",
+            Field::ThreadProfileAngle => "Included angle between the two flanks of a thread tooth. Metric threads such as M5 × 0.8 use 60°.",
             Field::FluteLength => {
                 "Length of the cutting edge (length of cut) measured from the tip. The \
                  rest of the tool, up to the overall length, is the non-cutting shank; \
@@ -1763,13 +1779,10 @@ impl Field {
             }
             Field::FaceBodyHeight => "Axial height of the face mill body, including its non-cutting portion.",
             Field::ShankDiameter => {
-                "Diameter of the non-cutting shank above the cutting portion (typically \
-                 equal to the cutting diameter)."
+                "Diameter of the shank. Use =tool_diameter to follow Diameter, or enter a fixed value."
             }
-            Field::ShankLength => {
-                "Length of the non-cutting shank above the cutting portion. Overall length \
-                 = cutting length + shank length; editing the shank moves the overall \
-                 length, and editing the overall length moves the shank."
+            Field::ShoulderLength => {
+                "Distance from the tool tip to the start of the shank, including the flutes and any neck. Enter zero to infer the shoulder from the cutter geometry."
             }
             Field::NeckLength => {
                 "Length of a reduced-diameter neck above the flutes (reach/stub tools). \
@@ -6649,9 +6662,7 @@ impl App {
                         }
                     }
                 }
-                // In the Tools editor, every field edit flows into the working copy so
-                // the viewport previews it instantly (no Apply needed); the length trio
-                // also refreshes its derived buffers. Apply then commits the working copy.
+                // Update the cutter preview immediately. Apply commits the working copy.
                 if self.library_mode() {
                     self.live_edit(field);
                 }
@@ -10143,26 +10154,31 @@ impl App {
         plunge_param_help(plunge, first)
     }
 
-    /// The kind of the tool the inspector is editing (library entry or project tool).
-    fn inspected_tool_kind(&self) -> Option<ToolKind> {
+    /// The current library draft or selected project tool.
+    fn inspected_tool(&self) -> Option<&cam_model::Tool> {
         if self.library_mode() {
             // Prefer the working copy so a Type change (which edits it, not the committed
             // entry) immediately drives the kind-specific field set, labels and validation.
             return self
                 .tool_edit
                 .as_ref()
-                .map(|t| t.kind)
-                .or_else(|| self.library.tools.get(self.lib_sel).map(|t| t.kind));
+                .or_else(|| self.library.tools.get(self.lib_sel));
         }
         if let Selection::Tool(i) = self.controller.selection() {
-            self.controller
-                .inspection_setup()
-                .tools
-                .get(i)
-                .map(|t| t.kind)
+            self.controller.inspection_setup().tools.get(i)
         } else {
             None
         }
+    }
+
+    fn inspected_tool_kind(&self) -> Option<ToolKind> {
+        self.inspected_tool().map(|tool| tool.kind)
+    }
+
+    fn shank_diameter_follows_tool(&self) -> bool {
+        self.fields
+            .get(&Field::ShankDiameter)
+            .is_some_and(|source| source.trim() == TOOL_DIAMETER_FORMULA)
     }
 
     /// The inspector label for a field, kind-aware. A V-bit's transverse measurement is
@@ -10282,6 +10298,9 @@ impl App {
                 "Thread length — the length of the threaded cutting band, which bounds the \
                  thread depth reachable in one helical pass."
             }
+            (Some(ThreadMill { pitch: None }), Field::ThreadTeeth) => {
+                "A single-point mill has one tooth. Select Full-form to preview multiple teeth at a fixed pitch."
+            }
             // Shank / arbor.
             (Some(FaceMill), Field::ShankDiameter) => {
                 "Arbor diameter — the mounting stub above the cutting body (narrower than \
@@ -10310,6 +10329,15 @@ impl App {
         let Ok(value) = self.parsed_field_value(field) else {
             return true;
         };
+        if field == Field::ThreadTeeth {
+            return value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64;
+        }
+        if field == Field::ThreadProfileAngle {
+            return !(value > 0.0 && value < 180.0);
+        }
+        if field == Field::LengthBelowHolder {
+            return value < 0.0 || self.fields.get(&Field::ToolLength).and_then(|s| s.parse::<f64>().ok()).is_some_and(|length| value > length);
+        }
         if self.creating_operation() {
             return self
                 .operation_draft
@@ -10330,7 +10358,16 @@ impl App {
                 }
             }
         }
-        let buf = |f: Field| self.fields.get(&f).and_then(|s| s.parse::<f64>().ok());
+        let buf = |f: Field| self.fields.get(&f).and_then(|s| s.trim().parse::<f64>().ok());
+        if field == Field::ToolLength && value <= 0.0 {
+            return true;
+        }
+        if field == Field::ShoulderLength {
+            return value < 0.0
+                || (value > 0.0
+                    && (buf(Field::FluteLength).is_some_and(|flute| value < flute - 1e-9)
+                        || buf(Field::ToolLength).is_some_and(|length| value > length + 1e-9)));
+        }
         if self
             .inspected_tool_kind()
             .is_some_and(ToolKind::is_side_cutting_disc)
@@ -10422,9 +10459,9 @@ impl App {
             Field::ShankDiameter => {
                 // A face mill's arbor cannot be wider than its cutting body (⌀), else the
                 // silhouette flares out above the body. Only enforced for face mills.
-                matches!(self.inspected_tool_kind(), Some(ToolKind::FaceMill))
-                    && matches!((buf(Field::ShankDiameter), buf(Field::ToolDiameter)),
-                        (Some(arbor), Some(d)) if arbor > d + 1e-9)
+                value <= 0.0
+                    || (matches!(self.inspected_tool_kind(), Some(ToolKind::FaceMill))
+                        && buf(Field::ToolDiameter).is_some_and(|diameter| value > diameter + 1e-9))
             }
             Field::ToolThreadPitch => {
                 // Shown only for a full-form thread mill, where the pitch must be positive.
@@ -10443,8 +10480,8 @@ impl App {
                 let Some(fl) = buf(Field::FluteLength) else {
                     return true; // empty / unparseable
                 };
-                if fl <= 1e-9 {
-                    return true; // flute length cannot be 0 (anywhere)
+                if fl <= 1e-9 || buf(Field::ToolLength).is_some_and(|length| fl > length + 1e-9) {
+                    return true;
                 }
                 match self.inspected_tool_kind() {
                     Some(ToolKind::FaceMill) => matches!(buf(Field::FaceBodyHeight), Some(body) if fl > body + 1e-9),
@@ -10528,40 +10565,33 @@ impl App {
             .any(|&f| self.field_invalid(f))
     }
 
-    /// Apply the flute/shank/overall length constraint to the selected library tool
-    /// **live** from the `edited` field's current buffer, then refresh the *other* two
-    /// length buffers so the derived value shows immediately. Only fires on a valid
-    /// number; the edited field's own buffer is left untouched (mid-typing).
+    /// Apply valid input to the live cutter, keeping inferred shoulders in sync
+    /// with flute and overall length while preserving any explicit shoulder.
     fn live_edit(&mut self, edited: Field) {
-        let Some(v) = self.fields.get(&edited).and_then(|s| s.parse::<f64>().ok()) else {
-            return; // empty / unparseable: hold the last valid working copy
+        let Ok(value) = self.parsed_field_value(edited) else {
+            return;
         };
-        if !v.is_finite() || v < 0.0 || (edited == Field::FluteLength && v <= 0.0) {
-            return; // never write a zero/negative flute (keeps the last valid state)
+        if value < 0.0 || (edited == Field::FluteLength && value <= 0.0) {
+            return;
         }
-        let mut parsed: BTreeMap<Field, f64> = BTreeMap::new();
-        parsed.insert(edited, v);
-        // Apply just the edited field to the working copy (single-field semantics keep
-        // the overall = flute + shank coupling correct), then read back the derived
-        // length trio to refresh the *other* two buffers for display.
-        let derived = {
-            let Some(t) = self.tool_edit.as_mut() else {
-                return;
-            };
-            apply_tool_dims(t, &parsed);
-            apply_tool_kind_fields(&mut t.kind, &parsed);
-            (!t.kind.is_side_cutting_disc()).then(|| {
-                [
-                    (Field::FluteLength, t.flute_len()),
-                    (Field::ShankLength, (t.length - t.flute_len()).max(0.0)),
-                    (Field::ToolLength, t.length),
-                ]
-            })
+        let value = if edited == Field::ShankDiameter && self.shank_diameter_follows_tool() {
+            0.0 // The model resolves this reference to the current tool diameter.
+        } else {
+            value
         };
-        for (f, val) in derived.into_iter().flatten() {
-            if f != edited {
-                self.fields.insert(f, fmt_num(val));
-            }
+        let parsed = BTreeMap::from([(edited, value)]);
+        let Some(tool) = self.tool_edit.as_mut() else {
+            return;
+        };
+        // Refresh only a buffer still showing the old inferred shoulder.
+        let refresh_shoulder = matches!(edited, Field::FluteLength | Field::ToolLength)
+            && tool.shoulder_length == 0.0
+            && self.fields.get(&Field::ShoulderLength) == Some(&fmt_num(tool.shoulder_len()));
+        apply_tool_dims(tool, &parsed);
+        apply_tool_kind_fields(&mut tool.kind, &parsed);
+        if refresh_shoulder {
+            self.fields
+                .insert(Field::ShoulderLength, fmt_num(tool.shoulder_len()));
         }
         if matches!(edited, Field::ToolDiameter | Field::Flutes) {
             self.refresh_preset_cutting_fields(None);
@@ -10572,18 +10602,7 @@ impl App {
     /// library tool while the Tools tab is active, else a selected project tool. `None`
     /// ⇒ show the normal 3D backplot.
     fn preview_tool(&self) -> Option<cam_model::Tool> {
-        if self.library_mode() {
-            // The live working copy (which carries the in-progress edits); fall back to
-            // the committed tool before the first edit / working copy is set.
-            return self
-                .tool_edit
-                .clone()
-                .or(self.library.tools.get(self.lib_sel).cloned());
-        }
-        match self.controller.selection() {
-            Selection::Tool(i) => self.controller.inspection_setup().tools.get(i).cloned(),
-            _ => None,
-        }
+        self.inspected_tool().cloned()
     }
 
     /// Whether the Tools inspector has uncommitted edits — the working copy differs
@@ -10592,6 +10611,19 @@ impl App {
     fn inspector_dirty(&self) -> bool {
         if self.machine_edit_dirty() {
             return true;
+        }
+        if let (Some(tool), Some(source)) =
+            (self.inspected_tool(), self.fields.get(&Field::ShankDiameter))
+        {
+            let source = source.trim();
+            let unchanged = if tool.shank_diameter == 0.0 {
+                source == TOOL_DIAMETER_FORMULA
+            } else {
+                source.parse::<f64>() == Ok(tool.shank_diameter)
+            };
+            if !unchanged {
+                return true;
+            }
         }
         if !self.library_mode() {
             if self.stock_to_leave_dirty() {
@@ -10627,7 +10659,10 @@ impl App {
                     &self
                         .inspector_fields()
                         .into_iter()
-                        .filter(|f| parameter_expressions::parameter(*f).is_none())
+                        .filter(|f| {
+                            *f != Field::ShankDiameter
+                                && parameter_expressions::parameter(*f).is_none()
+                        })
                         .collect::<Vec<_>>(),
                     &self.fields,
                     |f| self.field_value(f),
@@ -10636,9 +10671,15 @@ impl App {
         match (self.tool_edit.clone(), self.library.tools.get(self.lib_sel)) {
             (Some(edit), Some(saved)) => {
                 edit != *saved
-                    || fields_are_dirty(&self.inspector_fields(), &self.fields, |field| {
-                        self.field_value(field)
-                    })
+                    || fields_are_dirty(
+                        &self
+                            .inspector_fields()
+                            .into_iter()
+                            .filter(|&field| field != Field::ShankDiameter)
+                            .collect::<Vec<_>>(),
+                        &self.fields,
+                        |field| self.field_value(field),
+                    )
             }
             _ => false,
         }
@@ -10679,7 +10720,7 @@ impl App {
     /// Which fields the inspector shows for the current selection.
     fn inspector_fields(&self) -> Vec<Field> {
         // The field set is **kind-specific** — the end mill has its own characterisation
-        // (Andreas): flute ⌀, flute length, shank ⌀, shank length, overall length,
+        // (Andreas): diameter, flute length, shank ⌀, shoulder length, overall length,
         // flutes — no neck. Other kinds keep the generic set until characterised in turn.
         // The Cutting-direction control is rendered separately (it's a picker, not a
         // numeric field), as is the Type picker.
@@ -10690,7 +10731,7 @@ impl App {
                     Field::ToolDiameter, // "Flute ⌀"
                     Field::FluteLength,
                     Field::ShankDiameter,
-                    Field::ShankLength,
+                    Field::ShoulderLength,
                     Field::ToolLength, // "Overall length"
                     Field::Flutes,
                 ],
@@ -10700,7 +10741,7 @@ impl App {
                     Field::CornerRadius,
                     Field::FluteLength,
                     Field::ShankDiameter,
-                    Field::ShankLength,
+                    Field::ShoulderLength,
                     Field::ToolLength,
                     Field::Flutes,
                 ],
@@ -10710,7 +10751,7 @@ impl App {
                     Field::TipLength,
                     Field::FluteLength,
                     Field::ShankDiameter,
-                    Field::ShankLength,
+                    Field::ShoulderLength,
                     Field::ToolLength,
                     Field::Flutes,
                 ],
@@ -10719,7 +10760,7 @@ impl App {
                     Field::ToolDiameter,
                     Field::FluteLength,
                     Field::ShankDiameter,
-                    Field::ShankLength,
+                    Field::ShoulderLength,
                     Field::ToolLength,
                     Field::PointAngle,
                 ],
@@ -10745,7 +10786,7 @@ impl App {
                 ],
                 // Face mill (shell mill): a wide cutting body on a narrower arbor.
                 // ShankDiameter is relabelled "Arbor diameter" (see
-                // `field_label`). No shank-length / neck — the arbor length is overall − body.
+                // `field_label`). Body height determines where the arbor begins.
                 Some(ToolKind::FaceMill) => vec![
                     Field::ToolDiameter,
                     Field::FluteLength,
@@ -10773,15 +10814,15 @@ impl App {
                 // Thread mill (single-point/full-form is a toggle, rendered separately):
                 // - single-point (single profile): one 60° tooth + a reduced neck. Min cutting
                 //   ⌀ (smallest hole), neck ⌀ (sets max thread depth), length of cut (reach),
-                //   shank ⌀/length, overall. The blind-hole allowance is derived per operation.
+                //   shank ⌀, shoulder and overall length. Blind-hole allowance is derived per operation.
                 // - full-form: a long threaded band at a fixed pitch (cutting ⌀, thread length,
-                //   shank ⌀, shank length, overall, pitch). No neck.
+                //   shank ⌀, shoulder and overall length, pitch).
                 Some(ToolKind::ThreadMill { pitch: None }) => vec![
                     Field::ToolDiameter,
                     Field::NeckDiameter,
                     Field::FluteLength,
                     Field::ShankDiameter,
-                    Field::ShankLength,
+                    Field::ShoulderLength,
                     Field::ToolLength,
                     Field::Flutes,
                 ],
@@ -10789,7 +10830,7 @@ impl App {
                     Field::ToolDiameter,
                     Field::FluteLength,
                     Field::ShankDiameter,
-                    Field::ShankLength,
+                    Field::ShoulderLength,
                     Field::ToolLength,
                     Field::ToolThreadPitch,
                     Field::Flutes,
@@ -10822,7 +10863,12 @@ impl App {
         if self.library_mode() {
             // Use the working-copy kind (via inspected_tool_kind) so a Type change swaps
             // in the new field set immediately, without waiting for Apply.
-            return tool_fields(self.inspected_tool_kind());
+            let mut fields = tool_fields(self.inspected_tool_kind());
+            fields.push(Field::LengthBelowHolder);
+            if matches!(self.inspected_tool_kind(), Some(ToolKind::ThreadMill { .. })) {
+                fields.extend([Field::ThreadTeeth, Field::ThreadProfileAngle]);
+            }
+            return fields;
         }
         if self.creating_operation() {
             return self
@@ -10949,11 +10995,14 @@ impl App {
             return match field {
                 Field::ToolDiameter => Some(t.diameter),
                 Field::ToolLength => Some(t.length),
+                Field::LengthBelowHolder => Some(t.length_below_holder),
+                Field::ThreadTeeth => Some(t.thread_teeth as f64),
+                Field::ThreadProfileAngle => Some(t.thread_profile_angle()),
                 // Effective flute (resolves the 0-sentinel), so shank = overall − flute.
                 Field::FluteLength => Some(t.flute_len()),
                 Field::FaceBodyHeight => Some(t.face_body_height()),
                 Field::ShankDiameter => Some(t.shank_dia()),
-                Field::ShankLength => Some((t.length - t.flute_len()).max(0.0)),
+                Field::ShoulderLength => Some(t.shoulder_len()),
                 Field::NeckLength => Some(t.neck_length),
                 Field::NeckDiameter => Some(t.neck_diameter),
                 Field::Flutes => Some(t.flutes as f64),
@@ -11053,11 +11102,11 @@ impl App {
                 Selection::Tool(i) => setup.tools.get(i).map(|t| t.shank_dia()),
                 _ => None,
             },
-            Field::ShankLength => match self.controller.selection() {
+            Field::ShoulderLength => match self.controller.selection() {
                 Selection::Tool(i) => setup
                     .tools
                     .get(i)
-                    .map(|t| (t.length - t.flute_len()).max(0.0)),
+                    .map(cam_model::Tool::shoulder_len),
                 _ => None,
             },
             Field::Flutes => match self.controller.selection() {
@@ -11352,10 +11401,20 @@ impl App {
                     }
                 }
             }
-            Selection::Tool(i) => self.controller.edit_tool(i, |t| {
-                apply_tool_dims(t, &parsed);
-                apply_tool_kind_fields(&mut t.kind, &parsed);
-            }),
+            Selection::Tool(i) => {
+                if self.shank_diameter_follows_tool() {
+                    parsed.insert(Field::ShankDiameter, 0.0);
+                }
+                self.controller.edit_tool(i, |t| {
+                    if t.shoulder_length == 0.0
+                        && parsed.get(&Field::ShoulderLength) == Some(&t.shoulder_len())
+                    {
+                        parsed.remove(&Field::ShoulderLength);
+                    }
+                    apply_tool_dims(t, &parsed);
+                    apply_tool_kind_fields(&mut t.kind, &parsed);
+                });
+            }
             Selection::Operation(_) => {}
             Selection::Stock => self.controller.edit_stock(|stock| {
                 if let cam_model::Stock::BoundingBox {
@@ -12957,6 +13016,44 @@ impl App {
             .unwrap_or_else(|| "Tool Library".to_string());
         let mut list = column![inspector_heading(name)].spacing(6).padding(14);
 
+        if let Some(tool) = &self.tool_edit {
+            list = list.push(inspector_section("General"));
+            for (label, field, value) in [
+                (
+                    "Description",
+                    tool_presets::ToolDetail::Description,
+                    &tool.description,
+                ),
+                (
+                    "Vendor",
+                    tool_presets::ToolDetail::Manufacturer,
+                    &tool.manufacturer,
+                ),
+                (
+                    "Product ID",
+                    tool_presets::ToolDetail::ProductId,
+                    &tool.product_id,
+                ),
+                (
+                    "Product link",
+                    tool_presets::ToolDetail::ProductLink,
+                    &tool.product_link,
+                ),
+            ] {
+                list = list.push(
+                    row![
+                        text(label).size(12).width(Length::Fill),
+                        inspector_input("", value)
+                            .on_input(move |value| Message::ToolDetailChanged(field, value))
+                            .width(177)
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+
+        list = list.push(inspector_section("Cutter"));
         if let Some(t) = self.preview_tool() {
             // Keep the label flexible so long tool types fit a narrow inspector.
             list = list.push(
@@ -12981,45 +13078,28 @@ impl App {
             );
         }
 
-        if self
-            .preview_tool()
-            .is_some_and(|tool| matches!(tool.kind, ToolKind::RoughingMill))
-        {
-            list = list.push(text("Roughing serrations are not modeled; simulation uses the nominal flat-end envelope.")
-                .size(11).color(INSPECTOR_MUTED));
+        let fields = self.inspector_fields();
+        if fields.contains(&Field::Flutes) {
+            let value = self
+                .fields
+                .get(&Field::Flutes)
+                .map(String::as_str)
+                .unwrap_or_default();
+            list = list.push(self.parameter_field_row(
+                Field::Flutes,
+                if self.inspected_tool_kind().is_some_and(|kind| kind.is_side_cutting_disc()) {
+                    self.field_label(Field::Flutes)
+                } else {
+                    "Number of flutes"
+                },
+                self.field_help(Field::Flutes),
+                value,
+            ));
         }
-
         if let Some(tool) = &self.tool_edit {
-            if tool.kind.is_side_cutting_disc() {
-                list = list.push(
-                    text("Toolpaths for side-cutting discs require a dedicated strategy.")
-                        .size(11)
-                        .color(INSPECTOR_MUTED),
-                );
-            }
             for (label, field, value) in [
                 (
-                    "Description",
-                    tool_presets::ToolDetail::Description,
-                    &tool.description,
-                ),
-                (
-                    "Manufacturer",
-                    tool_presets::ToolDetail::Manufacturer,
-                    &tool.manufacturer,
-                ),
-                (
-                    "Product ID",
-                    tool_presets::ToolDetail::ProductId,
-                    &tool.product_id,
-                ),
-                (
-                    "Product link",
-                    tool_presets::ToolDetail::ProductLink,
-                    &tool.product_link,
-                ),
-                (
-                    "Cutter material",
+                    "Material",
                     tool_presets::ToolDetail::CutterMaterial,
                     &tool.cutter_material,
                 ),
@@ -13037,8 +13117,61 @@ impl App {
                 );
             }
         }
+        if self
+            .preview_tool()
+            .is_some_and(|tool| matches!(tool.kind, ToolKind::RoughingMill))
+        {
+            list = list.push(text("Roughing serrations are not modeled; simulation uses the nominal flat-end envelope.")
+                .size(11).color(INSPECTOR_MUTED));
+        }
 
-        for field in self.inspector_fields() {
+        if self
+            .tool_edit
+            .as_ref()
+            .is_some_and(|tool| tool.kind.is_side_cutting_disc())
+        {
+            list = list.push(
+                text("Toolpaths for side-cutting discs require a dedicated strategy.")
+                    .size(11)
+                    .color(INSPECTOR_MUTED),
+            );
+        }
+
+        list = list.push(inspector_section("Geometry"));
+        // Put the common dimensions first, while retaining each cutter's extra fields.
+        let mut geometry = Vec::new();
+        for field in [
+            Field::ToolDiameter,
+            Field::ShankDiameter,
+            Field::ToolLength,
+            Field::LengthBelowHolder,
+            Field::FluteLength,
+            Field::ShoulderLength,
+            Field::ThreadTeeth,
+            Field::ThreadProfileAngle,
+        ] {
+            if fields.contains(&field) {
+                geometry.push(field);
+            }
+        }
+        geometry.extend(
+            fields
+                .iter()
+                .copied()
+                .filter(|field| !geometry_common_or_cutting_data(*field)),
+        );
+        for field in geometry.into_iter().chain(
+            [
+                Field::NominalRpm,
+                Field::NominalFeed,
+                Field::NominalPlungeFeed,
+            ]
+            .into_iter()
+            .filter(|field| fields.contains(field)),
+        ) {
+            if field == Field::NominalRpm {
+                list = list.push(inspector_section("Cutting data"));
+            }
             let raw = self
                 .fields
                 .get(&field)
@@ -13046,7 +13179,7 @@ impl App {
                 .unwrap_or_default();
             let value = self.settings.format_numeric_input(
                 raw,
-                self.edited_tool_input == Some(field) || field == Field::Flutes,
+                self.edited_tool_input == Some(field) || field == Field::ThreadTeeth,
             );
             list = list.push(self.parameter_field_row(
                 field,
@@ -18387,6 +18520,120 @@ mod settings_agree_with_constants {
 mod inspector_field_tests {
     use super::*;
     use cam_model::{DrillOp, Tool};
+
+    #[test]
+    fn library_shank_diameter_follows_diameter_until_overridden() {
+        let (mut app, _) = App::new();
+        app.workspace = Workspace::Tools;
+        app.library.tools = vec![crate::tool_library::default_tool(1, ToolKind::EndMill)];
+        app.lib_sel = 0;
+        app.reload_tool_edit();
+
+        assert_eq!(app.field_label(Field::ToolDiameter), "Diameter (mm)");
+        assert_eq!(app.fields[&Field::ShankDiameter], "=tool_diameter");
+        let _ = app.update(Message::FieldChanged(Field::ToolDiameter, "8".into()));
+        assert_eq!(app.parsed_field_value(Field::ShankDiameter), Ok(8.0));
+        assert_eq!(app.preview_tool().unwrap().shank_dia(), 8.0);
+        let _ = app.update(Message::FieldChanged(Field::ShankDiameter, "10".into()));
+        let _ = app.update(Message::FieldChanged(Field::ToolDiameter, "9".into()));
+        assert_eq!(app.preview_tool().unwrap().shank_dia(), 10.0);
+        let _ = app.update(Message::FieldChanged(
+            Field::ShankDiameter,
+            "=tool_diameter".into(),
+        ));
+        let _ = app.update(Message::Apply);
+        assert_eq!(app.fields[&Field::ShankDiameter], "=tool_diameter");
+        assert_eq!(app.library.tools[0].shank_dia(), 9.0);
+        assert!(!app.inspector_dirty());
+    }
+
+    #[test]
+    fn library_shoulder_length_sets_the_thread_mill_reach_independently() {
+        let (mut app, _) = App::new();
+        app.workspace = Workspace::Tools;
+        app.library.tools = vec![Tool {
+            number: 1,
+            diameter: 4.0,
+            shank_diameter: 6.0,
+            length: 58.0,
+            flute_length: 2.4,
+            flutes: 4,
+            kind: ToolKind::ThreadMill { pitch: Some(0.8) },
+            ..Default::default()
+        }];
+        app.lib_sel = 0;
+        app.reload_tool_edit();
+        assert_eq!(app.fields[&Field::ShankDiameter], "6");
+        assert_eq!(app.fields[&Field::ShoulderLength], "2.4");
+        let _ = app.update(Message::FieldChanged(Field::ShoulderLength, "60".into()));
+        assert!(app.field_invalid(Field::ShoulderLength));
+        let _ = app.update(Message::FieldChanged(Field::ShoulderLength, "16".into()));
+        assert!(!app.field_invalid(Field::ShoulderLength));
+        let _ = app.update(Message::Apply);
+
+        let encoded = serde_json::to_string(&app.library.tools[0]).unwrap();
+        let tool: Tool = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            (tool.flute_len(), tool.shoulder_len(), tool.length),
+            (2.4, 16.0, 58.0)
+        );
+        let profile = tool.profile();
+        assert!(profile
+            .segs
+            .iter()
+            .any(|seg| !seg.cutting && seg.end == cam_geo::Point::new(3.0, 16.0)));
+        assert!(profile
+            .segs
+            .iter()
+            .all(|seg| !seg.cutting || seg.end.y <= 2.4));
+    }
+
+    #[test]
+    fn library_thread_mill_stores_holder_length_and_teeth_independently() {
+        let (mut app, _) = App::new();
+        app.workspace = Workspace::Tools;
+        app.reload_tool_edit();
+        let _ = app.update(Message::ToolKindChanged(ToolKind::ThreadMill { pitch: Some(1.0) }));
+        assert!(app.inspector_fields().contains(&Field::LengthBelowHolder));
+        assert!(app.inspector_fields().contains(&Field::ThreadTeeth));
+        assert!(app.inspector_fields().contains(&Field::ThreadProfileAngle));
+        let _ = app.update(Message::FieldChanged(Field::LengthBelowHolder, "20".into()));
+        let _ = app.update(Message::FieldChanged(Field::ThreadTeeth, "5".into()));
+        let _ = app.update(Message::FieldChanged(Field::ThreadProfileAngle, "65".into()));
+        assert!(!app.field_invalid(Field::LengthBelowHolder));
+        assert!(!app.field_invalid(Field::ThreadTeeth));
+        assert!(!app.field_invalid(Field::ThreadProfileAngle));
+        let tool = app.tool_edit.as_ref().unwrap();
+        assert_eq!(tool.length_below_holder, 20.0);
+        assert_eq!(tool.thread_teeth, 5);
+        assert_ne!(tool.length, tool.length_below_holder);
+        let encoded = serde_json::to_string(tool).unwrap();
+        let decoded: Tool = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.length_below_holder, 20.0);
+        assert_eq!(decoded.thread_teeth, 5);
+        assert_eq!(decoded.thread_profile_angle_deg, 65.0);
+        let mut old: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        old.as_object_mut().unwrap().remove("length_below_holder");
+        old.as_object_mut().unwrap().remove("thread_teeth");
+        old.as_object_mut().unwrap().remove("thread_profile_angle_deg");
+        let decoded: Tool = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.length_below_holder, 0.0);
+        assert_eq!(decoded.thread_teeth, 0);
+        assert_eq!(decoded.thread_profile_angle_deg, 60.0);
+        let _ = app.update(Message::Apply);
+        app.reload_tool_edit();
+        let saved = app.tool_edit.as_ref().unwrap();
+        assert_eq!(saved.length_below_holder, 20.0);
+        assert_eq!(saved.thread_teeth, 5);
+        assert_eq!(saved.thread_profile_angle_deg, 65.0);
+        let _ = app.update(Message::FieldChanged(Field::ThreadProfileAngle, "180".into()));
+        assert!(app.field_invalid(Field::ThreadProfileAngle));
+        assert_eq!(app.preview_tool().unwrap().thread_profile_angle_deg, 65.0);
+        let _ = app.update(Message::FieldChanged(Field::ThreadTeeth, "1.5".into()));
+        assert!(app.field_invalid(Field::ThreadTeeth));
+        let _ = app.update(Message::FieldChanged(Field::LengthBelowHolder, "9999".into()));
+        assert!(app.field_invalid(Field::LengthBelowHolder));
+    }
 
     #[test]
     fn disc_cutters_have_distinct_labels_and_independent_dimensions() {

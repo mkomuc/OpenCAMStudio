@@ -119,8 +119,10 @@ pub struct ToolIdentity {
     flute_len_um: i64,
     face_body_height_um: i64,
     shank_dia_um: i64,
+    shoulder_len_um: i64,
     neck_len_um: i64,
     neck_dia_um: i64,
+    thread_profile_angle_mdeg: i64,
     flutes: u32,
     cutting_direction: CutDir,
 }
@@ -135,8 +137,14 @@ impl Tool {
             flute_len_um: q(self.flute_len()),
             face_body_height_um: if matches!(self.kind, ToolKind::FaceMill) { q(self.face_body_height()) } else { 0 },
             shank_dia_um: q(self.shank_dia()),
+            shoulder_len_um: q(self.shoulder_len()),
             neck_len_um: q(self.neck_length),
             neck_dia_um: q(self.neck_dia()),
+            thread_profile_angle_mdeg: if matches!(self.kind, ToolKind::ThreadMill { .. }) {
+                qa(self.thread_profile_angle())
+            } else {
+                0
+            },
             flutes: self.flutes,
             cutting_direction: self.cutting_direction,
         }

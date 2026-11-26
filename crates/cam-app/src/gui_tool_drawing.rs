@@ -7,6 +7,7 @@ pub(super) struct ToolCanvas {
     selected: Option<Field>,
     compact: bool,
     profile: cam_geo::Profile2D,
+    dimensions: Vec<Dimension>,
     flute_length: f64,
     flutes: u32,
     cutting_direction: CutDir,
@@ -25,7 +26,7 @@ pub(super) struct ToolCanvas {
 
 impl ToolCanvas {
     pub(super) fn new(tool: &cam_model::Tool) -> Self {
-        let profile = tool.profile();
+        let profile = tool.preview_profile();
         // The flute helix spans the actual cutting region — the flute length for an end
         // mill, the cone for a V-bit / drill — read off the profile's cutting segments.
         let cutting_top = profile
@@ -72,6 +73,7 @@ impl ToolCanvas {
                 }
             },
             draw_face_inserts: matches!(tool.kind, ToolKind::FaceMill),
+            dimensions: dimensions(tool, &profile),
             profile,
         }
     }
@@ -309,10 +311,11 @@ pub(super) fn is_parameter(field: Field) -> bool {
         field,
         Field::ToolDiameter
             | Field::ToolLength
+            | Field::LengthBelowHolder
             | Field::FluteLength
             | Field::FaceBodyHeight
             | Field::ShankDiameter
-            | Field::ShankLength
+            | Field::ShoulderLength
             | Field::NeckLength
             | Field::NeckDiameter
             | Field::CornerRadius
@@ -322,6 +325,7 @@ pub(super) fn is_parameter(field: Field) -> bool {
             | Field::PointAngle
             | Field::ChamferAngle
             | Field::ToolThreadPitch
+            | Field::ThreadProfileAngle
             | Field::Flutes
     )
 }
@@ -356,9 +360,14 @@ enum DimensionGeometry {
         degrees: f64,
         apex: f64,
     },
+    ThreadAngle {
+        degrees: f64,
+        crest: cam_geo::Point,
+        roots: [cam_geo::Point; 2],
+    },
 }
 
-fn dimensions(tool: &cam_model::Tool) -> Vec<Dimension> {
+fn dimensions(tool: &cam_model::Tool, profile: &cam_geo::Profile2D) -> Vec<Dimension> {
     use DimensionGeometry::*;
     use Field::*;
     let r = tool.radius();
@@ -438,15 +447,15 @@ fn dimensions(tool: &cam_model::Tool) -> Vec<Dimension> {
         );
         if !matches!(tool.kind, ToolKind::FaceMill) && !tool.kind.is_side_cutting_disc() {
             add(
-                ShankLength,
+                ShoulderLength,
                 "Ls",
-                (tool.length - flute).max(0.0),
+                tool.shoulder_len(),
                 Vertical {
-                    radius: shank,
-                    from: flute,
-                    to: tool.length,
+                    radius: r.max(shank),
+                    from: 0.0,
+                    to: tool.shoulder_len(),
                     left: false,
-                    lane: 0.0,
+                    lane: 48.0,
                 },
             );
         }
@@ -587,6 +596,37 @@ fn dimensions(tool: &cam_model::Tool) -> Vec<Dimension> {
             geometry: Angle { degrees, apex },
         });
     }
+    if tool.length_below_holder > 0.0 {
+        dims.push(Dimension {
+            field: LengthBelowHolder,
+            label: format!("{} mm", fmt_num(tool.length_below_holder)),
+            geometry: Vertical {
+                radius: profile.max_radius(),
+                from: 0.0,
+                to: tool.length_below_holder,
+                left: true,
+                lane: 48.0,
+            },
+        });
+    }
+    if matches!(tool.kind, ToolKind::ThreadMill { .. }) {
+        // The first tooth's two cutting segments meet at its crest. Use the
+        // preview profile so the annotation follows the drawn cutting edges.
+        if let Some(tooth) = profile.segs.windows(3).find(|segments| {
+            segments[1].cutting && segments[2].cutting && segments[1].end.x == r
+        }) {
+            let degrees = tool.thread_profile_angle();
+            dims.push(Dimension {
+                field: ThreadProfileAngle,
+                label: format!("{}°", fmt_num(degrees)),
+                geometry: ThreadAngle {
+                    degrees,
+                    crest: tooth[1].end,
+                    roots: [tooth[0].end, tooth[2].end],
+                },
+            });
+        }
+    }
     dims
 }
 
@@ -596,7 +636,8 @@ impl ToolCanvas {
         self.selected = Some(
             field
                 .filter(|f| {
-                    *f == Field::Flutes || dimensions(&self.tool).iter().any(|d| d.field == *f)
+                    matches!(f, Field::Flutes | Field::LengthBelowHolder)
+                        || self.dimensions.iter().any(|d| d.field == *f)
                 })
                 .unwrap_or(Field::ToolDiameter),
         );
@@ -615,8 +656,8 @@ impl ToolCanvas {
         use iced::Point as P;
         let map = |r: f64, z: f64| P::new(cx + r as f32 * scale, bottom - z as f32 * scale);
         let accent = palette::ACCENT_BLUE;
-        let dims = dimensions(&self.tool);
-        for dim in dims
+        for dim in self
+            .dimensions
             .iter()
             .filter(|d| !self.compact || self.selected == Some(d.field))
         {
@@ -659,6 +700,21 @@ impl ToolCanvas {
                     let x = cx + sign as f32 * (radius_px + 22.0 + lane);
                     line(frame, a, P::new(x + sign as f32 * 4.0, a.y));
                     line(frame, b, P::new(x + sign as f32 * 4.0, b.y));
+                    if dim.field == Field::LengthBelowHolder {
+                        // Mark the holder face even when no holder model is assigned.
+                        let holder_face =
+                            canvas::Path::line(b, P::new(cx + radius_px + 6.0, b.y));
+                        frame.stroke(
+                            &holder_face,
+                            canvas::Stroke {
+                                line_dash: canvas::LineDash {
+                                    segments: &[4.0, 3.0],
+                                    offset: 0,
+                                },
+                                ..stroke
+                            },
+                        );
+                    }
                     dimension_line(frame, P::new(x, a.y), P::new(x, b.y), color);
                     let position = P::new(x + 6.0, (a.y + b.y) * 0.5 - 8.0);
                     frame.with_save(|frame| {
@@ -697,6 +753,34 @@ impl ToolCanvas {
                     line(frame, anchor, end);
                     label(frame, end, dim.label.clone());
                 }
+                DimensionGeometry::ThreadAngle {
+                    degrees,
+                    crest,
+                    roots,
+                } => {
+                    let origin = map(crest.x, crest.y);
+                    let half = (degrees as f32).to_radians() * 0.5;
+                    let radius = 26.0;
+                    let at = |a: f32| {
+                        P::new(origin.x + radius * a.cos(), origin.y - radius * a.sin())
+                    };
+                    let arc = canvas::Path::new(|path| {
+                        path.move_to(at(-half));
+                        for i in 1..=32 {
+                            path.line_to(at(-half + 2.0 * half * i as f32 / 32.0));
+                        }
+                    });
+                    frame.stroke(&arc, stroke);
+                    // Continue the highlighted flanks out past the tooth so the arc
+                    // has room at the scale of the full cutter drawing.
+                    for (root, end) in roots.into_iter().zip([at(half), at(-half)]) {
+                        line(frame, map(root.x, root.y), origin);
+                        line(frame, origin, end);
+                    }
+                    arrow(frame, at(-half), at(-half + 0.15), color);
+                    arrow(frame, at(half), at(half - 0.15), color);
+                    label(frame, P::new(origin.x + 8.0, bottom + 29.0), dim.label.clone());
+                }
             }
         }
         if self.compact {
@@ -707,6 +791,8 @@ impl ToolCanvas {
                 } else {
                     format!("{} · {}", flute_count(self.flutes), self.cutting_direction)
                 }
+            } else if field == Field::LengthBelowHolder && self.tool.length_below_holder == 0.0 {
+                "Length below holder (unspecified)".to_string()
             } else if let Some(label) = disc_tool_field_label(self.tool.kind, field) {
                 label.to_string()
             } else {
@@ -792,7 +878,7 @@ impl App {
         let content = column![
             row![text(format!("T{} · {}", tool.number, tool.kind)).size(18), Space::new().width(Length::Fill), inspector_button("Close").on_press(Message::ToolInfoClose)].spacing(12).align_y(Alignment::Center),
             canvas::Canvas::new(ToolCanvas::new(tool)).width(Length::Fill).height((self.window.height - 200.0).clamp(220.0, 520.0)),
-            text("L: overall length · Lc: cutting length · Ls: shank length · Ln: neck length · P: thread pitch").size(11),
+            text("L: overall length · Lc: cutting length · Ls: shoulder length · Ln: neck length · P: thread pitch").size(11),
         ].spacing(10);
         Some(
             container(
@@ -820,6 +906,7 @@ mod tests {
         let tool = cam_model::Tool {
             diameter: 6.0,
             length: 50.0,
+            length_below_holder: 25.0,
             flute_length: 20.0,
             shank_diameter: 8.0,
             neck_length: 5.0,
@@ -827,8 +914,16 @@ mod tests {
             kind: ToolKind::BullNose { corner_radius: 1.0 },
             ..Default::default()
         };
-        let dims = dimensions(&tool);
+        let dims = dimensions(&tool, &tool.preview_profile());
         let get = |field| &dims.iter().find(|d| d.field == field).unwrap().geometry;
+        assert!(matches!(
+            get(Field::LengthBelowHolder),
+            DimensionGeometry::Vertical {
+                from: 0.0,
+                to: 25.0,
+                ..
+            }
+        ));
         assert!(matches!(
             get(Field::ToolDiameter),
             DimensionGeometry::Horizontal {
@@ -846,10 +941,10 @@ mod tests {
             }
         ));
         assert!(matches!(
-            get(Field::ShankLength),
+            get(Field::ShoulderLength),
             DimensionGeometry::Vertical {
-                from: 20.0,
-                to: 50.0,
+                from: 0.0,
+                to: 25.0,
                 ..
             }
         ));
@@ -869,7 +964,14 @@ mod tests {
             length: 50.0,
             ..Default::default()
         };
-        let dims = dimensions(&legacy);
+        let dims = dimensions(&legacy, &legacy.preview_profile());
+        assert!(dims.iter().all(|dim| dim.field != Field::LengthBelowHolder));
+        assert_eq!(
+            ToolCanvas::new(&legacy)
+                .selected(Some(Field::LengthBelowHolder))
+                .selected,
+            Some(Field::LengthBelowHolder)
+        );
         assert_eq!(
             dims.iter()
                 .find(|d| d.field == Field::FluteLength)
@@ -896,9 +998,10 @@ mod tests {
             .map(|kind| kind.to_kind())
             .chain([ToolKind::ThreadMill { pitch: Some(1.25) }]);
         for kind in kinds {
-            let tool = crate::tool_library::default_tool(1, kind);
+            let mut tool = crate::tool_library::default_tool(1, kind);
+            tool.length_below_holder = tool.length / 2.0;
             app.tool_edit = Some(tool.clone());
-            let dims = dimensions(&tool);
+            let dims = dimensions(&tool, &tool.preview_profile());
             for field in app
                 .inspector_fields()
                 .into_iter()
@@ -916,7 +1019,46 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(dimensions(&chamfer).iter().any(|d| matches!(d.geometry, DimensionGeometry::Angle { degrees: 90.0, apex } if (apex + 1.0).abs() < 1e-9)));
+        assert!(dimensions(&chamfer, &chamfer.preview_profile()).iter().any(|d| matches!(d.geometry, DimensionGeometry::Angle { degrees: 90.0, apex } if (apex + 1.0).abs() < 1e-9)));
+    }
+
+    #[test]
+    fn thread_angle_annotation_uses_the_drawn_tooth_flanks() {
+        for pitch in [None, Some(0.8)] {
+            let tool = cam_model::Tool {
+                diameter: 4.0,
+                shank_diameter: 6.0,
+                length: 58.0,
+                flute_length: 2.4,
+                neck_diameter: 3.0,
+                thread_profile_angle_deg: 65.0,
+                kind: ToolKind::ThreadMill { pitch },
+                ..Default::default()
+            };
+            let drawing = ToolCanvas::new(&tool).selected(Some(Field::ThreadProfileAngle));
+            assert_eq!(drawing.selected, Some(Field::ThreadProfileAngle));
+            let dimension = drawing
+                .dimensions
+                .iter()
+                .find(|dim| dim.field == Field::ThreadProfileAngle)
+                .unwrap();
+            let DimensionGeometry::ThreadAngle {
+                degrees,
+                crest,
+                roots,
+            } = dimension.geometry
+            else {
+                panic!("expected the thread angle annotation");
+            };
+            assert_eq!(crest.x, 2.0);
+            assert!(roots[0].y < crest.y && crest.y < roots[1].y);
+            let measured: f64 = roots
+                .iter()
+                .map(|root| ((root.y - crest.y).abs() / (crest.x - root.x)).atan())
+                .sum();
+            assert!((measured.to_degrees() - degrees).abs() < 1e-9);
+            assert_eq!(dimension.label, "65°");
+        }
     }
 
     #[test]
@@ -988,6 +1130,15 @@ mod tests {
             None,
         ))
         .expect("graphics adapter");
+        let thread_mill = cam_model::Tool {
+            diameter: 4.0,
+            shank_diameter: 6.0,
+            length: 58.0,
+            flute_length: 2.4,
+            length_below_holder: 25.0,
+            kind: ToolKind::ThreadMill { pitch: Some(0.8) },
+            ..Default::default()
+        };
         for (name, tool, selected) in [
             (
                 "endmill-info",
@@ -1013,6 +1164,16 @@ mod tests {
                     },
                 ),
                 Some(Field::PointAngle),
+            ),
+            (
+                "thread-mill-holder-length",
+                thread_mill.clone(),
+                Some(Field::LengthBelowHolder),
+            ),
+            (
+                "thread-mill-profile-angle",
+                thread_mill,
+                Some(Field::ThreadProfileAngle),
             ),
         ] {
             let compact = selected.is_some();

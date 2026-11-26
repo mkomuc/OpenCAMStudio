@@ -389,14 +389,27 @@ pub struct Tool {
     pub number: u32,
     /// Cutting diameter, mm.
     pub diameter: f64,
-    /// Overall tool length — the stickout below the holder, mm.
+    /// Overall tool length, mm. Currently also used for simulated stickout.
     pub length: f64,
+    /// Exposed length from the tool tip to the holder, mm; zero means unspecified.
+    #[serde(default)]
+    pub length_below_holder: f64,
+    /// Number of axial thread-form teeth on a thread mill; zero means unspecified.
+    #[serde(default)]
+    pub thread_teeth: u32,
+    /// Included angle between the thread mill's tooth flanks, in degrees.
+    #[serde(default = "default_thread_profile_angle_deg")]
+    pub thread_profile_angle_deg: f64,
     /// Axial length of cut from the tip, mm (head width or blade thickness for a disc).
     /// `0.0` = unspecified for older tool kinds;
     /// see [`Tool::flute_len`] for the fallback. Drives the
     /// cutting/non-cutting split of a generated generatrix.
     #[serde(default)]
     pub flute_length: f64,
+    /// Axial distance from the tip to the start of the shank, mm.
+    /// Zero uses the shoulder already implied by the cutter geometry.
+    #[serde(default, skip_serializing_if = "is_zero_length")]
+    pub shoulder_length: f64,
     /// Face mill body height; zero means the legacy flute length.
     #[serde(default)]
     pub face_body_height: f64,
@@ -443,6 +456,14 @@ pub struct Tool {
     pub kind: ToolKind,
 }
 
+const fn default_thread_profile_angle_deg() -> f64 {
+    60.0
+}
+
+fn is_zero_length(length: &f64) -> bool {
+    *length == 0.0
+}
+
 impl Default for Tool {
     /// A bare ⌀0 end mill — a base for struct-update literals (`..Default::default()`).
     /// Not a usable tool on its own; callers set at least number/diameter/kind.
@@ -457,7 +478,11 @@ impl Default for Tool {
             number: 0,
             diameter: 0.0,
             length: 0.0,
+            length_below_holder: 0.0,
+            thread_teeth: 0,
+            thread_profile_angle_deg: default_thread_profile_angle_deg(),
             flute_length: 0.0,
+            shoulder_length: 0.0,
             face_body_height: 0.0,
             shank_diameter: 0.0,
             neck_length: 0.0,
@@ -476,6 +501,16 @@ impl Default for Tool {
 }
 
 impl Tool {
+    /// Effective included angle, using the standard 60° profile for invalid data.
+    pub fn thread_profile_angle(&self) -> f64 {
+        let angle = self.thread_profile_angle_deg;
+        if angle > 0.0 && angle < 180.0 {
+            angle
+        } else {
+            default_thread_profile_angle_deg()
+        }
+    }
+
     /// The tool radius (half the diameter), mm.
     pub fn radius(&self) -> f64 {
         0.5 * self.diameter
@@ -511,6 +546,21 @@ impl Tool {
         } else {
             self.diameter
         }
+    }
+
+    /// Effective tip-to-shoulder length. When omitted, the existing cutting
+    /// portion and any reduced neck determine where the shank begins.
+    pub fn shoulder_len(&self) -> f64 {
+        let length = self.length.max(0.0);
+        let flute = self.flute_len().clamp(0.0, length);
+        let shoulder = if self.shoulder_length > 0.0 {
+            self.shoulder_length
+        } else if matches!(self.kind, ToolKind::ThreadMill { .. }) {
+            flute
+        } else {
+            flute + self.neck_length
+        };
+        shoulder.clamp(flute, length)
     }
 
     /// Face mill body height, with a fallback for older saved tools.
@@ -579,6 +629,16 @@ impl Tool {
     /// effective cutter dimensions. Thread mills include their single tooth or
     /// repeated full-form teeth, with the non-cutting tip, neck and shank tagged.
     pub fn profile(&self) -> cam_geo::Profile2D {
+        self.profile_with_thread_teeth(0)
+    }
+
+    /// Cutter drawing profile. A specified full-form tooth count controls the
+    /// toothed band shown within the flute length.
+    pub fn preview_profile(&self) -> cam_geo::Profile2D {
+        self.profile_with_thread_teeth(self.thread_teeth)
+    }
+
+    fn profile_with_thread_teeth(&self, thread_teeth: u32) -> cam_geo::Profile2D {
         use cam_geo::BottomShape;
         if matches!(self.kind, ToolKind::FaceMill) {
             use cam_geo::{Point, Profile2D, ProfileSeg, SegShape};
@@ -595,7 +655,7 @@ impl Tool {
             if shank > 1e-9 { segs.push(line(0.0, length, false)); }
             return Profile2D { start: Point::new(0.0, 0.0), segs };
         }
-        // Single-profile (single-point) thread mill: one 60° tooth at the tip, a sharply
+        // Single-profile (single-point) thread mill: one tooth at the tip, a sharply
         // reduced neck over the length of cut (its reach), then the shank. The neck ⌀ sets
         // the max thread depth = (min cutting ⌀ − neck ⌀)/2. Built directly, since the
         // generatrix has no single-tooth bottom.
@@ -606,21 +666,27 @@ impl Tool {
             let r_shank = self.shank_dia() * 0.5;
             let l_cut = self.flute_len().max(1e-3); // length of cut (reach)
             let oal = self.length.max(l_cut);
-            // Symmetric 60° tooth (crest r_min, roots r_neck): height 2·depth·tan30°.
-            let h = (2.0 * (r_min - r_neck) * (30.0_f64).to_radians().tan()).min(l_cut);
+            let tan_half_angle = (self.thread_profile_angle().to_radians() * 0.5).tan();
+            let depth = (r_min - r_neck).min(l_cut * 0.5 / tan_half_angle);
+            let r_root = r_min - depth;
+            let half_width = depth * tan_half_angle;
             let line = |r: f64, z: f64, cutting| ProfileSeg {
                 shape: SegShape::Line,
                 end: Point::new(r, z),
                 cutting,
             };
             let mut segs = vec![
-                line(r_neck, 0.0, false),   // tip flat at the neck radius
-                line(r_min, h * 0.5, true), // rising flank to the crest (cutting)
-                line(r_neck, h, true),      // falling flank back to the neck (cutting)
-                line(r_neck, l_cut, false), // reduced neck up to the length of cut
+                line(r_root, 0.0, false),
+                line(r_min, half_width, true),
+                line(r_root, 2.0 * half_width, true),
             ];
+            if r_root > r_neck {
+                segs.push(line(r_neck, 2.0 * half_width, false));
+            }
+            let shoulder = self.shoulder_len().max(l_cut);
+            segs.push(line(r_neck, shoulder, false));
             if (r_shank - r_neck).abs() > 1e-9 {
-                segs.push(line(r_shank, l_cut, false)); // step to the shank
+                segs.push(line(r_shank, shoulder, false)); // step to the shank
             }
             segs.push(line(r_shank, oal, false)); // shank to the overall length
             if r_shank > 1e-9 {
@@ -631,9 +697,8 @@ impl Tool {
                 segs,
             };
         }
-        // Full-form thread mill: the threads *are* the cutting surface, so the boundary is
-        // a 60° saw-tooth up the side (crest = cutting ⌀, root = crest − depth, depth =
-        // 0.866·pitch for a 60° form). The bottom face and shank are non-cutting.
+        // Full-form thread mill: symmetric teeth at a fixed pitch. If the cutter
+        // radius limits tooth depth, leave space at the roots to retain the flank angle.
         if let ToolKind::ThreadMill { pitch: Some(pitch) } = self.kind {
             use cam_geo::{Point, Profile2D, ProfileSeg, SegShape};
             let r = self.radius(); // crest / cutting ⌀
@@ -641,24 +706,40 @@ impl Tool {
             let tl = self.flute_len().max(1e-3); // thread length
             let oal = self.length.max(tl);
             let p = pitch.max(0.05);
-            let depth = (0.866_025_4 * p).min(r * 0.7);
+            let half_cell = p.min(tl) * 0.5;
+            let tan_half_angle = (self.thread_profile_angle().to_radians() * 0.5).tan();
+            let depth = (half_cell / tan_half_angle).min(r * 0.7);
             let r_root = (r - depth).max(0.0);
-            let count = ((tl / p).floor() as usize).max(1);
+            let half_width = depth * tan_half_angle;
+            // Catalog dimensions such as 2.40 / 0.80 are exact decimal multiples.
+            let fitted_count = ((tl / p + 1e-9).floor() as usize).max(1);
+            let count = if thread_teeth == 0 {
+                fitted_count
+            } else {
+                (thread_teeth as usize).min(fitted_count)
+            };
             let line = |r: f64, z: f64, cutting| ProfileSeg {
                 shape: SegShape::Line,
                 end: Point::new(r, z),
                 cutting,
             };
-            // Bottom face (non-cutting) out to the minor ⌀, then the toothed side rising
-            // root → crest → root at each half-pitch (cutting).
             let mut segs = vec![line(r_root, 0.0, false)];
-            for k in 1..=2 * count {
-                let z = (k as f64) * (p * 0.5);
-                let rr = if k % 2 == 1 { r } else { r_root };
-                segs.push(line(rr, z, true));
+            let mut z_top = 0.0;
+            for tooth in 0..count {
+                let center = tooth as f64 * p + half_cell;
+                let start = center - half_width;
+                if start > z_top + 1e-9 {
+                    segs.push(line(r_root, start, false));
+                }
+                z_top = (center + half_width).min(tl);
+                segs.push(line(r, center, true));
+                segs.push(line(r_root, z_top, true));
             }
-            let z_top = (count as f64) * p;
-            segs.push(line(r_shank, z_top, false)); // step to the shank
+            let shank_start = self.shoulder_len().max(tl);
+            if z_top < shank_start {
+                segs.push(line(r_root, shank_start, false));
+            }
+            segs.push(line(r_shank, shank_start, false));
             segs.push(line(r_shank, oal, false)); // shank to the overall length
             if r_shank > 1e-9 {
                 segs.push(line(0.0, oal, false)); // top face back to the axis
@@ -721,12 +802,17 @@ impl Tool {
                 }
             }
         };
+        let neck_length = if self.shoulder_length > 0.0 && !self.kind.is_side_cutting_disc() {
+            (self.shoulder_len() - flute_length).max(0.0)
+        } else {
+            self.neck_length
+        };
         cam_geo::generatrix(&cam_geo::GeneratrixSpec {
             radius: self.radius(),
             flute_length,
             shank_radius,
             length: self.length,
-            neck_length: self.neck_length,
+            neck_length,
             neck_radius: self.neck_dia() * 0.5,
             bottom,
         })
@@ -994,6 +1080,83 @@ mod tests {
             .iter()
             .filter(|s| s.cutting)
             .all(|s| s.end.y <= 20.0 + 1e-9));
+    }
+
+    #[test]
+    fn full_form_thread_mill_preview_uses_the_specified_tooth_count() {
+        let mut tool = Tool {
+            diameter: 4.0,
+            shank_diameter: 4.0,
+            length: 50.0,
+            flute_length: 15.0,
+            flutes: 4,
+            kind: ToolKind::ThreadMill { pitch: Some(0.8) },
+            ..Default::default()
+        };
+        let default_profile = tool.profile();
+        assert_eq!(tool.preview_profile(), default_profile);
+
+        for count in [1, 3, 10] {
+            tool.thread_teeth = count;
+            let preview = tool.preview_profile();
+            let crests: Vec<_> = preview
+                .segs
+                .iter()
+                .filter(|seg| seg.cutting && seg.end.x == tool.radius())
+                .collect();
+            assert_eq!(crests.len(), count as usize);
+            assert!(crests.windows(2).all(|pair| {
+                (pair[1].end.y - pair[0].end.y - 0.8).abs() < 1e-9
+            }));
+            assert_eq!(preview.height(), tool.length);
+            assert_eq!(tool.profile(), default_profile);
+        }
+    }
+
+    #[test]
+    fn thread_profile_angle_matches_m5_catalog_geometry() {
+        let mut tool = Tool {
+            diameter: 4.0,
+            shank_diameter: 6.0,
+            length: 58.0,
+            flute_length: 2.40,
+            flutes: 4,
+            kind: ToolKind::ThreadMill { pitch: Some(0.80) },
+            ..Default::default()
+        };
+        assert_eq!(tool.thread_profile_angle(), 60.0);
+        let m5_identity = tool.identity();
+
+        for angle in [60.0, 65.0, 20.0] {
+            tool.thread_profile_angle_deg = angle;
+            let profile = tool.profile();
+            let crests: Vec<_> = profile
+                .segs
+                .windows(3)
+                .filter(|points| points[1].cutting && points[1].end.x == 2.0)
+                .collect();
+            assert_eq!(crests.len(), 3);
+            for (index, points) in crests.into_iter().enumerate() {
+                let [left, crest, right] = [points[0].end, points[1].end, points[2].end];
+                let half = |root: cam_geo::Point| {
+                    ((root.y - crest.y).abs() / (crest.x - root.x))
+                        .atan()
+                        .to_degrees()
+                };
+                assert!((half(left) + half(right) - angle).abs() < 1e-9);
+                assert!((crest.y - (index as f64 + 0.5) * 0.80).abs() < 1e-9);
+            }
+            assert!(profile.segs.iter().all(|seg| !seg.cutting || seg.end.y <= 2.40));
+            assert!(profile.segs.iter().any(|seg| seg.end.x == 3.0 && seg.end.y == 58.0));
+            assert_eq!(profile.height(), 58.0);
+        }
+        assert_ne!(tool.identity(), m5_identity);
+        let m5 = Tool {
+            thread_profile_angle_deg: 60.0,
+            ..tool
+        };
+        assert!(m5.profile().segs.iter().any(|seg| seg.cutting && (seg.end.y - 2.40).abs() < 1e-9));
+        assert_eq!(m5.preview_profile(), m5.profile());
     }
 
     #[test]
