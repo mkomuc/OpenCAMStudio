@@ -36,14 +36,20 @@ pub(crate) fn validate_stock_to_leave(
             .ok_or("3D surface operations require linked solid geometry")?,
         _ => return Err("Stock to Leave is supported for Profile, Pocket, Face, Adaptive Clearing, Parallel, and Spiral.".into()),
     };
-    if stock.axial > 0.0 && stock.axial >= depth {
+    if stock.axial > 0.0
+        && stock.axial >= depth
+        && document
+            .rotary_indexes
+            .get(&operation.id())
+            .is_none_or(|index| !index.uses_automatic_cad())
+    {
         return Err(format!("Axial stock to leave ({:.3} mm) must be less than the operation depth ({depth:.3} mm).", stock.axial));
     }
     Ok(())
 }
 
 impl AppController {
-    /// Set a fixed fourth-axis pose for any ordinary machining operation.
+    /// Set fixed or automatic fourth-axis indexing.
     pub fn set_operation_rotary_index(
         &mut self,
         id: u32,
@@ -58,6 +64,9 @@ impl AppController {
             .ok_or("Operation does not exist")?;
         if let Some(index) = &index {
             index.validate()?;
+            if index.auto.is_some() && !operation.supports_automatic_index() {
+                return Err("Auto indexing requires a 2D operation".into());
+            }
             if operation.rotary_wrap().is_some() {
                 return Err("An operation cannot be both indexed and wrapped".into());
             }
@@ -869,7 +878,7 @@ impl AppController {
         let id = operation.id();
         let mut document =
             self.prepare_operation_settings(operation, overrides, tools, geometry, None, None)?;
-        crate::cad_operations::resolve_height_settings(
+        crate::cad_operations::validate_operation_height_settings(
             &document,
             document
                 .setup()
@@ -930,13 +939,13 @@ impl AppController {
             None,
             Some(index),
         )?;
-        crate::cad_operations::resolve_height_settings(
+        crate::cad_operations::validate_operation_height_settings(
             &document,
             document
                 .setup()
                 .operations
                 .iter()
-                .find(|o| o.id() == id)
+                .find(|op| op.id() == id)
                 .unwrap(),
             &settings,
         )?;
@@ -976,15 +985,13 @@ impl AppController {
         let old = self
             .operation(id)
             .ok_or("Operation is not in the active setup")?;
-        if self.document().cad_linked_operations.contains(&id)
-            && !self.geometry_state().bindings.contains_key(&id)
-        {
-            return Err("Linked CAD geometry is missing; repair the geometry before applying operation settings".into());
-        }
         let mut document = self.document().clone();
         if let Some(index) = index_override {
             if let Some(index) = index {
                 index.validate()?;
+                if index.auto.is_some() && !operation.supports_automatic_index() {
+                    return Err("Auto indexing requires a 2D operation".into());
+                }
                 if operation.rotary_wrap().is_some() {
                     return Err("An operation cannot be both indexed and wrapped".into());
                 }
@@ -992,6 +999,16 @@ impl AppController {
             } else {
                 document.rotary_indexes.remove(&id);
             }
+        }
+        let automatic = document
+            .rotary_indexes
+            .get(&id)
+            .is_some_and(cam_model::RotaryIndex::uses_automatic_cad);
+        if !automatic
+            && document.cad_linked_operations.contains(&id)
+            && !document.geometry.bindings.contains_key(&id)
+        {
+            return Err("Linked CAD geometry is missing; repair the geometry before applying operation settings".into());
         }
         for tool in tools {
             if let Some(existing) = document
@@ -1034,6 +1051,15 @@ impl AppController {
             }
         }
         let heights = document.setup().heights_for(id);
+        if automatic {
+            *document
+                .setup_mut()
+                .operations
+                .iter_mut()
+                .find(|op| op.id() == id)
+                .unwrap() = operation;
+            return Ok(document);
+        }
         if operation.rotary_wrap().is_some() {
             let geometry = crate::cad_operations::geometry_for_operation(&document, id)?;
             crate::cad_operations::resolve_wrapped_operation(&geometry, &mut operation)?;
@@ -1214,6 +1240,19 @@ impl AppController {
         tools: Vec<Tool>,
         selected: Vec<EntityRef>,
     ) -> Result<cam_model::GeometryBinding, String> {
+        self.preview_operation_settings_with_geometry_and_index(
+            operation, overrides, tools, selected, None,
+        )
+    }
+
+    pub(crate) fn preview_operation_settings_with_geometry_and_index(
+        &self,
+        operation: Operation,
+        overrides: Option<cam_model::GeometryOverrides>,
+        tools: Vec<Tool>,
+        selected: Vec<EntityRef>,
+        index_override: Option<Option<cam_model::RotaryIndex>>,
+    ) -> Result<cam_model::GeometryBinding, String> {
         let id = operation.id();
         let document = self.prepare_operation_settings(
             operation,
@@ -1221,9 +1260,14 @@ impl AppController {
             tools,
             Some(selected),
             None,
-            None,
+            index_override,
         )?;
-        Ok(document.geometry.bindings[&id].clone())
+        document
+            .geometry
+            .bindings
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| "Geometry binding unavailable".into())
     }
 
     pub fn preview_operation_geometry(

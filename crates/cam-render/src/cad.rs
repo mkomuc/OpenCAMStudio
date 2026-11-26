@@ -641,24 +641,9 @@ impl CadScene {
         aperture: f64,
         select_through: bool,
     ) -> Vec<PickCandidate> {
-        let mut loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
-        loops.retain(|c| self.planar_loops.contains(&c.entity));
-        if loops.is_empty() {
-            loops = self
-                .pick_candidates(ray, EntityKind::Face, aperture, select_through)
-                .into_iter()
-                .filter_map(|mut candidate| {
-                    let wire = self.face_outer_loops.get(&candidate.entity)?;
-                    if !self.planar_loops.contains(wire) {
-                        return None;
-                    }
-                    candidate.entity = wire.clone();
-                    Some(candidate)
-                })
-                .collect();
-        }
-        deduplicate_candidates(&mut loops);
-        loops
+        self.pick_boundary_candidates(ray, aperture, select_through, |wire| {
+            self.planar_loops.contains(wire)
+        })
     }
 
     /// Chamfer/engrave/carve select the actual planar rim. Rounded transitions
@@ -669,19 +654,42 @@ impl CadScene {
         aperture: f64,
         select_through: bool,
     ) -> Vec<PickCandidate> {
+        self.pick_boundary_candidates(ray, aperture, select_through, |wire| {
+            self.surface_loops.contains(wire)
+        })
+    }
+
+    /// Indexed chains may lie outside setup XY. The operation resolver checks
+    /// the selected loop in its machining frame.
+    pub fn pick_indexed_loop_candidates(
+        &self,
+        ray: Ray,
+        aperture: f64,
+        select_through: bool,
+    ) -> Vec<PickCandidate> {
+        self.pick_boundary_candidates(ray, aperture, select_through, |_| true)
+    }
+
+    fn pick_boundary_candidates(
+        &self,
+        ray: Ray,
+        aperture: f64,
+        select_through: bool,
+        accepts: impl Fn(&EntityRef) -> bool,
+    ) -> Vec<PickCandidate> {
         let mut loops = self.pick_candidates(ray, EntityKind::Loop, aperture, select_through);
-        loops.retain(|c| self.surface_loops.contains(&c.entity));
+        loops.retain(|c| accepts(&c.entity));
         if loops.is_empty() {
             loops = self
                 .pick_candidates(ray, EntityKind::Face, aperture, select_through)
                 .into_iter()
-                .filter_map(|mut c| {
-                    let wire = self.face_outer_loops.get(&c.entity)?;
-                    if !self.surface_loops.contains(wire) {
+                .filter_map(|mut candidate| {
+                    let wire = self.face_outer_loops.get(&candidate.entity)?;
+                    if !accepts(wire) {
                         return None;
                     }
-                    c.entity = wire.clone();
-                    Some(c)
+                    candidate.entity = wire.clone();
+                    Some(candidate)
                 })
                 .collect();
         }
@@ -1134,6 +1142,19 @@ mod tests {
         assert_eq!(hits[0].entity.instance_id, 1);
         assert_eq!(hits[0].entity.revision, 1);
         assert!(!hits[0].occluded);
+        geometry.instances[0].placement.rotation = [[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]];
+        let side = CadScene::from_geometry(&geometry, &BTreeSet::new());
+        let side_ray = Ray {
+            origin: [0., -5., 0.],
+            direction: [0., 1., 0.],
+        };
+        assert!(side
+            .pick_surface_loop_candidates(side_ray, 0.1, false)
+            .is_empty());
+        let indexed = side.pick_indexed_loop_candidates(side_ray, 0.1, false);
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].entity, hits[0].entity);
+
         let mut scene = scene;
         let rim = hits[0].entity.clone();
         let mut silhouette = rim.clone();

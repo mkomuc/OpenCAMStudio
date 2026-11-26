@@ -82,8 +82,28 @@ processing-time estimates omit those constraints.
 ## Indexed 3+1 machining
 
 On an operation's **Multi-axis** tab choose **3+1 Indexed**, select A (X) or B (Y),
-and enter the rotary centre and absolute angle in degrees. Alternatively, choose **Selection**
-for the angle and pick a planar face, a closed planar chain, or a straight edge.
+and enter the rotary centre in setup coordinates. **Auto** is the default for 2D
+operations. Use the operation's usual **Geometry** controls to pick machining
+features in order. Each CAD feature is cut in its own indexed frame, using the
+same tool and cutting settings. Height references resolve separately for each CAD
+feature. Drawing geometry uses the setup XY plane at 0°.
+
+Face uses the same Geometry editor in 3-axis and 3+1 Indexed. Select a planar
+target face or a body silhouette for CAD, or a closed boundary for drawings.
+In Auto, a body silhouette is projected along setup Z and machined at 0°.
+
+- **Rotary angle** runs from the lowest signed absolute angle to the highest.
+  Features at the same angle keep their selection order.
+- **Selection order** runs in the order shown on the **Geometry** tab, including
+  returning to an earlier angle when the next feature requires it.
+
+Auto requires a unique tool approach reachable with the configured rotary axis.
+For example, a planar face supplies its outward direction, while a through hole
+accessible from both ends needs an explicitly chosen angle. Toolpath diagnostics
+identify any selection that needs correction.
+
+Use **Manual angle** to enter one absolute angle in degrees, or **Selection** to
+set one angle from a planar face, a closed planar chain, or a straight edge.
 The face or chain is aligned perpendicular to Z; the edge is aligned with Z.
 Use Flip to choose the opposite direction. The selected direction must be reachable
 with the chosen rotary axis. This mode is available

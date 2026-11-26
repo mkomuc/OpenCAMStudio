@@ -129,6 +129,13 @@ fn fallback(
         return input;
     }
     let refs = &binding.selected;
+    if binding.recipe == ExtractionRecipe::FaceRegion
+        && refs
+            .iter()
+            .any(|reference| reference.kind == EntityKind::Silhouette)
+    {
+        return Err(reason.into());
+    }
     let view = View::for_path(state, refs)?;
     let bounds = view.bounds(view.body.bounds);
     let mut heights = CuttingHeights {

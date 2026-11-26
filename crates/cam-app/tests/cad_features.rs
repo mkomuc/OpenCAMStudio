@@ -436,6 +436,321 @@ fn indexed_cad_resolves_side_faces_in_the_machine_frame_and_invalidates_paths() 
 }
 
 #[test]
+fn auto_indexed_pockets_follow_both_orders_on_a_and_b() {
+    use cam_cldata::{MoveKind, Point3, Step};
+
+    for axis in [RotaryAxis::A, RotaryAxis::B] {
+        let (state, floor) = pocket();
+        let mut app = controller();
+        app.set_post_kind(cam_post::PostKind::LinuxCnc);
+        app.set_simulation_accuracy(0.5);
+        app.edit_tool(0, |tool| {
+            tool.flute_length = 32.;
+            tool.length = 32.;
+        });
+        let center = Point3::new(25., 25., 2.);
+        let instances = [90., 0., 90.]
+            .into_iter()
+            .enumerate()
+            .map(|(i, angle)| {
+                let position = if axis == RotaryAxis::A {
+                    Point3::new(2. + 22. * i as f64, 15., 10. + i as f64)
+                } else {
+                    Point3::new(15., 2. + 22. * i as f64, 10. + i as f64)
+                };
+                let translation = axis.material_point(position, center, angle);
+                let rotation = std::array::from_fn(|i| {
+                    let basis = [
+                        Point3::new(1., 0., 0.),
+                        Point3::new(0., 1., 0.),
+                        Point3::new(0., 0., 1.),
+                    ];
+                    basis.map(|p| {
+                        let p = axis.material_point(p, Point3::new(0., 0., 0.), angle);
+                        [p.x, p.y, p.z][i]
+                    })
+                });
+                GeometryInstance {
+                    id: i as u64 + 1,
+                    name: format!("Pocket {}", i + 1),
+                    placement: RigidTransform {
+                        rotation,
+                        translation: [translation.x, translation.y, translation.z],
+                    },
+                    ..state.instances[0].clone()
+                }
+            })
+            .collect();
+        app.add_cad_asset(state.assets[0].clone(), instances)
+            .unwrap();
+        select_all_models(&mut app);
+        let selected: Vec<_> = app
+            .geometry_state()
+            .instances
+            .iter()
+            .map(|instance| EntityRef {
+                instance_id: instance.id,
+                ..floor.clone()
+            })
+            .collect();
+        let index = RotaryIndex {
+            axis,
+            center: [center.x, center.y, center.z],
+            auto: Some(AutomaticRotaryIndex {
+                order: RotaryMachiningOrder::SelectionOrder,
+                selected: selected.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let operation = app.operation_template(OpKind::Pocket, 1);
+        let id = app
+            .commit_operation_creation_with_index(
+                operation,
+                None,
+                OperationHeightSettings::default(),
+                vec![],
+                StockToLeave::default(),
+                Some(index.clone()),
+            )
+            .unwrap();
+
+        let path =
+            std::env::temp_dir().join(format!("auto-index-{axis:?}-{}.ocam", std::process::id()));
+        app.save_project(&path).unwrap();
+        app.open_project(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(app.document().rotary_indexes[&id], index);
+
+        for (order, expected, expected_changes) in [
+            (
+                RotaryMachiningOrder::SelectionOrder,
+                vec![(0, 90.), (1, 0.), (2, 90.)],
+                vec![90., 0., 90.],
+            ),
+            (
+                RotaryMachiningOrder::RotaryAngle,
+                vec![(1, 0.), (0, 90.), (2, 90.)],
+                vec![90.],
+            ),
+        ] {
+            let mut index = index.clone();
+            index.auto.as_mut().unwrap().order = order;
+            app.set_operation_rotary_index(id, Some(index)).unwrap();
+            let result = app.run(&CancelToken::new());
+            assert_eq!(
+                result.completion,
+                JobCompletion::Complete,
+                "{:?}",
+                result.diagnostics
+            );
+            assert!(!result.scene.strips.is_empty());
+            assert!(!result.stock_vertices.is_empty());
+            assert!(result.stock_machined.iter().any(|&machined| machined));
+            assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+            let mut cuts = Vec::new();
+            let mut bottoms = [f64::INFINITY; 3];
+            let mut changes = Vec::new();
+            let mut previous_angle = 0.;
+            let mut previous = None;
+            for step in result.program.steps() {
+                match step {
+                    Step::Rapid { to, .. } => previous = Some(*to),
+                    Step::Rotary {
+                        to,
+                        angle,
+                        axis: actual_axis,
+                        feed,
+                        tag,
+                        ..
+                    } => {
+                        assert_eq!(*actual_axis, axis);
+                        if *angle != previous_angle {
+                            assert!(feed.is_none());
+                            assert_eq!(tag.kind, MoveKind::Traverse);
+                            assert_eq!(previous, Some(*to));
+                            assert!(to.z >= 25.);
+                            changes.push(*angle);
+                            previous_angle = *angle;
+                        }
+                        if tag.kind == MoveKind::Cutting {
+                            let axial = if axis == RotaryAxis::A { to.x } else { to.y };
+                            let feature = ((axial - 2.) / 22.).floor() as usize;
+                            bottoms[feature] = bottoms[feature].min(to.z);
+                            let cut = (feature, *angle);
+                            if cuts.last() != Some(&cut) {
+                                cuts.push(cut);
+                            }
+                        }
+                        previous = Some(*to);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(cuts, expected);
+            assert_eq!(changes, expected_changes);
+            let mut backplot_order = Vec::new();
+            for strip in result
+                .scene
+                .strips
+                .iter()
+                .filter(|strip| strip.op == Some(id) && strip.color == cam_render::CUT)
+            {
+                let axial = strip.points.last().unwrap()[usize::from(axis == RotaryAxis::B)];
+                let feature = ((axial - 2.) / 22.).floor() as usize;
+                if backplot_order.last() != Some(&feature) {
+                    backplot_order.push(feature);
+                }
+            }
+            assert_eq!(
+                backplot_order,
+                expected
+                    .iter()
+                    .map(|(feature, _)| *feature)
+                    .collect::<Vec<_>>()
+            );
+            for (actual, expected) in bottoms.into_iter().zip([7., 8., 9.]) {
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "bottom {actual}, expected {expected}"
+                );
+            }
+            let nc = app.export_nc().unwrap();
+            let mut previous = 0.;
+            let posted_changes: Vec<_> = nc
+                .lines()
+                .filter_map(|line| {
+                    let angle = line
+                        .split_ascii_whitespace()
+                        .find_map(|word| word.strip_prefix(axis.word())?.parse::<f64>().ok())?;
+                    if angle == previous {
+                        return None;
+                    }
+                    assert!(line.starts_with("G0 "));
+                    previous = angle;
+                    Some(angle)
+                })
+                .collect();
+            assert_eq!(posted_changes, expected_changes);
+        }
+
+        let mut unreachable = index;
+        unreachable.axis = if axis == RotaryAxis::A {
+            RotaryAxis::B
+        } else {
+            RotaryAxis::A
+        };
+        app.set_operation_rotary_index(id, Some(unreachable))
+            .unwrap();
+        let result = app.run(&CancelToken::new());
+        assert_eq!(result.completion, JobCompletion::Failed);
+        assert!(!result.program.has_rotary_motion());
+        assert!(result.diagnostics.iter().any(|d| d.op == Some(id)
+            && d.message.contains("Pocket 1")
+            && d.message.contains("unreachable")));
+    }
+}
+
+#[test]
+fn auto_indexing_rejects_an_edge_with_two_reachable_machining_planes() {
+    let (state, _) = pocket();
+    let edge = state.assets[0]
+        .topology
+        .edges
+        .iter()
+        .find(|edge| {
+            matches!(edge.curve, CadCurve::Line { start, end }
+            if start == [0., 0., 0.] && end == [20., 0., 0.])
+        })
+        .unwrap();
+    let mut app = controller();
+    let selected = reference(edge.id, EntityKind::Edge);
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let operation = app.operation_template(OpKind::Profile, 1);
+    let id = app
+        .commit_operation_creation_with_index(
+            operation,
+            None,
+            OperationHeightSettings::default(),
+            vec![],
+            StockToLeave::default(),
+            Some(RotaryIndex {
+                auto: Some(AutomaticRotaryIndex {
+                    selected: vec![selected.clone()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    let result = app.run(&CancelToken::new());
+    assert_eq!(result.completion, JobCompletion::Failed);
+    assert!(!result.program.has_rotary_motion());
+    assert!(
+        result.diagnostics.iter().any(|d| d.op == Some(id)
+            && d.message.contains(&format!("Edge {}", selected.id))
+            && d.message.contains("ambiguous")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn auto_indexing_machines_a_connected_edge_selection_as_one_boundary() {
+    let (state, floor) = pocket();
+    let topology = &state.assets[0].topology;
+    let selected = topology
+        .loops
+        .iter()
+        .find(|wire| wire.face_id == floor.id && wire.is_outer)
+        .unwrap()
+        .edge_uses
+        .iter()
+        .map(|edge| reference(edge.edge_id, EntityKind::Edge))
+        .collect();
+    let mut app = controller();
+    app.edit_tool(0, |tool| tool.flute_length = 12.);
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    let operation = app.operation_template(OpKind::Pocket, 1);
+    app.commit_operation_creation_with_index(
+        operation,
+        None,
+        OperationHeightSettings::default(),
+        vec![],
+        StockToLeave::default(),
+        Some(RotaryIndex {
+            auto: Some(AutomaticRotaryIndex {
+                selected,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    assert!(result.program.steps().iter().any(|step| {
+        matches!(
+            step,
+            cam_cldata::Step::Rotary {
+                angle: 0.,
+                feed: Some(_),
+                ..
+            }
+        )
+    }));
+}
+
+#[test]
 fn closed_spline_boundary_profiles_keep_explicit_depth_after_save_and_reopen() {
     let (mut state, face) = pocket();
     let wire = state.assets[0]

@@ -3730,14 +3730,10 @@ impl App {
 
     fn seed_rotary_index_draft(&mut self, id: u32) {
         self.rotary_index_draft = self.controller.document().rotary_indexes.get(&id).cloned();
-        self.rotary_index_mode = if self
-            .rotary_index_draft
-            .as_ref()
-            .is_some_and(|i| i.face.is_some())
-        {
-            rotary_view::IndexMode::Face
-        } else {
-            rotary_view::IndexMode::Manual
+        self.rotary_index_mode = match &self.rotary_index_draft {
+            Some(index) if index.auto.is_some() => rotary_view::IndexMode::Auto,
+            Some(index) if index.face.is_some() => rotary_view::IndexMode::Face,
+            _ => rotary_view::IndexMode::Manual,
         };
         self.seed_rotary_index_values();
     }
@@ -7163,6 +7159,7 @@ impl App {
                 }
                 let _ = self.pick_operation_geometry();
                 if self.cad_filter != filter
+                    && !self.automatic_index_geometry_editor()
                     && !matches!(
                         self.geometry_operation_kind(),
                         Some(OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral)
@@ -7409,8 +7406,9 @@ impl App {
                                     }
                                 });
                             }
-                            if let Ok(input) = crate::cad_operations::geometry_for_setup(
-                                self.controller.document(),
+                            if let Ok(input) = crate::cad_operations::geometry_for_operation(
+                                &self.rotary_draft_document(),
+                                id,
                             )
                             .and_then(|geometry| {
                                 cam_geometry3d::resolve_binding_advisory(&geometry, &binding)
@@ -7461,6 +7459,11 @@ impl App {
                                         if let Some(region) = input.regions.first() {
                                             op.boundary = region.outer().clone();
                                             op.islands = region.holes().to_vec();
+                                        }
+                                    }
+                                    Operation::Face(op) => {
+                                        if let Some(region) = input.regions.first() {
+                                            op.boundary = region.outer().clone();
                                         }
                                     }
                                     Operation::Bore(op) => {
@@ -7514,7 +7517,10 @@ impl App {
             Message::EditCadGeometry(id) => {
                 if let Some(binding) = self.controller.geometry_state().bindings.get(&id) {
                     self.cad_filter_explicit = false;
-                    let refs = binding.selected.clone();
+                    let refs = self
+                        .operation_geometry
+                        .clone()
+                        .unwrap_or_else(|| binding.selected.clone());
                     if matches!(self.current_operation(id), Some(Operation::Profile(_))) {
                         self.profile_selection_mode = match refs.first().map(|r| r.kind) {
                             Some(EntityKind::Face) => ProfileSelectionMode::FaceContours,
@@ -7545,9 +7551,15 @@ impl App {
                                 _ => CadFilter::Body,
                             }
                         }
+                        cam_model::ExtractionRecipe::FaceRegion
+                            if refs.first().is_some_and(|reference| {
+                                reference.kind == EntityKind::Silhouette
+                            }) =>
+                        {
+                            CadFilter::Silhouette
+                        }
                         _ => CadFilter::Face,
                     };
-                    let refs = self.operation_geometry.clone().unwrap_or(refs);
                     self.controller.set_cad_selection(refs);
                     self.cad_inspecting = true;
                     self.cad_editing_op = Some(id);
@@ -10548,7 +10560,11 @@ impl App {
                         .inspection_setup()
                         .height_settings
                         .contains_key(&id))
-                && self.resolve_height_editor(id).is_err()
+                && if self.automatic_cad_index().is_some() {
+                    self.edited_height_settings().is_err()
+                } else {
+                    self.resolve_height_editor(id).is_err()
+                }
             {
                 return true;
             }
@@ -11277,7 +11293,9 @@ impl App {
                         .ok_or_else(|| "Linked heights must be finite numbers or blank.".into())
                 }
             };
-            let overrides = if self.controller.geometry_state().bindings.contains_key(&id) {
+            let overrides = if self.automatic_cad_index().is_none()
+                && self.controller.geometry_state().bindings.contains_key(&id)
+            {
                 match parse_override(&self.cad_override_top).and_then(|top| {
                     parse_override(&self.cad_override_bottom)
                         .map(|bottom| cam_model::GeometryOverrides { top, bottom })
@@ -12647,7 +12665,26 @@ impl App {
         if self.profile_entry_cad_pick(entity.clone()) {
             return;
         }
+        if self.automatic_cad_index().is_some()
+            && self.operation_tab == OperationTab::Geometry
+            && self.geometry_editor.is_none()
+        {
+            if self.profile_geometry_active() {
+                let kind = match entity.kind {
+                    EntityKind::Face => cam_model::ProfileGeometryKind::FaceContours,
+                    EntityKind::Edge | EntityKind::Loop => cam_model::ProfileGeometryKind::Chain,
+                    EntityKind::Silhouette => cam_model::ProfileGeometryKind::Silhouette,
+                    _ => return,
+                };
+                self.profile_entry_message(profile_entries_view::EntryMessage::Add(kind));
+                self.profile_entry_cad_pick(entity);
+                return;
+            }
+            self.operation_geometry_message(GeometryMessage::Edit);
+        }
+        let automatic = self.automatic_index_geometry_editor();
         let auto_edit_id = if self.geometry_auto_pick
+            && !automatic
             && self.operation_tab == OperationTab::Geometry
             && self.cad_editing_op.is_none()
             && self.cad_pending_kind.is_none()
@@ -12684,16 +12721,21 @@ impl App {
                     return;
                 }
             }
-            if self.geometry_operation_kind() == Some(OpKind::Drill) {
-                self.operation_geometry_message(GeometryMessage::Add(CadFilter::Face));
-            } else {
-                let _ = self.update(Message::EditCadGeometry(id));
+            match self.geometry_operation_kind() {
+                Some(OpKind::Drill) => {
+                    self.operation_geometry_message(GeometryMessage::Add(CadFilter::Face))
+                }
+                Some(OpKind::Face) => self.operation_geometry_message(GeometryMessage::Edit),
+                _ => {
+                    let _ = self.update(Message::EditCadGeometry(id));
+                }
             }
             self.geometry_additive = true;
             self.geometry_auto_pick = false;
         }
         if self.cad_editing_op.is_none()
             && self.cad_pending_kind.is_none()
+            && !automatic
             && (self.setup_draft_dirty()
                 || (matches!(self.controller.selection(), Selection::Operation(_))
                     && self.inspector_dirty()))
@@ -12730,7 +12772,8 @@ impl App {
         }
         let pocket_edges = entity.kind == EntityKind::Edge
             && self.geometry_operation_kind() == Some(OpKind::Pocket);
-        let multiple = pocket_edges
+        let multiple = automatic
+            || pocket_edges
             || (profile && entity.kind != EntityKind::Silhouette)
             || matches!(
                 self.cad_pending_kind,
@@ -12794,14 +12837,16 @@ impl App {
         };
         match selection_result {
             Ok(()) => {
-                if !self.creating_operation() && self.cad_editing_op.is_none() {
+                if !self.creating_operation() && self.cad_editing_op.is_none() && !automatic {
                     let selected = self.controller.cad_selection().to_vec();
                     self.clear_browser_selection();
                     self.controller.set_cad_selection(selected);
                 }
-                self.sync_chamfer_geometry_fields();
+                if !automatic {
+                    self.sync_chamfer_geometry_fields();
+                    self.sync_creation_geometry_heights();
+                }
                 self.reveal_selected_bodies();
-                self.sync_creation_geometry_heights();
                 self.focus_ops.clear();
                 self.status = format!(
                     "{} CAD feature(s) selected.{}",
@@ -12894,6 +12939,7 @@ impl App {
                 CadFilter::Body
             }
             (OpKind::Face, EntityKind::Silhouette) => CadFilter::Silhouette,
+            (OpKind::Face, EntityKind::Face) => CadFilter::Face,
             _ => self.cad_filter,
         };
     }
@@ -15213,6 +15259,7 @@ struct Viewport {
     cad_scene: Arc<CadScene>,
     cad_filter: EntityKind,
     cad_filter_explicit: bool,
+    cad_indexed_geometry: bool,
     geometry_pick_active: bool,
     cad_operation_kind: Option<OpKind>,
     cad_silhouette: bool,
@@ -15719,6 +15766,7 @@ impl Viewport {
             cad_scene,
             cad_filter,
             cad_filter_explicit: false,
+            cad_indexed_geometry: false,
             geometry_pick_active: false,
             cad_operation_kind: None,
             cad_silhouette: false,
@@ -15809,7 +15857,10 @@ impl Viewport {
         let aperture =
             0.5 * self.snap_catch_px * camera.world_per_pixel(bounds.height) / aspect.min(1.0);
         let ray = camera.pick_ray(u, v, aspect);
-        if self.cad_silhouette && !self.setup_axis {
+        let facing_silhouette = self.cad_operation_kind == Some(OpKind::Face)
+            && self.cad_filter_explicit
+            && self.cad_filter == EntityKind::Silhouette;
+        if (self.cad_silhouette || facing_silhouette) && !self.setup_axis {
             return self.cad_scene.pick_silhouette_candidates(
                 ray,
                 aperture as f64,
@@ -15850,6 +15901,13 @@ impl Viewport {
                     self.cad_select_through,
                 );
             }
+        }
+        if self.cad_indexed_geometry && self.cad_filter == EntityKind::Loop {
+            return self.cad_scene.pick_indexed_loop_candidates(
+                ray,
+                aperture as f64,
+                self.cad_select_through,
+            );
         }
         match if self.setup_axis {
             None
@@ -15906,11 +15964,18 @@ impl Viewport {
         aperture: f64,
     ) -> Vec<PickCandidate> {
         let through = self.cad_select_through;
+        let indexed_loops = || {
+            self.cad_scene
+                .pick_indexed_loop_candidates(ray, aperture, through)
+        };
         let mut candidates = match kind {
             OpKind::Profile => {
-                let mut candidates = self
-                    .cad_scene
-                    .pick_profile_candidates(ray, aperture, through);
+                let mut candidates = if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else {
+                    self.cad_scene
+                        .pick_profile_candidates(ray, aperture, through)
+                };
                 candidates.extend(self.cad_scene.pick_any_candidates(
                     ray,
                     &[EntityKind::Face, EntityKind::Edge, EntityKind::Silhouette],
@@ -15926,10 +15991,12 @@ impl Viewport {
                     aperture,
                     through,
                 );
-                candidates.extend(
+                candidates.extend(if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else {
                     self.cad_scene
-                        .pick_surface_loop_candidates(ray, aperture, through),
-                );
+                        .pick_surface_loop_candidates(ray, aperture, through)
+                });
                 candidates
             }
             OpKind::Engrave => self.cad_scene.pick_any_candidates(
@@ -15942,7 +16009,9 @@ impl Viewport {
                 let mut candidates =
                     self.cad_scene
                         .pick_any_candidates(ray, &[EntityKind::Face], aperture, through);
-                candidates.extend(if kind == OpKind::Pocket {
+                candidates.extend(if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else if kind == OpKind::Pocket {
                     self.cad_scene
                         .pick_pocket_loop_candidates(ray, aperture, through)
                 } else {

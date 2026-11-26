@@ -272,6 +272,14 @@ impl App {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         apply_op_fields(&mut draft, &fields);
         self.apply_parameter_sources(&mut draft)?;
+        if let Some(auto) = self.automatic_cad_index() {
+            if auto.selected.is_empty() {
+                return Err(
+                    "Select machining geometry for Auto indexing on the Geometry tab".into(),
+                );
+            }
+            return Ok((draft, None));
+        }
         if draft
             .rotary_wrap()
             .is_some_and(|wrap| !wrap.geometry.is_empty())
@@ -444,6 +452,11 @@ impl App {
     }
 
     pub(super) fn creation_ready(&self) -> bool {
+        if self.automatic_cad_index().is_some() {
+            return self.creation_operation().is_ok()
+                && self.edited_height_settings().is_ok()
+                && self.validate_rotary_index_draft().is_ok();
+        }
         self.creation_operation()
             .and_then(|(op, binding)| {
                 let mut document = self.rotary_draft_document();

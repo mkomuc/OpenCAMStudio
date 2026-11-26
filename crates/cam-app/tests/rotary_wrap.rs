@@ -265,3 +265,53 @@ fn indexed_operations_post_fixed_angles_and_preserve_indexes_through_history() {
     assert!(result.collisions.is_empty(), "{:?}", result.collisions);
     assert!(!result.stock_vertices.is_empty());
 }
+
+#[test]
+fn drawing_geometry_uses_setup_xy_in_auto_indexing() {
+    let mut app = new_app();
+    let mut operation = profile(&app);
+    operation.set_rotary_wrap(None);
+    app.add_operation(operation);
+    let id = app.document().setup().operations[0].id();
+    app.set_operation_rotary_index(
+        id,
+        Some(RotaryIndex {
+            angle: 90.,
+            auto: Some(cam_model::AutomaticRotaryIndex {
+                drawing: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let result = cam_toolpath::build_job(
+        app.document(),
+        2000.,
+        cam_cldata::SpindleDir::Cw,
+        None,
+        30.,
+        &CancelToken::new(),
+    );
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let feed_angles: Vec<_> = result
+        .program
+        .steps()
+        .iter()
+        .filter_map(|step| match step {
+            Step::Rotary {
+                angle,
+                feed: Some(_),
+                ..
+            } => Some(*angle),
+            _ => None,
+        })
+        .collect();
+    assert!(!feed_angles.is_empty());
+    assert!(feed_angles.iter().all(|&angle| angle == 0.));
+}

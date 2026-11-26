@@ -124,7 +124,9 @@ pub fn build_job_cached_with_preview(
     mut preview: Option<&mut dyn FnMut(&Program)>,
 ) -> JobResult {
     cache.reset_stats();
-    build_job_with_compute(
+    let progress = std::cell::RefCell::new(&mut progress);
+    let active_auto = std::cell::Cell::new(false);
+    build_job_with_compute_and_progress(
         request.document,
         request.spindle_rpm,
         request.dir,
@@ -132,11 +134,20 @@ pub fn build_job_cached_with_preview(
         request.tool_change_height,
         cancel,
         |op, env, token, stock_to_leave, geometry, heights| {
+            let automatic = request
+                .document
+                .resolved_indexed_cuts
+                .contains_key(&op.id());
             let mut geometry_fingerprint = geometry
                 .bindings
                 .get(&op.id())
                 .map(|binding| geometry.binding_fingerprint(binding));
-            if let Some(index) = request.document.rotary_indexes.get(&op.id()) {
+            if let Some(index) = request
+                .document
+                .rotary_indexes
+                .get(&op.id())
+                .filter(|index| !index.uses_automatic_cad())
+            {
                 geometry_fingerprint = Some(format!(
                     "{}:index:{index:?}",
                     geometry_fingerprint.unwrap_or_default()
@@ -195,7 +206,9 @@ pub fn build_job_cached_with_preview(
                     cutting_heights: heights,
                 },
                 || {
-                    progress(CalculationProgress::Started(op.id()));
+                    if !automatic || !active_auto.replace(true) {
+                        progress.borrow_mut()(CalculationProgress::Started(op.id()));
+                    }
                     let result = compute_with_stock_and_preview(
                         op,
                         env,
@@ -216,18 +229,56 @@ pub fn build_job_cached_with_preview(
                             }
                         },
                     );
-                    progress(CalculationProgress::Finished {
-                        operation: op.id(),
-                        success: !result.cancelled && !result.has_errors() && !token.is_cancelled(),
-                    });
+                    if !automatic {
+                        progress.borrow_mut()(CalculationProgress::Finished {
+                            operation: op.id(),
+                            success: !result.cancelled
+                                && !result.has_errors()
+                                && !token.is_cancelled(),
+                        });
+                    }
                     result
                 },
             )
+        },
+        |operation, success| {
+            if active_auto.replace(false) {
+                progress.borrow_mut()(CalculationProgress::Finished { operation, success });
+            }
         },
     )
 }
 
 fn build_job_with_compute(
+    doc: &Document,
+    spindle_rpm: f64,
+    dir: SpindleDir,
+    stock: Option<([f64; 2], [f64; 2])>,
+    tool_change_height: f64,
+    cancel: &CancelToken,
+    compute: impl FnMut(
+        &Operation,
+        &JobEnv,
+        &CancelToken,
+        cam_model::StockToLeave,
+        &cam_model::GeometryState,
+        Option<cam_model::CuttingHeights>,
+    ) -> StrategyResult,
+) -> JobResult {
+    build_job_with_compute_and_progress(
+        doc,
+        spindle_rpm,
+        dir,
+        stock,
+        tool_change_height,
+        cancel,
+        compute,
+        |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_job_with_compute_and_progress(
     doc: &Document,
     spindle_rpm: f64,
     dir: SpindleDir,
@@ -242,6 +293,7 @@ fn build_job_with_compute(
         &cam_model::GeometryState,
         Option<cam_model::CuttingHeights>,
     ) -> StrategyResult,
+    mut finish_automatic: impl FnMut(u32, bool),
 ) -> JobResult {
     let Some(setup) = doc.active_setup() else {
         return JobResult {
@@ -411,6 +463,12 @@ fn build_job_with_compute(
         .iter()
         .filter(|op| doc.operation_is_included(setup.id, op.id()))
         .map(|op| {
+            if let Some(cuts) = doc.resolved_indexed_cuts.get(&op.id()) {
+                return cuts
+                    .iter()
+                    .map(|cut| cut.safety.clearance)
+                    .fold(setup.heights_for(op.id()).clearance, f64::max);
+            }
             setup
                 .height_settings
                 .get(&op.id())
@@ -480,9 +538,10 @@ fn build_job_with_compute(
         } else {
             (operation, None)
         };
-        let indexed_geometry = doc
-            .rotary_indexes
-            .get(&operation.id())
+        let index = doc.rotary_indexes.get(&operation.id());
+        let automatic = index.filter(|index| index.uses_automatic_cad());
+        let indexed_geometry = index
+            .filter(|index| !index.uses_automatic_cad())
             .map(|index| index.geometry(&doc.geometry));
         let operation_geometry = indexed_geometry.as_ref().unwrap_or(&doc.geometry);
         env.heights = setup.heights_for(operation.id());
@@ -493,12 +552,14 @@ fn build_job_with_compute(
         let configured = setup
             .height_settings
             .get(&operation.id())
+            .filter(|_| automatic.is_none())
             .map(|settings| settings.resolve(doc, operation));
         if let Some(Ok(heights)) = configured {
             env.heights = heights.safety();
         }
         env.heights.clearance = env.heights.clearance.max(fixture_top);
         env.heights.retract = env.heights.retract.max(fixture_top);
+        let mut indexed_fragments = Vec::new();
         let mut result = if let Some(reason) = parameter_error {
             StrategyResult {
                 diagnostics: vec![Diagnostic::error(reason)],
@@ -518,6 +579,24 @@ fn build_job_with_compute(
                 diagnostics: vec![Diagnostic::error(reason)],
                 ..Default::default()
             }
+        } else if let Some(index) = automatic {
+            let result = compute_indexed_cuts(
+                operation.id(),
+                index,
+                doc,
+                &env,
+                stock_to_leave,
+                fixture_top,
+                automatic_entry,
+                cancel,
+                &mut compute,
+                &mut indexed_fragments,
+            );
+            finish_automatic(
+                operation.id(),
+                !result.has_errors() && !result.cancelled && !cancel.is_cancelled(),
+            );
+            result
         } else if doc.cad_linked_operations.contains(&operation.id())
             && !operation_geometry.bindings.contains_key(&operation.id())
         {
@@ -636,7 +715,7 @@ fn build_job_with_compute(
             completion = JobCompletion::Failed;
             continue;
         }
-        if result.program.is_empty() {
+        if result.program.is_empty() && indexed_fragments.is_empty() {
             continue;
         }
         // Per-operation spindle speed: the op's own value if set, else the job default
@@ -658,6 +737,7 @@ fn build_job_with_compute(
             ends_with: last_tool_change(&result.program),
             datum: operation.work_offset(),
             fragment: result.program,
+            indexed_fragments,
             pattern_id: None,
             instance_index: None,
         };
@@ -726,10 +806,10 @@ fn build_job_with_compute(
                         .iter()
                         .filter_map(|id| seeds_by_id.get(id))
                         .try_fold(0usize, |sum, seed| {
-                            let steps = seed.fragment.steps().len();
+                            let steps = seed.motion_count();
                             let repeated_steps = automatic_seeds
                                 .get(&seed.op_id)
-                                .map_or(steps, |seed| seed.fragment.steps().len());
+                                .map_or(steps, Planned::motion_count);
                             repeated_steps
                                 .checked_mul(count.saturating_sub(1))?
                                 .checked_add(steps)?
@@ -737,7 +817,7 @@ fn build_job_with_compute(
                         });
                     let current = planned
                         .iter()
-                        .try_fold(0usize, |sum, p| sum.checked_add(p.fragment.steps().len()));
+                        .try_fold(0usize, |sum, p| sum.checked_add(p.motion_count()));
                     if required.is_none()
                         || current
                             .and_then(|n| n.checked_add(required.unwrap_or(usize::MAX)))
@@ -782,6 +862,17 @@ fn build_job_with_compute(
                             .with_pattern_owner(pattern.id, index as u32);
                         planned.push(Planned {
                             fragment,
+                            indexed_fragments: seed
+                                .indexed_fragments
+                                .iter()
+                                .map(|cut| IndexedFragment {
+                                    program: cut
+                                        .program
+                                        .transformed_xy(center, translation, degrees)
+                                        .with_pattern_owner(pattern.id, index as u32),
+                                    ..*cut
+                                })
+                                .collect(),
                             pattern_id: Some(pattern.id),
                             instance_index: Some(index as u32),
                             ..seed.clone()
@@ -817,7 +908,7 @@ fn build_job_with_compute(
     }
     if planned
         .iter()
-        .try_fold(0usize, |sum, p| sum.checked_add(p.fragment.steps().len()))
+        .try_fold(0usize, |sum, p| sum.checked_add(p.motion_count()))
         .is_none_or(|n| n > 5_000_000)
     {
         diagnostics.push(
@@ -829,8 +920,63 @@ fn build_job_with_compute(
     }
 
     // Expand patterns in the unwrapped plane, then wrap each derived instance.
+    let mut indexed = Vec::new();
+    for mut pl in planned {
+        if pl.indexed_fragments.is_empty() {
+            indexed.push(pl);
+            continue;
+        }
+        let mut index = doc.rotary_indexes[&pl.op_id].clone();
+        let mut segments = Vec::new();
+        for cut in std::mem::take(&mut pl.indexed_fragments) {
+            index.angle = cut.angle;
+            let mut at_clearance = Program::new();
+            if let Some(start) = first_position(&cut.program) {
+                at_clearance.push(Step::Rapid {
+                    to: Point3::new(start.x, start.y, start.z.max(cut.clearance)),
+                    tag: pl.tag(MoveKind::Traverse),
+                });
+            }
+            let end = last_position(&cut.program);
+            at_clearance.extend(cut.program);
+            if let Some(end) = end.filter(|p| p.z < cut.clearance) {
+                at_clearance.push(Step::Rapid {
+                    to: Point3::new(end.x, end.y, cut.clearance),
+                    tag: pl.tag(MoveKind::Retract),
+                });
+            }
+            match crate::index_program(&at_clearance, &index, cancel) {
+                Ok(fragment) => segments.push(Planned {
+                    clearance: cut.clearance,
+                    ends_with: last_tool_change(&fragment),
+                    fragment,
+                    ..pl.clone()
+                }),
+                Err(reason) => {
+                    diagnostics.push(
+                        Diagnostic::error(reason)
+                            .for_op(pl.op_id)
+                            .for_setup(setup.id),
+                    );
+                    completion = if cancel.is_cancelled() {
+                        JobCompletion::Cancelled
+                    } else {
+                        JobCompletion::Failed
+                    };
+                    segments.clear();
+                    break;
+                }
+            }
+        }
+        indexed.extend(segments);
+    }
+    let mut planned = indexed;
     for pl in &mut planned {
-        if let Some(index) = doc.rotary_indexes.get(&pl.op_id) {
+        if let Some(index) = doc
+            .rotary_indexes
+            .get(&pl.op_id)
+            .filter(|index| !index.uses_automatic_cad())
+        {
             match crate::index_program(&pl.fragment, index, cancel) {
                 Ok(fragment) => pl.fragment = fragment,
                 Err(reason) => {
@@ -1077,6 +1223,98 @@ struct ComputeContext<'a> {
     stock_to_leave: cam_model::StockToLeave,
     compute: &'a mut StrategyCompute<'a>,
     geometry: &'a cam_model::GeometryState,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_indexed_cuts(
+    id: u32,
+    index: &cam_model::RotaryIndex,
+    doc: &Document,
+    env: &JobEnv,
+    stock_to_leave: cam_model::StockToLeave,
+    fixture_top: f64,
+    automatic_entry: bool,
+    cancel: &CancelToken,
+    compute: &mut StrategyCompute<'_>,
+    fragments: &mut Vec<IndexedFragment>,
+) -> StrategyResult {
+    let Some(cuts) = doc
+        .resolved_indexed_cuts
+        .get(&id)
+        .filter(|cuts| !cuts.is_empty())
+    else {
+        return StrategyResult {
+            diagnostics: vec![Diagnostic::error(
+                "Auto indexed geometry must be resolved before planning",
+            )
+            .with_code(crate::DiagnosticCode::GeometryUnresolved)],
+            ..Default::default()
+        };
+    };
+    let mut fixed = index.clone();
+    let mut combined = StrategyResult::default();
+    let mut cached_geometry = None;
+    for cut in cuts {
+        if cancel.is_cancelled() {
+            combined.cancelled = true;
+            break;
+        }
+        let operation = automatic_entry
+            .then(|| automatic_pattern_entry(&cut.operation))
+            .flatten();
+        let operation = operation.as_ref().unwrap_or(&cut.operation);
+        if cached_geometry.is_none() || fixed.angle != cut.angle {
+            fixed.angle = cut.angle;
+            cached_geometry = Some(fixed.geometry(&doc.geometry));
+        }
+        let geometry = cached_geometry.as_mut().unwrap();
+        geometry.bindings.insert(id, cut.binding.clone());
+        let mut local = JobEnv {
+            heights: cut.safety,
+            stock: env.stock.map(|_| cut.stock_xy),
+            tools: env.tools,
+            spindle: env.spindle,
+        };
+        local.heights.clearance = local.heights.clearance.max(fixture_top);
+        local.heights.retract = local.heights.retract.max(fixture_top);
+        let mut result = compute_at_heights(
+            operation,
+            &local,
+            cut.cutting,
+            cancel,
+            ComputeContext {
+                stock_to_leave,
+                compute,
+                geometry,
+            },
+            true,
+        );
+        if let Some(feed) = cut.feed_floor {
+            match apply_feed_height(&result.program, feed, operation) {
+                Ok(program) => result.program = program,
+                Err(reason) => result.diagnostics.push(Diagnostic::error(reason)),
+            }
+        }
+        let failed = result.has_errors();
+        combined
+            .diagnostics
+            .extend(result.diagnostics.into_iter().map(|mut diagnostic| {
+                diagnostic.message = format!("{}: {}", cut.selection_label, diagnostic.message);
+                diagnostic
+            }));
+        if result.cancelled || cancel.is_cancelled() {
+            combined.cancelled = true;
+            break;
+        }
+        if !failed && !result.program.is_empty() {
+            fragments.push(IndexedFragment {
+                angle: cut.angle,
+                clearance: local.heights.clearance,
+                program: result.program,
+            });
+        }
+    }
+    combined
 }
 
 fn compute_at_heights(
@@ -1356,6 +1594,7 @@ struct Planned {
     op_id: u32,
     clearance: f64,
     fragment: Program,
+    indexed_fragments: Vec<IndexedFragment>,
     tool: u32,
     rpm: f64,
     cooling: cam_model::Cooling,
@@ -1367,7 +1606,22 @@ struct Planned {
     instance_index: Option<u32>,
 }
 
+#[derive(Clone)]
+struct IndexedFragment {
+    angle: f64,
+    clearance: f64,
+    program: Program,
+}
+
 impl Planned {
+    fn motion_count(&self) -> usize {
+        self.indexed_fragments
+            .iter()
+            .fold(self.fragment.len(), |sum, cut| {
+                sum.saturating_add(cut.program.len())
+            })
+    }
+
     fn tag(&self, kind: MoveKind) -> Tag {
         let mut tag = Tag::new(self.op_id, kind);
         tag.pattern_id = self.pattern_id;
@@ -3819,6 +4073,7 @@ mod tests {
                 op_id: 1,
                 clearance: 5.,
                 fragment,
+                indexed_fragments: Vec::new(),
                 tool: 1,
                 rpm: 1000.,
                 cooling,

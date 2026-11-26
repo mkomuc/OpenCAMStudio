@@ -219,6 +219,7 @@ impl App {
         }
         if let Some(
             kind @ (OpKind::Pocket
+            | OpKind::Face
             | OpKind::Chamfer
             | OpKind::Engrave
             | OpKind::Carve
@@ -363,8 +364,15 @@ impl App {
 
     pub(super) fn pick_operation_geometry(&mut self) -> iced::Task<Message> {
         self.profile_tab_picking = false;
+        if self.automatic_cad_index().is_some()
+            && self.geometry_editor.is_none()
+            && !self.profile_geometry_active()
+        {
+            self.operation_geometry_message(GeometryMessage::Edit);
+            return iced::Task::none();
+        }
         self.geometry_additive = true;
-        if self.wrapped_pocket_geometry_editor() {
+        if self.wrapped_pocket_geometry_editor() || self.automatic_index_geometry_editor() {
             self.status = "Select geometry in the viewport, then use OK to stage it.".into();
             return iced::Task::none();
         }
@@ -392,6 +400,28 @@ impl App {
     }
 
     pub(super) fn remove_operation_geometry(&mut self, index: Option<usize>) {
+        if self.automatic_cad_index().is_some() && !self.stock_contour_editor() {
+            let mut selected = if self.automatic_index_geometry_editor() {
+                self.controller.cad_selection().to_vec()
+            } else {
+                self.automatic_cad_index().unwrap().selected.clone()
+            };
+            if let Some(index) = index {
+                if index < selected.len() {
+                    selected.remove(index);
+                }
+            } else {
+                selected.clear();
+            }
+            if self.automatic_index_geometry_editor() {
+                self.controller.set_cad_selection(selected);
+            } else {
+                self.stage_automatic_selection(selected);
+            }
+            self.geometry_row_selection = None;
+            self.cad_candidates.clear();
+            return;
+        }
         if self.wrapped_pocket_geometry_editor() {
             let mut selected = self.controller.cad_selection().to_vec();
             if let Some(index) = index {

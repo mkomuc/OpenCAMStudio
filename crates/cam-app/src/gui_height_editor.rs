@@ -156,6 +156,9 @@ impl App {
         &self,
         id: u32,
     ) -> Result<ResolvedOperationHeights, String> {
+        if self.automatic_cad_index().is_some() {
+            return Err("Height references resolve separately for each Auto selection.".into());
+        }
         let mut document = self.rotary_draft_document();
         for tool in &self.operation_tools {
             if !document
@@ -485,7 +488,13 @@ impl App {
             }
             controls = controls.push(section.width(Length::Fill));
         }
-        if let Err(reason) = resolved {
+        if self.automatic_cad_index().is_some() {
+            controls = controls.push(
+                text("Height references resolve separately for each Auto selection.")
+                    .size(11)
+                    .color(INSPECTOR_MUTED),
+            );
+        } else if let Err(reason) = resolved {
             controls = controls.push(text(reason).size(11).color(palette::ERROR));
         }
         controls.into()

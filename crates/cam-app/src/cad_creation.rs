@@ -115,6 +115,9 @@ impl AppController {
         let mut document = self.document().clone();
         if let Some(index) = index {
             index.validate()?;
+            if index.auto.is_some() && !operation.supports_automatic_index() {
+                return Err("Auto indexing requires a 2D operation".into());
+            }
             if operation.rotary_wrap().is_some() {
                 return Err("An operation cannot be both indexed and wrapped".into());
             }
@@ -196,7 +199,7 @@ impl AppController {
             .iter()
             .find(|o| o.id() == id)
             .unwrap();
-        crate::cad_operations::resolve_height_settings(
+        crate::cad_operations::validate_operation_height_settings(
             &document,
             operation,
             &document.setup().height_settings[&id],

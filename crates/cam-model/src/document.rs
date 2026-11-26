@@ -2709,6 +2709,9 @@ pub struct Document {
     /// Per-operation 3+1 indexing; stable operation IDs are document-wide.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub rotary_indexes: std::collections::BTreeMap<u32, crate::RotaryIndex>,
+    /// Transient CAD extraction for Auto indexing, in machining order.
+    #[serde(skip)]
+    pub resolved_indexed_cuts: std::collections::BTreeMap<u32, Vec<crate::ResolvedIndexedCut>>,
     /// Schema version this document conforms to.
     pub schema_version: u32,
     /// Independent physical workholding setups, in browser order.
@@ -2816,6 +2819,7 @@ impl Document {
             schema_version: SCHEMA_VERSION,
             operation_names: Default::default(),
             rotary_indexes: Default::default(),
+            resolved_indexed_cuts: Default::default(),
             active_setup_id: 0,
             setups: Vec::new(),
             geometry: crate::GeometryState::default(),

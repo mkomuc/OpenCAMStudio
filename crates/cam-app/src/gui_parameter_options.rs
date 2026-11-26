@@ -3,8 +3,8 @@ use super::*;
 use cam_model::{
     AdaptiveContainment, BoreOrder, Comp, Cooling, DrillCycleMode, HeightPlaneKind as Plane,
     HeightReference as Reference, OperationHeightSettings, ParallelTransition, ProfileCorner,
-    RotaryAxis, RotaryIndex, RotaryWrap, ScallopOrder, ScallopRetraction, SpiralBoundary,
-    SpiralCutDirection, SpiralMilling, SpiralMode, SpiralOrder, TabShape,
+    RotaryAxis, RotaryIndex, RotaryMachiningOrder, RotaryWrap, ScallopOrder, ScallopRetraction,
+    SpiralBoundary, SpiralCutDirection, SpiralMilling, SpiralMode, SpiralOrder, TabShape,
 };
 use operation_tabs::Compensation;
 use profile_tabs::Positioning;
@@ -185,7 +185,8 @@ settings! {
         MachiningType::Wrap => RotaryAction::Enable(true),
     });
     ROTARY_AXIS: RotaryAxis = "indexAxis", |_| Some(RotaryIndex::default().axis), |value| Message::Rotary(RotaryAction::IndexAxis(value));
-    ROTARY_ANGLE_MODE: IndexMode = "indexAngleMode", |_| Some(IndexMode::Manual), |value| Message::Rotary(RotaryAction::IndexMode(value));
+    ROTARY_ANGLE_MODE: IndexMode = "indexAngleMode", |op| Some(if op.supports_automatic_index() { IndexMode::Auto } else { IndexMode::Manual }), |value| Message::Rotary(RotaryAction::IndexMode(value));
+    ROTARY_ORDER: RotaryMachiningOrder = "indexMachiningOrder", |_| Some(RotaryMachiningOrder::default()), |value| Message::Rotary(RotaryAction::IndexOrder(value));
     ROTARY_FLIP: bool = "flipToolEngagement", |_| Some(RotaryIndex::default().flip), |value| Message::Rotary(RotaryAction::IndexFlip(value));
     ROTARY_UNWRAP: bool = "unwrapGeometry", |op| op.supports_rotary_wrap().then_some(RotaryWrap::default().unwrap_geometry), |value| Message::Rotary(RotaryAction::Unwrap(value));
     COMPENSATION: Compensation = "compensation", get!(Profile(p) => Compensation::of(p.comp)), |value: Compensation| Message::ProfileCompChanged(value.value());
@@ -412,7 +413,12 @@ impl App {
     }
 
     pub(super) fn seed_user_rotary_index_options(&mut self) {
-        self.seed_user_options(&[ROTARY_AXIS.spec, ROTARY_ANGLE_MODE.spec, ROTARY_FLIP.spec]);
+        self.seed_user_options(&[
+            ROTARY_AXIS.spec,
+            ROTARY_ANGLE_MODE.spec,
+            ROTARY_ORDER.spec,
+            ROTARY_FLIP.spec,
+        ]);
     }
 
     pub(super) fn seed_user_rotary_wrap_options(&mut self) {
@@ -450,6 +456,9 @@ impl App {
                     Message::Rotary(RotaryAction::IndexMode(mode)) => {
                         self.rotary_index_mode != *mode
                     }
+                    Message::Rotary(RotaryAction::IndexOrder(order)) => self
+                        .automatic_index()
+                        .is_some_and(|auto| auto.order != *order),
                     Message::Rotary(RotaryAction::IndexFlip(flip)) => self
                         .rotary_index_draft
                         .as_ref()
@@ -475,6 +484,10 @@ impl App {
         };
         match (message, op) {
             (Message::Rotary(RotaryAction::Enable(true)), op) => op.supports_rotary_wrap(),
+            (Message::Rotary(RotaryAction::IndexMode(IndexMode::Auto)), op) => {
+                self.rotary_index_draft.is_some() && op.supports_automatic_index()
+            }
+            (Message::Rotary(RotaryAction::IndexOrder(_)), _) => self.automatic_index().is_some(),
             (
                 Message::Rotary(
                     RotaryAction::IndexAxis(_)

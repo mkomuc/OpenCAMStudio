@@ -1,6 +1,55 @@
 //! Cylindrical wrapping of planar contour and pocket toolpaths.
-use crate::{EntityRef, Operation};
+use crate::{CuttingHeights, EntityRef, GeometryBinding, Heights, Operation};
 pub use cam_cldata::RotaryAxis;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RotaryMachiningOrder {
+    #[default]
+    RotaryAngle,
+    SelectionOrder,
+}
+
+impl std::fmt::Display for RotaryMachiningOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RotaryAngle => "Rotary angle",
+            Self::SelectionOrder => "Selection order",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AutomaticRotaryIndex {
+    pub order: RotaryMachiningOrder,
+    /// Drawing geometry lies in the setup XY plane and uses index zero.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub drawing: bool,
+    /// Pick order is also the stable tie-breaker when sorting by angle.
+    pub selected: Vec<EntityRef>,
+}
+
+/// One feature resolved by the CAD adapter for a planning snapshot.
+#[derive(Clone, Debug)]
+pub struct ResolvedIndexedCut {
+    pub operation: Operation,
+    pub angle: f64,
+    pub cutting: CuttingHeights,
+    pub safety: Heights,
+    pub stock_xy: ([f64; 2], [f64; 2]),
+    pub feed_floor: Option<f64>,
+    pub binding: GeometryBinding,
+    pub selection_label: String,
+}
+
+impl Operation {
+    pub fn supports_automatic_index(&self) -> bool {
+        !matches!(
+            self,
+            Self::Adaptive(_) | Self::Parallel(_) | Self::Spiral(_)
+        )
+    }
+}
 
 /// Fixed workpiece index for ordinary three-axis machining. Operation geometry
 /// and heights are in the machine frame at this angle; CAD placements are rotated
@@ -15,6 +64,9 @@ pub struct RotaryIndex {
     /// Optional planar face, closed loop, or straight edge used to choose the index angle.
     pub face: Option<EntityRef>,
     pub flip: bool,
+    /// Present only in Auto mode. Older files retain their fixed angle and reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto: Option<AutomaticRotaryIndex>,
 }
 impl Default for RotaryIndex {
     fn default() -> Self {
@@ -25,11 +77,31 @@ impl Default for RotaryIndex {
             tolerance: 0.01,
             face: None,
             flip: false,
+            auto: None,
         }
     }
 }
 impl RotaryIndex {
+    pub fn uses_automatic_cad(&self) -> bool {
+        self.auto.as_ref().is_some_and(|auto| !auto.drawing)
+    }
+
+    pub fn fixed_angle(&self) -> f64 {
+        if self.auto.as_ref().is_some_and(|auto| auto.drawing) {
+            0.
+        } else {
+            self.angle
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if self
+            .auto
+            .as_ref()
+            .is_some_and(|auto| auto.drawing && !auto.selected.is_empty())
+        {
+            return Err("Auto drawing indexing requires drawing geometry".into());
+        }
         if !self
             .center
             .into_iter()
@@ -44,23 +116,40 @@ impl RotaryIndex {
         }
         Ok(())
     }
+
+    /// Angle that rotates a directed feature into the positive machine Z axis.
+    pub fn angle_for_direction(&self, n: [f64; 3]) -> Result<f64, String> {
+        let length = n[0].hypot(n[1]).hypot(n[2]);
+        if !length.is_finite() || length < 1e-10 {
+            return Err("Selection direction is invalid".into());
+        }
+        let (along, angle) = match self.axis {
+            RotaryAxis::A => (n[0], n[1].atan2(n[2]).to_degrees()),
+            RotaryAxis::B => (n[1], (-n[0]).atan2(n[2]).to_degrees()),
+        };
+        if along.abs() / length > 1e-6 {
+            return Err(
+                "This selection cannot be aligned with Z using the selected rotary axis".into(),
+            );
+        }
+        Ok(if self.flip { angle + 180. } else { angle })
+    }
     /// Input geometry must already be expressed in setup axes.
     pub fn geometry(&self, source: &crate::GeometryState) -> crate::GeometryState {
         let mut out = source.clone();
+        let angle = self.fixed_angle();
         let center = cam_cldata::Point3::new(self.center[0], self.center[1], self.center[2]);
         let point = |p: [f64; 3]| {
-            let p = self.axis.material_point(
-                cam_cldata::Point3::new(p[0], p[1], p[2]),
-                center,
-                -self.angle,
-            );
+            let p =
+                self.axis
+                    .material_point(cam_cldata::Point3::new(p[0], p[1], p[2]), center, -angle);
             [p.x, p.y, p.z]
         };
         let vector = |p: [f64; 3]| {
             let p = self.axis.material_point(
                 cam_cldata::Point3::new(p[0], p[1], p[2]),
                 cam_cldata::Point3::new(0., 0., 0.),
-                -self.angle,
+                -angle,
             );
             [p.x, p.y, p.z]
         };
@@ -79,9 +168,18 @@ impl RotaryIndex {
 impl crate::Document {
     /// A temporary view for resolving indexed CAD selections and height references.
     pub fn indexed_view(&self, id: u32) -> Result<Option<Self>, String> {
-        let Some(index) = self.rotary_indexes.get(&id) else {
+        let Some(index) = self
+            .rotary_indexes
+            .get(&id)
+            .filter(|index| !index.uses_automatic_cad())
+        else {
             return Ok(None);
         };
+        self.view_at_index(id, index).map(Some)
+    }
+
+    /// A temporary view at an explicitly resolved rotary position.
+    pub fn view_at_index(&self, id: u32, index: &RotaryIndex) -> Result<Self, String> {
         index.validate()?;
         let setup = self.setup();
         let geometry = self.geometry.geometry_in_setup(&setup.frame)?;
@@ -94,7 +192,7 @@ impl crate::Document {
             let p = index.axis.material_point(
                 cam_cldata::Point3::new(p[0], p[1], p[2]),
                 center,
-                -index.angle,
+                -index.fixed_angle(),
             );
             [p.x, p.y, p.z]
         };
@@ -138,7 +236,7 @@ impl crate::Document {
                 std::array::from_fn(|i| max[i] - b[i]),
             ],
         };
-        Ok(Some(view))
+        Ok(view)
     }
 }
 

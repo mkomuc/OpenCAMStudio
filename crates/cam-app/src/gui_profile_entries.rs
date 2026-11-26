@@ -76,6 +76,18 @@ impl App {
         let Some(Operation::Profile(profile)) = &self.operation_draft else {
             return Vec::new();
         };
+        if let Some(auto) = self.automatic_cad_index() {
+            if let Some(entries) = &profile.selections {
+                if self.profile_entry_editor.is_some() || entry_selections(entries) == auto.selected
+                {
+                    return entries.clone();
+                }
+            }
+            return crate::cad_operations::profile_entries_from_selection(
+                self.controller.geometry_state(),
+                &auto.selected,
+            );
+        }
         if let Some(entries) = &profile.selections {
             return entries.clone();
         }
@@ -333,6 +345,7 @@ impl App {
                     editor.draft.name =
                         format!("{} {}", kind_name(editor.draft.kind), editor.index + 1);
                 }
+                let automatic = self.automatic_cad_index().is_some();
                 let result = self.indexed_draft_geometry().and_then(|geometry| {
                     let split =
                         cam_geometry3d::split_profile_chain_entry(&geometry, &editor.draft)?;
@@ -340,7 +353,17 @@ impl App {
                         .as_deref()
                         .unwrap_or(std::slice::from_ref(&editor.draft));
                     for entry in entries {
-                        cam_geometry3d::profile_entry_contours(&geometry, entry)?;
+                        if automatic {
+                            let ProfileGeometrySource::Cad(refs) = &entry.source else {
+                                return Err("Select CAD geometry for this indexed entry".into());
+                            };
+                            if refs.is_empty() {
+                                return Err("Select geometry for this entry".into());
+                            }
+                            crate::cad_operations::validate_selection(&geometry, refs)?;
+                        } else {
+                            cam_geometry3d::profile_entry_contours(&geometry, entry)?;
+                        }
                     }
                     Ok(split)
                 });
@@ -513,6 +536,9 @@ impl App {
             .is_some_and(|e| e.picking)
         {
             return false;
+        }
+        if self.automatic_cad_index().is_some() {
+            return true;
         }
         let hit = self
             .controller
@@ -813,6 +839,13 @@ impl App {
 
 impl App {
     fn sync_profile_entry_cache(&mut self) {
+        if self.automatic_cad_index().is_some() {
+            if let Some(Operation::Profile(profile)) = &self.operation_draft {
+                let selected = entry_selections(profile.selections.as_deref().unwrap_or_default());
+                self.stage_automatic_selection(selected);
+            }
+            return;
+        }
         if let Some((resolved, _)) = self.profile_selection_geometry() {
             self.edit_operation_draft(|op| {
                 if let Operation::Profile(p) = op {
@@ -897,6 +930,20 @@ impl App {
             offset += contours.len();
         }
     }
+}
+
+fn entry_selections(entries: &[ProfileGeometryEntry]) -> Vec<EntityRef> {
+    let mut seen = BTreeSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| match &entry.source {
+            ProfileGeometrySource::Cad(refs) => Some(refs),
+            _ => None,
+        })
+        .flatten()
+        .filter(|r| seen.insert((*r).clone()))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

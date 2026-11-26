@@ -21,6 +21,7 @@ pub(super) enum GeometryMessage {
 pub(super) struct GeometryEditor {
     stock: bool,
     wrapped: bool,
+    automatic: bool,
     kind: OpKind,
     drill: Option<cam_model::DrillGeometry>,
     cad_selection: Vec<EntityRef>,
@@ -40,6 +41,11 @@ pub(super) struct GeometryEditor {
 
 fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)> {
     match kind {
+        OpKind::Face if cad => vec![
+            (CadFilter::Face, "face", "Add a planar face as the facing target."),
+            (CadFilter::Silhouette, "silhouette", "Add a body silhouette projected onto the machining XY plane."),
+        ],
+        OpKind::Face => vec![(CadFilter::Loop, "chain", "Add a closed drawing boundary for facing.")],
         OpKind::Chamfer if cad => vec![
             (CadFilter::Face, "face", "Add modeled Chamfer Faces. The upper and lower face boundaries define the bevel; small cutters finish it in multiple stepdowns."),
             (CadFilter::Loop, "chain", "Add Chain. Select a rim or connected edges; set Chamfer width in Passes."),
@@ -276,7 +282,8 @@ impl App {
     }
 
     pub(super) fn operation_uses_cad_geometry(&self) -> bool {
-        self.cad_pending_kind.is_some()
+        self.automatic_cad_index().is_some()
+            || self.cad_pending_kind.is_some()
             || self.cad_editing_op.is_some()
             || self.operation_draft.as_ref().is_some_and(|op| {
                 matches!(op, Operation::Pocket(p) if p.wrap.as_ref().is_some_and(|wrap| !wrap.geometry.is_empty())) || self.controller
@@ -292,6 +299,12 @@ impl App {
             .is_some_and(|editor| editor.wrapped)
     }
 
+    pub(super) fn automatic_index_geometry_editor(&self) -> bool {
+        self.geometry_editor
+            .as_ref()
+            .is_some_and(|editor| editor.automatic)
+    }
+
     pub(super) fn operation_geometry_collection(
         &self,
         kind: OpKind,
@@ -303,6 +316,7 @@ impl App {
             .or_else(|| (!labels.is_empty()).then_some(0));
         let cad = self.operation_uses_cad_geometry();
         let sources = if self.wrapped_pocket_geometry_editor()
+            || self.automatic_index_geometry_editor()
             || (self
                 .operation_draft
                 .as_ref()
@@ -311,6 +325,8 @@ impl App {
                 && (self.cad_pending_kind.is_some() || self.cad_editing_op.is_some()))
         {
             self.controller.cad_selection()
+        } else if let Some(auto) = self.automatic_cad_index() {
+            &auto.selected
         } else if let Some(wrap) = self
             .operation_draft
             .as_ref()
@@ -331,25 +347,17 @@ impl App {
             .into_iter()
             .enumerate()
             .map(|(index, label)| GeometryRow {
-                icon: if kind == OpKind::Drill {
-                    "drill"
-                } else if kind == OpKind::Bore {
-                    "bore"
-                } else if kind == OpKind::Thread {
-                    "thread"
-                } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral)
-                    && sources
-                        .get(index)
-                        .is_some_and(|r| r.kind == EntityKind::Body)
-                {
-                    "silhouette"
-                } else if sources
-                    .get(index)
-                    .is_some_and(|r| r.kind == EntityKind::Face)
-                {
-                    "face"
-                } else {
-                    "chain"
+                icon: match (kind, sources.get(index).map(|r| r.kind)) {
+                    (OpKind::Drill, _) => "drill",
+                    (OpKind::Bore, _) => "bore",
+                    (OpKind::Thread, _) => "thread",
+                    (OpKind::Face, Some(EntityKind::Silhouette))
+                    | (
+                        OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral,
+                        Some(EntityKind::Body),
+                    ) => "silhouette",
+                    (_, Some(EntityKind::Face)) => "face",
+                    _ => "chain",
                 },
                 label,
                 action: Some(Message::GeometryRowSelected(index)),
@@ -412,6 +420,8 @@ impl App {
                 "Bore selection"
             } else if kind == OpKind::Thread {
                 "Thread selection"
+            } else if kind == OpKind::Face {
+                "Facing selection"
             } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral) {
                 "Machining geometry"
             } else {
@@ -726,6 +736,7 @@ impl App {
                     | OpKind::Drill
                     | OpKind::Bore
                     | OpKind::Thread
+                    | OpKind::Face
                     | OpKind::Adaptive
                     | OpKind::Parallel
                     | OpKind::Spiral),
@@ -733,9 +744,12 @@ impl App {
                 else {
                     return;
                 };
+                let automatic = !matches!(message, GeometryMessage::SelectStock)
+                    && self.automatic_cad_index().is_some();
                 let pending = self.controller.pending_op();
                 let editor = GeometryEditor {
                     stock: matches!(message, GeometryMessage::SelectStock),
+                    automatic,
                     wrapped: !matches!(message, GeometryMessage::SelectStock)
                         && kind == OpKind::Pocket
                         && self
@@ -766,7 +780,25 @@ impl App {
                     height_defaults: self.creation_geometry_height_defaults.clone(),
                 };
                 self.height_reference_pick = None;
-                if editor.wrapped {
+                if editor.automatic {
+                    let selected = self.automatic_cad_index().unwrap().selected.clone();
+                    self.cad_filter = match message {
+                        GeometryMessage::Add(filter) => filter,
+                        _ => match selected.first().map(|r| r.kind) {
+                            Some(EntityKind::Edge) => CadFilter::Edge,
+                            Some(EntityKind::Loop) => CadFilter::Loop,
+                            Some(EntityKind::Silhouette) => CadFilter::Silhouette,
+                            _ => CadFilter::Face,
+                        },
+                    };
+                    self.controller.set_cad_selection(selected);
+                    self.geometry_additive = true;
+                    self.cad_filter_explicit = matches!(message, GeometryMessage::Add(_));
+                    self.cad_hover = None;
+                    self.cad_candidates.clear();
+                    self.status =
+                        "Select geometry in the viewport, then use OK to stage it.".into();
+                } else if editor.wrapped {
                     let selected = self
                         .operation_draft
                         .as_ref()
@@ -800,7 +832,7 @@ impl App {
                     }
                 }
                 if let GeometryMessage::Add(filter) = message {
-                    if !editor.wrapped && self.operation_uses_cad_geometry() {
+                    if !editor.wrapped && !editor.automatic && self.operation_uses_cad_geometry() {
                         let _ = self.update(Message::GeometryFilterChanged(filter));
                     }
                 }
@@ -873,6 +905,10 @@ impl App {
             }
             GeometryMessage::Remove => {
                 let index = self.geometry_row_selection.unwrap_or(0);
+                if self.automatic_cad_index().is_some() && self.geometry_editor.is_none() {
+                    self.remove_operation_geometry(Some(index));
+                    return;
+                }
                 let editing_operation = !self.creating_operation();
                 // Older drawing operations can store hole centres without source loops.
                 // Their rows can still be removed directly from the operation draft.
@@ -935,6 +971,24 @@ impl App {
                     self.status = error;
                     return;
                 }
+                if self.automatic_index_geometry_editor() {
+                    let selected = self.controller.cad_selection().to_vec();
+                    let drill = self.pending_drill_geometry();
+                    self.operation_geometry_message(GeometryMessage::Cancel);
+                    self.stage_automatic_selection(selected);
+                    if let Some(settings) = drill {
+                        self.edit_operation_draft(|op| {
+                            if let Operation::Drill(drill) = op {
+                                drill.geometry = settings;
+                            }
+                        });
+                    }
+                    self.geometry_row_selection = None;
+                    self.status =
+                        "Geometry staged. The operation's OK/Cancel applies or discards all tabs."
+                            .into();
+                    return;
+                }
                 if self.wrapped_pocket_geometry_editor() {
                     let selected = self.controller.cad_selection().to_vec();
                     self.edit_operation_draft(|op| {
@@ -990,6 +1044,12 @@ impl App {
             .geometry_editor
             .as_ref()
             .ok_or("Open geometry settings")?;
+        if editor.automatic {
+            return crate::cad_operations::validate_selection(
+                self.controller.geometry_state(),
+                self.controller.cad_selection(),
+            );
+        }
         if editor.wrapped {
             let selected = self.controller.cad_selection();
             if selected.is_empty() {
@@ -1021,6 +1081,15 @@ impl App {
                 )
                 .map(|_| ())
         } else if self.cad_pending_kind.is_some() {
+            if editor.kind == OpKind::Face && self.rotary_index_draft.is_some() {
+                return crate::cad_operations::resolve_operation_selection(
+                    &self.rotary_draft_document(),
+                    editor.kind,
+                    self.controller.cad_selection(),
+                    0,
+                )
+                .map(|_| ());
+            }
             self.validate_active_profile_geometry().unwrap_or_else(|| {
                 self.controller
                     .preview_cad_operation(editor.kind, self.controller.cad_selection())
@@ -1051,6 +1120,7 @@ impl App {
                 OpKind::Drill => "Drill",
                 OpKind::Bore => "Bore",
                 OpKind::Thread => "Thread",
+                OpKind::Face => "Face",
                 OpKind::Parallel => "3D Parallel",
                 OpKind::Spiral => "3D Spiral",
                 OpKind::Adaptive => "3D Adaptive Clearing",
@@ -1076,6 +1146,12 @@ impl App {
                         "drill"
                     } else if kind == OpKind::Thread {
                         "thread"
+                    } else if kind == OpKind::Face && cad {
+                        if self.cad_filter == CadFilter::Silhouette {
+                            "silhouette"
+                        } else {
+                            "face"
+                        }
                     } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral) {
                         if self.cad_filter == CadFilter::Body {
                             "silhouette"
@@ -1120,6 +1196,7 @@ impl App {
             && matches!(
                 kind,
                 OpKind::Pocket
+                    | OpKind::Face
                     | OpKind::Chamfer
                     | OpKind::Engrave
                     | OpKind::Carve
@@ -1142,6 +1219,8 @@ impl App {
                         "Connected edges forming a closed stock boundary",
                     ),
                 ]
+            } else if kind == OpKind::Face {
+                modes(kind, cad)
             } else if matches!(kind, OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral) {
                 vec![
                     (CadFilter::Body, "silhouette", "Whole solid body"),
@@ -1218,8 +1297,16 @@ impl App {
             "Select a stock box edge, closed model loop, connected edge chain, or body silhouette. Use setup stock restores the setup box. Stock contours describe material; the cutter can approach from outside the footprint. Leave unchecked for closed pockets."
         } else if editor.wrapped {
             "Select cylindrical faces, closed loops, or connected edges. Select the wrap cylinder on the Multi-axis tab. Faces at different radii require separate operations."
+        } else if editor.automatic {
+            if kind == OpKind::Face {
+                "Select planar faces or body silhouettes. Faces are indexed individually. Silhouettes use the setup XY plane at 0°."
+            } else {
+                "Select machining geometry in the viewport. Orientations are resolved when the toolpath is generated."
+            }
         } else {
             match kind {
+            OpKind::Face if cad => "Select one planar facing target or a body silhouette projected onto the machining XY plane.",
+            OpKind::Face => "Select one closed drawing boundary for facing.",
             OpKind::Pocket => "Select planar pocket floors with their islands, closed boundary loops, or closed edge chains. Multiple pockets must share one floor height. Default heights cut from stock top down to the selected geometry.",
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
@@ -1238,27 +1325,17 @@ impl App {
         if let Some(settings) = editor.drill {
             body = body.push(self.drill_selection_controls(settings));
         }
-        if cad && !editor.stock && !editor.wrapped {
-            if let Some(info) =
-                crate::cad_operations::geometry_for_setup(self.controller.document())
-                    .ok()
-                    .and_then(|geometry| {
-                        crate::cad_operations::recipe(
-                            kind,
-                            &geometry,
-                            self.controller.cad_selection(),
-                        )
-                        .ok()
-                        .and_then(|recipe| {
-                            cam_geometry3d::verify_selection(
-                                &geometry,
-                                self.controller.cad_selection(),
-                                recipe,
-                                self.controller.stock_box().1[2],
-                            )
-                        })
-                    })
-            {
+        if cad && !editor.stock && !editor.wrapped && !editor.automatic {
+            let document = self.rotary_draft_document();
+            let id = self.operation_draft.as_ref().map_or(0, Operation::id);
+            let info = (|| {
+                let geometry = crate::cad_operations::geometry_for_operation(&document, id).ok()?;
+                let selected = self.controller.cad_selection();
+                let recipe = crate::cad_operations::recipe(kind, &geometry, selected).ok()?;
+                let stock_top = crate::cad_operations::operation_stock_top(&document, id).ok()?;
+                cam_geometry3d::verify_selection(&geometry, selected, recipe, stock_top)
+            })();
+            if let Some(info) = info {
                 body = body.push(
                     text(format!(
                         "Info: Automatic verification: {info}. Operation settings are used."
@@ -1337,6 +1414,38 @@ mod tests {
         app.begin_operation_draft(0);
         let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
         (app, face, boundary)
+    }
+
+    #[test]
+    fn indexed_pocket_uses_standard_geometry_settings_and_retains_pick_order() {
+        let (mut app, face, boundary) = wrapped_pocket_fixture();
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        assert!(app.automatic_cad_index().is_some());
+        app.operation_geometry_message(GeometryMessage::Add(CadFilter::Face));
+        assert!(app.automatic_index_geometry_editor());
+        assert!(app.rotary_pick.is_none());
+        app.select_cad_entity(face.clone());
+        let _ = app.update(Message::GeometryFilterChanged(CadFilter::Loop));
+        assert!(app.machining_viewport().cad_indexed_geometry);
+        app.select_cad_entity(boundary.clone());
+        assert_eq!(
+            app.controller.cad_selection(),
+            &[face.clone(), boundary.clone()]
+        );
+        app.operation_geometry_message(GeometryMessage::Confirm);
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert_eq!(
+            app.automatic_cad_index().unwrap().selected,
+            [face.clone(), boundary.clone()]
+        );
+
+        app.operation_geometry_message(GeometryMessage::Edit);
+        app.remove_operation_geometry(Some(0));
+        app.operation_geometry_message(GeometryMessage::Cancel);
+        assert_eq!(
+            app.automatic_cad_index().unwrap().selected,
+            [face, boundary]
+        );
     }
 
     #[test]

@@ -544,6 +544,9 @@ mod tests {
             setup.frame.world_from_setup.rotation = [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]];
         });
         app.rotary_action(rotary_view::Action::Indexed(true));
+        app.rotary_action(rotary_view::Action::IndexMode(
+            rotary_view::IndexMode::Manual,
+        ));
         for (plane, reference, offset) in [
             (P::Top, R::StockTop, 0.),
             (P::Bottom, R::StockBottom, 0.),
@@ -627,6 +630,9 @@ mod tests {
             }
         });
         app.rotary_action(rotary_view::Action::Indexed(true));
+        app.rotary_action(rotary_view::Action::IndexMode(
+            rotary_view::IndexMode::Manual,
+        ));
         *app.height_draft.as_mut().unwrap().definition_mut(P::Top) =
             cam_model::HeightDefinition::new(R::StockTop, 0.);
         *app.height_draft.as_mut().unwrap().definition_mut(P::Bottom) =

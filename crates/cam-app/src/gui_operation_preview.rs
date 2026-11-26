@@ -188,6 +188,22 @@ impl App {
     }
 
     pub(super) fn editor_selected_geometry(&self) -> Vec<EntityRef> {
+        if let Some(auto) = self.automatic_cad_index() {
+            if self.automatic_index_geometry_editor() || self.stock_contour_editor() {
+                return self.controller.cad_selection().to_vec();
+            }
+            if self.profile_entry_editor.is_some() {
+                return self
+                    .preview_profile_entries()
+                    .into_iter()
+                    .flat_map(|entry| match entry.source {
+                        cam_model::ProfileGeometrySource::Cad(refs) => refs,
+                        _ => Vec::new(),
+                    })
+                    .collect();
+            }
+            return auto.selected.clone();
+        }
         if let Some(wrap) = self
             .operation_draft
             .as_ref()
@@ -247,7 +263,7 @@ impl App {
 
     pub(super) fn operation_geometry_preview(&self) -> Scene {
         let mut scene = Scene::new();
-        if self.wrapped_pocket_geometry_editor() {
+        if self.wrapped_pocket_geometry_editor() || self.automatic_cad_index().is_some() {
             return scene;
         }
         let (operation, binding) = if self.creating_operation() {
@@ -524,7 +540,7 @@ impl App {
                     let p = index.axis.material_point(
                         cam_cldata::Point3::new(p[0], p[1], p[2]),
                         center,
-                        index.angle,
+                        index.fixed_angle(),
                     );
                     *point = frame.to_world_vector([p.x, p.y, p.z]).map(|v| v as f32);
                 }
@@ -662,7 +678,7 @@ impl App {
                     let n = index.axis.material_point(
                         cam_cldata::Point3::new(normal[0], normal[1], normal[2]),
                         cam_cldata::Point3::new(0., 0., 0.),
-                        index.angle,
+                        index.fixed_angle(),
                     );
                     [n.x, n.y, n.z]
                 } else {

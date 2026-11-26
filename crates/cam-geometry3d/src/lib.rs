@@ -446,6 +446,114 @@ pub fn index_selection_direction(
     }
 }
 
+/// Find directed machining planes, using CAD face orientation to distinguish
+/// the two sides of a loop or edge. An axial feature may need an entry check
+/// in both orientations.
+pub fn automatic_index_directions(
+    state: &GeometryState,
+    selected: &[EntityRef],
+    operation: &Operation,
+) -> Result<Vec<[f64; 3]>, String> {
+    let (first, rest) = selected.split_first().ok_or("Select machining geometry")?;
+    let mut directions = index_feature_directions(state, first, operation)?;
+    for reference in rest {
+        let adjacent = index_feature_directions(state, reference, operation)?;
+        directions.retain(|direction| {
+            adjacent
+                .iter()
+                .any(|other| distance(*direction, *other) < T)
+        });
+    }
+    if directions.is_empty() {
+        return Err("The selected edges do not identify a common machining plane".into());
+    }
+    Ok(directions)
+}
+
+fn index_feature_directions(
+    state: &GeometryState,
+    reference: &EntityRef,
+    operation: &Operation,
+) -> Result<Vec<[f64; 3]>, String> {
+    let axial = matches!(
+        operation,
+        Operation::Drill(_) | Operation::Bore(_) | Operation::Thread(_)
+    );
+    let view = View::for_path(state, std::slice::from_ref(reference))?;
+    let plane = |id| match view.face(id).ok()?.surface {
+        CadSurface::Plane { normal, .. } => Some(view.vector(normal)),
+        _ => None,
+    };
+    let directions = match reference.kind {
+        // A Face silhouette is explicitly the setup XY projection.
+        EntityKind::Silhouette if matches!(operation, Operation::Face(_)) => vec![[0., 0., 1.]],
+        EntityKind::Face => {
+            let face = view.face(reference.id)?;
+            match face.surface {
+                CadSurface::Cylinder { axis, .. } if axial => {
+                    let direction = view.vector(axis);
+                    vec![direction, direction.map(|v| -v)]
+                }
+                CadSurface::Plane { .. } if matches!(operation, Operation::Chamfer(_)) => {
+                    let mut directions = Vec::new();
+                    for wire in &face.loop_ids {
+                        for usage in &view.wire(*wire)?.edge_uses {
+                            directions.extend(
+                                view.edge(usage.edge_id)?
+                                    .face_ids
+                                    .iter()
+                                    .filter(|&&id| id != face.id)
+                                    .filter_map(|&id| plane(id)),
+                            );
+                        }
+                    }
+                    directions
+                }
+                CadSurface::Plane { normal, .. } if !axial => vec![view.vector(normal)],
+                _ => {
+                    return Err(if axial {
+                        "Select a cylindrical machining face"
+                    } else {
+                        "Select a planar machining face"
+                    }
+                    .into())
+                }
+            }
+        }
+        EntityKind::Loop if !axial => {
+            let normal = index_selection_direction(state, reference)?;
+            let wire = view.wire(reference.id)?;
+            let parallel = |p: &[f64; 3]| cross(*p, normal).iter().all(|v| v.abs() < T);
+            if let Some(direction) = plane(wire.face_id).filter(parallel) {
+                vec![direction]
+            } else {
+                let mut directions = Vec::new();
+                for usage in &wire.edge_uses {
+                    directions.extend(
+                        view.edge(usage.edge_id)?
+                            .face_ids
+                            .iter()
+                            .filter_map(|&id| plane(id))
+                            .filter(parallel),
+                    );
+                }
+                directions
+            }
+        }
+        EntityKind::Edge if !axial => view
+            .edge(reference.id)?
+            .face_ids
+            .iter()
+            .filter_map(|&id| plane(id))
+            .collect(),
+        _ => return Err("The selection does not define a machining orientation".into()),
+    };
+    if directions.is_empty() {
+        return Err("The selection does not identify a machining plane".into());
+    }
+    Ok(directions)
+}
+
 struct View<'a> {
     asset: &'a GeometryAsset,
     instance: &'a GeometryInstance,

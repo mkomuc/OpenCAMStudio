@@ -716,6 +716,10 @@ impl App {
         let Operation::Profile(p) = operation else {
             unreachable!()
         };
+        if self.automatic_index().is_some() {
+            return (p.comp == cam_model::Comp::Control)
+                .then(|| "Indexed operations require computed cutter compensation.".into());
+        }
         profile = p;
         let id = if self.creating_operation() {
             0
