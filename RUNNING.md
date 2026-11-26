@@ -301,17 +301,17 @@ plunge style, climb, and leads.
 
 ### Tools must be able to cut
 
-Every operation checks that the surface doing the cutting *is* a cutting surface,
-reading the tool's own profile rather than its type:
+Toolpath verification checks tool reach against the smaller of shoulder length
+and length below holder. If the length below holder is unspecified, it uses the
+overall tool length. The flute length limits the axial depth of cut. For operations
+that cut in axial levels, verification checks the depth of the individual cuts,
+including any full-depth finishing pass.
 
-- **Errors** (no G-code produced) when a **non-cutting** surface would do the work —
-  engraving or drilling with a chamfer mill, profiling with a V-bit (its cone has no
-  cylindrical flank, so it cannot cut a vertical wall at any depth), threading with
-  anything but a thread mill — or when the cut runs **past the flute length** onto the
-  shank.
-- **Warns** but proceeds when the tool cuts, just not well — facing with a ball-nose
-  leaves a scalloped floor; plunging an end mill as a drill has no point geometry to
-  centre the hole.
+Cutter suitability findings usually appear as warnings, such as a ball-nose tool
+leaving a scalloped floor. Thread milling requires a thread mill with enough reach
+for the threaded length. A fixed-pitch cutter must match the thread pitch and
+have enough cutting length for its specified teeth. One tooth travels the full
+thread length. Multiple teeth share that travel according to their axial spacing.
 
 The reason appears in the **Output** pane and against the operation in the tree.
 

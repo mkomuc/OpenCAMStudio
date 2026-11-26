@@ -224,7 +224,7 @@ impl AppController {
                 &inputs.document.rotary_indexes,
                 env!("CARGO_PKG_VERSION"),
                 // Verified programs and stock must reflect current machining rules.
-                12u32,
+                14u32,
             ),
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,
@@ -623,6 +623,10 @@ impl AppController {
                     bytes.extend_from_slice(&cam_geometry3d::POCKET_FLOOR_REVISION.to_le_bytes());
                 }
                 if let Some(revision) = cam_toolpath::concentric_clearing_revision(op) {
+                    bytes.extend_from_slice(&revision.to_le_bytes());
+                }
+                let revision = cam_toolpath::cutter_verification_revision(op);
+                if revision > 0 {
                     bytes.extend_from_slice(&revision.to_le_bytes());
                 }
                 let own = cam_model::GeometryAsset::fingerprint_source(&bytes);

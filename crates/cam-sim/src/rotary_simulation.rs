@@ -889,6 +889,7 @@ fn thread_intervals(
     let ProfileShape::Thread {
         root_radius,
         tooth_height,
+        first_tooth_offset,
         pitch,
         tooth_count,
     } = tool.shape
@@ -907,7 +908,7 @@ fn thread_intervals(
     };
     let mut result = Vec::new();
     for tooth in 0..tooth_count {
-        let base = f64::from(tooth) * pitch;
+        let base = first_tooth_offset + f64::from(tooth) * pitch;
         let Some((a, b)) = ray_tool(q, v, floor, ceiling, cone, base, base + tooth_height, 0.)
         else {
             continue;
@@ -1206,6 +1207,7 @@ mod tests {
                     ProfileShape::Thread {
                         root_radius: 0.4,
                         tooth_height: 0.5,
+                        first_tooth_offset: 0.,
                         pitch: 1.,
                         tooth_count: 2,
                     },
@@ -1693,17 +1695,18 @@ mod tests {
             shape: ProfileShape::Thread {
                 root_radius: 1.,
                 tooth_height: 1.,
+                first_tooth_offset: 0.25,
                 pitch: 2.,
                 tooth_count: 2,
             },
         };
         let axial = thread_intervals([1.5, 0., 0.], [0., 0., 1.], -3., 4., profile);
         assert_eq!(axial.len(), 2);
-        assert!((axial[0].0 - 0.25).abs() < 1e-6);
-        assert!((axial[0].1 - 0.75).abs() < 1e-6);
-        assert!((axial[1].0 - 2.25).abs() < 1e-6);
+        assert!((axial[0].0 - 0.5).abs() < 1e-6);
+        assert!((axial[0].1 - 1.0).abs() < 1e-6);
+        assert!((axial[1].0 - 2.5).abs() < 1e-6);
         assert!(thread_intervals([0.5, 0., 0.], [0., 0., 1.], -3., 4., profile).is_empty());
-        let side = thread_intervals([0., 0., 0.5], [1., 0., 0.], -3., 3., profile);
+        let side = thread_intervals([0., 0., 0.75], [1., 0., 0.], -3., 3., profile);
         assert_eq!(side.len(), 2);
         assert!((side[0].0 + 2.).abs() < 1e-5);
         assert!((side[0].1 + 1.).abs() < 1e-5);

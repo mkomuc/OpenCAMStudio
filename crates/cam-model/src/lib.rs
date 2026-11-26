@@ -286,7 +286,7 @@ pub enum ToolKind {
     SlittingSaw,
     /// Thread mill — helically interpolated to cut internal/external threads.
     /// `pitch` is `None` for a single-form (pitch-agnostic) mill, or `Some(p)` for
-    /// a full-profile mill whose tooth comb is ground for pitch `p` mm.
+    /// a cutter with one or more teeth ground for pitch `p` mm.
     ThreadMill {
         /// Full-profile pitch, mm; `None` for a single-form mill.
         pitch: Option<f64>,
@@ -548,19 +548,35 @@ impl Tool {
         }
     }
 
-    /// Effective tip-to-shoulder length. When omitted, the existing cutting
-    /// portion and any reduced neck determine where the shank begins.
+    /// Effective tip-to-shoulder length. When omitted, the cutter geometry
+    /// determines where the shank or arbor begins.
     pub fn shoulder_len(&self) -> f64 {
         let length = self.length.max(0.0);
         let flute = self.flute_len().clamp(0.0, length);
         let shoulder = if self.shoulder_length > 0.0 {
             self.shoulder_length
-        } else if matches!(self.kind, ToolKind::ThreadMill { .. }) {
-            flute
         } else {
-            flute + self.neck_length
+            match self.kind {
+                ToolKind::FaceMill => self.face_body_height(),
+                ToolKind::ThreadMill { .. } => flute,
+                _ => flute + self.neck_length,
+            }
         };
         shoulder.clamp(flute, length)
+    }
+
+    /// Tip-to-holder length, defaulting to the overall length when unspecified.
+    pub fn exposed_len(&self) -> f64 {
+        if self.length_below_holder > 0.0 {
+            self.length_below_holder
+        } else {
+            self.length
+        }
+    }
+
+    /// Axial reach from the tip, limited by the shoulder and the holder.
+    pub fn reach(&self) -> f64 {
+        self.shoulder_len().min(self.exposed_len())
     }
 
     /// Face mill body height, with a fallback for older saved tools.
@@ -627,22 +643,34 @@ impl Tool {
         Ok(())
     }
 
+    /// Number of axial cutting teeth specified for the cutter. A zero catalog
+    /// count uses the capacity inferred from pitch and cutting length.
+    pub fn thread_tooth_count(&self) -> u32 {
+        if matches!(self.kind, ToolKind::ThreadMill { pitch: Some(_) }) && self.thread_teeth > 0 {
+            self.thread_teeth
+        } else {
+            self.thread_tooth_capacity()
+        }
+    }
+
+    /// Number of axial teeth that can fit in the cutting length.
+    pub fn thread_tooth_capacity(&self) -> u32 {
+        match self.kind {
+            ToolKind::ThreadMill { pitch: Some(pitch) } => {
+                let cells = self.flute_len().max(1e-3) / pitch.max(0.05);
+                ((cells + 1e-9).floor() as u32).max(1)
+            }
+            ToolKind::ThreadMill { pitch: None } => 1,
+            _ => 0,
+        }
+    }
+
     /// This tool's **2D revolve generatrix** (`TOOLING_PLAN.md` Phase 4): the built-in
     /// kinds mapped onto a kernel-neutral [`cam_geo::GeneratrixSpec`] and generated. The
     /// cutting-end shape comes from [`kind`](Self::kind); the flute/shank split from the
     /// effective cutter dimensions. Thread mills include their single tooth or
     /// repeated full-form teeth, with the non-cutting tip, neck and shank tagged.
     pub fn profile(&self) -> cam_geo::Profile2D {
-        self.profile_with_thread_teeth(0)
-    }
-
-    /// Cutter drawing profile. A specified full-form tooth count controls the
-    /// toothed band shown within the flute length.
-    pub fn preview_profile(&self) -> cam_geo::Profile2D {
-        self.profile_with_thread_teeth(self.thread_teeth)
-    }
-
-    fn profile_with_thread_teeth(&self, thread_teeth: u32) -> cam_geo::Profile2D {
         use cam_geo::BottomShape;
         if matches!(self.kind, ToolKind::FaceMill) {
             use cam_geo::{Point, Profile2D, ProfileSeg, SegShape};
@@ -675,7 +703,7 @@ impl Tool {
             };
         }
         // Single-profile (single-point) thread mill: one tooth at the tip, a sharply
-        // reduced neck over the length of cut (its reach), then the shank. The neck ⌀ sets
+        // reduced neck up to the shoulder, then the shank. The neck ⌀ sets
         // the max thread depth = (min cutting ⌀ − neck ⌀)/2. Built directly, since the
         // generatrix has no single-tooth bottom.
         if let ToolKind::ThreadMill { pitch: None } = self.kind {
@@ -683,7 +711,7 @@ impl Tool {
             let r_min = self.radius(); // min cutting ⌀ = tooth crest
             let r_neck = (self.neck_dia() * 0.5).min(r_min);
             let r_shank = self.shank_dia() * 0.5;
-            let l_cut = self.flute_len().max(1e-3); // length of cut (reach)
+            let l_cut = self.flute_len().max(1e-3);
             let oal = self.length.max(l_cut);
             let tan_half_angle = (self.thread_profile_angle().to_radians() * 0.5).tan();
             let depth = (r_min - r_neck).min(l_cut * 0.5 / tan_half_angle);
@@ -730,13 +758,7 @@ impl Tool {
             let depth = (half_cell / tan_half_angle).min(r * 0.7);
             let r_root = (r - depth).max(0.0);
             let half_width = depth * tan_half_angle;
-            // Catalog dimensions such as 2.40 / 0.80 are exact decimal multiples.
-            let fitted_count = ((tl / p + 1e-9).floor() as usize).max(1);
-            let count = if thread_teeth == 0 {
-                fitted_count
-            } else {
-                (thread_teeth as usize).min(fitted_count)
-            };
+            let count = self.thread_tooth_count().min(self.thread_tooth_capacity());
             let line = |r: f64, z: f64, cutting| ProfileSeg {
                 shape: SegShape::Line,
                 end: Point::new(r, z),
@@ -835,6 +857,11 @@ impl Tool {
             neck_radius: self.neck_dia() * 0.5,
             bottom,
         })
+    }
+
+    /// Cutter drawing profile, shared with planning and stock verification.
+    pub fn preview_profile(&self) -> cam_geo::Profile2D {
+        self.profile()
     }
 }
 
@@ -1119,7 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn full_form_thread_mill_preview_uses_the_specified_tooth_count() {
+    fn thread_mill_profiles_use_the_specified_tooth_count() {
         let mut tool = Tool {
             diameter: 4.0,
             shank_diameter: 4.0,
@@ -1145,7 +1172,8 @@ mod tests {
                 (pair[1].end.y - pair[0].end.y - 0.8).abs() < 1e-9
             }));
             assert_eq!(preview.height(), tool.length);
-            assert_eq!(tool.profile(), default_profile);
+            assert_eq!(tool.profile(), preview);
+            assert_ne!(tool.profile(), default_profile);
         }
     }
 

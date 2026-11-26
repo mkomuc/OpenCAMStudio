@@ -3432,7 +3432,14 @@ fn nearest_point_on_path(pts: &[Point], w: Point, closed: bool) -> ([f64; 2], f6
 /// Whether two tools have the same cutting geometry, ignoring their numbers — used
 /// to dedupe when embedding a library tool into a project's setup.
 fn same_tool_geometry(a: &Tool, b: &Tool) -> bool {
-    a.diameter == b.diameter && a.length == b.length && a.flutes == b.flutes && a.kind == b.kind
+    a.diameter == b.diameter
+        && a.length == b.length
+        && a.flutes == b.flutes
+        && a.kind == b.kind
+        && a.flute_len() == b.flute_len()
+        && a.shoulder_len() == b.shoulder_len()
+        && a.exposed_len() == b.exposed_len()
+        && a.thread_tooth_count() == b.thread_tooth_count()
 }
 
 /// The most cells the material-removal sim may use across the part's larger side.
@@ -3564,11 +3571,20 @@ pub(crate) fn sim_profile(tool: &Tool) -> Option<ToolProfile> {
         },
         ToolKind::ThreadMill { pitch } => {
             let outline = tool.profile();
+            let mut cutting = outline
+                .segs
+                .iter()
+                .enumerate()
+                .filter(|(_, seg)| seg.cutting);
+            let (leading_index, _) = cutting.next()?;
+            let (_, trailing) = cutting.next()?;
+            let first_tooth_offset = outline.segs[leading_index - 1].end.y;
             ProfileShape::Thread {
                 root_radius: outline.segs[0].end.x,
-                tooth_height: outline.segs[2].end.y,
+                tooth_height: trailing.end.y - first_tooth_offset,
+                first_tooth_offset,
                 pitch: pitch.unwrap_or(0.).max(0.),
-                tooth_count: (outline.segs.iter().filter(|s| s.cutting).count() / 2) as u32,
+                tooth_count: tool.thread_tooth_count().min(tool.thread_tooth_capacity()),
             }
         }
     };
@@ -5537,9 +5553,16 @@ mod tests {
         );
 
         // Embedding the same geometry again reuses the number (no duplicate).
-        let n2 = app.use_tool(bit);
+        let n2 = app.use_tool(bit.clone());
         assert_eq!(n1, n2);
         assert_eq!(app.document().setup().tools.len(), base + 1);
+
+        let shorter_stickout = app.use_tool(Tool {
+            length_below_holder: 18.0,
+            ..bit
+        });
+        assert_ne!(shorter_stickout, n1);
+        assert_eq!(app.document().setup().tools.len(), base + 2);
 
         // used_tools reflects only tools referenced by operations. The freshly
         // embedded tool isn't used by any op yet, so it must not appear.

@@ -34,15 +34,14 @@ pub fn default_tool(number: u32, kind: ToolKind) -> Tool {
     }
     if matches!(kind, ToolKind::ThreadMill { .. }) {
         // Single-profile (single-point) thread mill with typical proportions: one 60°
-        // tooth at the tip (min cutting ⌀), a reduced neck over the length of cut (its
-        // reach), then a standard shank. Full-form uses the same body (its pitch drives
-        // the stacked-teeth silhouette instead).
+        // tooth at the tip (min cutting ⌀), a reduced neck, then a standard shank.
+        // A full-form mill uses the same body with teeth spaced at its pitch.
         return Tool {
             number,
-            diameter: 4.8,       // min cutting ⌀ (smallest hole it threads)
-            neck_diameter: 3.5,  // reduced neck (sets max thread depth = (4.8−3.5)/2)
-            flute_length: 15.0,  // length of cut (reach)
-            length: 55.0,        // overall
+            diameter: 4.8,      // min cutting ⌀ (smallest hole it threads)
+            neck_diameter: 3.5, // reduced neck (sets max thread depth = (4.8−3.5)/2)
+            flute_length: 15.0, // length of cut
+            length: 55.0,       // overall
             flutes: 3,
             kind, // carries the pitch (None = single-point by default)
             ..Default::default()

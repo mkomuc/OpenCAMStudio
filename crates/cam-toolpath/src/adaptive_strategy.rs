@@ -155,23 +155,20 @@ impl AdaptiveStrategy {
                 self.geometry.model_top
             );
         }
-        let z_top = self
-            .geometry
-            .layers
-            .iter()
-            .map(|l| l.z)
-            .fold(f64::NEG_INFINITY, f64::max);
         let z_bottom = self
             .geometry
             .layers
             .iter()
             .map(|l| l.z)
             .fold(f64::INFINITY, f64::min);
-        crate::guards::warn_side_milling(
+        let depth = env.heights.top_of_stock - z_bottom;
+        crate::guards::warn_side_milling(op.id, "3D adaptive", tool, &mut diagnostics);
+        crate::guards::warn_tool_reach(op.id, "3D adaptive", tool, depth, &mut diagnostics);
+        crate::guards::warn_cut_depth(
             op.id,
             "3D adaptive",
             tool,
-            z_top - z_bottom,
+            op.params.stepdown.min(depth),
             &mut diagnostics,
         );
         crate::guards::warn_flat_floor(op.id, "3D adaptive", tool, &mut diagnostics);
@@ -1564,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn warns_and_generates_for_tools_unsuited_to_side_milling_the_full_depth() {
+    fn warns_and_generates_for_tools_unsuited_to_the_side_cut() {
         let (strategy, mut tool) = fixture();
         tool.kind = ToolKind::Drill {
             point_angle_deg: 118.,

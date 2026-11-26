@@ -11,6 +11,8 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Dependencies {
     #[serde(default)]
+    cutter_verification_revision: u32,
+    #[serde(default)]
     pocket_stock_revision: u32,
     #[serde(default)]
     adaptive_domain_revision: u32,
@@ -69,6 +71,25 @@ pub(crate) struct CacheExtras {
     pub stock_to_leave: StockToLeave,
     pub geometry_fingerprint: Option<String>,
     pub cutting_heights: Option<CuttingHeights>,
+}
+
+/// Revision of the cutter-suitability checks for operations that use them.
+pub fn cutter_verification_revision(operation: &Operation) -> u32 {
+    if matches!(operation, Operation::Thread(_)) {
+        return 2;
+    }
+    u32::from(matches!(
+        operation,
+        Operation::Adaptive(_)
+            | Operation::Bore(_)
+            | Operation::Carve(_)
+            | Operation::Chamfer(_)
+            | Operation::Drill(_)
+            | Operation::Engrave(_)
+            | Operation::Face(_)
+            | Operation::Pocket(_)
+            | Operation::Profile(_)
+    ))
 }
 
 /// Revision for operations that can emit concentric clearing passes.
@@ -134,6 +155,7 @@ impl OperationCache {
             axial,
         };
         let key = Dependencies {
+            cutter_verification_revision: cutter_verification_revision(op),
             // Frontier paths use configured leads and exact shared/overlapped seams.
             // This also applies to 2D operations using the shared clearer.
             adaptive_clearing_revision: 3 * u32::from(match op {

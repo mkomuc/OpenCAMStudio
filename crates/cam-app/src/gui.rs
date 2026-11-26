@@ -1766,23 +1766,21 @@ impl Field {
             }
             Field::ToolDiameter => "The tool's cutting diameter (mm).",
             Field::ToolLength => {
-                "Overall length of the tool. Currently used for reach checks and the backplot; \
-                 length below holder is stored separately."
+                "Overall tool length, used by the backplot and as the default exposed length \
+                 when Length below holder is unspecified."
             }
-            Field::LengthBelowHolder => "Length from the tool tip to the holder; zero means unspecified. This catalog value does not change simulation reach.",
+            Field::LengthBelowHolder => "Distance from the tool tip to the holder. Reach is the smaller of this distance and shoulder length. Enter zero to use the overall length.",
             Field::ThreadTeeth => "Number of axial thread-form teeth, separate from the flute count; zero means unspecified.",
             Field::ThreadProfileAngle => "Included angle between the two flanks of a thread tooth. Metric threads such as M5 × 0.8 use 60°.",
             Field::FluteLength => {
-                "Length of the cutting edge (length of cut) measured from the tip. The \
-                 rest of the tool, up to the overall length, is the non-cutting shank; \
-                 the split is used for gouge/collision checks."
+                "Length of the cutting edge measured from the tip. It limits the axial depth of cut."
             }
             Field::FaceBodyHeight => "Axial height of the face mill body, including its non-cutting portion.",
             Field::ShankDiameter => {
                 "Diameter of the shank. Use =tool_diameter to follow Diameter, or enter a fixed value."
             }
             Field::ShoulderLength => {
-                "Distance from the tool tip to the start of the shank, including the flutes and any neck. Enter zero to infer the shoulder from the cutter geometry."
+                "Distance from the tool tip to the start of the shank, including the flutes and any neck. It limits reach together with Length below holder. Enter zero to infer the shoulder from the cutter geometry."
             }
             Field::NeckLength => {
                 "Length of a reduced-diameter neck above the flutes (reach/stub tools). \
@@ -10214,7 +10212,7 @@ impl App {
             (Some(ToolKind::FaceMill), Field::ToolDiameter) => "Cutting diameter (mm)",
             (Some(ToolKind::FaceMill), Field::ShankDiameter) => "Arbor diameter (mm)",
             // Thread mill: a single-point mill's ⌀ is the *minimum* cutting ⌀ (smallest
-            // hole); FluteLength is its length of cut (reach) and it exposes the reduced
+            // hole); FluteLength is its length of cut and it exposes the reduced
             // neck. A full-form mill uses the plain cutting ⌀ and thread length.
             (Some(ToolKind::ThreadMill { pitch: None }), Field::ToolDiameter) => {
                 "Min cutting diameter (mm)"
@@ -10293,15 +10291,14 @@ impl App {
             }
             (Some(FaceMill), Field::FluteLength) => "Axial cutting length from the tool tip; it cannot exceed the body height.",
             (Some(ThreadMill { pitch: None }), Field::FluteLength) => {
-                "Length of cut — how far down from the tip the single tooth can thread \
-                 (the reduced-neck reach); it sets the maximum threaded depth."
+                "Axial cutting length for the single tooth. Shoulder length and length below \
+                 holder limit how deep the tooth can reach."
             }
             (Some(ThreadMill { pitch: Some(_) }), Field::FluteLength) => {
-                "Thread length — the length of the threaded cutting band, which bounds the \
-                 thread depth reachable in one helical pass."
+                "Length of the toothed band. The tooth count and pitch must fit within this length."
             }
             (Some(ThreadMill { pitch: None }), Field::ThreadTeeth) => {
-                "A single-point mill has one tooth. Select Full-form to preview multiple teeth at a fixed pitch."
+                "A single-point mill has one tooth. Select Full-form for a cutter with teeth ground at a fixed pitch."
             }
             // Shank / arbor.
             (Some(FaceMill), Field::ShankDiameter) => {
@@ -10820,7 +10817,7 @@ impl App {
                 ],
                 // Thread mill (single-point/full-form is a toggle, rendered separately):
                 // - single-point (single profile): one 60° tooth + a reduced neck. Min cutting
-                //   ⌀ (smallest hole), neck ⌀ (sets max thread depth), length of cut (reach),
+                //   ⌀ (smallest hole), neck ⌀ (sets max thread depth), length of cut,
                 //   shank ⌀, shoulder and overall length. Blind-hole allowance is derived per operation.
                 // - full-form: a long threaded band at a fixed pitch (cutting ⌀, thread length,
                 //   shank ⌀, shoulder and overall length, pitch).
@@ -10905,13 +10902,19 @@ impl App {
                 Field::OriginY,
                 Field::OriginZ,
             ],
-            Selection::Tool(i) => tool_fields(
-                self.controller
+            Selection::Tool(i) => {
+                let kind = self
+                    .controller
                     .inspection_setup()
                     .tools
                     .get(i)
-                    .map(|t| t.kind),
-            ),
+                    .map(|t| t.kind);
+                let mut fields = tool_fields(kind);
+                if matches!(kind, Some(ToolKind::ThreadMill { pitch: Some(_) })) {
+                    fields.push(Field::ThreadTeeth);
+                }
+                fields
+            }
             Selection::Stock => vec![
                 Field::StockXOffset,
                 Field::StockYOffset,
@@ -11114,6 +11117,10 @@ impl App {
                     .tools
                     .get(i)
                     .map(cam_model::Tool::shoulder_len),
+                _ => None,
+            },
+            Field::ThreadTeeth => match self.controller.selection() {
+                Selection::Tool(i) => setup.tools.get(i).map(|t| t.thread_teeth as f64),
                 _ => None,
             },
             Field::Flutes => match self.controller.selection() {

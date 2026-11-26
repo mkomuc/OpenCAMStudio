@@ -70,7 +70,6 @@ impl FaceStrategy {
         };
         // Report floor and reach differences; simulation uses the actual cutter.
         crate::guards::warn_flat_floor(op.id, "face", tool, &mut diagnostics);
-        crate::guards::warn_axial_reach(op.id, "face", tool, op.depth, &mut diagnostics);
         if !op.boundary.is_valid() {
             fail!("operation {}: face boundary is not a closed area", op.id);
         }
@@ -178,6 +177,15 @@ impl FaceStrategy {
                 ..Default::default()
             };
         }
+
+        crate::guards::warn_tool_reach(op.id, "face", tool, op.depth, &mut diagnostics);
+        crate::guards::warn_cut_depth(
+            op.id,
+            "face",
+            tool,
+            crate::guards::max_stepdown(top, &levels),
+            &mut diagnostics,
+        );
 
         // Map a (travel u, step v) coordinate to world XY, and the world travel dir.
         let to_world = |u: f64, v: f64| match op.direction {
@@ -446,6 +454,36 @@ mod tests {
         assert!((z[2] + 4.0).abs() < 1e-9);
         op.multiple_depths.enabled = false;
         assert_eq!(plunge_levels(&run(op)), vec![-4.0]);
+    }
+
+    #[test]
+    fn facing_checks_total_reach_and_the_depth_of_each_pass() {
+        let mut op = face_op();
+        op.depth = 5.0;
+        let mut cutter = tool(10.0);
+        cutter.flute_length = 2.0;
+        cutter.shoulder_length = 7.0;
+        cutter.length_below_holder = 4.0;
+        let tools = [cutter];
+        let env = JobEnv {
+            heights: Heights::new(5.0, 2.0, 0.0),
+            tools: &tools,
+            stock: None,
+            spindle: cam_cldata::SpindleDir::Cw,
+        };
+
+        let stepped = FaceStrategy::new(op.clone()).compute(&env, &CancelToken::new());
+        assert!(!stepped.program.is_empty());
+        assert_eq!(stepped.diagnostics.len(), 1, "{:?}", stepped.diagnostics);
+        assert!(stepped.diagnostics[0].message.contains("4.000 mm reach"));
+
+        op.multiple_depths.enabled = false;
+        let single = FaceStrategy::new(op).compute(&env, &CancelToken::new());
+        assert!(!single.program.is_empty());
+        assert_eq!(single.diagnostics.len(), 2, "{:?}", single.diagnostics);
+        assert!(single.diagnostics[1]
+            .message
+            .contains("2.000 mm length of cut"));
     }
 
     #[test]

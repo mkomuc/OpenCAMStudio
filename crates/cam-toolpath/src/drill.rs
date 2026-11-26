@@ -80,7 +80,7 @@ impl DrillStrategy {
             .map(CuttingHeights::depth)
             .reduce(f64::max)
             .unwrap_or(op.depth);
-        crate::guards::warn_axial_reach(
+        crate::guards::warn_axial_cut(
             op.id,
             "drill",
             tool,

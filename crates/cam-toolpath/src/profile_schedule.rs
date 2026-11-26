@@ -35,6 +35,17 @@ pub(super) fn compute(op: &ProfileOp, env: &JobEnv, cancel: &CancelToken) -> Str
             ..Default::default()
         };
     }
+    if !result.has_errors() {
+        if let Some(tool) = env.tool(op.tool) {
+            crate::guards::warn_tool_reach(
+                op.id,
+                "profile",
+                tool,
+                env.heights.top_of_stock + op.depth - p.floor_allowance,
+                &mut result.diagnostics,
+            );
+        }
+    }
     if p.keep_tool_down
         && !result.has_errors()
         && !op.tabs.enabled

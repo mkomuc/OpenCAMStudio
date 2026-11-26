@@ -78,6 +78,7 @@ impl Heightfield {
         let ProfileShape::Thread {
             root_radius,
             tooth_height,
+            first_tooth_offset,
             pitch,
             tooth_count,
         } = tool.shape
@@ -123,7 +124,7 @@ impl Heightfield {
                 let z = a[2] + (b[2] - a[2]) * t;
                 let index = y * self.nx + x;
                 for tooth in 0..tooth_count {
-                    let bottom = z + f64::from(tooth) * pitch;
+                    let bottom = z + first_tooth_offset + f64::from(tooth) * pitch;
                     let lower = (bottom + flank) as f32;
                     let upper = ((bottom + tooth_height - flank) as f32).min(self.z[index]);
                     if upper - lower <= 1e-6 {

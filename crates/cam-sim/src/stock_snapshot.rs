@@ -271,6 +271,7 @@ fn valid_tool(tool: ToolProfile) -> bool {
         crate::ProfileShape::Thread {
             root_radius,
             tooth_height,
+            first_tooth_offset,
             pitch,
             tooth_count,
         } => {
@@ -278,8 +279,10 @@ fn valid_tool(tool: ToolProfile) -> bool {
                 && root_radius >= 0.
                 && tooth_height.is_finite()
                 && tooth_height > 0.
+                && first_tooth_offset.is_finite()
+                && first_tooth_offset >= 0.
                 && pitch.is_finite()
-                && pitch > 0.
+                && (pitch > 0. || (pitch == 0. && tooth_count == 1))
                 && tooth_count > 0
         }
     }
@@ -389,6 +392,7 @@ mod tests {
             ProfileShape::Thread {
                 root_radius: 0.8,
                 tooth_height: 0.4,
+                first_tooth_offset: 0.,
                 pitch: 1.5,
                 tooth_count: 3,
             },

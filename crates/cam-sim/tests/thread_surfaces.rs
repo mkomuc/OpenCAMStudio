@@ -15,6 +15,7 @@ fn tools() -> [SimTool; 2] {
                 shape: ProfileShape::Thread {
                     root_radius: 0.5,
                     tooth_height: 1. / 3f64.sqrt(),
+                    first_tooth_offset: 0.,
                     pitch: 0.,
                     tooth_count: 1,
                 },
@@ -233,6 +234,7 @@ fn full_form_thread_mill_removes_separate_tooth_intervals() {
     table[1].profile.shape = ProfileShape::Thread {
         root_radius: 0.5,
         tooth_height: 0.6,
+        first_tooth_offset: 0.,
         pitch: 1.,
         tooth_count: 4,
     };

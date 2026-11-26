@@ -107,8 +107,7 @@ fn kind_id(k: &ToolKind) -> ToolKindId {
 }
 
 /// The geometric fingerprint of a tool — everything that makes two tools *the same
-/// tool*, and nothing that doesn't. **Excludes** `number` (and, by construction,
-/// names and any future holder position). Uses the **effective** cutter dimensions
+/// tool*. Excludes the tool number and catalog details. Uses the effective cutter dimensions
 /// ([`Tool::flute_len`] etc.) so an old tool (`0.0` sentinels) fingerprints identically
 /// to one that spelled the same values out.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -116,6 +115,7 @@ pub struct ToolIdentity {
     kind: ToolKindId,
     diameter_um: i64,
     length_um: i64,
+    exposed_len_um: i64,
     flute_len_um: i64,
     face_body_height_um: i64,
     shank_dia_um: i64,
@@ -123,6 +123,7 @@ pub struct ToolIdentity {
     neck_len_um: i64,
     neck_dia_um: i64,
     thread_profile_angle_mdeg: i64,
+    thread_tooth_count: u32,
     flutes: u32,
     cutting_direction: CutDir,
 }
@@ -134,6 +135,7 @@ impl Tool {
             kind: kind_id(&self.kind),
             diameter_um: q(self.diameter),
             length_um: q(self.length),
+            exposed_len_um: q(self.exposed_len()),
             flute_len_um: q(self.flute_len()),
             face_body_height_um: if matches!(self.kind, ToolKind::FaceMill) {
                 q(self.face_body_height())
@@ -149,6 +151,7 @@ impl Tool {
             } else {
                 0
             },
+            thread_tooth_count: self.thread_tooth_count(),
             flutes: self.flutes,
             cutting_direction: self.cutting_direction,
         }
@@ -338,11 +341,14 @@ mod tests {
         let sentinel = t(1, 12.0, ToolKind::EndMill); // flute_length 0 ⇒ eff 30
         let mut explicit = t(2, 12.0, ToolKind::EndMill);
         explicit.flute_length = 30.0;
+        explicit.length_below_holder = 30.0;
         assert_eq!(
             sentinel.identity(),
             explicit.identity(),
             "0-sentinel (fully fluted) fingerprints like an explicit full flute length"
         );
+        explicit.length_below_holder = 20.0;
+        assert_ne!(sentinel.identity(), explicit.identity());
     }
 
     #[test]

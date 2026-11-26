@@ -335,6 +335,7 @@ mod tests {
             shape: ProfileShape::Thread {
                 root_radius: 0.5,
                 tooth_height: 2.,
+                first_tooth_offset: 0.,
                 pitch: 2.,
                 tooth_count: 1,
             },

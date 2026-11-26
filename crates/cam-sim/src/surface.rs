@@ -945,6 +945,7 @@ mod tests {
             shape: crate::ProfileShape::Thread {
                 root_radius: 1.,
                 tooth_height: 1.,
+                first_tooth_offset: 0.,
                 pitch: 2.,
                 tooth_count: 2,
             },
@@ -1064,6 +1065,7 @@ mod tests {
             shape: crate::ProfileShape::Thread {
                 root_radius: 1.,
                 tooth_height: 1.,
+                first_tooth_offset: 0.,
                 pitch: 2.,
                 tooth_count: 2,
             },

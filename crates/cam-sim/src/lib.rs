@@ -85,6 +85,9 @@ pub enum ProfileShape {
     Thread {
         root_radius: f64,
         tooth_height: f64,
+        /// Axial distance from the tool tip to the first tooth's lower flank.
+        #[serde(default)]
+        first_tooth_offset: f64,
         pitch: f64,
         tooth_count: u32,
     },
@@ -184,13 +187,14 @@ impl ToolProfile {
             ProfileShape::Thread {
                 root_radius,
                 tooth_height,
+                first_tooth_offset,
                 ..
             } => {
                 let width = self.radius - root_radius;
                 if width <= 1e-9 {
-                    0.
+                    first_tooth_offset
                 } else {
-                    (d - root_radius).max(0.) / width * tooth_height * 0.5
+                    first_tooth_offset + (d - root_radius).max(0.) / width * tooth_height * 0.5
                 }
             }
         }
