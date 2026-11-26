@@ -3467,6 +3467,7 @@ mod tests {
                     number: 1,
                     profile: cam_sim::ToolProfile::flat(3.),
                     noncutting_tip_radius,
+                    thread_body: None,
                 }],
             );
             if noncutting_tip_radius.is_none() {

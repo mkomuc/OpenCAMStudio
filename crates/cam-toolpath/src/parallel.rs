@@ -2247,6 +2247,7 @@ mod tests {
                     shape: cam_sim::ProfileShape::Ball,
                 },
                 noncutting_tip_radius: None,
+                thread_body: None,
             }],
         );
         assert!(verified.is_clean(), "{:?}", verified.collisions);

@@ -1114,6 +1114,7 @@ mod tests {
                         },
                     },
                     noncutting_tip_radius: None,
+                    thread_body: None,
                 }],
             )
         };

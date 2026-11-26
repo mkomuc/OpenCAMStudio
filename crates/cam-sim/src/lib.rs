@@ -214,6 +214,19 @@ pub struct SimTool {
     /// A flat-envelope tool without a cutting tip needs full-profile clearance
     /// on a straight plunge; side-cutting descents check only the tip disc.
     pub noncutting_tip_radius: Option<f64>,
+    /// Dimensions of the thread mill's non-cutting body, when known.
+    pub thread_body: Option<ThreadBody>,
+}
+
+/// The cylindrical neck and shank above a thread mill's cutting teeth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThreadBody {
+    pub neck_radius: f64,
+    /// Distance from the tip to the start of the shank, in mm.
+    pub shoulder: f64,
+    pub shank_radius: f64,
+    /// Overall length measured from the tip, in mm.
+    pub length: f64,
 }
 
 /// The kind of a detected problem.
@@ -223,7 +236,7 @@ pub enum CollisionKind {
     Fixture,
     /// A rapid (`G0`) traverse passes through remaining stock.
     RapidThroughStock,
-    /// A feed reposition or a non-cutting cutter tip enters remaining stock.
+    /// A feed reposition or a non-cutting part of the tool enters remaining stock.
     NonCuttingThroughStock,
     /// The tool cut below the desired target surface — an over-cut (gouge) that
     /// destroys part material.
@@ -402,6 +415,7 @@ mod tests {
     fn vbit(number: u32, radius: f64, half_angle_rad: f64) -> SimTool {
         SimTool {
             noncutting_tip_radius: None,
+            thread_body: None,
             number,
             profile: ToolProfile {
                 radius,
@@ -496,6 +510,7 @@ mod tests {
         // that blocked export of a face op run with a chamfer tool.
         let vee = SimTool {
             noncutting_tip_radius: None,
+            thread_body: None,
             number: 1,
             profile: ToolProfile {
                 radius: 2.0,
@@ -527,6 +542,7 @@ mod tests {
         // rapid at the plunge depth, out across proud stock, is a genuine crash.
         let vee = SimTool {
             noncutting_tip_radius: None,
+            thread_body: None,
             number: 1,
             profile: ToolProfile {
                 radius: 2.0,
@@ -735,6 +751,7 @@ mod tests {
             .build();
         let tools = [SimTool {
             noncutting_tip_radius: None,
+            thread_body: None,
             number: 2,
             profile: ToolProfile {
                 radius: 2.0,

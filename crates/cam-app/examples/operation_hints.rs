@@ -752,6 +752,7 @@ fn v_groove_model(program: &Program, tool: &Tool) -> Model {
                 },
             },
             noncutting_tip_radius: None,
+            thread_body: None,
         }],
     )
     .field;

@@ -603,6 +603,7 @@ fn lifted_pocket_links_preserve_floor_coverage_and_simulate_clean() {
                     number: 1,
                     profile: ToolProfile::flat(3.),
                     noncutting_tip_radius: None,
+                    thread_body: None,
                 }],
             );
             assert!(
@@ -715,6 +716,7 @@ fn an_adaptively_cleared_island_pocket_simulates_clean() {
             number: 1,
             profile: ToolProfile::flat(3.0),
             noncutting_tip_radius: None,
+            thread_body: None,
         }],
     );
     assert!(
@@ -832,6 +834,7 @@ fn adaptive_reference_pocket_uses_lifted_rapid_links_and_clears_each_depth() {
                     number: 1,
                     profile: ToolProfile::flat(3.),
                     noncutting_tip_radius: None,
+                    thread_body: None,
                 }],
             );
             assert!(sim.is_clean(), "{:?}", sim.collisions);
@@ -921,6 +924,7 @@ fn configured_adaptive_leads_are_posted_as_arcs_and_simulate_cleanly() {
                     number: 1,
                     profile: ToolProfile::flat(3.),
                     noncutting_tip_radius: None,
+                    thread_body: None,
                 }],
             );
             assert!(sim.is_clean(), "{:?}", sim.collisions);
@@ -1158,6 +1162,7 @@ fn keep_tool_down_with_finishing_preserves_islands_and_simulates_clean() {
                 number: 1,
                 profile: ToolProfile::flat(3.),
                 noncutting_tip_radius: None,
+                thread_body: None,
             }],
         );
         assert!(sim.is_clean(), "{down}: {:?}", sim.collisions);
@@ -1260,6 +1265,7 @@ fn keep_down_depth_and_finishing_passes_verify_on_raised_synthetic_stock() {
                         number: 1,
                         profile: ToolProfile::flat(3.),
                         noncutting_tip_radius: None,
+                        thread_body: None,
                     }],
                 );
                 assert!(

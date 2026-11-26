@@ -7,6 +7,7 @@ fn tools() -> [SimTool; 2] {
             number: 1,
             profile: ToolProfile::flat(4.),
             noncutting_tip_radius: None,
+            thread_body: None,
         },
         SimTool {
             number: 2,
@@ -21,6 +22,7 @@ fn tools() -> [SimTool; 2] {
                 },
             },
             noncutting_tip_radius: Some(0.5),
+            thread_body: None,
         },
     ]
 }

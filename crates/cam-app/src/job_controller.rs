@@ -231,7 +231,7 @@ impl AppController {
                 &inputs.document.rotary_indexes,
                 env!("CARGO_PKG_VERSION"),
                 // Verified programs and stock must reflect current machining rules.
-                if has_thread_mill { 15u32 } else { 14u32 },
+                if has_thread_mill { 16u32 } else { 14u32 },
             ),
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,

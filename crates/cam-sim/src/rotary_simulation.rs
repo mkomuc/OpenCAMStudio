@@ -1068,6 +1068,7 @@ mod tests {
                 number: 1,
                 profile: ToolProfile::flat(1.),
                 noncutting_tip_radius: None,
+                thread_body: None,
             },
             flute_length: 10.,
             length: 10.,

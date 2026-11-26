@@ -211,6 +211,7 @@ mod tests {
             number: 1,
             profile: ToolProfile::flat(2.),
             noncutting_tip_radius: None,
+            thread_body: None,
         }]
     }
     fn slot() -> ProgramBuilder {

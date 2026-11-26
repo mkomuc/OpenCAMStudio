@@ -37,6 +37,41 @@ impl Sweep {
         (t, d2)
     }
 
+    /// Z range swept by a finite cylinder at an XY column. Clip to the part
+    /// of the motion where the column is actually inside the disk.
+    pub(super) fn cylinder_interval(
+        &self,
+        x: f64,
+        y: f64,
+        lower: f64,
+        upper: f64,
+    ) -> Option<[f64; 2]> {
+        let dx = x - self.a[0];
+        let dy = y - self.a[1];
+        let r2 = self.tool.radius.powi(2);
+        let (entry, exit) = if self.len2 < 1e-24 {
+            if dx * dx + dy * dy > r2 {
+                return None;
+            }
+            (0., 1.)
+        } else {
+            let along = (dx * self.dx + dy * self.dy) / self.len2;
+            let across2 = (dx * self.dy - dy * self.dx).powi(2) / self.len2;
+            if across2 > r2 {
+                return None;
+            }
+            let reach = ((r2 - across2) / self.len2).sqrt();
+            ((along - reach).max(0.), (along + reach).min(1.))
+        };
+        if entry > exit {
+            return None;
+        }
+        let dz = self.b[2] - self.a[2];
+        let entry_z = self.a[2] + dz * entry;
+        let exit_z = self.a[2] + dz * exit;
+        Some([entry_z.min(exit_z) + lower, entry_z.max(exit_z) + upper])
+    }
+
     /// Z ranges swept by one tooth, relative to its axial offset on the tool.
     /// A column can enter the tooth's cutting annulus on both sides of the
     /// non-cutting core, so the two encounters must be evaluated independently.
