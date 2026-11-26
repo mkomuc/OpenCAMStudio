@@ -1,7 +1,7 @@
 //! Pocket finishing controls; all cutter compensation is computed by the strategy.
 use super::*;
-use parameter_options::{depth_toggle, pocket_toggle, MULTIPLE_DEPTHS, POCKET_FINISHING};
 use cam_model::PocketFinishing;
+use parameter_options::{depth_toggle, pocket_toggle, MULTIPLE_DEPTHS, POCKET_FINISHING};
 
 pub(super) const DEFAULT_STEPDOWN: &str = "=min(tool_fluteLength * 0.75; tool_diameter * 2.5)";
 
@@ -100,11 +100,7 @@ impl App {
         face: bool,
     ) -> operation_sections::Form<'_> {
         let mut list = operation_sections::Form::new(self, OperationTab::Passes, None)
-            .optional_section(
-                "Multiple Depths",
-                d.enabled,
-                Some(MULTIPLE_DEPTHS),
-            );
+            .optional_section("Multiple Depths", d.enabled, Some(MULTIPLE_DEPTHS));
         if !d.enabled {
             return list;
         }
@@ -159,11 +155,7 @@ impl App {
         p: &PocketFinishing,
     ) -> operation_sections::Form<'_> {
         let mut list = operation_sections::Form::new(self, OperationTab::Passes, None)
-            .optional_section(
-                "Finishing passes",
-                p.enabled,
-                Some(POCKET_FINISHING),
-            );
+            .optional_section("Finishing passes", p.enabled, Some(POCKET_FINISHING));
         if !p.enabled {
             return list;
         }

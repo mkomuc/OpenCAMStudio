@@ -3418,8 +3418,6 @@ mod performance_tests {
             }
         }
     }
-
-
 }
 
 #[cfg(test)]

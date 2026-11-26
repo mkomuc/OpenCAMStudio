@@ -1369,7 +1369,10 @@ mod tests {
         assert_eq!(viewport.cad_filter, EntityKind::Loop);
         assert_eq!(viewport.cad_operation_kind, Some(OpKind::Engrave));
         let _ = app.update(Message::CadSelect(boundary.clone()));
-        assert_eq!(app.controller.cad_selection(), std::slice::from_ref(&boundary));
+        assert_eq!(
+            app.controller.cad_selection(),
+            std::slice::from_ref(&boundary)
+        );
         assert_eq!(app.editor_selected_geometry(), vec![boundary.clone()]);
         assert!(
             app.geometry_settings_valid().is_ok(),
@@ -1553,8 +1556,6 @@ mod tests {
         assert!(app.geometry_editor.is_none());
         assert_eq!(app.controller.document(), &before);
     }
-
-
 
     fn drawing_app() -> App {
         let (mut app, _) = App::new();

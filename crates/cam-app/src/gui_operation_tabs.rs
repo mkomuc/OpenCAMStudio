@@ -1,9 +1,9 @@
 //! Backend-driven operation tabs. Tab changes only change the view of one draft.
 use super::*;
-use parameter_options::*;
 use cam_model::Comp;
 use iced::widget::column;
 use iced::widget::svg;
+use parameter_options::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum OperationTab {
@@ -222,7 +222,10 @@ pub(super) fn operation_field_invalid(op: &Operation, field: Field, value: f64) 
         | Field::AdaptiveFineStepdown
         | Field::MajorDia
         | Field::Pitch => value <= 0.0,
-        Field::StockLeaveRadial | Field::StockLeaveAxial | Field::ChamferTipOffset | Field::ScallopSafeDistance => value < 0.0,
+        Field::StockLeaveRadial
+        | Field::StockLeaveAxial
+        | Field::ChamferTipOffset
+        | Field::ScallopSafeDistance => value < 0.0,
         Field::TabWidth | Field::TabSpacing => value <= 0.0,
         Field::TabHeight => value <= 0.0,
         Field::Engagement if matches!(op, Operation::Pocket(p) if p.clear.pocket_adaptive_enabled()) => {
@@ -541,13 +544,15 @@ impl App {
                 list = list
                     .section("Geometry")
                     .push(text("Tool containment").size(12));
-                list = list.push(
-                    CONTAINMENT.picker(adaptive.params.containment, &[
-                            cam_model::AdaptiveContainment::Inside,
-                            cam_model::AdaptiveContainment::Center,
-                            cam_model::AdaptiveContainment::Outside,
-                        ], Length::Fill),
-                );
+                list = list.push(CONTAINMENT.picker(
+                    adaptive.params.containment,
+                    &[
+                        cam_model::AdaptiveContainment::Inside,
+                        cam_model::AdaptiveContainment::Center,
+                        cam_model::AdaptiveContainment::Outside,
+                    ],
+                    Length::Fill,
+                ));
             }
         }
         if tab == OperationTab::Geometry
@@ -753,11 +758,8 @@ impl App {
                 _ => None,
             };
             if let Some(rough) = rough {
-                list = list.optional_section(
-                    "Roughing passes",
-                    rough.enabled,
-                    Some(CONTOUR_ROUGHING),
-                );
+                list =
+                    list.optional_section("Roughing passes", rough.enabled, Some(CONTOUR_ROUGHING));
                 if rough.enabled {
                     for field in [
                         Field::ContourRoughStepover,
@@ -1001,11 +1003,7 @@ impl App {
             }
             Operation::Bore(b) => {
                 let toggle = |label: &'static str, value, setting: Setting<bool>| {
-                    row![
-                        text(label).size(12),
-                        setting.checkbox(value, 15)
-                    ]
-                    .spacing(8)
+                    row![text(label).size(12), setting.checkbox(value, 15)].spacing(8)
                 };
                 if tab == OperationTab::Geometry {
                     list = list.section("Geometry");
@@ -1021,12 +1019,12 @@ impl App {
                     } else {
                         list = list.push(toggle("Internal hole", b.internal, BORE_INTERNAL));
                     }
-                    list = list.push(BORE_ORDER.picker(b.order, &cam_model::BoreOrder::ALL, Length::Fill));
-                    list = list.push(toggle(
-                        "Reverse order",
-                        b.reverse_order,
-                        BORE_REVERSE,
+                    list = list.push(BORE_ORDER.picker(
+                        b.order,
+                        &cam_model::BoreOrder::ALL,
+                        Length::Fill,
                     ));
+                    list = list.push(toggle("Reverse order", b.reverse_order, BORE_REVERSE));
                 }
                 if tab == OperationTab::Passes {
                     list = list.section("Passes").push(toggle(
@@ -1034,11 +1032,9 @@ impl App {
                         b.ramp_angle.is_some(),
                         BORE_ANGLE,
                     ));
-                    list = list.section("Passes").push(toggle(
-                        "Climb milling",
-                        b.climb,
-                        BORE_CLIMB,
-                    ));
+                    list =
+                        list.section("Passes")
+                            .push(toggle("Climb milling", b.climb, BORE_CLIMB));
                     list = list.section("Passes").push(toggle(
                         "Repeat final pass",
                         b.repeat_pass,
@@ -1168,11 +1164,7 @@ impl App {
                         .spacing(8),
                     );
                 }
-                list = list.optional_section(
-                    "Smoothing",
-                    p.smoothing,
-                    Some(SMOOTHING),
-                );
+                list = list.optional_section("Smoothing", p.smoothing, Some(SMOOTHING));
                 if p.smoothing {
                     let field = Field::ScallopSmoothingTolerance;
                     let value = self.fields.get(&field).map_or("", String::as_str);
@@ -1413,11 +1405,7 @@ impl App {
         if tab == OperationTab::Passes && App::stock_to_leave_supported(op) {
             let stock = self.stock_to_leave_value();
             let enabled = self.stock_to_leave_enabled();
-            list = list.optional_section(
-                "Stock to Leave",
-                enabled,
-                Some(STOCK_LEAVE),
-            );
+            list = list.optional_section("Stock to Leave", enabled, Some(STOCK_LEAVE));
             if enabled {
                 for field in stock_offset_fields(op) {
                     let fallback = match field {

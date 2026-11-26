@@ -789,7 +789,6 @@ mod tests {
     use cam_cldata::{MoveKind, Tag};
     use std::time::Duration;
 
-
     fn tag() -> Tag {
         Tag::new(7, MoveKind::Cutting)
     }

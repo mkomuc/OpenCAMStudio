@@ -1079,15 +1079,12 @@ impl App {
                 let stepover = cam_model::OperationParameter::MaximumStepover;
                 let source = stepover.default_expression();
                 stepover.set_source(op, source);
-                self.fields.insert(
-                    Field::PocketStepover,
-                    format!("={source}"),
-                );
+                self.fields
+                    .insert(Field::PocketStepover, format!("={source}"));
             } else {
                 let stepover = diameter - overlap * diameter;
                 pocket.maximum_stepover = Some(stepover);
-                self.fields
-                    .insert(Field::PocketStepover, fmt_num(stepover));
+                self.fields.insert(Field::PocketStepover, fmt_num(stepover));
             }
         }
         if let (Operation::Face(face), Some(overlap), Some(diameter)) =
@@ -1764,12 +1761,21 @@ mod tests {
             app.tool_edit.as_ref().unwrap().product_link,
             edited.product_link
         );
-        assert_eq!(app.tool_edit.as_ref().unwrap().cutter_material, edited.cutter_material);
+        assert_eq!(
+            app.tool_edit.as_ref().unwrap().cutter_material,
+            edited.cutter_material
+        );
         assert_eq!(app.tool_edit.as_ref().unwrap().coating, edited.coating);
         send(&mut app, Message::CancelToolDraft);
         assert_eq!(app.tool_edit.as_ref().unwrap(), &saved);
-        send(&mut app, Message::ToolDetailChanged(ToolDetail::CutterMaterial, "Carbide".into()));
-        send(&mut app, Message::ToolDetailChanged(ToolDetail::Coating, "TiAlN".into()));
+        send(
+            &mut app,
+            Message::ToolDetailChanged(ToolDetail::CutterMaterial, "Carbide".into()),
+        );
+        send(
+            &mut app,
+            Message::ToolDetailChanged(ToolDetail::Coating, "TiAlN".into()),
+        );
         send(&mut app, Message::Apply);
         assert_eq!(app.library.tools[0].cutter_material, "Carbide");
         assert_eq!(app.library.tools[0].coating, "TiAlN");
@@ -1781,9 +1787,14 @@ mod tests {
         app.switch_workspace(Workspace::Tools);
         app.lib_sel = 0;
         app.reload_tool_edit();
-        send(&mut app, Message::ToolCuttingDirChanged(CutDir::Compression));
+        send(
+            &mut app,
+            Message::ToolCuttingDirChanged(CutDir::Compression),
+        );
         assert!(app.inspector_dirty());
-        assert!(library_extra(app.tool_edit.as_ref().unwrap()).unwrap().contains(", C"));
+        assert!(library_extra(app.tool_edit.as_ref().unwrap())
+            .unwrap()
+            .contains(", C"));
         send(&mut app, Message::Apply);
         assert_eq!(app.library.tools[0].cutting_direction, CutDir::Compression);
     }

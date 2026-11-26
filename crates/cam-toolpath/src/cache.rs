@@ -2,7 +2,9 @@
 //! the planner assembles links, datums, spindle and shutdown on every run.
 use crate::{CancelToken, JobEnv, StrategyResult};
 use cam_cldata::SpindleDir;
-use cam_model::{CuttingHeights, Heights, Operation, OperationParameter, Plunge, StockToLeave, Tool};
+use cam_model::{
+    CuttingHeights, Heights, Operation, OperationParameter, Plunge, StockToLeave, Tool,
+};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
@@ -79,7 +81,8 @@ pub fn concentric_clearing_revision(operation: &Operation) -> Option<u32> {
         Operation::Pocket(_) | Operation::Adaptive(_) => true,
         Operation::Profile(p) => {
             p.stepover > 0.
-                || p.parameter_expressions.contains_key(&OperationParameter::Stepover)
+                || p.parameter_expressions
+                    .contains_key(&OperationParameter::Stepover)
         }
         Operation::Carve(p) => p.clear.is_some(),
         _ => false,

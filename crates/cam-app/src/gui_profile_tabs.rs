@@ -1141,7 +1141,10 @@ mod tests {
             app.height_offsets.insert(P::Bottom, "0".into());
             let mut document = app.rotary_draft_document();
             let view = document.indexed_view(id).unwrap().unwrap();
-            let face_z = view.height_selection_bounds(std::slice::from_ref(&face)).unwrap().1[2];
+            let face_z = view
+                .height_selection_bounds(std::slice::from_ref(&face))
+                .unwrap()
+                .1[2];
             let instance = view.geometry.instance(1).unwrap();
             let normal = if face_id == 102 {
                 [0., -1., 0.]
@@ -1454,7 +1457,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn drawing_tab_picker_stays_on_selected_contour_when_stock_height_changes() {

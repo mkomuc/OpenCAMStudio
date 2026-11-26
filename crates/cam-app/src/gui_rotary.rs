@@ -458,7 +458,9 @@ impl App {
     }
     pub(super) fn rotary_controls(&self, op: &Operation) -> Element<'_, Message> {
         use iced::widget::column;
-        use parameter_options::{MACHINING_TYPE, ROTARY_ANGLE_MODE, ROTARY_AXIS, ROTARY_FLIP, ROTARY_UNWRAP};
+        use parameter_options::{
+            MACHINING_TYPE, ROTARY_ANGLE_MODE, ROTARY_AXIS, ROTARY_FLIP, ROTARY_UNWRAP,
+        };
         let enabled = op.rotary_wrap().is_some();
         let indexed = self.rotary_index_draft.is_some();
         let selected_mode = if enabled {
@@ -477,10 +479,13 @@ impl App {
             machining_types.clone(),
             selected_mode,
             |mode| {
-                row![mode.icon(), text(mode.to_string()).size(12).width(Length::Fill)]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .into()
+                row![
+                    mode.icon(),
+                    text(mode.to_string()).size(12).width(Length::Fill)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into()
             },
             |_| 0,
             MACHINING_TYPE.on_change(),

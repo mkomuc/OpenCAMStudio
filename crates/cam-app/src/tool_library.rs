@@ -919,7 +919,9 @@ mod library_file_tests {
             ToolKind::EndMill
         );
         assert!(matches!(
-            crate::controller::sim_profile(&reopened.tools[index]).unwrap().shape,
+            crate::controller::sim_profile(&reopened.tools[index])
+                .unwrap()
+                .shape,
             cam_sim::ProfileShape::Flat
         ));
         let app = crate::AppController::new(crate::default_machine());

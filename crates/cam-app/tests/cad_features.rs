@@ -336,7 +336,12 @@ fn circular_face_with_bores(inner_radius: f64) -> (GeometryState, EntityRef) {
     let top = plane(0., 1.);
     let bottom = plane(-5., -1.);
     let outside = fixture.bore([10., 10.], 10., top, bottom);
-    let wall = fixture.t.faces.iter_mut().find(|f| f.id == outside).unwrap();
+    let wall = fixture
+        .t
+        .faces
+        .iter_mut()
+        .find(|f| f.id == outside)
+        .unwrap();
     let CadSurface::Cylinder { inward, .. } = &mut wall.surface else {
         unreachable!()
     };

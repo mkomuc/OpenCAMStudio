@@ -135,7 +135,11 @@ impl Tool {
             diameter_um: q(self.diameter),
             length_um: q(self.length),
             flute_len_um: q(self.flute_len()),
-            face_body_height_um: if matches!(self.kind, ToolKind::FaceMill) { q(self.face_body_height()) } else { 0 },
+            face_body_height_um: if matches!(self.kind, ToolKind::FaceMill) {
+                q(self.face_body_height())
+            } else {
+                0
+            },
             shank_dia_um: q(self.shank_dia()),
             shoulder_len_um: q(self.shoulder_len()),
             neck_len_um: q(self.neck_length),

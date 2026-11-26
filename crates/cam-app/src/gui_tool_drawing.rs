@@ -258,7 +258,11 @@ impl canvas::Program<Message> for ToolCanvas {
                             // Compression changes helix direction at mid-length. Its
                             // actual transition height is not specified by the tool data.
                             let advance = if self.cutting_direction == CutDir::Compression {
-                                if z <= flute_len * 0.5 { -z } else { z - flute_len }
+                                if z <= flute_len * 0.5 {
+                                    -z
+                                } else {
+                                    z - flute_len
+                                }
                             } else {
                                 s * z
                             };
@@ -426,9 +430,18 @@ fn dimensions(tool: &cam_model::Tool, profile: &cam_geo::Profile2D) -> Vec<Dimen
         );
     }
     if matches!(tool.kind, ToolKind::FaceMill) {
-        add(FaceBodyHeight, "Body", tool.face_body_height(), Vertical {
-            radius: r, from: 0.0, to: tool.face_body_height(), left: false, lane: 1.0,
-        });
+        add(
+            FaceBodyHeight,
+            "Body",
+            tool.face_body_height(),
+            Vertical {
+                radius: r,
+                from: 0.0,
+                to: tool.face_body_height(),
+                left: false,
+                lane: 1.0,
+            },
+        );
     }
     if !conical {
         add(

@@ -1,8 +1,8 @@
 //! One owner for linking controls, grouped in machining order.
 use super::*;
-use parameter_options::*;
 use cam_model::Comp;
 use iced::widget::{column, Column};
+use parameter_options::*;
 
 pub(super) const KEEP_TOOL_DOWN_HELP: &str = "Continue from the current cutting height into the next depth or finishing pass using a safe feed link. Unsafe or disconnected transitions still retract to clearance.";
 pub(super) const BORE_CENTER_HELP: &str = "For an internal bore, start and end the tangent leads at the hole centre. The lead radius becomes half the tool-centre orbit. Each pass retracts to clearance.";

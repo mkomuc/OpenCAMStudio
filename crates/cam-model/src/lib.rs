@@ -565,7 +565,11 @@ impl Tool {
 
     /// Face mill body height, with a fallback for older saved tools.
     pub fn face_body_height(&self) -> f64 {
-        if self.face_body_height > 0.0 { self.face_body_height } else { self.flute_len() }
+        if self.face_body_height > 0.0 {
+            self.face_body_height
+        } else {
+            self.flute_len()
+        }
     }
 
     /// Effective neck diameter: the explicit [`neck_diameter`](Self::neck_diameter),
@@ -647,13 +651,28 @@ impl Tool {
             let flute = self.flute_len().clamp(0.0, body);
             let length = self.length.max(body);
             let shank = self.shank_dia().max(0.0) * 0.5;
-            let line = |r, z, cutting| ProfileSeg { shape: SegShape::Line, end: Point::new(r, z), cutting };
+            let line = |r, z, cutting| ProfileSeg {
+                shape: SegShape::Line,
+                end: Point::new(r, z),
+                cutting,
+            };
             let mut segs = vec![line(r, 0.0, true), line(r, flute, true)];
-            if body > flute { segs.push(line(r, body, false)); }
-            if (shank - r).abs() > 1e-9 { segs.push(line(shank, body, false)); }
-            if length > body { segs.push(line(shank, length, false)); }
-            if shank > 1e-9 { segs.push(line(0.0, length, false)); }
-            return Profile2D { start: Point::new(0.0, 0.0), segs };
+            if body > flute {
+                segs.push(line(r, body, false));
+            }
+            if (shank - r).abs() > 1e-9 {
+                segs.push(line(shank, body, false));
+            }
+            if length > body {
+                segs.push(line(shank, length, false));
+            }
+            if shank > 1e-9 {
+                segs.push(line(0.0, length, false));
+            }
+            return Profile2D {
+                start: Point::new(0.0, 0.0),
+                segs,
+            };
         }
         // Single-profile (single-point) thread mill: one tooth at the tip, a sharply
         // reduced neck over the length of cut (its reach), then the shank. The neck ⌀ sets
@@ -983,9 +1002,16 @@ mod tests {
 
     #[test]
     fn compression_direction_round_trips_and_has_distinct_identity() {
-        let down = Tool { kind: ToolKind::EndMill, ..Default::default() };
-        let compression = Tool { cutting_direction: CutDir::Compression, ..down.clone() };
-        let loaded: Tool = serde_json::from_str(&serde_json::to_string(&compression).unwrap()).unwrap();
+        let down = Tool {
+            kind: ToolKind::EndMill,
+            ..Default::default()
+        };
+        let compression = Tool {
+            cutting_direction: CutDir::Compression,
+            ..down.clone()
+        };
+        let loaded: Tool =
+            serde_json::from_str(&serde_json::to_string(&compression).unwrap()).unwrap();
         assert_eq!(loaded.cutting_direction, CutDir::Compression);
         assert_ne!(compression.identity(), down.identity());
     }
@@ -1069,9 +1095,19 @@ mod tests {
         });
         short.flute_length = 2.0;
         let profile = short.profile();
-        assert!(profile.segs.iter().any(|s| s.cutting && (s.end.y - 2.0).abs() < 1e-9));
-        assert!(profile.segs.iter().filter(|s| s.cutting).all(|s| s.end.y <= 2.0 + 1e-9));
-        assert!(profile.segs.iter().any(|s| !s.cutting && (s.end.y - 4.0).abs() < 1e-9));
+        assert!(profile
+            .segs
+            .iter()
+            .any(|s| s.cutting && (s.end.y - 2.0).abs() < 1e-9));
+        assert!(profile
+            .segs
+            .iter()
+            .filter(|s| s.cutting)
+            .all(|s| s.end.y <= 2.0 + 1e-9));
+        assert!(profile
+            .segs
+            .iter()
+            .any(|s| !s.cutting && (s.end.y - 4.0).abs() < 1e-9));
         short.flute_length = 0.0;
         assert!((short.flute_len() - 4.0).abs() < 1e-9);
         // Flute split honoured: nothing above z=20 cuts.
@@ -1161,13 +1197,23 @@ mod tests {
 
     #[test]
     fn face_mill_body_and_cutting_length_are_distinct() {
-        let mut tool = Tool { diameter: 50.0, length: 60.0, flute_length: 25.0, shank_diameter: 16.0, kind: ToolKind::FaceMill, ..Default::default() };
+        let mut tool = Tool {
+            diameter: 50.0,
+            length: 60.0,
+            flute_length: 25.0,
+            shank_diameter: 16.0,
+            kind: ToolKind::FaceMill,
+            ..Default::default()
+        };
         assert_eq!(tool.face_body_height(), 25.0);
         tool.face_body_height = 25.0;
         tool.flute_length = 5.0;
         let profile = tool.profile();
         assert!(profile.segs.iter().any(|s| s.cutting && s.end.y == 5.0));
-        assert!(profile.segs.iter().any(|s| !s.cutting && s.end.x == 25.0 && s.end.y == 25.0));
+        assert!(profile
+            .segs
+            .iter()
+            .any(|s| !s.cutting && s.end.x == 25.0 && s.end.y == 25.0));
         let json = serde_json::to_string(&tool).unwrap();
         assert_eq!(serde_json::from_str::<Tool>(&json).unwrap(), tool);
     }

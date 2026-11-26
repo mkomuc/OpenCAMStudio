@@ -1647,7 +1647,10 @@ mod tests {
             .filter_map(|step| match step {
                 cam_cldata::Step::Drill(cycle) => Some(cycle.tag.op_id),
                 cam_cldata::Step::Linear { tag, .. }
-                    if tag.kind == cam_cldata::MoveKind::Plunge => Some(tag.op_id),
+                    if tag.kind == cam_cldata::MoveKind::Plunge =>
+                {
+                    Some(tag.op_id)
+                }
                 _ => None,
             })
             .collect();

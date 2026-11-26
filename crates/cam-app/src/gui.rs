@@ -8781,7 +8781,9 @@ impl App {
             }
             Message::ScallopRetractionChanged(policy) => {
                 self.edit_operation_draft(|op| match op {
-                    Operation::Parallel(p) if p.params.scallop => p.params.scallop_retraction = policy,
+                    Operation::Parallel(p) if p.params.scallop => {
+                        p.params.scallop_retraction = policy
+                    }
                     Operation::Parallel(p) => p.params.retraction = policy,
                     Operation::Spiral(p) => p.params.retraction = policy,
                     _ => {}
@@ -10484,7 +10486,9 @@ impl App {
                     return true;
                 }
                 match self.inspected_tool_kind() {
-                    Some(ToolKind::FaceMill) => matches!(buf(Field::FaceBodyHeight), Some(body) if fl > body + 1e-9),
+                    Some(ToolKind::FaceMill) => {
+                        matches!(buf(Field::FaceBodyHeight), Some(body) if fl > body + 1e-9)
+                    }
                     Some(ToolKind::RadiusMill { .. }) => {
                         matches!((buf(Field::CornerRadius), buf(Field::TipLength)), (Some(cr), Some(tip)) if fl < cr + tip - 1e-9)
                     }
@@ -10503,7 +10507,10 @@ impl App {
                     _ => false,
                 }
             }
-            Field::FaceBodyHeight => value <= 0.0 || matches!(buf(Field::ToolLength), Some(length) if value > length + 1e-9),
+            Field::FaceBodyHeight => {
+                value <= 0.0
+                    || matches!(buf(Field::ToolLength), Some(length) if value > length + 1e-9)
+            }
             _ => false,
         }
     }
@@ -13220,7 +13227,12 @@ impl App {
             );
             if is_end_mill {
                 let dir_opts = if matches!(t.kind, ToolKind::EndMill | ToolKind::RoughingMill) {
-                    vec![CutDir::Down, CutDir::Up, CutDir::Straight, CutDir::Compression]
+                    vec![
+                        CutDir::Down,
+                        CutDir::Up,
+                        CutDir::Straight,
+                        CutDir::Compression,
+                    ]
                 } else {
                     vec![CutDir::Down, CutDir::Up, CutDir::Compression]
                 };
@@ -13538,8 +13550,8 @@ fn ribbon_group<'a>(
             .spacing(4)
             .align_x(Alignment::Center),
     )
-        .padding(Padding::from([3.0, 4.0]))
-        .into()
+    .padding(Padding::from([3.0, 4.0]))
+    .into()
 }
 
 /// Fixed width of a large (Full-density) ribbon command button, px.
@@ -14189,9 +14201,7 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (op @ Operation::Spiral(_), field) => parameter_expressions::parameter(field)?.value(op),
         (Operation::Parallel(o), Field::ParallelStepover) => Some(o.params.stepover),
         (Operation::Parallel(o), Field::ParallelAngle) => Some(o.params.angle),
-        (Operation::Parallel(o), Field::ScallopSafeDistance) => {
-            Some(o.params.safe_distance)
-        }
+        (Operation::Parallel(o), Field::ScallopSafeDistance) => Some(o.params.safe_distance),
         (Operation::Parallel(o), Field::ScallopSmoothingTolerance) => {
             Some(o.params.scallop_smoothing_tolerance)
         }
@@ -17560,16 +17570,34 @@ mod multi_setup_draft_tests {
         app.begin_operation_draft(id);
         app.operation_tab = OperationTab::Linking;
         let _ = app.operation_inspector(id);
-        send(&mut app, Message::ParallelTransitionChanged(ParallelTransition::NoContact));
-        assert_eq!(mode(app.current_operation(id).unwrap()), ParallelTransition::NoContact);
+        send(
+            &mut app,
+            Message::ParallelTransitionChanged(ParallelTransition::NoContact),
+        );
+        assert_eq!(
+            mode(app.current_operation(id).unwrap()),
+            ParallelTransition::NoContact
+        );
         send(&mut app, Message::CancelOperationDraft);
-        assert_eq!(mode(app.controller.operation(id).unwrap()), ParallelTransition::StraightLine);
+        assert_eq!(
+            mode(app.controller.operation(id).unwrap()),
+            ParallelTransition::StraightLine
+        );
         app.begin_operation_draft(id);
-        send(&mut app, Message::ParallelTransitionChanged(ParallelTransition::Smooth));
+        send(
+            &mut app,
+            Message::ParallelTransitionChanged(ParallelTransition::Smooth),
+        );
         send(&mut app, Message::Apply);
-        assert_eq!(mode(app.controller.operation(id).unwrap()), ParallelTransition::Smooth);
+        assert_eq!(
+            mode(app.controller.operation(id).unwrap()),
+            ParallelTransition::Smooth
+        );
         assert!(app.controller.undo());
-        assert_eq!(mode(app.controller.operation(id).unwrap()), ParallelTransition::StraightLine);
+        assert_eq!(
+            mode(app.controller.operation(id).unwrap()),
+            ParallelTransition::StraightLine
+        );
     }
 
     #[test]
@@ -17580,19 +17608,28 @@ mod multi_setup_draft_tests {
         let id = operation.id();
         assert!(!operation_fields(&operation).contains(&Field::LiftHeight));
         app.controller.add_operation(operation);
-        let minimum = |op: &Operation| {
-            matches!(op, Operation::Parallel(p) if p.params.retraction == ScallopRetraction::Minimum)
-        };
+        let minimum = |op: &Operation| matches!(op, Operation::Parallel(p) if p.params.retraction == ScallopRetraction::Minimum);
         app.begin_operation_draft(id);
-        send(&mut app, Message::ScallopRetractionChanged(ScallopRetraction::Minimum));
+        send(
+            &mut app,
+            Message::ScallopRetractionChanged(ScallopRetraction::Minimum),
+        );
         assert!(minimum(app.current_operation(id).unwrap()));
-        assert!(operation_fields(app.current_operation(id).unwrap()).contains(&Field::ScallopSafeDistance));
+        assert!(operation_fields(app.current_operation(id).unwrap())
+            .contains(&Field::ScallopSafeDistance));
         send(&mut app, Message::CancelOperationDraft);
         assert!(!minimum(app.controller.operation(id).unwrap()));
         app.begin_operation_draft(id);
-        send(&mut app, Message::ScallopRetractionChanged(ScallopRetraction::Minimum));
+        send(
+            &mut app,
+            Message::ScallopRetractionChanged(ScallopRetraction::Minimum),
+        );
         send(&mut app, Message::Apply);
-        assert!(minimum(app.controller.operation(id).unwrap()), "{}", app.status);
+        assert!(
+            minimum(app.controller.operation(id).unwrap()),
+            "{}",
+            app.status
+        );
         assert!(app.controller.undo());
         assert!(!minimum(app.controller.operation(id).unwrap()));
     }
@@ -17611,13 +17648,23 @@ mod multi_setup_draft_tests {
             assert!(operation_fields(&operation).contains(&field));
             assert_eq!(operation_tabs::field_tab(field), OperationTab::Linking);
             assert_eq!(op_field(&operation, field), Some(0.6));
-            assert!(!operation_tabs::operation_field_invalid(&operation, field, 0.));
-            assert!(operation_tabs::operation_field_invalid(&operation, field, -1.));
+            assert!(!operation_tabs::operation_field_invalid(
+                &operation, field, 0.
+            ));
+            assert!(operation_tabs::operation_field_invalid(
+                &operation, field, -1.
+            ));
         }
         app.controller.add_operation(operation);
         app.begin_operation_draft(id);
-        send(&mut app, Message::FieldChanged(Field::LeadInSize, "0.9".into()));
-        send(&mut app, Message::FieldChanged(Field::LeadOutSize, "0".into()));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadInSize, "0.9".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadOutSize, "0".into()),
+        );
         send(&mut app, Message::Apply);
         let applied = app.controller.operation(id).unwrap();
         assert_eq!(op_field(applied, Field::LeadInSize), Some(0.9));
@@ -17659,10 +17706,7 @@ mod multi_setup_draft_tests {
             );
             send(&mut app, Message::CancelOperationDraft);
             app.begin_operation_draft(id);
-            assert_eq!(
-                app.fields.get(&field).map(String::as_str),
-                Some("0.2")
-            );
+            assert_eq!(app.fields.get(&field).map(String::as_str), Some("0.2"));
             send(&mut app, Message::FieldChanged(field, "2".into()));
             send(&mut app, Message::Apply);
             assert_eq!(
@@ -18668,7 +18712,14 @@ mod inspector_field_tests {
     fn face_mill_flute_and_body_are_independent() {
         let (mut app, _) = App::new();
         app.workspace = Workspace::Tools;
-        app.tool_edit = Some(Tool { diameter: 50.0, length: 60.0, flute_length: 25.0, shank_diameter: 16.0, kind: ToolKind::FaceMill, ..Default::default() });
+        app.tool_edit = Some(Tool {
+            diameter: 50.0,
+            length: 60.0,
+            flute_length: 25.0,
+            shank_diameter: 16.0,
+            kind: ToolKind::FaceMill,
+            ..Default::default()
+        });
         assert!(app.inspector_fields().contains(&Field::FluteLength));
         assert!(app.inspector_fields().contains(&Field::FaceBodyHeight));
         app.fields.insert(Field::FaceBodyHeight, "25".into());
@@ -18676,7 +18727,10 @@ mod inspector_field_tests {
         app.fields.insert(Field::FluteLength, "5".into());
         app.live_edit(Field::FluteLength);
         let tool = app.tool_edit.as_ref().unwrap();
-        assert_eq!((tool.flute_len(), tool.face_body_height(), tool.length), (5.0, 25.0, 60.0));
+        assert_eq!(
+            (tool.flute_len(), tool.face_body_height(), tool.length),
+            (5.0, 25.0, 60.0)
+        );
         assert!(!app.field_invalid(Field::FluteLength));
         app.fields.insert(Field::FluteLength, "26".into());
         assert!(app.field_invalid(Field::FluteLength));

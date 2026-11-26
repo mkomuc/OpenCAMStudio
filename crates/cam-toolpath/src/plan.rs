@@ -2245,7 +2245,8 @@ mod tests {
                 .iter()
                 .all(|step| matches!(step, Step::Comment(_))));
             assert!(job.diagnostics.iter().any(|finding| {
-                finding.op == Some(0) && finding.message.contains("requires a side-cutting strategy")
+                finding.op == Some(0)
+                    && finding.message.contains("requires a side-cutting strategy")
             }));
         }
     }

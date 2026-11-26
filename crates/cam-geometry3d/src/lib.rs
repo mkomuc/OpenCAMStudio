@@ -24,8 +24,8 @@ mod profile_contours;
 mod profile_entries;
 mod surface_geometry;
 pub use adaptive::{
-    adaptive_heights, pocket_stock_shadow, projected_footprint, resolve_adaptive, validate_adaptive_selection,
-    AdaptiveGeometry, AdaptiveLayer, AdaptiveResolveConfig,
+    adaptive_heights, pocket_stock_shadow, projected_footprint, resolve_adaptive,
+    validate_adaptive_selection, AdaptiveGeometry, AdaptiveLayer, AdaptiveResolveConfig,
 };
 use cam_geo::{Contour, Point, Polygon};
 use cam_model::*;
@@ -1302,7 +1302,8 @@ fn derive(
             if normal[2] < 0.0 {
                 return Err("floor normal must face the machining direction".into());
             }
-            let region = view.region_from_loops(pocket_regions::floor_loop_ids(&view, f, floor)?)?;
+            let region =
+                view.region_from_loops(pocket_regions::floor_loop_ids(&view, f, floor)?)?;
             for face in view
                 .asset
                 .topology
@@ -2112,11 +2113,15 @@ mod tests {
         let (mut state, face) = plate_with_hole();
         let selection = std::slice::from_ref(&face);
         let binding =
-            resolve_selection_advisory(&state, selection, ExtractionRecipe::PocketFloor, 1.).unwrap();
+            resolve_selection_advisory(&state, selection, ExtractionRecipe::PocketFloor, 1.)
+                .unwrap();
         let resolved = resolve_binding_advisory(&state, &binding).unwrap();
         assert_eq!(
             resolved.heights,
-            CuttingHeights { top: 1., bottom: 0. }
+            CuttingHeights {
+                top: 1.,
+                bottom: 0.
+            }
         );
         assert_eq!(resolved.regions[0].area(), 400.);
         assert!(resolved.regions[0].holes().is_empty());

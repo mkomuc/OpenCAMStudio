@@ -168,9 +168,7 @@ fn inspector_section_frame<'a>(content: impl Into<Element<'a, Message>>) -> Elem
     .into()
 }
 
-pub(super) fn inspector_button<'a, M: 'a>(
-    label: impl Into<String>,
-) -> iced::widget::Button<'a, M> {
+pub(super) fn inspector_button<'a, M: 'a>(label: impl Into<String>) -> iced::widget::Button<'a, M> {
     button(
         text(label.into())
             .size(INSPECTOR_TEXT_SIZE)
@@ -360,9 +358,7 @@ pub(super) fn inspector_value<'a>(
     .into()
 }
 
-pub(super) fn inspector_footer<'a, M: 'a>(
-    content: impl Into<Element<'a, M>>,
-) -> Element<'a, M> {
+pub(super) fn inspector_footer<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
     container(content)
         .padding([12, 14])
         .width(Length::Fill)

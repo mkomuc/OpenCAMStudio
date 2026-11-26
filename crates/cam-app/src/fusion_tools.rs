@@ -189,7 +189,10 @@ mod tests {
     fn imports_compression_direction_even_when_description_mentions_both_cuts() {
         let json = r#"{"data":[{"type":"flat end mill","unit":"millimeters","description":"compression upcut downcut","geometry":{"DC":6,"OAL":50,"LCF":20,"SFDM":6,"NOF":2}}]}"#;
         let entries = parse(json).unwrap();
-        assert_eq!(entries[0].tool.as_ref().unwrap().cutting_direction, CutDir::Compression);
+        assert_eq!(
+            entries[0].tool.as_ref().unwrap().cutting_direction,
+            CutDir::Compression
+        );
         assert!(!entries[0].detail.contains("Cut direction unspecified"));
     }
     #[test]
