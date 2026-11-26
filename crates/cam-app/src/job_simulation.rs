@@ -1,16 +1,35 @@
 //! Cancellable stock verification and mesh preparation.
 use super::*;
-use cam_sim::{Heightfield, SimResult};
+use cam_sim::{Heightfield, ProfileShape, SimResult};
 
 fn simulation_tool(tool: &cam_model::Tool, outline: &cam_geo::Profile2D) -> Option<SimTool> {
+    let profile = sim_profile(tool)?;
+    let thread_body = match (tool.kind, profile.shape) {
+        (cam_model::ToolKind::ThreadMill { pitch }, ProfileShape::Thread { root_radius, .. }) => {
+            let shoulder = tool.shoulder_len().max(tool.flute_len().max(1e-3));
+            Some(cam_sim::ThreadBody {
+                neck_radius: if pitch.is_some() {
+                    // The full-form profile continues at the tooth root up to the shoulder.
+                    root_radius
+                } else {
+                    tool.neck_dia().min(tool.diameter) / 2.
+                },
+                shoulder,
+                shank_radius: tool.shank_dia() / 2.,
+                length: tool.length.max(shoulder),
+            })
+        }
+        _ => None,
+    };
     Some(SimTool {
         number: tool.number,
-        profile: sim_profile(tool)?,
+        profile,
         noncutting_tip_radius: outline
             .segs
             .first()
             .filter(|s| !s.cutting && s.end.y.abs() < 1e-9)
             .map(|s| s.end.x),
+        thread_body,
     })
 }
 
@@ -445,12 +464,10 @@ impl JobInputs {
                     tool,
                     flute_length: flute,
                     length: t.length.max(flute),
-                    neck_length: if matches!(t.kind, cam_model::ToolKind::ThreadMill { .. }) {
-                        t.neck_length.max(t.flute_len())
-                    } else {
-                        t.neck_length
-                    },
-                    neck_radius: t.neck_dia() / 2.,
+                    neck_length: tool.thread_body.map_or(t.neck_length, |body| body.shoulder),
+                    neck_radius: tool
+                        .thread_body
+                        .map_or(t.neck_dia() / 2., |body| body.neck_radius),
                     shank_radius: t.shank_dia() / 2.,
                 })
             })

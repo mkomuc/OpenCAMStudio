@@ -471,10 +471,7 @@ impl MoveHandles {
         let v = picking_view::project(self.camera, bounds, point((axis + 2) % 3))?.0 - center;
         Some((center, u, v))
     }
-    fn projected(
-        &self,
-        size: iced::Size,
-    ) -> Option<ProjectedHandles> {
+    fn projected(&self, size: iced::Size) -> Option<ProjectedHandles> {
         self.projected_with_radii(size, None)
     }
     fn projected_with_radii(

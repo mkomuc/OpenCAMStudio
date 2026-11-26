@@ -111,8 +111,9 @@ pub(crate) fn concentric_rings(
                         }
                         let mut closed = ring.pts.clone();
                         closed.push(ring.pts[0]);
-                        let hits = cam_geo::clip_path(&cam_geo::Polyline::new(closed), &reach, true)
-                            .map_err(|e| RingsError::Offset(e.to_string()))?;
+                        let hits =
+                            cam_geo::clip_path(&cam_geo::Polyline::new(closed), &reach, true)
+                                .map_err(|e| RingsError::Offset(e.to_string()))?;
                         if !hits.is_empty() {
                             rings.push(ring);
                         }

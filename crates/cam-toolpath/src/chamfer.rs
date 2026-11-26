@@ -354,11 +354,8 @@ impl ChamferStrategy {
             )));
         }
 
-        // The bevel is cut by the flank between the tip and `tip_depth` above it, so
-        // that whole section must still be cutting surface. This is the upper bound on
-        // tip depth that was previously missing (there was no flank-length geometry to
-        // check against); the generatrix now supplies it.
-        crate::guards::warn_axial_reach(op.id, "chamfer", tool, tip_depth, &mut diagnostics);
+        // The flank needs cutting edge up to the height of the bevel above the tip.
+        crate::guards::warn_axial_cut(op.id, "chamfer", tool, tip_depth, &mut diagnostics);
 
         // Offset the tool axis to the air side by the deep-plunge shift plus the tip
         // radius (0 for a sharp V at the tip keeps it on the edge). Sign follows the
@@ -1117,6 +1114,7 @@ mod tests {
                         },
                     },
                     noncutting_tip_radius: None,
+                    thread_body: None,
                 }],
             )
         };

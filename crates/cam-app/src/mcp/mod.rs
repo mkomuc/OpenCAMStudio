@@ -8,9 +8,9 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Map, Value};
 
 pub(crate) use commands::call;
-pub use desktop_link::connect_desktop;
 #[cfg(feature = "gui")]
 pub(crate) use commands::is_read_only;
+pub use desktop_link::connect_desktop;
 pub use protocol::serve;
 pub(crate) use shop::{call_shop, shop_tools, Shop};
 pub type CommandResult = Result<Value, String>;

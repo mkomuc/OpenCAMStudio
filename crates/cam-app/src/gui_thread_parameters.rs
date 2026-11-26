@@ -1,10 +1,10 @@
 //! Transactional thread-size presets and geometry-driven suggestions.
 use super::*;
-use parameter_options::{operation_picker, THREAD_HAND, THREAD_SERIES, THREAD_SIZING};
 use cam_model::{
     matching_thread_standards, thread_standards, ThreadDiameterBasis, ThreadSeries, ThreadStandard,
 };
 use iced::widget::column;
+use parameter_options::{operation_picker, THREAD_HAND, THREAD_SERIES, THREAD_SIZING};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum ThreadMatchMode {

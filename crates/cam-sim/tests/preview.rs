@@ -230,11 +230,13 @@ fn tools() -> [SimTool; 2] {
     [
         SimTool {
             noncutting_tip_radius: None,
+            thread_body: None,
             number: 1,
             profile: ToolProfile::flat(1.),
         },
         SimTool {
             noncutting_tip_radius: None,
+            thread_body: None,
             number: 2,
             profile: ToolProfile {
                 radius: 1.5,
@@ -298,6 +300,7 @@ fn incremental_playback_rewind_and_edited_prefix_match_fresh_simulation() {
         &options(),
         &[SimTool {
             noncutting_tip_radius: None,
+            thread_body: None,
             number: 1,
             profile: ToolProfile::flat(2.),
         }],

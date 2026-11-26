@@ -8,14 +8,13 @@ use crate::Diagnostic;
 
 // CAD bounding boxes carry small tolerance padding (typically 1e-7 mm).
 // Allow one nanometre of numerical noise at an otherwise exact reach limit.
-const REACH_TOLERANCE: f64 = 1e-6;
+pub(crate) const DEPTH_TOLERANCE: f64 = 1e-6;
 
 /// Report cutter suitability as warnings, without suppressing the operation.
 pub(crate) fn warn_side_milling(
     op_id: u32,
     op: &str,
     tool: &Tool,
-    depth: f64,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Kind rules the generatrix cannot express.
@@ -46,22 +45,11 @@ pub(crate) fn warn_side_milling(
         _ => {}
     }
 
-    let profile = tool.profile();
-    let flank = profile.cutting_flank_height();
-    if flank <= 1e-9 {
+    if tool.profile().cutting_flank_height() <= 1e-9 {
         diagnostics.push(Diagnostic::warning(format!(
             "operation {op_id} ({op}): tool {} ({}) has no cylindrical cutting flank — \
              the generated wall will follow the selected cutter's shape.",
             tool.number, tool.kind
-        )));
-        return;
-    }
-    if depth > flank + REACH_TOLERANCE {
-        diagnostics.push(Diagnostic::warning(format!(
-            "operation {op_id} ({op}): depth {depth:.3} mm exceeds tool {}'s {flank:.3} mm \
-             length of cut — below that the non-cutting shank would rub against the wall. \
-             Reduce the depth or use a longer-fluted tool.",
-            tool.number
         )));
     }
 }
@@ -104,53 +92,76 @@ pub(crate) fn warn_plunge(op_id: u32, op: &str, tool: &Tool, diagnostics: &mut V
     )));
 }
 
-/// Report cutter suitability as warnings, without suppressing the operation.
-pub(crate) fn warn_axial_reach(
+/// Check the full axial distance the tool must reach.
+pub(crate) fn warn_tool_reach(
     op_id: u32,
     op: &str,
     tool: &Tool,
     depth: f64,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let profile = tool.profile();
-    // The deepest the tool can be buried with only cutting surface in contact: the
-    // flank where there is one, otherwise the height of the cutting end itself.
-    let flank = profile.cutting_flank_height();
-    let reach = if flank > 1e-9 {
-        flank
-    } else {
-        cutting_end_height(&profile)
-    };
-    if depth > reach + REACH_TOLERANCE {
+    let reach = tool.reach();
+    if depth > reach + DEPTH_TOLERANCE {
         diagnostics.push(Diagnostic::warning(format!(
-            "operation {op_id} ({op}): depth {depth:.3} mm exceeds tool {}'s {reach:.3} mm \
-             of cutting edge — deeper, the non-cutting shank would be in the hole.",
+            "operation {op_id} ({op}): depth {depth:.3} mm exceeds tool {}'s {reach:.3} mm reach \
+             (limited by the shoulder and length below holder).",
             tool.number
         )));
     }
 }
 
-/// The height of the tool's contiguous cutting end above the tip — how deep it can be
-/// buried before a non-cutting surface reaches the work.
-fn cutting_end_height(profile: &cam_geo::Profile2D) -> f64 {
-    let mut z = 0.0_f64;
-    let mut prev = profile.start;
-    let mut started = false;
-    for s in &profile.segs {
-        if !s.cutting {
-            // Skip a *leading* non-cutting surface (a chamfer mill's flat tip); stop
-            // only once the cutting edge has begun and then ended.
-            if started {
-                break;
-            }
-            prev = s.end;
-            continue;
-        }
-        started = true;
-        z = z.max(prev.y.max(s.end.y));
-        prev = s.end;
+/// Check the maximum axial engagement of a cut.
+pub(crate) fn warn_cut_depth(
+    op_id: u32,
+    op: &str,
+    tool: &Tool,
+    depth: f64,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let limit = cutting_length(tool);
+    if depth > limit + DEPTH_TOLERANCE {
+        diagnostics.push(Diagnostic::warning(format!(
+            "operation {op_id} ({op}): depth of cut {depth:.3} mm exceeds tool {}'s \
+             {limit:.3} mm length of cut along its cutting edge.",
+            tool.number
+        )));
     }
-    z
+}
+
+fn cutting_length(tool: &Tool) -> f64 {
+    // V-bits have no separate flute-length field. Their cone defines the cutting edge.
+    if let ToolKind::VBit {
+        included_angle_deg,
+        tip_radius,
+    } = tool.kind
+    {
+        return cam_geo::vtip_max_depth(
+            0.5 * included_angle_deg.to_radians(),
+            tip_radius,
+            tool.radius(),
+        );
+    }
+    tool.flute_len()
+}
+
+/// Check operations where the required reach is also the axial depth of cut.
+pub(crate) fn warn_axial_cut(
+    op_id: u32,
+    op: &str,
+    tool: &Tool,
+    depth: f64,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    warn_tool_reach(op_id, op, tool, depth, diagnostics);
+    warn_cut_depth(op_id, op, tool, depth, diagnostics);
+}
+
+pub(crate) fn max_stepdown(top: f64, levels: &[f64]) -> f64 {
+    std::iter::once(top)
+        .chain(levels.iter().copied())
+        .zip(levels)
+        .map(|(previous, level)| previous - level)
+        .fold(0.0, f64::max)
 }
 
 #[cfg(test)]
@@ -188,27 +199,43 @@ mod tests {
         ] {
             let mut diagnostics = Vec::new();
             let tool = tool(kind);
-            warn_side_milling(7, "bore", &tool, 20., &mut diagnostics);
+            warn_side_milling(7, "bore", &tool, &mut diagnostics);
             warn_flat_floor(7, "bore", &tool, &mut diagnostics);
             warn_plunge(7, "bore", &tool, &mut diagnostics);
-            warn_axial_reach(7, "bore", &tool, 50., &mut diagnostics);
+            warn_axial_cut(7, "bore", &tool, 50., &mut diagnostics);
             assert!(!diagnostics.is_empty(), "{kind:?}");
             assert!(diagnostics.iter().all(|d| d.severity == Severity::Warning));
         }
     }
 
     #[test]
-    fn cutting_reach_allows_cad_padding_and_warns_for_real_overreach() {
-        let tool = tool(ToolKind::EndMill);
+    fn reach_and_cut_depth_have_independent_limits() {
+        let mut tool = tool(ToolKind::EndMill);
+        tool.shoulder_length = 22.;
+        tool.length_below_holder = 18.;
         for extra in [0., 1e-7, 2e-7, 1e-4] {
             let mut diagnostics = Vec::new();
-            warn_side_milling(0, "profile", &tool, 12. + extra, &mut diagnostics);
-            warn_axial_reach(0, "bore", &tool, 12. + extra, &mut diagnostics);
-            assert_eq!(
-                diagnostics.len(),
-                if extra < REACH_TOLERANCE { 0 } else { 2 }
-            );
+            warn_tool_reach(0, "profile", &tool, 18. + extra, &mut diagnostics);
+            warn_cut_depth(0, "profile", &tool, 12. + extra, &mut diagnostics);
+            if extra < DEPTH_TOLERANCE {
+                assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            } else {
+                assert_eq!(diagnostics.len(), 2);
+                assert!(diagnostics[0].message.contains("18.000 mm reach"));
+                assert!(diagnostics[1].message.contains("12.000 mm length of cut"));
+            }
         }
+
+        tool.length_below_holder = 30.;
+        let mut diagnostics = Vec::new();
+        warn_tool_reach(0, "profile", &tool, 23., &mut diagnostics);
+        assert!(diagnostics[0].message.contains("22.000 mm reach"));
+
+        tool.length_below_holder = 0.;
+        assert_eq!(tool.reach(), 22.);
+        tool.shoulder_length = 0.;
+        tool.neck_length = 4.;
+        assert_eq!(tool.reach(), 16.);
     }
 
     #[test]
@@ -218,13 +245,14 @@ mod tests {
         tool.shank_diameter = 6.;
         tool.flute_length = 8.;
         let mut diagnostics = Vec::new();
-        warn_side_milling(0, "bore", &tool, 6., &mut diagnostics);
+        warn_side_milling(0, "bore", &tool, &mut diagnostics);
+        warn_axial_cut(0, "bore", &tool, 6., &mut diagnostics);
         warn_flat_floor(0, "bore", &tool, &mut diagnostics);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
-    fn reach_includes_a_chamfer_mills_cutting_cone_above_its_flat() {
+    fn cut_depth_includes_a_chamfer_mills_cutting_cone_above_its_flat() {
         let mut tool = tool(ToolKind::ChamferMill {
             included_angle_deg: 90.,
             tip_diameter: 1.,
@@ -233,13 +261,13 @@ mod tests {
         // has a cutting cylindrical flank above it.
         tool.flute_length = 2.5;
         let mut diagnostics = Vec::new();
-        warn_axial_reach(0, "chamfer", &tool, 2.4, &mut diagnostics);
+        warn_cut_depth(0, "chamfer", &tool, 2.4, &mut diagnostics);
         assert!(diagnostics.is_empty());
-        warn_axial_reach(0, "chamfer", &tool, 2.6, &mut diagnostics);
+        warn_cut_depth(0, "chamfer", &tool, 2.6, &mut diagnostics);
         assert_eq!(diagnostics.len(), 1);
         tool.flute_length = 12.;
         diagnostics.clear();
-        warn_axial_reach(0, "chamfer", &tool, 2.6, &mut diagnostics);
+        warn_cut_depth(0, "chamfer", &tool, 2.6, &mut diagnostics);
         assert!(diagnostics.is_empty());
     }
 }

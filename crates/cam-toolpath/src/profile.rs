@@ -322,8 +322,18 @@ impl ProfileStrategy {
                 ..Default::default()
             };
         }
-        // Report shape/reach differences while retaining the operator's cutter.
-        crate::guards::warn_side_milling(op.id, "profile", tool, op.depth, &mut diagnostics);
+        // Scheduled passes supply their own stock top and stepdown.
+        let top = env.heights.top_of_stock;
+        let floor = -op.depth;
+        let levels = depth_levels(top, floor, op.stepdown);
+        crate::guards::warn_side_milling(op.id, "profile", tool, &mut diagnostics);
+        crate::guards::warn_cut_depth(
+            op.id,
+            "profile",
+            tool,
+            crate::guards::max_stepdown(top, &levels),
+            &mut diagnostics,
+        );
         if let Err(message) = op.validate_control_leads(tool.radius()) {
             return StrategyResult {
                 diagnostics: vec![Diagnostic::error(message)],
@@ -334,7 +344,7 @@ impl ProfileStrategy {
         crate::guards::warn_plunge(op.id, "profile", tool, &mut diagnostics);
 
         if !op.closed {
-            let mut result = open_profile(op, tool.radius(), env, cancel);
+            let mut result = open_profile(op, tool.radius(), env, &levels, cancel);
             diagnostics.append(&mut result.diagnostics);
             result.diagnostics = diagnostics;
             return result;
@@ -360,8 +370,6 @@ impl ProfileStrategy {
                 ..Default::default()
             };
         }
-        // `depth` is a positive magnitude below the reference; the floor sits at Z = -depth.
-        let floor = -op.depth;
         if floor >= env.heights.top_of_stock {
             diagnostics.push(Diagnostic::warning(format!(
                 "operation {}: depth {} does not reach below the stock top {}; nothing to cut",
@@ -450,7 +458,6 @@ impl ProfileStrategy {
                 return StrategyResult { diagnostics: vec![Diagnostic::error("Requested profile roughing needs stock strictly containing the offset part; select valid stock or set stepover to zero")], ..Default::default() };
             };
             {
-                let levels = depth_levels(env.heights.top_of_stock, floor, op.stepdown);
                 let mut program = Program::new();
                 // Clear the frame through the shared engine (stay-down inside-out,
                 // engagement-spaced, climb-oriented). No finishing leads — the
@@ -569,7 +576,6 @@ impl ProfileStrategy {
                 }
             }
         };
-        let levels = depth_levels(env.heights.top_of_stock, floor, op.stepdown);
         let vertices: usize = contours.iter().map(Vec::len).sum();
         let factor = if matches!(op.plunge, Plunge::Ramp { .. }) {
             MAX_RAMP_LAPS + 2
@@ -802,7 +808,13 @@ fn offset_open_chain_with_join(
     Ok(points)
 }
 
-fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken) -> StrategyResult {
+fn open_profile(
+    op: &ProfileOp,
+    radius: f64,
+    env: &JobEnv,
+    levels: &[f64],
+    cancel: &CancelToken,
+) -> StrategyResult {
     let fail = |message: &str| StrategyResult {
         diagnostics: vec![Diagnostic::error(format!("operation {}: {message}", op.id))],
         ..Default::default()
@@ -858,13 +870,12 @@ fn open_profile(op: &ProfileOp, radius: f64, env: &JobEnv, cancel: &CancelToken)
     if reverse {
         points.reverse();
     }
-    let levels = depth_levels(env.heights.top_of_stock, -op.depth, op.stepdown);
     if levels.len().saturating_mul(points.len()).saturating_mul(4) > cam_model::MAX_PROFILE_MOVES {
         return fail("Open profile motion budget exceeded");
     }
     let mut program = Program::new();
     let mut previous = env.heights.top_of_stock;
-    for (level, z) in levels.into_iter().enumerate() {
+    for (level, &z) in levels.iter().enumerate() {
         if cancel.is_cancelled() {
             return StrategyResult {
                 cancelled: true,

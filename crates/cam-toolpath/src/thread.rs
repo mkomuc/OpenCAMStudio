@@ -1,6 +1,6 @@
 //! The thread-milling strategy: cut a thread at each hole/boss centre by
-//! **helically interpolating** a single-form thread mill — one continuous helix
-//! of `length / pitch` turns, advancing exactly `pitch` in Z per revolution.
+//! helically interpolating a thread mill. Each tooth traces a helix with one
+//! pitch of axial travel per revolution. Axially spaced teeth share the work.
 //!
 //! ## Depth and passes
 //!
@@ -10,9 +10,8 @@
 //! to the root, deepest last; `spring_passes` add full-depth repeats. The steps are
 //! equal in *radius* by default, or equal in *material* when `gradual` is set — see
 //! [`infeed_fractions`], which is where the difference and its reason live.
-//! The tool geometry is enforced up front by three hard gates (min cutting ⌀ vs. the
-//! pre-drilled minor bore, max thread depth from the reduced neck, reach vs. length of
-//! cut) plus a blind-hole allowance that validates the drilled depth.
+//! Verification checks bore entry, radial cutting depth, reach, and blind-hole
+//! allowance. Fixed-pitch tools also need matching pitch and a valid cutting band.
 //!
 //! ## Direction (the correctness-critical part)
 //!
@@ -227,15 +226,41 @@ impl ThreadStrategy {
             }
         }
 
-        // Gate 3 — reach: the threaded length must fit inside the tool's length of cut.
         let thread_length = op.z_top - op.z_bottom;
-        if thread_length > tool.flute_len() + 1e-9 {
+        let reach = tool.reach();
+        let tolerance = crate::guards::DEPTH_TOLERANCE;
+        if thread_length > reach + tolerance {
             diagnostics.push(Diagnostic::error(format!(
-                "operation {}: threaded length {:.3} exceeds the tool's length of cut (reach) {:.3}",
-                op.id, thread_length, tool.flute_len()
+                "operation {}: threaded length {thread_length:.3} mm exceeds the tool's \
+                 {reach:.3} mm reach (limited by the shoulder and length below holder)",
+                op.id
             )));
             bail!();
         }
+        let tooth_count = tool.thread_tooth_count();
+        let fixed_pitch = if let ToolKind::ThreadMill { pitch: Some(pitch) } = tool.kind {
+            if !pitch.is_finite() || pitch <= 0. || (pitch - op.pitch).abs() > tolerance {
+                diagnostics.push(Diagnostic::error(format!(
+                    "operation {}: tool {} pitch {pitch:.3} mm must match the thread pitch {:.3} mm",
+                    op.id, tool.number, op.pitch
+                )));
+                bail!();
+            }
+            let capacity = tool.thread_tooth_capacity();
+            if tooth_count > capacity {
+                diagnostics.push(Diagnostic::error(format!(
+                    "operation {}: tool {} specifies {tooth_count} axial teeth at {pitch:.3} mm pitch. \
+                     Its {:.3} mm length of cut can fit only {capacity}.",
+                    op.id,
+                    tool.number,
+                    tool.flute_len()
+                )));
+                bail!();
+            }
+            true
+        } else {
+            false
+        };
 
         // Blind-hole allowance: a positive `drill_clearance` marks a blind hole; the
         // pre-drill must leave at least the allowance (auto = one pitch) below the thread,
@@ -292,46 +317,27 @@ impl ThreadStrategy {
             ArcDir::Cw
         };
         let z_up = (op.hand == Hand::Right) == (arc_dir == ArcDir::Ccw);
-        // Full-profile mills (a tooth comb ground for a specific pitch) cut the
-        // whole thread in a single turn; a single-form mill runs one turn per
-        // pitch over the length. Same helix generator, different turn count.
-        let full_profile = match tool.kind {
-            ToolKind::ThreadMill { pitch: Some(p) } => {
-                if !p.is_finite() || p <= 0. || (p - op.pitch).abs() > 1e-6 {
-                    diagnostics.push(Diagnostic::error(format!(
-                        "operation {}: full-profile tool pitch {:.3} must match the thread pitch {:.3}",
-                        op.id, p, op.pitch
-                    )));
-                    bail!();
-                }
-                true
-            }
-            _ => false,
-        };
-
-        let length = op.z_top - op.z_bottom;
-        if full_profile && length < op.pitch {
+        if tooth_count > 1 && thread_length < op.pitch {
             diagnostics.push(Diagnostic::error(format!(
-                "operation {}: a full-profile thread needs at least one pitch of axial travel; use a single-form mill for this shorter interval", op.id
+                "operation {}: a multi-tooth thread mill needs at least one pitch of axial travel; use a single-tooth mill for this shorter interval", op.id
             )));
             bail!();
         }
-        // Turns of the helix, and the Z it climbs while cutting: the full length
-        // for a single-form mill, exactly one pitch for a full-profile comb.
-        let (turns, z_span) = if full_profile {
-            (1.0, op.pitch)
+
+        // Each additional tooth covers one pitch of axial span. Keep at least a
+        // full turn for a comb so the tooth paths join around the circumference.
+        let z_span = if tooth_count > 1 {
+            (thread_length - f64::from(tooth_count - 1) * op.pitch).max(op.pitch)
         } else {
-            (length / op.pitch, length)
+            thread_length
         };
+        let turns = z_span / op.pitch;
+        let z_low = op.z_bottom;
+        let z_high = z_low + z_span;
         let (z_start, z_end) = if z_up {
-            (op.z_bottom, op.z_bottom + z_span)
-        } else if full_profile {
-            // The comb extends upward from the tip. Reversing the cut must
-            // traverse the same bottom-anchored pitch, otherwise only the top
-            // of the requested thread is reached by the teeth.
-            (op.z_bottom + z_span, op.z_bottom)
+            (z_low, z_high)
         } else {
-            (op.z_top, op.z_top - z_span)
+            (z_high, z_low)
         };
 
         // Total angular sweep of the helix: `turns · 2π`. Emitted as arc segments
@@ -361,7 +367,7 @@ impl ThreadStrategy {
         let mut program = Program::new();
         program.push(Step::Comment(format!(
             "Thread mill: {} {} {} \u{00d8}{:.3}\u{00d7}{:.3}",
-            if full_profile {
+            if fixed_pitch {
                 "full-profile"
             } else {
                 "single-form"
@@ -990,20 +996,118 @@ mod tests {
             .any(|d| d.message.contains("max thread depth")));
     }
 
-    /// Gate 3: the threaded length cannot exceed the tool's length of cut (reach).
     #[test]
-    fn reach_gate_errors_when_thread_is_longer_than_length_of_cut() {
-        let mut t = tool(5.0);
-        t.flute_length = 4.0; // reach 4 mm
-        let mut o = op(true, Hand::Right, true);
-        o.z_top = 0.0;
-        o.z_bottom = -6.0; // 6 mm thread > 4 mm reach
-        let r = run(o, t);
-        assert!(r.has_errors());
-        assert!(r
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("length of cut")));
+    fn single_point_thread_reach_uses_the_shoulder_and_holder() {
+        let mut tool = tool(5.0);
+        tool.flute_length = 4.0;
+        tool.shoulder_length = 8.0;
+        tool.length_below_holder = 7.0;
+
+        let operation = op(true, Hand::Right, true);
+        let result = run(operation.clone(), tool.clone());
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(!result.program.is_empty());
+
+        tool.length_below_holder = 5.0;
+        let result = run(operation.clone(), tool.clone());
+        assert!(result.has_errors());
+        assert!(result.program.is_empty());
+        assert!(result.diagnostics[0].message.contains("5.000 mm reach"));
+
+        tool.length_below_holder = 7.0;
+        tool.shoulder_length = 5.5;
+        let result = run(operation, tool);
+        assert!(result.has_errors());
+        assert!(result.program.is_empty());
+        assert!(result.diagnostics[0].message.contains("5.500 mm reach"));
+    }
+
+    // The project uses a 16 mm thread and a three-tooth, 0.8 mm-pitch cutter.
+    // Keep the fixture in code so it can run without loading any project assets.
+    fn short_band_fixture() -> (ThreadOp, Tool) {
+        let operation = ThreadOp {
+            major_dia: 32.0,
+            pitch: 2.0,
+            z_bottom: -16.0,
+            ..op(true, Hand::Right, true)
+        };
+        let cutter = Tool {
+            diameter: 4.0,
+            length: 50.0,
+            shoulder_length: 18.0,
+            shank_diameter: 6.0,
+            flute_length: 2.4,
+            thread_teeth: 3,
+            ..full_profile_tool(0.8)
+        };
+        (operation, cutter)
+    }
+
+    #[test]
+    fn short_cutting_band_does_not_mask_a_pitch_mismatch() {
+        let (operation, cutter) = short_band_fixture();
+        let result = run(operation, cutter);
+        assert!(result.program.is_empty());
+        assert!(result.diagnostics[0]
+            .message
+            .contains("pitch 0.800 mm must match the thread pitch 2.000 mm"));
+    }
+
+    #[test]
+    fn specified_tooth_count_must_fit_the_cutting_band() {
+        let (operation, mut cutter) = short_band_fixture();
+        cutter.kind = ToolKind::ThreadMill {
+            pitch: Some(operation.pitch),
+        };
+        let result = run(operation, cutter);
+        assert!(result.program.is_empty());
+        assert!(result.diagnostics[0].message.contains("can fit only 1"));
+    }
+
+    #[test]
+    fn one_or_three_teeth_cover_the_same_thread_at_the_programmed_pitch() {
+        let (operation, cutter) = short_band_fixture();
+        for (teeth, flute_length, expected_travel) in [(1, 2.4, 16.), (3, 6., 12.)] {
+            let tool = Tool {
+                thread_teeth: teeth,
+                flute_length,
+                kind: ToolKind::ThreadMill {
+                    pitch: Some(operation.pitch),
+                },
+                ..cutter.clone()
+            };
+            for hand in [Hand::Right, Hand::Left] {
+                let op = ThreadOp {
+                    hand,
+                    ..operation.clone()
+                };
+                let result = run(op, tool.clone());
+                assert!(!result.has_errors(), "{:?}", result.diagnostics);
+                result.program.validate().unwrap();
+                let arcs = cutting_arcs(&result.program);
+                assert_eq!(arcs.len(), expected_travel as usize);
+                assert!(arcs
+                    .iter()
+                    .all(|(end, _, _)| { ((end.x.hypot(end.y)) - 14.0).abs() < 1e-9 }));
+                for pair in arcs.windows(2) {
+                    assert!(((pair[1].0.z - pair[0].0.z).abs() - 1.).abs() < 1e-9);
+                }
+                let last = arcs.last().unwrap().0.z;
+                let high = operation.z_bottom + expected_travel;
+                assert_eq!(
+                    last,
+                    if hand == Hand::Right {
+                        high
+                    } else {
+                        operation.z_bottom
+                    }
+                );
+                assert_eq!(
+                    high + f64::from(teeth - 1) * operation.pitch,
+                    operation.z_top
+                );
+            }
+        }
     }
 
     /// The blind-hole allowance validates the drilled depth: too shallow errors, deep

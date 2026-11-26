@@ -130,7 +130,7 @@ impl EngraveStrategy {
             }
         };
         crate::guards::warn_plunge(op.id, "engrave", tool, &mut diagnostics);
-        crate::guards::warn_axial_reach(op.id, "engrave", tool, op.depth, &mut diagnostics);
+        crate::guards::warn_axial_cut(op.id, "engrave", tool, op.depth, &mut diagnostics);
 
         if op.chain.len() < 2 {
             diagnostics.push(Diagnostic::error(format!(

@@ -397,6 +397,12 @@ impl App {
     /// Validation, previews, creation and Apply consume the same source graph,
     /// including parameters whose sections have been collapsed.
     pub(super) fn parsed_field_value(&self, field: Field) -> Result<f64, String> {
+        if field == Field::ShankDiameter && self.shank_diameter_follows_tool() {
+            if self.inspected_tool_kind().is_some_and(ToolKind::is_side_cutting_disc) {
+                return Err("Side-cutting discs require an explicit shank or arbor diameter".into());
+            }
+            return self.parsed_field_value(Field::ToolDiameter);
+        }
         if let (Some(parameter), Some(op)) = (parameter(field), self.parameter_operation()) {
             if matches!(field, Field::CuttingSpeed | Field::FeedPerTooth) {
                 if let Some(source) = self
@@ -536,6 +542,13 @@ impl App {
         Some(fmt_num(pocket.concentric_stepover(tool.diameter)))
     }
     pub(super) fn saved_field_source(&self, field: Field) -> Option<String> {
+        if field == Field::ShankDiameter
+            && self
+                .inspected_tool()
+                .is_some_and(|tool| tool.shank_diameter == 0.0)
+        {
+            return Some(TOOL_DIAMETER_FORMULA.into());
+        }
         if field == Field::PocketStepover {
             if let Some(source) = self
                 .parameter_operation()

@@ -239,7 +239,14 @@ fn catalog_details_round_trip_and_old_tools_load_without_them() {
     let loaded: ToolLibrary = serde_json::from_str(&encoded).unwrap();
     assert_eq!(loaded.tools[0], tool);
     let mut legacy = serde_json::to_value(&tool).unwrap();
-    for field in ["description", "manufacturer", "product_id", "product_link", "cutter_material", "coating"] {
+    for field in [
+        "description",
+        "manufacturer",
+        "product_id",
+        "product_link",
+        "cutter_material",
+        "coating",
+    ] {
         legacy.as_object_mut().unwrap().remove(field);
     }
     let loaded: Tool = serde_json::from_value(legacy).unwrap();

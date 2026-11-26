@@ -789,7 +789,6 @@ mod tests {
     use cam_cldata::{MoveKind, Tag};
     use std::time::Duration;
 
-
     fn tag() -> Tag {
         Tag::new(7, MoveKind::Cutting)
     }
@@ -910,15 +909,24 @@ mod tests {
     pub(super) fn collision_player() -> SimulationPlayer {
         let mut controller = AppController::new(crate::default_machine());
         controller.edit_setup(|setup| {
-            setup.tools = vec![cam_model::Tool {
-                number: 2,
-                diameter: 4.,
-                neck_diameter: 2.,
-                length: 30.,
-                flute_length: 10.,
-                kind: ToolKind::ThreadMill { pitch: None },
-                ..Default::default()
-            }];
+            setup.tools = vec![
+                cam_model::Tool {
+                    number: 2,
+                    diameter: 4.,
+                    neck_diameter: 2.,
+                    length: 30.,
+                    flute_length: 10.,
+                    kind: ToolKind::ThreadMill { pitch: None },
+                    ..Default::default()
+                },
+                cam_model::Tool {
+                    number: 1,
+                    diameter: 4.,
+                    length: 30.,
+                    flute_length: 10.,
+                    ..Default::default()
+                },
+            ];
         });
         let program = Program {
             steps: vec![
@@ -932,6 +940,9 @@ mod tests {
                     feed: 60.,
                     tag: Tag::new(7, MoveKind::Plunge),
                 },
+                // A separate cut and link after the blocked plunge exercise
+                // playback past the collision and regeneration on rewind.
+                Step::ToolChange { tool: 1 },
                 Step::Linear {
                     to: Point3::new(3., 0., -3.),
                     feed: 60.,
@@ -991,13 +1002,7 @@ mod tests {
         let setup = Arc::make_mut(&mut player.inputs.document).setup_mut();
         setup.tools[0].diameter = 2.;
         setup.tools[0].neck_diameter = 1.;
-        setup.tools.push(cam_model::Tool {
-            number: 1,
-            diameter: 8.,
-            length: 30.,
-            flute_length: 10.,
-            ..Default::default()
-        });
+        setup.tools[1].diameter = 8.;
         player.inputs.min = [-6., -6., 0.];
         player.inputs.max = [6., 6., 5.];
         player.inputs.preview_resolution = Some(0.125);
@@ -1124,7 +1129,7 @@ mod tests {
             player.tick();
             drain_player(&mut player);
             assert!(!player.playing);
-            assert_eq!(player.collision.as_ref().unwrap().step_index, Some(4));
+            assert_eq!(player.collision.as_ref().unwrap().step_index, Some(5));
             assert!(player.position > 8. && player.position < 11.);
 
             player.seek(0.);

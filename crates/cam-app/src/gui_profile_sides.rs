@@ -1104,5 +1104,4 @@ mod tests {
         assert!(app.controller.undo());
         assert_eq!(app.controller.document(), &before);
     }
-
 }

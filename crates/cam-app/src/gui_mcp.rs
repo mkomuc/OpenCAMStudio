@@ -212,7 +212,11 @@ impl App {
         self.save_preferences_to(settings, &settings_path()?)
     }
 
-    pub(super) fn save_preferences_to(&mut self, settings: crate::Settings, path: &Path) -> io::Result<()> {
+    pub(super) fn save_preferences_to(
+        &mut self,
+        settings: crate::Settings,
+        path: &Path,
+    ) -> io::Result<()> {
         let directory = config_directory(path)?;
         std::fs::create_dir_all(directory)?;
         let pending = tempfile::NamedTempFile::new_in(directory)?;

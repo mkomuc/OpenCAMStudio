@@ -1171,8 +1171,6 @@ mod tests {
         assert!(saved.contours().all(|contour| !contour.closed));
     }
 
-
-
     fn app() -> App {
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());

@@ -13,18 +13,16 @@ pub(super) fn floor_loop_ids(
     let mut kept = Vec::new();
     for &id in &face.loop_ids {
         let wire = view.wire(id)?;
-        if !descends_below_floor(view, wire, floor) || is_annular_inner_rim(view, wire, outer_center) {
+        if !descends_below_floor(view, wire, floor)
+            || is_annular_inner_rim(view, wire, outer_center)
+        {
             kept.push(id);
         }
     }
     Ok(kept)
 }
 
-fn is_annular_inner_rim(
-    view: &View,
-    wire: &CadLoop,
-    outer_center: Option<[f64; 3]>,
-) -> bool {
+fn is_annular_inner_rim(view: &View, wire: &CadLoop, outer_center: Option<[f64; 3]>) -> bool {
     // Concentric closed wires define the two rims of an annular floor.
     // The inner rim bounds the selected face at every diameter.
     outer_center.is_some_and(|outer| {

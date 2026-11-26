@@ -2245,7 +2245,8 @@ mod tests {
                 .iter()
                 .all(|step| matches!(step, Step::Comment(_))));
             assert!(job.diagnostics.iter().any(|finding| {
-                finding.op == Some(0) && finding.message.contains("requires a side-cutting strategy")
+                finding.op == Some(0)
+                    && finding.message.contains("requires a side-cutting strategy")
             }));
         }
     }
@@ -3466,6 +3467,7 @@ mod tests {
                     number: 1,
                     profile: cam_sim::ToolProfile::flat(3.),
                     noncutting_tip_radius,
+                    thread_body: None,
                 }],
             );
             if noncutting_tip_radius.is_none() {

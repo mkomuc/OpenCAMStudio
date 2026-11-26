@@ -282,6 +282,13 @@ impl CarveStrategy {
         // flat land behind.
         let (w_full, flat) = shape_facts(&region, op.offset, w_max);
         let full_depth = vtip_depth_for_half_width(alpha, tip_radius, w_full);
+        crate::guards::warn_tool_reach(
+            op.id,
+            "carve",
+            tool,
+            full_depth.min(op.depth),
+            &mut diagnostics,
+        );
         let reach = if full_depth > max_depth + 1e-9 {
             format!(", though tool {} reaches only {max_depth:.3} mm", op.tool)
         } else {
@@ -358,14 +365,6 @@ impl CarveStrategy {
                 if matches!(cp.plunge, Plunge::Straight) {
                     crate::guards::warn_plunge(op.id, "carve clearing", ctool, &mut diagnostics);
                 }
-                crate::guards::warn_axial_reach(
-                    op.id,
-                    "carve clearing",
-                    ctool,
-                    op.depth,
-                    &mut diagnostics,
-                );
-
                 let r = ctool.radius();
                 // The same spacing rule a pocket uses, from the same field — and the
                 // same validation: rejected rather than clamped, so a hand-edited file
@@ -398,6 +397,20 @@ impl CarveStrategy {
                         op.id
                     );
                 }
+                crate::guards::warn_tool_reach(
+                    op.id,
+                    "carve clearing",
+                    ctool,
+                    op.depth,
+                    &mut diagnostics,
+                );
+                crate::guards::warn_cut_depth(
+                    op.id,
+                    "carve clearing",
+                    ctool,
+                    crate::guards::max_stepdown(op.top, &levels),
+                    &mut diagnostics,
+                );
                 // `offset` is a real finishing allowance here: how far the end mill stays
                 // off the carved surface, leaving that skin for the V-bit — which cuts it
                 // better, with the flank of its cone rather than a corner. Nothing is left
@@ -2587,10 +2600,13 @@ mod tests {
     }
 
     #[test]
-    fn a_clearing_tool_that_cannot_reach_the_depth_warns_and_generates() {
+    fn a_clearing_cut_beyond_the_flutes_warns_and_generates() {
         let mut o = op(2.5);
-        o.clear = Some(clearing(2));
+        let mut clear = clearing(2);
+        clear.params.stepdown = 3.0;
+        o.clear = Some(clear);
         let mut short = endmill(2, 4.0);
+        short.shoulder_length = 10.0;
         short.flute_length = 2.0;
         let result = run_with(o, &[vbit(90.0, 0.0), short]);
         assert!(!result.has_errors(), "{:?}", result.diagnostics);

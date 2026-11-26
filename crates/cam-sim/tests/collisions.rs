@@ -1,5 +1,8 @@
 use cam_cldata::{ArcDir, MoveKind, Point3, Program, Step, Tag};
-use cam_sim::{simulate, CollisionKind, SimOptions, SimTool, SimulationCache, ToolProfile};
+use cam_sim::{
+    simulate, CollisionKind, ProfileShape, SimOptions, SimTool, SimulationCache, ThreadBody,
+    ToolProfile,
+};
 
 fn tag(kind: MoveKind) -> Tag {
     Tag {
@@ -15,11 +18,13 @@ fn tools() -> [SimTool; 2] {
             number: 1,
             profile: ToolProfile::flat(2.),
             noncutting_tip_radius: None,
+            thread_body: None,
         },
         SimTool {
             number: 2,
             profile: ToolProfile::flat(2.),
             noncutting_tip_radius: Some(1.),
+            thread_body: None,
         },
     ]
 }
@@ -155,6 +160,91 @@ fn a_thread_mill_can_side_cut_a_descending_helix_with_its_tip_in_a_prepared_hole
         result.field.sample(3.2, 0.) < 0.,
         "the teeth can cut the side wall"
     );
+}
+
+#[test]
+fn thread_helix_reports_shank_contact_while_the_cutting_tip_is_clear() {
+    let mut table = tools();
+    table[0].profile = ToolProfile::flat(3.);
+    table[1] = SimTool {
+        number: 2,
+        profile: ToolProfile {
+            radius: 1.,
+            shape: ProfileShape::Thread {
+                root_radius: 0.5,
+                tooth_height: 0.6,
+                first_tooth_offset: 0.,
+                pitch: 0.,
+                tooth_count: 1,
+            },
+        },
+        noncutting_tip_radius: Some(0.5),
+        thread_body: Some(ThreadBody {
+            neck_radius: 0.5,
+            shoulder: 3.,
+            shank_radius: 1.75,
+            length: 10.,
+        }),
+    };
+    let mut program = plunge(1, MoveKind::Plunge);
+    let Step::Linear { to, .. } = &mut program.steps[2] else {
+        unreachable!()
+    };
+    to.z = -5.;
+    program.steps.extend([
+        Step::Rapid {
+            to: Point3::new(0., 0., 2.),
+            tag: tag(MoveKind::Retract),
+        },
+        Step::ToolChange { tool: 2 },
+        Step::Linear {
+            to: Point3::new(0., 0., -1.5),
+            feed: 60.,
+            tag: tag(MoveKind::Plunge),
+        },
+        Step::Linear {
+            to: Point3::new(2.2, 0., -1.5),
+            feed: 60.,
+            tag: tag(MoveKind::LeadIn),
+        },
+        Step::Arc {
+            end: Point3::new(2.2, 0., -4.),
+            center: Point3::new(0., 0., -1.5),
+            dir: ArcDir::Cw,
+            feed: 60.,
+            tag: tag(MoveKind::Cutting),
+        },
+    ]);
+    let mut cache = SimulationCache::default();
+    let mut run = |tools: &[SimTool]| {
+        cache
+            .simulate_controlled(
+                &program,
+                [-5., -5., -6.],
+                [5., 5., 0.],
+                &options(),
+                tools,
+                &|| false,
+                |_, _| {},
+            )
+            .unwrap()
+    };
+    let blocked = run(&table);
+    assert_eq!(blocked.collisions.len(), 1);
+    let hit = &blocked.collisions[0];
+    assert_eq!(hit.kind, CollisionKind::NonCuttingThroughStock);
+    assert_eq!(hit.step_index, Some(program.steps.len() - 1));
+    assert_eq!(
+        (hit.op_id, hit.pattern_id, hit.instance_index),
+        (Some(7), Some(9), Some(2))
+    );
+    assert!(hit.message.contains("shank"), "{hit:?}");
+    assert!((hit.fraction - 0.6004).abs() < 1e-5, "{hit:?}");
+
+    table[1].thread_body.as_mut().unwrap().shoulder = 6.;
+    let clear = run(&table);
+    assert!(clear.collisions.is_empty(), "{:?}", clear.collisions);
+    assert!(clear.removed_volume > blocked.removed_volume);
 }
 
 #[test]

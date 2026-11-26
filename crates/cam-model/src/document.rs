@@ -1311,7 +1311,8 @@ impl PocketOp {
     /// Keeps older overlap formulas and their dependencies live in the inspector.
     pub fn legacy_stepover_expression(&self) -> Option<&'static str> {
         use crate::OperationParameter::{MaximumStepover, Overlap, PocketOverlap};
-        if self.maximum_stepover.is_some() || self.parameter_expressions.contains_key(&MaximumStepover)
+        if self.maximum_stepover.is_some()
+            || self.parameter_expressions.contains_key(&MaximumStepover)
         {
             None
         } else if self.parameter_expressions.contains_key(&PocketOverlap) {

@@ -5,15 +5,29 @@ use super::{Heightfield, SurfaceMesh, MESH_TILE_SIZE};
 use rayon::prelude::*;
 
 #[derive(Clone, Copy)]
-struct Corner {
-    xy: [f32; 2],
-    wall_normal: Option<[f32; 2]>,
+pub(super) struct Corner {
+    pub(super) xy: [f32; 2],
+    pub(super) wall_normal: Option<[f32; 2]>,
     flat_cut_rim: bool,
+    roundover: Option<Roundover>,
+}
+
+#[derive(Clone, Copy)]
+struct Roundover {
+    heights: [f32; 2],
+    cut: u32,
 }
 
 impl Corner {
+    fn follows_roundover(&self, z: f32) -> bool {
+        self.roundover
+            .is_some_and(|round| (round.heights[0]..=round.heights[1]).contains(&z))
+    }
+
     fn separates(&self, lower: f32, upper: f32, stock_top: f32, wall_step: f32) -> bool {
-        upper - lower > wall_step || (self.flat_cut_rim && lower < stock_top && upper == stock_top)
+        (upper - lower > wall_step
+            && !(self.follows_roundover(lower) && self.follows_roundover(upper)))
+            || (self.flat_cut_rim && lower < stock_top && upper == stock_top)
     }
 }
 
@@ -284,6 +298,7 @@ impl Heightfield {
             xy: self.grid_xy(x, y),
             wall_normal: None,
             flat_cut_rim: false,
+            roundover: None,
         };
         let left = x.saturating_sub(1);
         let right = x.min(self.nx - 1);
@@ -295,6 +310,7 @@ impl Heightfield {
             return corner;
         }
         corner.flat_cut_rim = self.flat_cut_rim(ids, heights);
+        corner.roundover = self.roundover_at(ids, heights, corner.xy);
         if x == 0 || y == 0 || x == self.nx || y == self.ny {
             return corner;
         }
@@ -446,6 +462,84 @@ impl Heightfield {
         })
     }
 
+    /// The vertical tangent of a roundover can exceed the wall step in a
+    /// single cell. Samples from the same level pass still form one surface.
+    fn roundover_at(&self, ids: [usize; 4], heights: [f32; 4], xy: [f32; 2]) -> Option<Roundover> {
+        let candidates = ids.map(|i| self.winners[i]);
+        let [x, y] = xy.map(f64::from);
+        for id in candidates {
+            let Some(reference) = self.cuts.get(id as usize) else {
+                continue;
+            };
+            if !matches!(
+                reference.tool.shape,
+                crate::ProfileShape::RadiusMill { corner_radius, tip_length: 0. }
+                    if corner_radius > 0. && corner_radius <= reference.tool.radius
+            ) || reference.a[2] != reference.b[2]
+            {
+                continue;
+            }
+            let mut range = [f32::INFINITY, f32::NEG_INFINITY];
+            let mut nearest = (f64::INFINITY, id);
+            for (id, height) in candidates.into_iter().zip(heights) {
+                let Some(cut) = self.cuts.get(id as usize) else {
+                    continue;
+                };
+                if cut.operation == reference.operation
+                    && cut.tool == reference.tool
+                    && cut.a[2] == reference.a[2]
+                    && cut.b[2] == reference.b[2]
+                {
+                    range = [range[0].min(height), range[1].max(height)];
+                    let (_, distance) = cut.projection(x, y);
+                    if distance < nearest.0 {
+                        nearest = (distance, id);
+                    }
+                }
+            }
+            if range[0] < range[1] {
+                return Some(Roundover {
+                    heights: range,
+                    cut: nearest.1,
+                });
+            }
+        }
+        None
+    }
+
+    pub(super) fn roundover_surface(&self, corner: Corner, z: f32) -> Option<(f32, [f32; 3])> {
+        if !corner.follows_roundover(z) {
+            return None;
+        }
+        let cut = &self.cuts[corner.roundover?.cut as usize];
+        let crate::ProfileShape::RadiusMill { corner_radius, .. } = cut.tool.shape else {
+            return None;
+        };
+        let [x, y] = corner.xy.map(f64::from);
+        let (t, distance2) = cut.projection(x, y);
+        let distance = distance2.sqrt();
+        let height = cut.bottom(t, distance2);
+        // At the bore wall, the roundover meets the cylindrical surface
+        // tangentially even if the contour vertex drifts just inside the tip.
+        if distance < cut.tool.radius - corner_radius && corner.wall_normal.is_none() {
+            return Some((height as f32, [0., 0., 1.]));
+        }
+        let horizontal = (cut.tool.radius - distance).clamp(0., corner_radius);
+        let vertical = (height - cut.a[2]).max(0.);
+        let direction = |point, axis: usize| {
+            (cut.a[axis] + t * (cut.b[axis] - cut.a[axis]) - point) / distance.max(1e-9)
+        };
+        let length = horizontal.hypot(vertical).max(1e-9);
+        Some((
+            (height as f32).min(self.top),
+            [
+                (direction(x, 0) * horizontal / length) as f32,
+                (direction(y, 1) * horizontal / length) as f32,
+                (vertical / length) as f32,
+            ],
+        ))
+    }
+
     /// Surface at a shared corner, excluding neighbours across a vertical wall.
     /// Compatible slopes share heights and normals, so curved floors shade smoothly.
     fn corner_surface(
@@ -456,6 +550,9 @@ impl Heightfield {
         wall_step: f32,
         corner: Corner,
     ) -> (f32, [f32; 3], bool) {
+        if let Some((height, normal)) = self.roundover_surface(corner, z) {
+            return (height, normal, true);
+        }
         let (x, y) = (x as isize, y as isize);
         let mut h =
             [(x - 1, y - 1), (x, y - 1), (x, y), (x - 1, y)].map(|(i, j)| self.height(i, j));
@@ -641,9 +738,9 @@ impl Heightfield {
             }
             for x in x0..x1 {
                 if self.detailed_column(x, y) {
-                    let xy = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)]
-                        .map(|(i, j)| corners[(j - y0) * corner_width + i - x0].xy);
-                    self.mesh_column(x, y, f, xy, &mut mesh);
+                    let c = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)]
+                        .map(|(i, j)| corners[(j - y0) * corner_width + i - x0]);
+                    self.mesh_column(x, y, f, c, &mut mesh);
                     continue;
                 }
                 let z = self.z[y * self.nx + x];
@@ -759,6 +856,42 @@ impl Heightfield {
 mod tests {
     use super::*;
     use crate::ToolProfile;
+
+    #[test]
+    fn steep_roundover_is_meshed_as_a_continuous_curve_above_the_wall() {
+        let mut field = Heightfield::new([-12., -10.], [12., 10.], 0.125, 3.);
+        field.cut_segment([-8., 0., -3.], [8., 0., -3.], 3.);
+        field.cut_segment_profile_controlled(
+            [-8., 0., 0.],
+            [8., 0., 0.],
+            &ToolProfile {
+                radius: 7.,
+                shape: crate::ProfileShape::RadiusMill {
+                    corner_radius: 4.,
+                    tip_length: 0.,
+                },
+            },
+            Some(2),
+            &|| false,
+        );
+        let mesh = field.to_solid_mesh(-3.);
+        let mut curved = 0;
+        for ((p, n), op) in mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .zip(&mesh.operations)
+        {
+            if *op != Some(2) || p[0].abs() > 5. || !(3.05..3.95).contains(&p[1]) {
+                continue;
+            }
+            let expected = (16. - (7. - p[1]).powi(2)).sqrt();
+            assert!((p[2] - expected).abs() < 1e-5, "roundover vertex {p:?}");
+            assert!(n[1] < 0. && n[2] > 0., "roundover normal {n:?}");
+            curved += 1;
+        }
+        assert!(curved > 100);
+    }
 
     #[test]
     fn rolled_corner_uses_all_nearby_cutter_sweeps() {
@@ -945,6 +1078,7 @@ mod tests {
             shape: crate::ProfileShape::Thread {
                 root_radius: 1.,
                 tooth_height: 1.,
+                first_tooth_offset: 0.,
                 pitch: 2.,
                 tooth_count: 2,
             },
@@ -1064,6 +1198,7 @@ mod tests {
             shape: crate::ProfileShape::Thread {
                 root_radius: 1.,
                 tooth_height: 1.,
+                first_tooth_offset: 0.,
                 pitch: 2.,
                 tooth_count: 2,
             },

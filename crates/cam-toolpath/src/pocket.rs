@@ -219,6 +219,18 @@ impl PocketStrategy {
                 regions.iter().map(|r| (r, None)).collect()
             };
             let mut combined = StrategyResult::default();
+            if by_depth && depths.len() > 1 {
+                if let Some(tool) = env.tool(op.tool) {
+                    crate::guards::warn_tool_reach(
+                        op.id,
+                        "pocket",
+                        tool,
+                        env.heights.top_of_stock + op.depth,
+                        &mut combined.diagnostics,
+                    );
+                }
+            }
+
             for (region, level) in passes {
                 single.boundary = region.outer().clone();
                 single.islands = region.holes().to_vec();
@@ -307,7 +319,7 @@ impl PocketStrategy {
         let Some(tool) = env.tool(op.tool) else {
             fail!("operation {}: tool {} is not in the setup", op.id, op.tool);
         };
-        crate::guards::warn_side_milling(op.id, "pocket", tool, op.depth, &mut diagnostics);
+        crate::guards::warn_side_milling(op.id, "pocket", tool, &mut diagnostics);
         crate::guards::warn_plunge(op.id, "pocket", tool, &mut diagnostics);
         // A pocket has a floor as well as walls; a non-flat tool only warns.
         crate::guards::warn_flat_floor(op.id, "pocket", tool, &mut diagnostics);
@@ -378,6 +390,16 @@ impl PocketStrategy {
                 op.id
             );
         }
+        let top = env.heights.top_of_stock;
+        let depth = top - floor;
+        let cut_depth = if op.finishing.enabled && op.finishing.finish_only_final {
+            depth
+        } else {
+            crate::guards::max_stepdown(top, &levels)
+        };
+        crate::guards::warn_tool_reach(op.id, "pocket", tool, depth, &mut diagnostics);
+        crate::guards::warn_cut_depth(op.id, "pocket", tool, cut_depth, &mut diagnostics);
+
         let mut program = Program::new();
         // Clear through the shared engine: engagement-spaced, climb-oriented,
         // stay-down inside-out rings. Explicit finishing owns the wall leads;

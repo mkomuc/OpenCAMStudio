@@ -1,6 +1,8 @@
 //! Inspector adapters for the shared profile pass model.
 use super::*;
-use parameter_options::{operation_picker, profile_toggle, CORNER, PROFILE_FINISH, PROFILE_MULTIPLE};
+use parameter_options::{
+    operation_picker, profile_toggle, CORNER, PROFILE_FINISH, PROFILE_MULTIPLE,
+};
 pub(super) const CUT_ORDER_HELP: &str = "By contour completes each contour before the next. By depth visits contours at each depth before going deeper. By radial pass completes each radial stage across contours and depths before the next. Outside stock clearing runs first when enabled.";
 pub(super) const CORNER_HELP: &str = "Roll around corner uses a rounded offset at outside corners. Keep sharp corner extends the offset edges to their intersection; very acute corners are bevelled to limit the extension.";
 pub(super) const WALL_ALLOWANCE_HELP: &str = "Signed offset of the final profile wall from the selected contour. Positive leaves material on the part; negative cuts past the nominal wall. This allowance remains after the finishing passes.";
@@ -845,11 +847,8 @@ impl App {
                 list = list.push(toggle(Toggle::BothWays));
                 list = list.push(number(Number::TangentialExtensionDistance));
             }
-            list = list.optional_section(
-                "Finishing passes",
-                p.passes.finishing,
-                Some(PROFILE_FINISH),
-            );
+            list =
+                list.optional_section("Finishing passes", p.passes.finishing, Some(PROFILE_FINISH));
             if p.passes.finishing {
                 for n in [
                     Number::FinishCount,

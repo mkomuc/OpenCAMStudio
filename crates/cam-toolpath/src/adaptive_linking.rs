@@ -978,6 +978,7 @@ mod tests {
                     number: 1,
                     profile: cam_sim::ToolProfile::flat(3.),
                     noncutting_tip_radius: None,
+                    thread_body: None,
                 }],
             );
             assert!(sim.is_clean(), "{lead:?}: {:?}", sim.collisions);

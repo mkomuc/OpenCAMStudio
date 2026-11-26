@@ -2,12 +2,16 @@
 //! the planner assembles links, datums, spindle and shutdown on every run.
 use crate::{CancelToken, JobEnv, StrategyResult};
 use cam_cldata::SpindleDir;
-use cam_model::{CuttingHeights, Heights, Operation, OperationParameter, Plunge, StockToLeave, Tool};
+use cam_model::{
+    CuttingHeights, Heights, Operation, OperationParameter, Plunge, StockToLeave, Tool,
+};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Dependencies {
+    #[serde(default)]
+    cutter_verification_revision: u32,
     #[serde(default)]
     pocket_stock_revision: u32,
     #[serde(default)]
@@ -69,6 +73,25 @@ pub(crate) struct CacheExtras {
     pub cutting_heights: Option<CuttingHeights>,
 }
 
+/// Revision of the cutter-suitability checks for operations that use them.
+pub fn cutter_verification_revision(operation: &Operation) -> u32 {
+    if matches!(operation, Operation::Thread(_)) {
+        return 2;
+    }
+    u32::from(matches!(
+        operation,
+        Operation::Adaptive(_)
+            | Operation::Bore(_)
+            | Operation::Carve(_)
+            | Operation::Chamfer(_)
+            | Operation::Drill(_)
+            | Operation::Engrave(_)
+            | Operation::Face(_)
+            | Operation::Pocket(_)
+            | Operation::Profile(_)
+    ))
+}
+
 /// Revision for operations that can emit concentric clearing passes.
 pub fn concentric_clearing_revision(operation: &Operation) -> Option<u32> {
     let can_clear = match operation {
@@ -79,7 +102,8 @@ pub fn concentric_clearing_revision(operation: &Operation) -> Option<u32> {
         Operation::Pocket(_) | Operation::Adaptive(_) => true,
         Operation::Profile(p) => {
             p.stepover > 0.
-                || p.parameter_expressions.contains_key(&OperationParameter::Stepover)
+                || p.parameter_expressions
+                    .contains_key(&OperationParameter::Stepover)
         }
         Operation::Carve(p) => p.clear.is_some(),
         _ => false,
@@ -131,6 +155,7 @@ impl OperationCache {
             axial,
         };
         let key = Dependencies {
+            cutter_verification_revision: cutter_verification_revision(op),
             // Frontier paths use configured leads and exact shared/overlapped seams.
             // This also applies to 2D operations using the shared clearer.
             adaptive_clearing_revision: 3 * u32::from(match op {

@@ -20,6 +20,8 @@ struct State {
     field: Heightfield,
     tool: ToolProfile,
     noncutting_tip_radius: Option<f64>,
+    thread_body: Option<ThreadBody>,
+    floor: f64,
     cur: Option<Point3>,
     collisions: Vec<Collision>,
 }
@@ -36,6 +38,8 @@ impl State {
             field,
             tool: ToolProfile::flat(config.options.tool_radius),
             noncutting_tip_radius: None,
+            thread_body: None,
+            floor: config.min[2],
             cur: None,
             collisions: Vec::new(),
         }
@@ -53,6 +57,7 @@ impl State {
                 let tool = tools.iter().find(|t| t.number == *number);
                 self.tool = tool.map_or(default_tool, |t| t.profile);
                 self.noncutting_tip_radius = tool.and_then(|t| t.noncutting_tip_radius);
+                self.thread_body = tool.and_then(|t| t.thread_body);
             }
             Step::Rapid { to, tag } | Step::Linear { to, tag, .. } => {
                 if let Some(a) = self.cur {
@@ -158,8 +163,71 @@ impl State {
             tag.kind,
             MoveKind::Link | MoveKind::Retract | MoveKind::Traverse
         );
+        let contact = if let Some(body) = self.thread_body {
+            let axial_descent = (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-9 && b[2] < a[2] - 1e-9;
+            collision::first_thread_contact(
+                &self.field,
+                a,
+                b,
+                self.floor,
+                self.tool,
+                body,
+                rapid || reposition || axial_descent,
+                cancelled,
+            )
+            .map(|(fraction, at, part)| {
+                (
+                    fraction,
+                    at,
+                    format!(
+                        "Thread mill {part} enters remaining stock at tool tip Z {:.3}",
+                        at[2]
+                    ),
+                )
+            })
+        } else {
+            self.tip_contact(a, b, rapid, reposition, cancelled)
+        };
+        if let Some((fraction, at, message)) = contact {
+            self.collisions.push(Collision {
+                kind: if rapid {
+                    CollisionKind::RapidThroughStock
+                } else {
+                    CollisionKind::NonCuttingThroughStock
+                },
+                at,
+                message,
+                op_id: Some(tag.op_id),
+                pattern_id: tag.pattern_id,
+                instance_index: tag.instance_index,
+                step_index: Some(index),
+                fraction: range.0 + fraction * (range.1 - range.0),
+            });
+            return true;
+        }
+        if !rapid && !reposition {
+            self.field.set_cut_source(index, range);
+            self.field
+                .cut_segment_profile_controlled(a, b, &self.tool, Some(tag.op_id), cancelled);
+        }
+        false
+    }
+
+    fn tip_contact(
+        &self,
+        a: [f64; 3],
+        b: [f64; 3],
+        rapid: bool,
+        reposition: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<(f64, [f64; 3], String)> {
         let axial = (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-9;
         let lifting = axial && b[2] >= a[2];
+        let needs_plunge_clearance = axial
+            && matches!(
+                self.tool.shape,
+                ProfileShape::Flat | ProfileShape::Thread { .. }
+            );
         let probe = if rapid || reposition {
             (!lifting).then_some(self.tool)
         } else if b[2] < a[2] - 1e-9 {
@@ -170,12 +238,7 @@ impl State {
                     // needs clearance for its entire diameter on a straight plunge.
                     // Checking only its neck would miss a core surrounding a small
                     // pilot hole. Side-cutting helices still use the tip-only probe.
-                    if axial
-                        && matches!(
-                            self.tool.shape,
-                            ProfileShape::Flat | ProfileShape::Thread { .. }
-                        )
-                    {
+                    if needs_plunge_clearance {
                         self.tool
                     } else {
                         ToolProfile::flat(radius)
@@ -183,52 +246,25 @@ impl State {
                 })
         } else {
             None
+        }?;
+        let (fraction, at, stock) = collision::first_contact(&self.field, a, b, &probe, cancelled)?;
+        let motion = if rapid {
+            "rapid"
+        } else if reposition {
+            "non-cutting feed"
+        } else if needs_plunge_clearance {
+            "non-plunging cutter"
+        } else {
+            "non-cutting tool tip"
         };
-        if let Some(tool) = probe {
-            if let Some((fraction, at, stock)) =
-                collision::first_contact(&self.field, a, b, &tool, cancelled)
-            {
-                let kind = if rapid {
-                    CollisionKind::RapidThroughStock
-                } else {
-                    CollisionKind::NonCuttingThroughStock
-                };
-                let motion = if rapid {
-                    "rapid"
-                } else if reposition {
-                    "non-cutting feed"
-                } else if axial
-                    && matches!(
-                        self.tool.shape,
-                        ProfileShape::Flat | ProfileShape::Thread { .. }
-                    )
-                {
-                    "non-plunging cutter"
-                } else {
-                    "non-cutting tool tip"
-                };
-                self.collisions.push(Collision {
-                    kind,
-                    at,
-                    message: format!(
-                        "{motion} at Z {:.3} enters stock standing at Z {stock:.3}",
-                        at[2]
-                    ),
-                    op_id: Some(tag.op_id),
-                    pattern_id: tag.pattern_id,
-                    instance_index: tag.instance_index,
-                    step_index: Some(index),
-                    fraction: range.0 + fraction * (range.1 - range.0),
-                });
-                return true;
-            }
-        }
-        if !rapid && !reposition {
-            self.field.set_cut_source(index, range);
-            self.field
-                .cut_segment_profile_controlled(a, b, &self.tool, Some(tag.op_id), cancelled);
-        }
-        false
+        Some((
+            fraction,
+            at,
+            format!(
+                "{motion} at Z {:.3} enters stock standing at Z {stock:.3}",
+                at[2]
+            ),
+        ))
     }
 }
 
