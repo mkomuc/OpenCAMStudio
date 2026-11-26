@@ -36,6 +36,76 @@ impl Sweep {
         let d2 = (x - self.a[0] - t * self.dx).powi(2) + (y - self.a[1] - t * self.dy).powi(2);
         (t, d2)
     }
+
+    /// Z ranges swept by one tooth, relative to its axial offset on the tool.
+    /// A column can enter the tooth's cutting annulus on both sides of the
+    /// non-cutting core, so the two encounters must be evaluated independently.
+    pub(super) fn thread_intervals(
+        &self,
+        x: f64,
+        y: f64,
+        root: f64,
+        height: f64,
+    ) -> [Option<[f64; 2]>; 2] {
+        let dx = x - self.a[0];
+        let dy = y - self.a[1];
+        let dz = self.b[2] - self.a[2];
+        let radius = self.tool.radius;
+        let flank_slope = height * 0.5 / (radius - root);
+        if self.len2 < 1e-24 {
+            let distance = dx.hypot(dy);
+            if distance < root || distance > radius {
+                return [None; 2];
+            }
+            let flank = (distance - root) * flank_slope;
+            return [
+                Some([
+                    self.a[2].min(self.b[2]) + flank,
+                    self.a[2].max(self.b[2]) + height - flank,
+                ]),
+                None,
+            ];
+        }
+
+        let length = self.len2.sqrt();
+        let along = (dx * self.dx + dy * self.dy) / length;
+        let across = (dx * self.dy - dy * self.dx).abs() / length;
+        if across > radius {
+            return [None; 2];
+        }
+        let reach = (radius * radius - across * across).max(0.).sqrt();
+        let start = (-along).max(-reach);
+        let end = (length - along).min(reach);
+        let z_slope = dz / length;
+        let extreme = if z_slope.abs() < flank_slope {
+            // The lower flank is convex along the move and the upper flank is
+            // concave. Their extrema can be displaced from closest approach.
+            -across * z_slope / (flank_slope * flank_slope - z_slope * z_slope).sqrt()
+        } else if z_slope > 0. {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        let interval = |start: f64, end: f64| {
+            if end < start {
+                return None;
+            }
+            let lower = extreme.clamp(start, end);
+            let upper = (-extreme).clamp(start, end);
+            let z = |s: f64| self.a[2] + dz * ((along + s) / length).clamp(0., 1.);
+            let flank = |s: f64| (s.hypot(across) - root).max(0.) * flank_slope;
+            Some([z(lower) + flank(lower), z(upper) + height - flank(upper)])
+        };
+        if across < root {
+            let core = (root * root - across * across).sqrt();
+            [
+                interval(start, end.min(-core)),
+                interval(start.max(core), end),
+            ]
+        } else {
+            [interval(start, end), None]
+        }
+    }
     pub fn surface_location(&self, point: [f32; 3]) -> Option<crate::SurfaceLocation> {
         let source = self.source?;
         let t = if self.len2 < 1e-12 && (self.b[2] - self.a[2]).abs() > 1e-12 {

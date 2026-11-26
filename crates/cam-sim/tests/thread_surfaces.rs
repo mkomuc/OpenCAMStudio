@@ -252,3 +252,51 @@ fn full_form_thread_mill_removes_separate_tooth_intervals() {
     }
     assert_eq!(result.field.sample(4.25, 0.), 5.);
 }
+
+#[test]
+fn multi_tooth_helix_clears_the_bore_inside_the_tooth_root() {
+    let mut table = tools();
+    table[1].profile = ToolProfile {
+        radius: 2.,
+        shape: ProfileShape::Thread {
+            root_radius: 2. - 3f64.sqrt() * 0.4,
+            tooth_height: 0.8,
+            first_tooth_offset: 0.,
+            pitch: 0.8,
+            tooth_count: 3,
+        },
+    };
+    let mut program = program(3);
+    for step in &mut program.steps {
+        match step {
+            Step::Arc { end, center, .. } => {
+                end.x = 3.;
+                end.z *= 0.8;
+                center.z *= 0.8;
+            }
+            Step::Linear { to, tag, .. } if tag.kind == MoveKind::LeadIn => to.x = 3.,
+            _ => {}
+        }
+    }
+    let result = run(&program, &table);
+    assert!(result.collisions.is_empty(), "{:?}", result.collisions);
+    let mesh = result.field.to_solid_mesh(0.);
+    assert!(
+        mesh.positions
+            .iter()
+            .zip(&mesh.operations)
+            .all(|(p, op)| *op != Some(1) || !(1.2..3.).contains(&p[2])),
+        "strips of the prepared bore remain in the fully swept thread"
+    );
+    for angle in [0.4f32, 1.9, 3.1, 5.] {
+        let hits = vertical_hits(&mesh, [4.65 * angle.cos(), 4.65 * angle.sin()]);
+        let phase = 0.8 * angle / std::f32::consts::TAU;
+        let flank = 0.35 / 3f32.sqrt();
+        for expected in [2. + phase - flank, 2. + phase + flank] {
+            assert!(
+                hits.iter().any(|z| (z - expected).abs() < 0.04),
+                "angle {angle}: expected flank {expected}, got {hits:?}"
+            );
+        }
+    }
+}

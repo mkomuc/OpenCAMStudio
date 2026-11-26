@@ -217,6 +217,13 @@ impl AppController {
             .iter()
             .map(|a| (a.id, a.revision, &a.source_fingerprint))
             .collect();
+        // Inherited stock can include threads cut in a different setup.
+        let has_thread_mill = inputs.document.setups.iter().any(|setup| {
+            setup
+                .tools
+                .iter()
+                .any(|tool| matches!(tool.kind, ToolKind::ThreadMill { .. }))
+        });
         let bytes = serde_json::to_vec(&(
             (
                 &inputs.document.setups,
@@ -224,7 +231,7 @@ impl AppController {
                 &inputs.document.rotary_indexes,
                 env!("CARGO_PKG_VERSION"),
                 // Verified programs and stock must reflect current machining rules.
-                14u32,
+                if has_thread_mill { 15u32 } else { 14u32 },
             ),
             &inputs.document.excluded_operations,
             &inputs.document.disabled_origins,

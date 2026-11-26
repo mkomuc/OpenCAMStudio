@@ -1,6 +1,6 @@
 //! Sparse Z intervals removed by side-cutting teeth. The ordinary heightfield
 //! remains compact; only columns touched by these finite cuts need extra detail.
-use super::{Heightfield, SurfaceMesh};
+use super::{surface::Corner, Heightfield, SurfaceMesh};
 use crate::{sweep::Sweep, ProfileShape, ToolProfile};
 
 #[derive(Clone, Copy, Debug)]
@@ -115,49 +115,48 @@ impl Heightfield {
             let mut changed = false;
             for x in x0..=x1 {
                 let (cx, cy) = self.center(x, y);
-                let (t, d2) = sweep.projection(cx, cy);
-                let d = d2.sqrt();
-                if d < root_radius || d > tool.radius {
+                let intervals = sweep.thread_intervals(cx, cy, root_radius, tooth_height);
+                if intervals == [None; 2] {
                     continue;
                 }
-                let flank = (d - root_radius) / width * tooth_height * 0.5;
-                let z = a[2] + (b[2] - a[2]) * t;
                 let index = y * self.nx + x;
                 for tooth in 0..tooth_count {
-                    let bottom = z + first_tooth_offset + f64::from(tooth) * pitch;
-                    let lower = (bottom + flank) as f32;
-                    let upper = ((bottom + tooth_height - flank) as f32).min(self.z[index]);
-                    if upper - lower <= 1e-6 {
-                        continue;
-                    }
-                    changed = true;
-                    self.track_removed_interval(index, f64::from(lower), f64::from(upper));
-                    let spans = self.bounded.get_or_default(index);
-                    spans.push(RemovedSpan {
-                        lower,
-                        upper,
-                        lower_op: operation,
-                        upper_op: operation,
-                        lower_source: cut,
-                        upper_source: cut,
-                    });
-                    spans.sort_by(|a, b| a.lower.total_cmp(&b.lower));
-                    let mut count = 0;
-                    for i in 0..spans.len() {
-                        let span = spans[i];
-                        if count > 0 && span.lower <= spans[count - 1].upper + 1e-6 {
-                            let previous = &mut spans[count - 1];
-                            if span.upper > previous.upper {
-                                previous.upper = span.upper;
-                                previous.upper_op = span.upper_op;
-                                previous.upper_source = span.upper_source;
-                            }
-                        } else {
-                            spans[count] = span;
-                            count += 1;
+                    let offset = first_tooth_offset + f64::from(tooth) * pitch;
+                    for [lower, upper] in intervals.into_iter().flatten() {
+                        let lower = (lower + offset) as f32;
+                        let upper = ((upper + offset) as f32).min(self.z[index]);
+                        if upper - lower <= 1e-6 {
+                            continue;
                         }
+                        changed = true;
+                        self.track_removed_interval(index, f64::from(lower), f64::from(upper));
+                        let spans = self.bounded.get_or_default(index);
+                        spans.push(RemovedSpan {
+                            lower,
+                            upper,
+                            lower_op: operation,
+                            upper_op: operation,
+                            lower_source: cut,
+                            upper_source: cut,
+                        });
+                        spans.sort_by(|a, b| a.lower.total_cmp(&b.lower));
+                        let mut count = 0;
+                        for i in 0..spans.len() {
+                            let span = spans[i];
+                            if count > 0 && span.lower <= spans[count - 1].upper + 1e-6 {
+                                let previous = &mut spans[count - 1];
+                                if span.upper > previous.upper {
+                                    previous.upper = span.upper;
+                                    previous.upper_op = span.upper_op;
+                                    previous.upper_source = span.upper_source;
+                                }
+                            } else {
+                                spans[count] = span;
+                                count += 1;
+                            }
+                        }
+                        spans.truncate(count);
                     }
-                    spans.truncate(count);
                 }
             }
             if changed {
@@ -333,7 +332,7 @@ impl Heightfield {
 
     /// Average matching tooth boundaries at a shared grid corner. Separate Z
     /// intervals keep opposite flanks and adjacent turns from being joined.
-    fn boundary_corner(&self, x: usize, y: usize, boundary: Boundary) -> f32 {
+    fn boundary_corner(&self, x: usize, y: usize, corner: Corner, boundary: Boundary) -> f32 {
         if let (Some(cylinder), Some((radius, positive))) =
             (self.horizontal_cylinder, boundary.cylinder)
         {
@@ -406,6 +405,11 @@ impl Heightfield {
             }
         }
         if !boundary.thread {
+            if boundary.lower_void {
+                if let Some((height, _)) = self.roundover_surface(corner, boundary.z) {
+                    return height;
+                }
+            }
             return boundary.z;
         }
         let mut sum = 0.;
@@ -449,13 +453,16 @@ impl Heightfield {
         x: usize,
         y: usize,
         floor: f32,
-        corners: [(usize, usize); 2],
+        corners: [((usize, usize), Corner); 2],
     ) -> Vec<[[f32; 2]; 2]> {
         self.material_spans(x, y, floor)
             .into_iter()
             .map(|span| {
                 span.boundaries().map(|bound| {
-                    corners.map(|(x, y)| self.boundary_corner(x, y, bound).clamp(floor, self.top))
+                    corners.map(|((x, y), corner)| {
+                        self.boundary_corner(x, y, corner, bound)
+                            .clamp(floor, self.top)
+                    })
                 })
             })
             .collect()
@@ -466,7 +473,7 @@ impl Heightfield {
         x: usize,
         y: usize,
         floor: f32,
-        xy: [[f32; 2]; 4],
+        corners: [Corner; 4],
         mesh: &mut SurfaceMesh,
     ) {
         let material = self.material_spans(x, y, floor);
@@ -474,13 +481,14 @@ impl Heightfield {
             return;
         }
         let coords = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)];
+        let xy = corners.map(|corner| corner.xy);
         for span in &material {
             for (side, bound) in span.boundaries().into_iter().enumerate() {
                 let mut p = std::array::from_fn(|i| {
                     [
                         xy[i][0],
                         xy[i][1],
-                        self.boundary_corner(coords[i].0, coords[i].1, bound)
+                        self.boundary_corner(coords[i].0, coords[i].1, corners[i], bound)
                             .clamp(floor, self.top),
                     ]
                 });
@@ -503,11 +511,17 @@ impl Heightfield {
                 } else {
                     [0., 0., sign]
                 };
+                let mut normals = [normal; 4];
                 if side == 0 {
                     p = [p[0], p[3], p[2], p[1]];
+                } else if !bound.thread {
+                    normals = corners.map(|corner| {
+                        self.roundover_surface(corner, bound.z)
+                            .map_or(normal, |(_, n)| n)
+                    });
                 }
                 let first = mesh.positions.len();
-                mesh.quad(p, [normal; 4], cut, bound.operation);
+                mesh.quad(p, normals, cut, bound.operation);
                 mesh.stamp_source(first, self, bound.cut);
             }
         }
@@ -524,7 +538,13 @@ impl Heightfield {
                 continue;
             }
             let normal = [-delta[1] / length, delta[0] / length, 0.];
-            let corners = ids.map(|i| coords[i]);
+            let corners = ids.map(|i| (coords[i], corners[i]));
+            let normals = corners.map(|(_, corner)| {
+                corner
+                    .wall_normal
+                    .filter(|n| n[0] * normal[0] + n[1] * normal[1] > 0.01)
+                    .map_or(normal, |[x, y]| [x, y, 0.])
+            });
             let (nx, ny) = (x as isize + dx, y as isize + dy);
             let neighbour = (nx >= 0 && ny >= 0 && nx < self.nx as isize && ny < self.ny as isize)
                 .then_some((nx as usize, ny as usize));
@@ -564,7 +584,7 @@ impl Heightfield {
                         [edge[1][0], edge[1][1], lower[1]],
                         [edge[0][0], edge[0][1], lower[0]],
                     ],
-                    [normal; 4],
+                    [normals[0], normals[1], normals[1], normals[0]],
                     op.is_some()
                         || cut != u32::MAX
                         || neighbour.is_some_and(|(nx, ny)| self.top_is_cut(ny * self.nx + nx)),
