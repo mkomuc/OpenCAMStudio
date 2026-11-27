@@ -636,6 +636,12 @@ pub(crate) fn create_operation(
             feed: defaults.plunge_feed,
         }),
         OpKind::Face => Operation::Face(FaceOp {
+            curves: Default::default(),
+            boundary_selected: true,
+            islands: resolved
+                .regions
+                .first()
+                .map_or_else(Vec::new, |r| r.holes().to_vec()),
             absolute_overlap: None,
             multiple_depths: Default::default(),
             parameter_expressions: Default::default(),
@@ -1580,12 +1586,17 @@ fn resolve_operation_input(
             p.start_offset = input.heights.top - document.setup().heights_for(id).top_of_stock;
         }
         (Operation::Face(p), ExtractionRecipe::FaceRegion) => {
-            if p.overshoot < 0.0 {
-                return Err(format!(
-                    "Operation {id}: negative overshoot is not certified for CAD facing"
-                ));
+            let region = region()?;
+            p.boundary = region.outer().clone();
+            p.islands = region.holes().to_vec();
+            p.boundary_selected = true;
+            if binding
+                .selected
+                .iter()
+                .any(|source| source.kind == EntityKind::Face)
+            {
+                p.boundary_regions(p.curves)?;
             }
-            p.boundary = region()?.outer().clone();
             p.depth = depth;
             p.start_offset = input.heights.top;
         }

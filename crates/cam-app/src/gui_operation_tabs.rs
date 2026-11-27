@@ -417,7 +417,7 @@ impl App {
                     .and_then(|(_, binding)| binding.as_ref())
             })
             .or_else(|| {
-                if creating {
+                if creating || self.operation_geometry.as_ref().is_some_and(Vec::is_empty) {
                     None
                 } else {
                     self.controller.geometry_state().bindings.get(&id)
@@ -598,7 +598,10 @@ impl App {
                 {
                     "Projected facing boundary".into()
                 }
-                Operation::Face(_) => "Rectangular facing boundary".into(),
+                Operation::Face(face) if face.boundary_selected || linked.is_some() => {
+                    "Selected facing boundary".into()
+                }
+                Operation::Face(_) => "Setup stock".into(),
                 Operation::Drill(o) => linked.map_or_else(
                     || format!("{} hole centres", o.points.len()),
                     |binding| format!("{} selected hole face(s)", binding.selected.len()),
@@ -1530,6 +1533,10 @@ impl App {
             (&mut operation, self.pending_drill_geometry())
         {
             drill.geometry = settings;
+        }
+        if let (Operation::Face(face), Some(curves)) = (&mut operation, self.pending_face_curves())
+        {
+            face.curves = curves;
         }
         let fields = self
             .inspector_fields()
@@ -3199,7 +3206,6 @@ mod tests {
         let _ = app.update(Message::GeometryRowSelected(0));
         let _ = app.update(Message::GeometryRemove(0));
         assert!(app.controller.cad_selection().is_empty());
-        let _ = app.update(Message::ConfirmOp);
         assert!(app.cad_pending_kind.is_some());
         assert_eq!(app.controller.document(), &before);
         let _ = app.update(Message::GeometryPick);
@@ -3239,7 +3245,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_committed_cad_geometry_opens_an_uncommitted_replacement_list() {
+    fn clearing_committed_face_geometry_stages_whole_stock_until_apply() {
         let (mut app, id) = linked_face_app();
         let before = app.controller.document().clone();
         let _ = app.update(Message::FieldChanged(Field::Feed, "432.1".into()));
@@ -3247,13 +3253,77 @@ mod tests {
         assert_eq!(app.cad_editing_op, Some(id));
         assert!(app.controller.cad_selection().is_empty());
         let _ = app.update(Message::ConfirmCadOperation);
-        let _ = app.update(Message::Apply);
         assert_eq!(app.controller.document(), &before);
         assert_eq!(app.fields[&Field::Feed], "432.1");
-        let _ = app.update(Message::CadEscape);
-        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::Apply);
+        assert!(!app.controller.geometry_state().bindings.contains_key(&id));
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(face))
+                if !face.boundary_selected && face.feed == 432.1)
+        );
+        assert!(app.controller.undo());
         assert_eq!(app.controller.document(), &before);
-        assert!(!app.inspector_dirty());
+    }
+
+    #[test]
+    fn face_creation_with_empty_cad_geometry_uses_whole_stock() {
+        let (mut app, old_id) = linked_face_app();
+        app.setup_draft = None;
+        app.controller
+            .place_cad_instance(
+                1,
+                cam_model::RigidTransform {
+                    translation: [0., 0., 3.],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        app.controller.set_cad_selection(Vec::new());
+        let _ = app.update(Message::BeginOp(OpKind::Face));
+        assert!(app.controller.cad_selection().is_empty());
+        let _ = app.update(Message::ConfirmOp);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("expected new Face operation");
+        };
+        assert_ne!(id, old_id);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(face))
+            if !face.boundary_selected)
+        );
+        assert!(!app.controller.geometry_state().bindings.contains_key(&id));
+        let op = app.controller.operation(id).unwrap();
+        let doc = app.controller.document();
+        let heights = doc.setup().height_settings[&id].resolve(doc, op).unwrap();
+        assert_eq!(heights.bottom, 2.);
+        assert_eq!(heights.top, 3.);
+    }
+
+    #[test]
+    fn face_curves_are_staged_by_the_geometry_editor() {
+        let (mut app, id) = linked_face_app();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Edit));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::FaceCurves(
+            cam_model::ProfileCurves::Outer,
+        )));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::All)
+        );
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Edit));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::FaceCurves(
+            cam_model::ProfileCurves::Outer,
+        )));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::Outer)
+        );
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::All)
+        );
+        let _ = app.update(Message::Apply);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::Outer)
+        );
     }
 
     #[test]

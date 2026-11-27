@@ -773,25 +773,11 @@ impl App {
                     .spacing(6),
                 );
             }
-            let mut filters = row![text("Curves").size(12).width(90)]
-                .spacing(6)
-                .align_y(Alignment::Center);
-            for (value, name, label) in [
-                (ProfileCurves::All, "all", "All contours"),
-                (ProfileCurves::Outer, "outer", "Outer contours only"),
-                (ProfileCurves::Inner, "inner", "Inner contours only"),
-            ] {
-                let active = entry.curves == value;
-                filters = filters.push(hint(
-                    button(icon(name, 27.))
-                        .padding(4)
-                        .style(move |theme, status| inspector_tab(theme, status, active))
-                        .on_press(Message::ProfileEntry(EntryMessage::Curves(value))),
-                    label,
-                    self.tooltips,
-                ));
-            }
-            body = body.push(filters);
+            body = body.push(geometry_selection::curve_filter_buttons(
+                entry.curves,
+                |value| Message::ProfileEntry(EntryMessage::Curves(value)),
+                self.tooltips,
+            ));
         }
         const SIDES: [ProfileSideRule; 5] = [
             ProfileSideRule::StartOutside,

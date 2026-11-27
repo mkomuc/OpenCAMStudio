@@ -376,6 +376,94 @@ fn cad_pocket_keeps_the_inner_rim_of_an_annular_face_at_different_diameters() {
 }
 
 #[test]
+fn face_switches_between_a_cad_contour_and_whole_stock() {
+    let mut fixture = Fixture::new();
+    fixture.face(vec![square(0., 20., 0., 20., -5.)], [0., 0., -1.]);
+    let face = fixture.face(vec![square(5., 15., 5., 15., 0.)], [0., 0., 1.]);
+    let wire = fixture
+        .t
+        .faces
+        .iter()
+        .find(|item| item.id == face)
+        .unwrap()
+        .loop_ids[0];
+    let state = fixture.state();
+    let mut app = controller();
+    app.add_cad_asset(state.assets[0].clone(), state.instances)
+        .unwrap();
+    select_all_models(&mut app);
+    app.edit_stock(|stock| {
+        *stock = Stock::RelativeBox {
+            offsets: [[1.; 3]; 2],
+        }
+    });
+    let tool = app.use_tool(Tool {
+        diameter: 4.,
+        ..Default::default()
+    });
+    app.begin_operation(OpKind::Face);
+    app.set_pending_tool(tool);
+    assert!(app.confirm_operation(None));
+    let id = app.selected_operation().unwrap().id();
+    let operation = app.operation(id).unwrap().clone();
+    app.apply_operation_settings_with_geometry(
+        operation,
+        None,
+        Vec::new(),
+        Some(vec![reference(wire, EntityKind::Loop)]),
+    )
+    .unwrap();
+    let Some(Operation::Face(bounded)) = app.operation(id) else {
+        panic!("expected Face")
+    };
+    assert!(bounded.boundary_selected);
+    assert_eq!(bounded.boundary.area(), 100.);
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    let cutting_x = result
+        .program
+        .steps()
+        .iter()
+        .filter_map(|step| match step {
+            cam_cldata::Step::Linear { to, tag, .. }
+                if tag.kind == cam_cldata::MoveKind::Cutting =>
+            {
+                Some(to.x)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!cutting_x.is_empty());
+    assert!(
+        cutting_x
+            .iter()
+            .all(|&x| (7. - 1e-7..=13. + 1e-7).contains(&x)),
+        "{cutting_x:?}"
+    );
+    let operation = app.operation(id).unwrap().clone();
+    app.apply_operation_settings_with_geometry(operation, None, Vec::new(), Some(vec![]))
+        .unwrap();
+    assert!(!app.geometry_state().bindings.contains_key(&id));
+    assert!(matches!(app.operation(id), Some(Operation::Face(face)) if !face.boundary_selected));
+    let result = app.run(&CancelToken::new());
+    assert_eq!(
+        result.completion,
+        JobCompletion::Complete,
+        "{:?}",
+        result.diagnostics
+    );
+    assert!(result.program.steps().iter().any(
+        |step| matches!(step, cam_cldata::Step::Linear { to, tag, .. }
+            if tag.kind == cam_cldata::MoveKind::Cutting && to.x > 20.)
+    ));
+}
+
+#[test]
 fn indexed_cad_resolves_side_faces_in_the_machine_frame_and_invalidates_paths() {
     let (state, face) = pocket();
     let mut app = controller();

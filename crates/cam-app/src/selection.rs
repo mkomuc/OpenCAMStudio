@@ -9,7 +9,13 @@ impl AppController {
         kind: OpKind,
         selected: &[LoopRef],
     ) -> Result<(), String> {
-        let boundary = *selected.first().ok_or("Select geometry first")?;
+        let Some(&boundary) = selected.first() else {
+            return if kind == OpKind::Face {
+                Ok(())
+            } else {
+                Err("Select geometry first".into())
+            };
+        };
         if selected
             .iter()
             .enumerate()

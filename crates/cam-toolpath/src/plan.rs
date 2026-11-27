@@ -1333,6 +1333,13 @@ fn compute_at_heights(
             };
         }
     }
+    if !linked
+        && matches!(operation, Operation::Face(face) if !face.boundary_selected)
+        && heights.top == heights.bottom
+        && heights.top.is_finite()
+    {
+        return StrategyResult::default();
+    }
     if let Err(reason) = heights.validate() {
         return StrategyResult {
             diagnostics: vec![Diagnostic::error(reason)],
@@ -1369,6 +1376,7 @@ fn compute_at_heights(
         Operation::Face(p) => {
             p.depth = depth;
             p.start_offset = heights.top;
+            p.boundary_selected |= linked;
             0.0
         }
         Operation::Chamfer(p) => {
@@ -1411,13 +1419,7 @@ fn compute_at_heights(
             },
         ),
         tools: env.tools,
-        // The existing facing strategy sweeps a rectangle. Its resolver only
-        // certifies whole-body rectangular top faces; use that selected extent.
-        stock: if linked && matches!(op, Operation::Face(_)) {
-            None
-        } else {
-            env.stock
-        },
+        stock: env.stock,
         spindle: env.spindle,
     };
     let mut result = (context.compute)(
@@ -2282,7 +2284,15 @@ fn compute_with_stock_and_preview(
             }
             let mut op = op.clone();
             op.depth -= axial;
-            FaceStrategy::new(op).compute(env, cancel)
+            let cad_face = geometry_state.bindings.get(&op.id).is_some_and(|binding| {
+                binding
+                    .selected
+                    .iter()
+                    .any(|source| source.kind == cam_model::EntityKind::Face)
+            });
+            FaceStrategy::new(op)
+                .with_face_runout(cad_face)
+                .compute(env, cancel)
         }
         Operation::Chamfer(op) => ChamferStrategy::new(op.clone()).compute(env, cancel),
         Operation::Bore(op) => crate::BoreStrategy::new(op.clone()).compute(env, cancel),
@@ -2998,6 +3008,9 @@ mod tests {
         assert!((min_cut_z(&pocket_allowed.program) - -1.5).abs() < 1e-9);
 
         let face = Operation::Face(cam_model::FaceOp {
+            curves: Default::default(),
+            boundary_selected: false,
+            islands: Vec::new(),
             absolute_overlap: None,
             multiple_depths: Default::default(),
             parameter_expressions: Default::default(),

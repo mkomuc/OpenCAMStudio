@@ -277,6 +277,9 @@ fn roughing_doc() -> Document {
 /// separately, and the property below is what says whether that argument holds.
 fn face_doc(overshoot: f64) -> Document {
     let op = FaceOp {
+        curves: Default::default(),
+        boundary_selected: false,
+        islands: Vec::new(),
         absolute_overlap: None,
         multiple_depths: Default::default(),
         parameter_expressions: Default::default(),

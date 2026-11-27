@@ -8,6 +8,7 @@ use iced::widget::column;
 #[derive(Clone, Debug)]
 pub(super) enum GeometryMessage {
     Drill(cam_model::DrillGeometry),
+    FaceCurves(cam_model::ProfileCurves),
     StockContours(bool),
     SelectStock,
     ResetStock,
@@ -24,6 +25,7 @@ pub(super) struct GeometryEditor {
     automatic: bool,
     kind: OpKind,
     drill: Option<cam_model::DrillGeometry>,
+    face_curves: Option<cam_model::ProfileCurves>,
     cad_selection: Vec<EntityRef>,
     pending: Option<crate::PendingOp>,
     cad_editing: Option<u32>,
@@ -43,6 +45,7 @@ fn modes(kind: OpKind, cad: bool) -> Vec<(CadFilter, &'static str, &'static str)
     match kind {
         OpKind::Face if cad => vec![
             (CadFilter::Face, "face", "Add a planar face as the facing target."),
+            (CadFilter::Loop, "closed", "Add a closed planar contour for facing."),
             (CadFilter::Silhouette, "silhouette", "Add a body silhouette projected onto the machining XY plane."),
         ],
         OpKind::Face => vec![(CadFilter::Loop, "chain", "Add a closed drawing boundary for facing.")],
@@ -187,6 +190,22 @@ impl App {
             .and_then(|editor| editor.drill)
     }
 
+    pub(super) fn pending_face_curves(&self) -> Option<cam_model::ProfileCurves> {
+        self.geometry_editor
+            .as_ref()
+            .and_then(|editor| editor.face_curves)
+    }
+
+    fn stage_face_curves(&mut self, curves: Option<cam_model::ProfileCurves>) {
+        if let Some(curves) = curves {
+            self.edit_operation_draft(|operation| {
+                if let Operation::Face(face) = operation {
+                    face.curves = curves;
+                }
+            });
+        }
+    }
+
     pub(super) fn stock_contour_editor(&self) -> bool {
         self.geometry_editor
             .as_ref()
@@ -286,7 +305,10 @@ impl App {
             || self.cad_pending_kind.is_some()
             || self.cad_editing_op.is_some()
             || self.operation_draft.as_ref().is_some_and(|op| {
-                matches!(op, Operation::Pocket(p) if p.wrap.as_ref().is_some_and(|wrap| !wrap.geometry.is_empty())) || self.controller
+                matches!(op, Operation::Face(face) if self.operation_binding_preview.is_some()
+                    || (!face.boundary_selected && self.controller.regions().is_empty()
+                    && !self.controller.geometry_state().instances.is_empty()))
+                || matches!(op, Operation::Pocket(p) if p.wrap.as_ref().is_some_and(|wrap| !wrap.geometry.is_empty())) || self.controller
                     .geometry_state()
                     .bindings
                     .contains_key(&op.id())
@@ -652,6 +674,7 @@ impl App {
         let (contours, closed): (Vec<_>, _) = match operation {
             Operation::Chamfer(op) => (vec![&op.chain], op.closed),
             Operation::Engrave(op) => (vec![&op.chain], op.closed),
+            Operation::Face(op) if op.boundary_selected => (vec![&op.boundary], true),
             Operation::Pocket(cam_model::PocketOp {
                 boundary, islands, ..
             }) => (
@@ -683,6 +706,11 @@ impl App {
 
     pub(super) fn operation_geometry_message(&mut self, message: GeometryMessage) {
         match message {
+            GeometryMessage::FaceCurves(curves) => {
+                if let Some(editor) = &mut self.geometry_editor {
+                    editor.face_curves = Some(curves);
+                }
+            }
             GeometryMessage::Drill(settings) => {
                 if let Some(drill) = self
                     .geometry_editor
@@ -763,6 +791,10 @@ impl App {
                         Some(Operation::Drill(drill)) if self.operation_uses_cad_geometry() => {
                             Some(drill.geometry)
                         }
+                        _ => None,
+                    },
+                    face_curves: match self.operation_draft.as_ref() {
+                        Some(Operation::Face(face)) => Some(face.curves),
                         _ => None,
                     },
                     cad_selection: self.controller.cad_selection().to_vec(),
@@ -974,8 +1006,10 @@ impl App {
                 if self.automatic_index_geometry_editor() {
                     let selected = self.controller.cad_selection().to_vec();
                     let drill = self.pending_drill_geometry();
+                    let curves = self.pending_face_curves();
                     self.operation_geometry_message(GeometryMessage::Cancel);
                     self.stage_automatic_selection(selected);
+                    self.stage_face_curves(curves);
                     if let Some(settings) = drill {
                         self.edit_operation_draft(|op| {
                             if let Operation::Drill(drill) = op {
@@ -1025,6 +1059,7 @@ impl App {
                         }
                     });
                 }
+                self.stage_face_curves(self.pending_face_curves());
                 self.geometry_editor = None;
                 self.geometry_additive = false;
                 self.geometry_row_selection = None;
@@ -1044,6 +1079,12 @@ impl App {
             .geometry_editor
             .as_ref()
             .ok_or("Open geometry settings")?;
+        if editor.kind == OpKind::Face
+            && self.operation_uses_cad_geometry()
+            && self.controller.cad_selection().is_empty()
+        {
+            return Ok(());
+        }
         if editor.automatic {
             return crate::cad_operations::validate_selection(
                 self.controller.geometry_state(),
@@ -1299,14 +1340,14 @@ impl App {
             "Select cylindrical faces, closed loops, or connected edges. Select the wrap cylinder on the Multi-axis tab. Faces at different radii require separate operations."
         } else if editor.automatic {
             if kind == OpKind::Face {
-                "Select planar faces or body silhouettes. Faces are indexed individually. Silhouettes use the setup XY plane at 0°."
+                "Select planar faces, closed contours, or body silhouettes. An empty selection faces the setup stock at 0°."
             } else {
                 "Select machining geometry in the viewport. Orientations are resolved when the toolpath is generated."
             }
         } else {
             match kind {
-            OpKind::Face if cad => "Select one planar facing target or a body silhouette projected onto the machining XY plane.",
-            OpKind::Face => "Select one closed drawing boundary for facing.",
+            OpKind::Face if cad => "Leave the selection empty to face the setup stock. Select a planar face, closed contour, or body silhouette to limit the cut.",
+            OpKind::Face => "Leave the selection empty to face the setup stock. Select a closed drawing contour to limit the cut.",
             OpKind::Pocket => "Select planar pocket floors with their islands, closed boundary loops, or closed edge chains. Multiple pockets must share one floor height. Default heights cut from stock top down to the selected geometry.",
             OpKind::Chamfer => "Select modeled inclined chamfer faces to use their upper and lower boundaries, or select a single edge, connected chain or boundary loop and set Chamfer width in Passes. Face machining automatically splits the bevel into bands that fit the cutter; set Stepdown on Passes for smaller bands.",
             OpKind::Engrave => "Select a boundary loop, or connected edges for an open or closed engraving path.",
@@ -1324,6 +1365,21 @@ impl App {
         body = body.push(text(description).size(12));
         if let Some(settings) = editor.drill {
             body = body.push(self.drill_selection_controls(settings));
+        }
+        if let Some(curves) = editor.face_curves {
+            if cad
+                && self
+                    .controller
+                    .cad_selection()
+                    .iter()
+                    .any(|item| item.kind == EntityKind::Face)
+            {
+                body = body.push(geometry_selection::curve_filter_buttons(
+                    curves,
+                    |value| Message::OperationGeometry(GeometryMessage::FaceCurves(value)),
+                    self.tooltips,
+                ));
+            }
         }
         if cad && !editor.stock && !editor.wrapped && !editor.automatic {
             let document = self.rotary_draft_document();

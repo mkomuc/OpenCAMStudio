@@ -1473,72 +1473,27 @@ fn derive(
             Ok((vec![region], vec![], heights))
         }
         ExtractionRecipe::FaceRegion => {
-            if refs.len() != 1 || refs[0].kind != EntityKind::Face {
-                return Err("Face requires one planar target face".into());
-            }
-            let f = view.face(refs[0].id)?;
-            let (z, n) = view.plane(f)?;
-            if n[2] < 0.0 {
-                return Err("facing target must face setup Z".into());
-            }
-            // Bounds come from the native B-rep, never the display mesh or an
-            // approximation of a spline. Transform all eight corners to retain a
-            // conservative enclosure in the active setup, even for curved bodies.
-            let mut min = [f64::INFINITY; 3];
-            let mut max = [f64::NEG_INFINITY; 3];
-            let bounds = std::iter::once(view.body.bounds).chain(
-                view.asset
-                    .topology
-                    .faces
-                    .iter()
-                    .filter(|face| face.body_id == view.body.id)
-                    .map(|face| face.bounds),
-            );
-            for bounds in bounds {
-                for x in [bounds[0][0], bounds[1][0]] {
-                    for y in [bounds[0][1], bounds[1][1]] {
-                        for z in [bounds[0][2], bounds[1][2]] {
-                            let point = view.point([x, y, z]);
-                            for axis in 0..3 {
-                                min[axis] = min[axis].min(point[axis]);
-                                max[axis] = max[axis].max(point[axis]);
-                            }
-                        }
+            let [reference] = refs.as_slice() else {
+                return Err("Face requires one planar target face or closed contour".into());
+            };
+            let (region, bottom) = match reference.kind {
+                EntityKind::Face => {
+                    let face = view.face(reference.id)?;
+                    let (z, normal) = view.plane(face)?;
+                    if normal[2] < 0.0 {
+                        return Err("facing target must face setup Z".into());
                     }
+                    (view.region(face)?, z)
                 }
-            }
-            for vertex in view
-                .asset
-                .topology
-                .vertices
-                .iter()
-                .filter(|v| v.body_id == view.body.id)
-            {
-                let point = view.point(vertex.point);
-                for axis in 0..3 {
-                    min[axis] = min[axis].min(point[axis]);
-                    max[axis] = max[axis].max(point[axis]);
+                EntityKind::Loop => {
+                    let (contour, z) = view.contour(view.wire(reference.id)?)?;
+                    (Polygon::new(contour).map_err(|e| e.to_string())?, z)
                 }
-            }
-            if max[2] > z + T {
-                return Err(
-                    "adjacent bosses/protected material above the target prevent whole-body facing"
-                        .into(),
-                );
-            }
-            let region = Polygon::new(Contour::new(vec![
-                Point::new(min[0], min[1]),
-                Point::new(max[0], min[1]),
-                Point::new(max[0], max[1]),
-                Point::new(min[0], max[1]),
-            ]))
-            .map_err(|error| error.to_string())?;
-            if stock_top <= z {
-                return Err("stock top must be above the facing target; increase the positive Z stock allowance".into());
-            }
+                _ => return Err("Face requires one planar target face or closed contour".into()),
+            };
             let heights = CuttingHeights {
                 top: stock_top,
-                bottom: z,
+                bottom,
             };
             heights.validate()?;
             Ok((vec![region], vec![], heights))
@@ -3222,7 +3177,7 @@ mod tests {
     }
 
     #[test]
-    fn facing_uses_exact_body_bounds_despite_splines_holes_and_blends_below_the_target() {
+    fn facing_uses_the_selected_face_outline_and_inner_loops() {
         let mut fixture = Fixture::new();
         let target = fixture.face(
             vec![
@@ -3231,52 +3186,51 @@ mod tests {
             ],
             [0., 0., 1.],
         );
-        fixture.t.edges[0].curve = CadCurve::Unsupported {
-            description: "exact spline retained in B-rep".into(),
-        };
-        let side = fixture.face(vec![square(0., 20., 0., 20., -2.)], [0., 0., -1.]);
-        fixture
-            .t
-            .faces
-            .iter_mut()
-            .find(|face| face.id == side)
-            .unwrap()
-            .surface = CadSurface::Unsupported {
-            description: "blend below target".into(),
-        };
+        fixture.face(vec![square(-5., 25., -5., 25., -2.)], [0., 0., -1.]);
+        let outer = fixture.t.faces[0].loop_ids[0];
         let state = fixture.state();
+        let face = reference(target, EntityKind::Face);
+        let contour = reference(outer, EntityKind::Loop);
+        for (source, hole_count) in [(face, 1), (contour, 0)] {
+            let binding =
+                resolve_selection(&state, &[source], ExtractionRecipe::FaceRegion, 1.).unwrap();
+            let input = resolve_binding(&state, &binding).unwrap();
+            assert_eq!(
+                input.heights,
+                CuttingHeights {
+                    top: 1.,
+                    bottom: 0.
+                }
+            );
+            assert_eq!(input.regions[0].outer().area(), 344.);
+            assert_eq!(input.regions[0].holes().len(), hole_count);
+        }
+    }
+
+    #[test]
+    fn facing_resolves_the_same_footprint_after_indexing_a_tilted_plate() {
+        let c = std::f64::consts::FRAC_1_SQRT_2;
+        let tilt = |[x, y, z]: [f64; 3]| [x, c * (y - z), c * (y + z)];
+        let mut fixture = Fixture::new();
+        let target = fixture.face(
+            vec![square(0., 20., 0., 20., 0.).into_iter().map(tilt).collect()],
+            tilt([0., 0., 1.]),
+        );
+        fixture.face(
+            vec![square(0., 20., 0., 20., -5.)
+                .into_iter()
+                .map(tilt)
+                .collect()],
+            tilt([0., 0., -1.]),
+        );
+        let mut state = fixture.state();
+        state.instances[0].placement.rotation = [[1., 0., 0.], [0., c, c], [0., -c, c]];
         let selected = [reference(target, EntityKind::Face)];
         let binding =
             resolve_selection(&state, &selected, ExtractionRecipe::FaceRegion, 1.).unwrap();
         let input = resolve_binding(&state, &binding).unwrap();
-        assert_eq!(
-            input.heights,
-            CuttingHeights {
-                top: 1.,
-                bottom: 0.
-            }
-        );
-        assert_eq!(input.regions[0].area(), 400.);
-        assert!(
-            input.regions[0].holes().is_empty(),
-            "facing clears stock above the body, including above holes"
-        );
-        assert!(
-            resolve_selection(&state, &selected, ExtractionRecipe::PocketFloor, 1.).is_err(),
-            "pocket certification is unchanged"
-        );
-        let mut boss = state;
-        std::sync::Arc::make_mut(&mut boss.assets[0].topology)
-            .faces
-            .iter_mut()
-            .find(|face| face.id == side)
-            .unwrap()
-            .bounds[1][2] = 2.;
-        assert!(
-            resolve_selection(&boss, &selected, ExtractionRecipe::FaceRegion, 3.)
-                .unwrap_err()
-                .contains("protected material")
-        );
+        assert!((input.regions[0].area() - 400.).abs() < T);
+        assert_eq!(input.heights.bottom, 0.);
     }
 
     #[test]

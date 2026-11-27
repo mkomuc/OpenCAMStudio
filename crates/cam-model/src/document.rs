@@ -1647,10 +1647,8 @@ impl std::fmt::Display for Axis {
     }
 }
 
-/// A facing operation: clear the top of the stock over a boundary with parallel
-/// passes, in stepdown passes, down to a depth. The passes form a continuous
-/// serpentine (one plunge per level, arc turnarounds) rather than lifting between
-/// passes.
+/// A facing operation clears the whole setup stock or a selected region with
+/// parallel passes at each cutting depth.
 ///
 /// Z uses the magnitude convention: `start_offset` is the top cutting plane above
 /// the drawing reference (Z=0), `depth` is how far *down* to face as a positive
@@ -1663,8 +1661,18 @@ pub struct FaceOp {
     pub id: u32,
     /// Tool number.
     pub tool: u32,
-    /// The area to face (usually the stock outline).
+    /// Selected outer contour, or a fallback stock outline for older projects.
     pub boundary: Contour,
+    /// Use the selected contour as the machining limit. Legacy unlinked
+    /// operations continue to use the setup stock.
+    #[serde(default)]
+    pub boundary_selected: bool,
+    /// Inner contours excluded from a selected machining region.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub islands: Vec<Contour>,
+    /// Curves that define the machining area on a selected face.
+    #[serde(default)]
+    pub curves: crate::ProfileCurves,
     /// Z of the top cutting plane, above the drawing reference (mm, >= 0). Set
     /// this to face stock that stands proud of Z=0 down toward it; `0` starts the
     /// cut at the reference plane.
@@ -1676,8 +1684,8 @@ pub struct FaceOp {
     /// Maximum depth removed per pass (mm, > 0).
     pub stepdown: f64,
     /// Fraction of the tool diameter that adjacent passes overlap (0..1). The pass
-    /// spacing is `diameter * (1 - overlap)`, and the first pass is placed so it
-    /// cuts a strip of exactly that width along the stock edge.
+    /// spacing is `diameter * (1 - overlap)`, and the passes are centered across
+    /// the machining area.
     #[serde(default)]
     pub overlap: f64,
     /// Facing overlap in millimetres; absent in older percentage-based projects.
@@ -1686,8 +1694,7 @@ pub struct FaceOp {
     /// Axial pass scheduling. Older projects retain their original multi-pass behavior.
     #[serde(default)]
     pub multiple_depths: crate::MultipleDepths,
-    /// Distance the tool overshoots past each stock edge (mm, >= 0) before the
-    /// 180-degree turnaround arc, so the arc swings clear of the part.
+    /// Cutter-edge clearance beyond the stock or selected face at pass ends.
     #[serde(default)]
     pub overshoot: f64,
     /// Orientation of the parallel cutting lines.
@@ -1715,6 +1722,31 @@ pub struct FaceOp {
     pub feed: f64,
     /// Plunge feed, mm/min.
     pub plunge_feed: f64,
+}
+
+impl FaceOp {
+    /// Filled machining regions defined by the chosen face curves.
+    pub fn boundary_regions(
+        &self,
+        curves: crate::ProfileCurves,
+    ) -> Result<Vec<cam_geo::Polygon>, String> {
+        use crate::ProfileCurves;
+        let polygon =
+            |outer, holes| cam_geo::Polygon::with_holes(outer, holes).map_err(|e| e.to_string());
+        match curves {
+            ProfileCurves::All => Ok(vec![polygon(self.boundary.clone(), self.islands.clone())?]),
+            ProfileCurves::Outer => Ok(vec![polygon(self.boundary.clone(), Vec::new())?]),
+            ProfileCurves::Inner if self.islands.is_empty() => {
+                Err("The selected face has no inner contours".into())
+            }
+            ProfileCurves::Inner => self
+                .islands
+                .iter()
+                .cloned()
+                .map(|outer| polygon(outer, Vec::new()))
+                .collect(),
+        }
+    }
 }
 
 /// A thread-milling operation: cut internal or external threads at a set of hole

@@ -3,6 +3,23 @@
 use super::*;
 use cam_model::{EntityRef, FrameAxisReference, SetupFrame};
 
+pub(crate) fn normalize_face_index(operation: &mut Operation, index: &mut cam_model::RotaryIndex) {
+    if let Operation::Face(face) = operation {
+        if index.uses_automatic_cad()
+            && index
+                .auto
+                .as_ref()
+                .is_some_and(|auto| auto.selected.is_empty())
+        {
+            index.auto = None;
+            index.angle = 0.0;
+            index.face = None;
+            face.boundary_selected = false;
+            face.islands.clear();
+        }
+    }
+}
+
 pub(crate) fn validate_stock_to_leave(
     document: &Document,
     operation: &Operation,
@@ -986,8 +1003,14 @@ impl AppController {
             .operation(id)
             .ok_or("Operation is not in the active setup")?;
         let mut document = self.document().clone();
+        let mut geometry = geometry;
         if let Some(index) = index_override {
-            if let Some(index) = index {
+            if let Some(mut index) = index {
+                let had_automatic = index.uses_automatic_cad();
+                normalize_face_index(&mut operation, &mut index);
+                if had_automatic && !index.uses_automatic_cad() {
+                    geometry = Some(Vec::new());
+                }
                 index.validate()?;
                 if index.auto.is_some() && !operation.supports_automatic_index() {
                     return Err("Auto indexing requires a 2D operation".into());
@@ -1007,6 +1030,8 @@ impl AppController {
         if !automatic
             && document.cad_linked_operations.contains(&id)
             && !document.geometry.bindings.contains_key(&id)
+            && !(matches!(operation, Operation::Face(_))
+                && geometry.as_ref().is_some_and(Vec::is_empty))
         {
             return Err("Linked CAD geometry is missing; repair the geometry before applying operation settings".into());
         }
@@ -1074,8 +1099,30 @@ impl AppController {
             *saved = operation;
             return Ok(document);
         }
-        let geometry = geometry
-            .filter(|_| !matches!(&operation,Operation::Profile(p) if p.selections.is_some()));
+        let clear_face =
+            matches!(operation, Operation::Face(_)) && geometry.as_ref().is_some_and(Vec::is_empty);
+        if clear_face {
+            document.geometry.bindings.remove(&id);
+            document.cad_linked_operations.remove(&id);
+            if let Operation::Face(face) = &mut operation {
+                face.boundary_selected = false;
+                face.islands.clear();
+            }
+        } else if let Some(selected) = geometry.as_ref().filter(|_| {
+            matches!(operation, Operation::Face(_)) && !document.geometry.bindings.contains_key(&id)
+        }) {
+            let (binding, _) = crate::cad_operations::resolve_operation_selection(
+                &document,
+                OpKind::Face,
+                selected,
+                id,
+            )?;
+            document.geometry.bindings.insert(id, binding);
+            document.cad_linked_operations.insert(id);
+        }
+        let geometry = geometry.filter(|_| {
+            !clear_face && !matches!(&operation, Operation::Profile(p) if p.selections.is_some())
+        });
         if let Some(selected) = &geometry {
             if matches!(
                 operation,
@@ -1180,7 +1227,7 @@ impl AppController {
                 }
             }
             binding.resolved_fingerprint = None;
-        } else if overrides.is_some() {
+        } else if overrides.is_some() && !clear_face {
             return Err("Height links are available only for CAD operations".into());
         }
         if let Operation::Profile(profile) = &mut operation {

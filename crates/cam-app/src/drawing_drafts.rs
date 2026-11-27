@@ -25,6 +25,12 @@ impl AppController {
     ) -> Result<Operation, String> {
         let kind = Self::operation_kind(operation);
         self.planar_operation_eligibility(kind, selected)?;
+        if let (Operation::Face(op), []) = (operation, selected) {
+            let mut op = op.clone();
+            op.boundary_selected = false;
+            op.islands.clear();
+            return Ok(Operation::Face(op));
+        }
         let nested: Vec<_> = if kind == OpKind::Carve
             && selected.len() == 1
             && selected[0].part == LoopPart::Outer
@@ -70,7 +76,11 @@ impl AppController {
                 op.points = self.selected_centers(selected)?;
                 op.hole_heights.clear();
             }
-            (Operation::Face(op), Operation::Face(new)) => op.boundary = new.boundary,
+            (Operation::Face(op), Operation::Face(new)) => {
+                op.boundary = new.boundary;
+                op.boundary_selected = true;
+                op.islands = new.islands;
+            }
             (Operation::Chamfer(op), Operation::Chamfer(new)) => {
                 op.chain = new.chain;
                 op.closed = new.closed;

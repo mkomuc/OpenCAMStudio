@@ -3,6 +3,33 @@ use super::*;
 use crate::LoopPart;
 use iced::widget::{column, svg};
 
+pub(super) fn curve_filter_buttons(
+    current: cam_model::ProfileCurves,
+    message: impl Fn(cam_model::ProfileCurves) -> Message,
+    tooltips: bool,
+) -> Element<'static, Message> {
+    use cam_model::ProfileCurves;
+    let mut filters = row![text("Curves").size(12).width(90)]
+        .spacing(6)
+        .align_y(Alignment::Center);
+    for (value, name, label) in [
+        (ProfileCurves::All, "all", "All contours"),
+        (ProfileCurves::Outer, "outer", "Outer contours only"),
+        (ProfileCurves::Inner, "inner", "Inner contours only"),
+    ] {
+        let active = current == value;
+        filters = filters.push(selection_hint(
+            button(selection_icon(name, 27.))
+                .padding(4)
+                .style(move |theme, status| inspector_tab(theme, status, active))
+                .on_press(message(value)),
+            label,
+            tooltips,
+        ));
+    }
+    filters.into()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ProfileSelectionMode {
     FaceContours,
@@ -389,7 +416,7 @@ impl App {
             return iced::Task::none();
         }
         if let Selection::Operation(id) = self.controller.selection() {
-            let message = if self.controller.geometry_state().bindings.contains_key(&id) {
+            let message = if self.operation_uses_cad_geometry() {
                 Message::EditCadGeometry(id)
             } else {
                 Message::EditDrawingGeometry(id)

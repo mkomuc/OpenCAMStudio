@@ -1965,8 +1965,7 @@ impl Field {
                  diameter. Higher = smoother floor, more passes."
             }
             Field::FaceOvershoot => {
-                "How far the tool runs past the stock edge before turning around (mm), \
-                 so the cutter fully clears the edge."
+                "Clearance from the cutter edge to the stock or selected face edge at pass ends (mm)."
             }
             Field::Engagement => {
                 "Adaptive-clearing stepover: the radial width of cut taken along a \
@@ -7387,6 +7386,23 @@ impl App {
                 }
                 if let Some(id) = self.cad_editing_op {
                     let selected = self.controller.cad_selection().to_vec();
+                    if selected.is_empty()
+                        && matches!(self.current_operation(id), Some(Operation::Face(_)))
+                    {
+                        self.edit_operation_draft(|operation| {
+                            if let Operation::Face(face) = operation {
+                                face.boundary_selected = false;
+                                face.islands.clear();
+                            }
+                        });
+                        self.operation_geometry = Some(selected);
+                        self.operation_binding_preview = None;
+                        self.cad_editing_op = None;
+                        self.cad_inspecting = false;
+                        self.operation_tab = OperationTab::Geometry;
+                        self.status = "Setup stock staged. Use OK to apply it.".into();
+                        return iced::Task::none();
+                    }
                     let profile_geometry = self.profile_selection_geometry().map(|p| p.0);
                     match self.preview_geometry_draft(id, selected.clone()) {
                         Ok(binding) => {
@@ -7464,6 +7480,8 @@ impl App {
                                     Operation::Face(op) => {
                                         if let Some(region) = input.regions.first() {
                                             op.boundary = region.outer().clone();
+                                            op.islands = region.holes().to_vec();
+                                            op.boundary_selected = true;
                                         }
                                     }
                                     Operation::Bore(op) => {
@@ -7515,12 +7533,15 @@ impl App {
                 }
             }
             Message::EditCadGeometry(id) => {
-                if let Some(binding) = self.controller.geometry_state().bindings.get(&id) {
+                let binding = self.controller.geometry_state().bindings.get(&id);
+                if binding.is_some()
+                    || matches!(self.current_operation(id), Some(Operation::Face(_)))
+                {
                     self.cad_filter_explicit = false;
                     let refs = self
                         .operation_geometry
                         .clone()
-                        .unwrap_or_else(|| binding.selected.clone());
+                        .unwrap_or_else(|| binding.map_or_else(Vec::new, |b| b.selected.clone()));
                     if matches!(self.current_operation(id), Some(Operation::Profile(_))) {
                         self.profile_selection_mode = match refs.first().map(|r| r.kind) {
                             Some(EntityKind::Face) => ProfileSelectionMode::FaceContours,
@@ -7530,7 +7551,10 @@ impl App {
                         self.profile_chain_edges =
                             refs.first().is_some_and(|r| r.kind == EntityKind::Edge);
                     }
-                    self.cad_filter = match binding.recipe {
+                    self.cad_filter = match binding
+                        .map_or(cam_model::ExtractionRecipe::FaceRegion, |b| {
+                            b.recipe.clone()
+                        }) {
                         cam_model::ExtractionRecipe::ProfileLoop { .. }
                         | cam_model::ExtractionRecipe::ChamferLoop
                         | cam_model::ExtractionRecipe::ChamferFaces
@@ -7551,12 +7575,12 @@ impl App {
                                 _ => CadFilter::Body,
                             }
                         }
-                        cam_model::ExtractionRecipe::FaceRegion
-                            if refs.first().is_some_and(|reference| {
-                                reference.kind == EntityKind::Silhouette
-                            }) =>
-                        {
-                            CadFilter::Silhouette
+                        cam_model::ExtractionRecipe::FaceRegion => {
+                            match refs.first().map(|r| r.kind) {
+                                Some(EntityKind::Silhouette) => CadFilter::Silhouette,
+                                Some(EntityKind::Loop) => CadFilter::Loop,
+                                _ => CadFilter::Face,
+                            }
                         }
                         _ => CadFilter::Face,
                     };
@@ -12940,6 +12964,7 @@ impl App {
             }
             (OpKind::Face, EntityKind::Silhouette) => CadFilter::Silhouette,
             (OpKind::Face, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Face, EntityKind::Loop) => CadFilter::Loop,
             _ => self.cad_filter,
         };
     }
@@ -15927,7 +15952,7 @@ impl Viewport {
             Some(OpKind::Pocket) if self.cad_filter == EntityKind::Loop => self
                 .cad_scene
                 .pick_pocket_loop_candidates(ray, aperture as f64, self.cad_select_through),
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Face)
                 if self.cad_filter == EntityKind::Loop =>
             {
                 self.cad_scene.pick_surface_loop_candidates(
@@ -16031,12 +16056,21 @@ impl Viewport {
                     through,
                 )
             }
-            OpKind::Face => self.cad_scene.pick_any_candidates(
-                ray,
-                &[EntityKind::Face, EntityKind::Silhouette],
-                aperture,
-                through,
-            ),
+            OpKind::Face => {
+                let mut candidates = self.cad_scene.pick_any_candidates(
+                    ray,
+                    &[EntityKind::Face, EntityKind::Silhouette],
+                    aperture,
+                    through,
+                );
+                candidates.extend(if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else {
+                    self.cad_scene
+                        .pick_surface_loop_candidates(ray, aperture, through)
+                });
+                candidates
+            }
         };
         candidates.sort_by(|a, b| {
             a.depth
@@ -16073,8 +16107,9 @@ impl Viewport {
                         },
                         OpKind::Face => match entity.kind {
                             EntityKind::Face => 0,
-                            EntityKind::Silhouette => 1,
-                            _ => 2,
+                            EntityKind::Loop => 1,
+                            EntityKind::Silhouette => 2,
+                            _ => 3,
                         },
                         OpKind::Drill | OpKind::Bore | OpKind::Thread => 0,
                     };

@@ -619,6 +619,11 @@ impl AppController {
                         &cam_toolpath::AdaptiveStrategy::DOMAIN_REVISION.to_le_bytes(),
                     );
                 }
+                if matches!(op, Operation::Face(_)) {
+                    bytes.extend_from_slice(
+                        &cam_toolpath::FaceStrategy::PASS_LAYOUT_REVISION.to_le_bytes(),
+                    );
+                }
                 if matches!(op, Operation::Pocket(p) if p.stock_contours.enabled) {
                     bytes.extend_from_slice(
                         &cam_toolpath::PocketStrategy::STOCK_CONTOUR_REVISION.to_le_bytes(),

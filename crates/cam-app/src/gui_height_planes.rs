@@ -788,7 +788,15 @@ mod tests {
                     .offset,
                 10.
             );
-            assert!(heights.top > heights.bottom);
+            if kind == OpKind::Face {
+                assert_eq!(
+                    heights.bottom,
+                    app.controller.document().height_model_bounds().1[2]
+                );
+                assert!(heights.top >= heights.bottom);
+            } else {
+                assert!(heights.top > heights.bottom);
+            }
             if kind == OpKind::Drill {
                 for (plane, reference) in [(P::Top, R::HoleTop), (P::Bottom, R::HoleBottom)] {
                     let options = R::options_for(plane, app.current_operation(id));

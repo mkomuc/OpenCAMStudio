@@ -249,6 +249,9 @@ impl App {
         {
             drill.geometry = settings;
         }
+        if let (Operation::Face(face), Some(curves)) = (&mut draft, self.pending_face_curves()) {
+            face.curves = curves;
+        }
         self.wizard_tool().ok_or("Choose a cutter")?;
         self.wizard_cutting().ok_or("Enter valid cutting data")?;
         let fields = self
@@ -273,7 +276,7 @@ impl App {
         apply_op_fields(&mut draft, &fields);
         self.apply_parameter_sources(&mut draft)?;
         if let Some(auto) = self.automatic_cad_index() {
-            if auto.selected.is_empty() {
+            if auto.selected.is_empty() && !matches!(draft, Operation::Face(_)) {
                 return Err(
                     "Select machining geometry for Auto indexing on the Geometry tab".into(),
                 );
@@ -301,6 +304,9 @@ impl App {
             }
         }
         if let Some(kind) = self.cad_pending_kind {
+            if kind == OpKind::Face && self.controller.cad_selection().is_empty() {
+                return Ok((draft, None));
+            }
             let mut document = self.rotary_draft_document();
             for tool in &self.operation_tools {
                 if let Some(existing) = document
@@ -337,7 +343,18 @@ impl App {
                     op.islands = new.islands;
                     op.additional_regions = new.additional_regions;
                 }
-                (Operation::Face(op), Operation::Face(new)) => op.boundary = new.boundary,
+                (Operation::Face(op), Operation::Face(new)) => {
+                    op.boundary = new.boundary;
+                    op.boundary_selected = true;
+                    op.islands = new.islands;
+                    if binding
+                        .selected
+                        .iter()
+                        .any(|item| item.kind == EntityKind::Face)
+                    {
+                        op.boundary_regions(op.curves)?;
+                    }
+                }
                 (Operation::Drill(op), Operation::Drill(new)) => {
                     if op.geometry.uses_model_heights()
                         || self

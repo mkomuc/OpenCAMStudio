@@ -276,6 +276,11 @@ impl App {
             let binding = operation
                 .as_ref()
                 .filter(|op| op.rotary_wrap().is_none())
+                .filter(|_| {
+                    self.operation_geometry
+                        .as_ref()
+                        .is_none_or(|selection| !selection.is_empty())
+                })
                 .and_then(|op| {
                     self.operation_binding_preview
                         .as_ref()
@@ -380,18 +385,33 @@ impl App {
                                 .map(|p| (p.chain.points().to_vec(), p.closed)),
                         );
                     }
+                    let curves = match &op {
+                        Operation::Face(face)
+                            if binding
+                                .selected
+                                .iter()
+                                .any(|item| item.kind == EntityKind::Face) =>
+                        {
+                            face.curves
+                        }
+                        _ => cam_model::ProfileCurves::All,
+                    };
                     for region in resolved
                         .regions
                         .into_iter()
                         .filter(|_| !matches!(op, Operation::Chamfer(_) | Operation::Engrave(_)))
                     {
-                        outlines.push((region.outer().points().to_vec(), true));
-                        outlines.extend(
-                            region
-                                .holes()
-                                .iter()
-                                .map(|hole| (hole.points().to_vec(), true)),
-                        );
+                        if curves != cam_model::ProfileCurves::Inner {
+                            outlines.push((region.outer().points().to_vec(), true));
+                        }
+                        if curves != cam_model::ProfileCurves::Outer {
+                            outlines.extend(
+                                region
+                                    .holes()
+                                    .iter()
+                                    .map(|hole| (hole.points().to_vec(), true)),
+                            );
+                        }
                     }
                     centers.extend(
                         resolved
@@ -415,7 +435,12 @@ impl App {
                     outlines.push((p.boundary.points().to_vec(), true));
                     outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
                 }
-                Operation::Face(p) => outlines.push((p.boundary.points().to_vec(), true)),
+                Operation::Face(p) => {
+                    if p.boundary_selected {
+                        outlines.push((p.boundary.points().to_vec(), true));
+                        outlines.extend(p.islands.iter().map(|c| (c.points().to_vec(), true)));
+                    }
+                }
                 Operation::Chamfer(p) if !p.faces.is_empty() => {
                     add_chamfer_faces(&mut scene, &p.faces, frame)
                 }
