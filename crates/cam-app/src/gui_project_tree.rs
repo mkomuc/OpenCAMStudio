@@ -2246,6 +2246,64 @@ mod tests {
     }
 
     #[test]
+    fn an_indexed_face_can_recompute_after_browser_selection_and_cancel() {
+        let (mut app, ids) = tree_app();
+        app.end_setup_draft();
+        app.controller.new_operation(OpKind::Face);
+        let id = app
+            .controller
+            .inspection_setup()
+            .operations
+            .last()
+            .unwrap()
+            .id();
+        let index = cam_model::RotaryIndex {
+            auto: Some(cam_model::AutomaticRotaryIndex {
+                drawing: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        app.controller
+            .set_operation_rotary_index(id, Some(index.clone()))
+            .unwrap();
+
+        send(&mut app, Message::ClickOp(ids[0]));
+        send(&mut app, Message::ClickOp(id));
+        assert_eq!(app.controller.selection(), Selection::Operation(id));
+        assert!(!app.inspector_active);
+        assert!(!app.inspector_dirty());
+
+        send(&mut app, Message::ClickOp(ids[0]));
+        send(
+            &mut app,
+            Message::Tree(TreeMessage::Open(TreeNode::Operation(id))),
+        );
+        assert_eq!(app.controller.selection(), Selection::Operation(id));
+        assert!(!app.inspector_dirty());
+
+        let recompute =
+            || Message::ToolpathCommand(TreeNode::Operation(id), ToolpathAction::Recompute);
+        send(&mut app, recompute());
+        drain_context_job(&mut app);
+        assert!(app.controller.toolpath_is_up_to_date(id), "{}", app.status);
+
+        send(&mut app, Message::Select(Selection::Operation(id)));
+        app.rotary_action(rotary_view::Action::Indexed(false));
+        assert!(app.inspector_dirty());
+        send(&mut app, recompute());
+        assert!(!app.controller.run_pending());
+
+        send(&mut app, Message::CancelOperationDraft);
+        assert_eq!(app.rotary_index_draft.as_ref(), Some(&index));
+        assert!(!app.inspector_dirty());
+        send(&mut app, recompute());
+        assert!(app.controller.run_needs_poll());
+        drain_context_job(&mut app);
+        assert!(app.controller.toolpath_is_up_to_date(id), "{}", app.status);
+    }
+
+    #[test]
     fn operation_context_menu_only_scrolls_if_taller_than_the_window() {
         use iced::advanced::renderer::Headless;
 

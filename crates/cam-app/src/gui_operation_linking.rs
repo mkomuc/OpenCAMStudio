@@ -67,6 +67,8 @@ impl App {
                         field,
                         Field::LeadInSize | Field::LeadOutSize | Field::LeadOverlap
                     ))
+                || (matches!(op, Operation::Face(_))
+                    && matches!(field, Field::LeadInSize | Field::LeadOutSize))
             {
                 continue;
             }
@@ -299,7 +301,7 @@ impl App {
                         self.tooltips,
                         p.params.transition,
                         &cam_model::ParallelTransition::ALL[..],
-                        PARALLEL_TRANSITION,
+                        PASS_TRANSITION,
                     ));
                 }
             }
@@ -325,9 +327,68 @@ impl App {
                     self.tooltips,
                 ));
             }
-            Operation::Face(_) => {
-                moves.push(label_help("Automatic links and turnarounds",
-                    "Facing links and turnaround arcs are determined by the strategy. Overshoot is on Passes.", self.tooltips));
+            Operation::Face(f) => {
+                let settings = f.linking;
+                moves.push(
+                    row![
+                        label_help(
+                            "Keep tool down",
+                            "Allow Straight line and Shortest path links and in-place stepdowns during whole-stock facing. Smooth connects eligible rows independently. No contact retracts between passes.",
+                            self.tooltips
+                        ),
+                        FACE_KEEP_DOWN.checkbox(f.keep_tool_down(), 15)
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into(),
+                );
+                leads.push(
+                    row![
+                        label_help("Lead-In (Entry)", help::LEAD_IN, self.tooltips),
+                        FACE_ENTRY.checkbox(settings.lead_in_enabled, 15)
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into(),
+                );
+                if settings.lead_in_enabled {
+                    leads.extend(self.face_lead_controls(settings.lead_in, true));
+                }
+                leads.push(
+                    row![
+                        label_help("Lead-Out (Exit)", help::LEAD_OUT, self.tooltips),
+                        FACE_EXIT.checkbox(settings.lead_out_enabled, 15)
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into(),
+                );
+                if settings.lead_in_enabled && settings.lead_out_enabled {
+                    leads.push(
+                        row![
+                            label_help(
+                                "Same as Lead-In",
+                                "Use the entry lead type and dimensions for the exit.",
+                                self.tooltips
+                            ),
+                            FACE_SAME_LEAD.checkbox(settings.same_lead_out, 15)
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .into(),
+                    );
+                }
+                if settings.lead_out_enabled && !settings.uses_entry_for_exit() {
+                    leads.extend(self.face_lead_controls(settings.lead_out, false));
+                }
+                leads.push(operation_picker(
+                    "Transition type",
+                    "No contact retracts between passes. Straight line joins the pass ends. Shortest path can enter a selected row from its nearer end. Smooth rounds eligible turns even with Keep tool down off. It tries a checked straight link when an arc cannot fit.",
+                    self.tooltips,
+                    f.transition(),
+                    &cam_model::ParallelTransition::ALL,
+                    PASS_TRANSITION,
+                ));
             }
             Operation::Thread(_) => {
                 leads.push(label_help(
@@ -538,6 +599,55 @@ impl App {
                 sections.push(self.operation_section(Section::Positions.id(), positions, None));
         }
         sections.into()
+    }
+
+    fn face_lead_controls(&self, lead: Lead, entering: bool) -> Vec<Element<'static, Message>> {
+        use profile_parameters::Number;
+        let (kind_label, help, picker, size, radius_label, length_label, sweep) = if entering {
+            (
+                "Entry lead type",
+                help::LEAD_IN,
+                LEAD_IN,
+                Field::LeadInSize,
+                "Horizontal Lead-In Radius (mm)",
+                "Lead-In Length (mm)",
+                Number::LeadInSweep,
+            )
+        } else {
+            (
+                "Exit lead type",
+                help::LEAD_OUT,
+                LEAD_OUT,
+                Field::LeadOutSize,
+                "Horizontal Lead-Out Radius (mm)",
+                "Lead-Out Length (mm)",
+                Number::LeadOutSweep,
+            )
+        };
+        let field_row = |field, label, help| {
+            let value = self.fields.get(&field).cloned().unwrap_or_default();
+            self.parameter_field_row(field, label, help, &value)
+        };
+        let kind = LeadKind::of(lead);
+        let mut controls = vec![operation_picker(
+            kind_label,
+            help,
+            self.tooltips,
+            kind,
+            &LeadKind::ALL[1..],
+            picker,
+        )];
+        if kind == LeadKind::Arc {
+            controls.push(field_row(size, radius_label, size.help()));
+            controls.push(field_row(
+                Field::Profile(sweep),
+                sweep.label(),
+                sweep.help(),
+            ));
+        } else {
+            controls.push(field_row(size, length_label, size.help()));
+        }
+        controls
     }
     fn finishing_retraction_control(
         &self,

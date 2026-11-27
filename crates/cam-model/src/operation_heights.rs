@@ -195,6 +195,10 @@ impl ResolvedOperationHeights {
         }
     }
     pub fn validate(self) -> Result<(), String> {
+        self.validate_interval(false)
+    }
+
+    fn validate_interval(self, allow_empty_cut: bool) -> Result<(), String> {
         if ![
             self.stock_top,
             self.clearance,
@@ -208,7 +212,7 @@ impl ResolvedOperationHeights {
         {
             return Err("Height references must resolve to finite coordinates".into());
         }
-        if self.top <= self.bottom {
+        if self.top < self.bottom || (!allow_empty_cut && self.top == self.bottom) {
             return Err("Top height must be above bottom height".into());
         }
         if self.clearance < self.retract || self.retract < self.top {
@@ -394,7 +398,9 @@ impl OperationHeightSettings {
             top: values[3].unwrap(),
             bottom: values[4].unwrap(),
         };
-        resolved.validate()?;
+        let stock_face = matches!(operation, Operation::Face(face) if !face.boundary_selected)
+            && !document.geometry.bindings.contains_key(&operation.id());
+        resolved.validate_interval(stock_face)?;
         if let Operation::Chamfer(op) = operation {
             if op.faces.is_empty() {
                 let minimum = document.chamfer_minimum_depth(op);
@@ -593,6 +599,9 @@ pub fn legacy_cutting(op: &Operation, h: &Heights) -> CuttingHeights {
 impl Document {
     fn selected_contour_height(&self, op: &Operation) -> Result<f64, String> {
         let Some(binding) = self.geometry.bindings.get(&op.id()) else {
+            if matches!(op, Operation::Face(face) if !face.boundary_selected) {
+                return Ok(self.height_model_bounds().1[2]);
+            }
             return Ok(self.operation_base_cutting_heights(op).bottom);
         };
         // Profile face contours and selected edge chains have their own Z plane.

@@ -666,6 +666,38 @@ mod tests {
     }
 
     #[test]
+    fn auto_indexed_profile_uses_the_standard_named_face_entry() {
+        use cam_model::{ProfileGeometryKind, ProfileSideRule};
+        use profile_entries_view::EntryMessage;
+        let (mut app, _) = selected_cad_profile();
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        let original = app.automatic_cad_index().unwrap().selected.clone();
+        let face = EntityRef {
+            asset_id: 1,
+            revision: 1,
+            instance_id: 1,
+            body_id: 1,
+            kind: EntityKind::Face,
+            id: 104,
+        };
+        app.profile_entry_message(EntryMessage::Add(ProfileGeometryKind::FaceContours));
+        app.profile_entry_message(EntryMessage::Name("Side contours".into()));
+        app.profile_entry_message(EntryMessage::Side(ProfileSideRule::On));
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Face);
+        app.select_cad_entity(face.clone());
+        app.profile_entry_message(EntryMessage::Confirm);
+        assert!(app.profile_entry_editor.is_none(), "{}", app.status);
+        let entries = app.profile_entries();
+        let entry = entries.last().unwrap();
+        assert_eq!(entry.name, "Side contours");
+        assert_eq!(entry.side_rule, ProfileSideRule::On);
+        assert_eq!(
+            app.automatic_cad_index().unwrap().selected,
+            original.into_iter().chain([face]).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn index_face_can_be_picked_before_cutting_geometry_and_has_direction_marker() {
         let (mut app, _) = selected_cad_profile();
         app.controller.begin_operation(OpKind::Profile);

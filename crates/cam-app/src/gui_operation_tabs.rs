@@ -407,6 +407,7 @@ impl App {
             return text("Operation unavailable").into();
         };
         let tab = self.operation_tab;
+        let automatic = self.automatic_cad_index();
         let linked = self
             .operation_binding_preview
             .as_ref()
@@ -416,7 +417,7 @@ impl App {
                     .and_then(|(_, binding)| binding.as_ref())
             })
             .or_else(|| {
-                if creating {
+                if creating || self.operation_geometry.as_ref().is_some_and(Vec::is_empty) {
                     None
                 } else {
                     self.controller.geometry_state().bindings.get(&id)
@@ -466,6 +467,9 @@ impl App {
         if tab == OperationTab::MultiAxis {
             list = list.push(self.rotary_controls(op));
         }
+        if let (OperationTab::Geometry, Some(auto)) = (tab, automatic) {
+            list = list.push(self.geometry_list(cad_geometry_labels(&auto.selected)));
+        }
         if tab == OperationTab::Tool {
             let tool = self.operation_drawing_tool(op);
             list = list.push(
@@ -504,6 +508,7 @@ impl App {
         }
         if tab == OperationTab::Geometry
             && creating
+            && automatic.is_none()
             && (op.rotary_wrap().is_none()
                 || (matches!(op, Operation::Pocket(_)) && !self.operation_uses_cad_geometry()))
         {
@@ -557,6 +562,7 @@ impl App {
         }
         if tab == OperationTab::Geometry
             && !creating
+            && automatic.is_none()
             && (op.rotary_wrap().is_none()
                 || (matches!(op, Operation::Pocket(_)) && !self.operation_uses_cad_geometry()))
         {
@@ -592,7 +598,10 @@ impl App {
                 {
                     "Projected facing boundary".into()
                 }
-                Operation::Face(_) => "Rectangular facing boundary".into(),
+                Operation::Face(face) if face.boundary_selected || linked.is_some() => {
+                    "Selected facing boundary".into()
+                }
+                Operation::Face(_) => "Setup stock".into(),
                 Operation::Drill(o) => linked.map_or_else(
                     || format!("{} hole centres", o.points.len()),
                     |binding| format!("{} selected hole face(s)", binding.selected.len()),
@@ -624,7 +633,7 @@ impl App {
                 list = list.push(self.geometry_list(operation_geometry_labels(op)));
             }
         }
-        if let (OperationTab::Geometry, Operation::Drill(drill)) = (tab, op) {
+        if let (OperationTab::Geometry, Operation::Drill(drill), None) = (tab, op, automatic) {
             list = list.section("Geometry").push(self.drill_order_controls(
                 drill.geometry,
                 linked.is_some() || self.operation_uses_cad_geometry(),
@@ -787,7 +796,7 @@ impl App {
         }
         match op {
             Operation::Profile(p) => {
-                if tab == OperationTab::Geometry && linked.is_none() {
+                if tab == OperationTab::Geometry && (linked.is_none() || automatic.is_some()) {
                     list = list.section("Geometry");
                     let comp = p.comp;
                     list = list.push(operation_picker(
@@ -1504,17 +1513,30 @@ impl App {
         id: u32,
         selected: Vec<EntityRef>,
     ) -> Result<cam_model::GeometryBinding, String> {
-        if self.any_field_invalid() {
-            return Err("Correct invalid operation fields before using geometry".into());
-        }
         let mut operation = self
             .current_operation(id)
             .cloned()
             .ok_or("Operation unavailable")?;
+        // The previous facing target can be in a different frame when the
+        // angle and target are edited together. Apply resolves the new heights.
+        let invalid = if matches!(operation, Operation::Face(_)) {
+            self.inspector_fields()
+                .iter()
+                .any(|&field| self.field_invalid(field))
+        } else {
+            self.any_field_invalid()
+        };
+        if invalid {
+            return Err("Correct invalid operation fields before using geometry".into());
+        }
         if let (Operation::Drill(drill), Some(settings)) =
             (&mut operation, self.pending_drill_geometry())
         {
             drill.geometry = settings;
+        }
+        if let (Operation::Face(face), Some(curves)) = (&mut operation, self.pending_face_curves())
+        {
+            face.curves = curves;
         }
         let fields = self
             .inspector_fields()
@@ -1559,16 +1581,19 @@ impl App {
             .filter(|tool| used.contains(&tool.number))
             .cloned()
             .collect();
-        self.controller.preview_operation_settings_with_geometry(
-            operation,
-            Some(overrides),
-            tools,
-            selected,
-        )
+        self.controller
+            .preview_operation_settings_with_geometry_and_index(
+                operation,
+                Some(overrides),
+                tools,
+                selected,
+                Some(self.rotary_index_draft.clone()),
+            )
     }
 
     pub(super) fn operation_height_overrides_valid(&self) -> bool {
-        if self.library_mode() || self.creating_operation() {
+        if self.library_mode() || self.creating_operation() || self.automatic_cad_index().is_some()
+        {
             return true;
         }
         let Selection::Operation(id) = self.controller.selection() else {
@@ -2272,6 +2297,15 @@ mod tests {
     }
 
     fn linked_face_app_at_heights(floor_z: f64, model_bottom: f64, model_top: f64) -> (App, u32) {
+        linked_face_app_fixture(floor_z, model_bottom, model_top, false)
+    }
+
+    fn linked_face_app_fixture(
+        floor_z: f64,
+        model_bottom: f64,
+        model_top: f64,
+        with_projection: bool,
+    ) -> (App, u32) {
         use cam_model::*;
         let (mut app, _) = App::new();
         app.controller = AppController::new(crate::default_machine());
@@ -2331,6 +2365,14 @@ mod tests {
                 loop_ids: vec![3],
                 bounds: [[0.0, 0.0, floor_z], [10.0, 10.0, floor_z]],
             }],
+            projection: with_projection.then(|| CadProjectionMesh {
+                chord_tolerance: 0.0025,
+                mesh: CadMesh {
+                    vertices: points.to_vec(),
+                    triangles: vec![[0, 1, 2], [0, 2, 3], [0, 1, 2], [0, 2, 3]],
+                    triangle_faces: vec![2, 2, 4, 4],
+                },
+            }),
             ..Default::default()
         };
         let mut second_loop = topology.loops[0].clone();
@@ -2392,6 +2434,264 @@ mod tests {
             .unwrap();
         app.begin_operation_draft(id);
         (app, id)
+    }
+
+    #[test]
+    fn face_uses_shared_cad_geometry_settings_in_three_axis_and_auto_index() {
+        for indexed in [false, true] {
+            let (mut app, id) = linked_face_app();
+            let first = app.controller.geometry_state().bindings[&id].selected[0].clone();
+            let second = EntityRef {
+                id: 4,
+                ..first.clone()
+            };
+            if indexed {
+                app.rotary_action(rotary_view::Action::Indexed(true));
+            }
+            let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+            let _ = app.operation_inspector(id);
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+                CadFilter::Face,
+            )));
+            assert!(app.geometry_editor.is_some());
+            assert_eq!(app.machining_viewport().cad_filter, EntityKind::Face);
+            let _ = app.operation_geometry_settings();
+            app.select_cad_entity(second.clone());
+            let selected = if indexed {
+                vec![first.clone(), second]
+            } else {
+                vec![second]
+            };
+            assert_eq!(app.controller.cad_selection(), selected);
+            let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+            assert!(app.geometry_editor.is_none(), "{}", app.status);
+            assert_eq!(
+                app.controller.geometry_state().bindings[&id].selected,
+                [first]
+            );
+            let _ = app.update(Message::Apply);
+            if indexed {
+                assert_eq!(
+                    app.controller.document().rotary_indexes[&id]
+                        .auto
+                        .as_ref()
+                        .unwrap()
+                        .selected,
+                    selected
+                );
+            } else {
+                assert_eq!(
+                    app.controller.geometry_state().bindings[&id].selected,
+                    selected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auto_indexed_height_preview_uses_live_heights_for_each_feature_angle() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R, RotaryAxis};
+
+        let (mut app, id) = linked_face_app();
+        let state = app.controller.geometry_state();
+        let first = state.bindings[&id].selected[0].clone();
+        let asset = state.assets[0].clone();
+        let mut side = state.instances[0].clone();
+        side.placement.rotation = [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
+        let mut lower = state.instances[0].clone();
+        lower.placement.translation[2] = -2.;
+        app.controller
+            .add_cad_asset(asset, vec![side, lower])
+            .unwrap();
+        let selected = app
+            .controller
+            .geometry_state()
+            .instances
+            .iter()
+            .map(|instance| EntityRef {
+                asset_id: instance.asset_id,
+                instance_id: instance.id,
+                ..first.clone()
+            })
+            .collect();
+        app.controller
+            .edit_setup(|setup| setup.model_instances = vec![1, 2, 3]);
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::RelativeBox {
+                offsets: [[1.; 3]; 2],
+            }
+        });
+        app.controller.select(Selection::Operation(id));
+        app.begin_operation_draft(id);
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        app.stage_automatic_selection(selected);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Heights));
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::HeightReferenceChanged(P::Top, R::StockTop));
+        let _ = app.update(Message::HeightOffsetChanged(P::Top, "-0.5".into()));
+        let _ = app.update(Message::HeightReferenceChanged(P::Feed, R::Plane(P::Top)));
+        let _ = app.update(Message::HeightOffsetChanged(P::Feed, "0.25".into()));
+        let _ = app.update(Message::HeightReferenceChanged(
+            P::Bottom,
+            R::SelectedContours,
+        ));
+        let _ = app.update(Message::HeightOffsetChanged(P::Bottom, "-0.25".into()));
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "12.50".into()));
+        let camera = OrbitCamera::framed([-10.; 3], [20.; 3]);
+        let overlay = app.height_preview(camera, 0.).unwrap();
+        for angle in [0., 90.] {
+            let planes: Vec<_> = overlay
+                .planes
+                .iter()
+                .filter(|plane| plane.rotary_angle == Some((RotaryAxis::A, angle)))
+                .collect();
+            assert_eq!(planes.len(), if angle == 0. { 6 } else { 5 });
+            let top = planes.iter().find(|plane| plane.name == "Top").unwrap();
+            let feed = planes.iter().find(|plane| plane.name == "Feed").unwrap();
+            assert!((feed.z - top.z - 0.25).abs() < 1e-9);
+            for plane in planes {
+                for [x, y, z] in plane.corners {
+                    let machine = RotaryAxis::A.material_point(
+                        cam_cldata::Point3::new(x.into(), y.into(), z.into()),
+                        cam_cldata::Point3::new(0., 0., 0.),
+                        -angle,
+                    );
+                    assert!((machine.z - plane.z).abs() < 1e-5);
+                }
+                assert_eq!(plane.active, plane.name == "Clearance");
+            }
+        }
+        let bottoms: Vec<_> = overlay
+            .planes
+            .iter()
+            .filter(|plane| plane.name == "Bottom")
+            .map(|plane| plane.value_label.as_str())
+            .collect();
+        assert_eq!(bottoms, ["-3.25", "-1.25", "-1.25"]);
+        let _ = app.update(Message::HeightReferenceChanged(P::Feed, R::Disabled));
+        assert!(app
+            .height_preview(camera, 0.)
+            .unwrap()
+            .planes
+            .iter()
+            .all(|plane| plane.name != "Feed"));
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
+    fn face_geometry_editor_resolves_a_side_using_the_staged_manual_angle() {
+        let (mut app, id) = linked_face_app();
+        app.controller
+            .place_cad_instance(
+                1,
+                cam_model::RigidTransform {
+                    rotation: [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]],
+                    translation: [0.; 3],
+                },
+            )
+            .unwrap();
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::RelativeBox {
+                offsets: [[0.; 3], [0., 1., 1.]],
+            };
+        });
+        app.begin_operation_draft(id);
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        app.rotary_action(rotary_view::Action::IndexMode(
+            rotary_view::IndexMode::Manual,
+        ));
+        app.rotary_action(rotary_view::Action::IndexValue(0, "90".into()));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Face,
+        )));
+        let face = EntityRef {
+            id: 4,
+            ..app.controller.geometry_state().bindings[&id].selected[0].clone()
+        };
+        app.select_cad_entity(face.clone());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert_eq!(
+            app.operation_binding_preview.as_ref().unwrap().selected,
+            [face.clone()]
+        );
+        let _ = app.update(Message::Apply);
+        assert_eq!(
+            app.controller.geometry_state().bindings[&id].selected,
+            [face]
+        );
+        assert_eq!(app.controller.document().rotary_indexes[&id].angle, 90.);
+    }
+
+    #[test]
+    fn face_auto_index_machines_a_selected_silhouette_at_zero() {
+        let (mut app, id) = linked_face_app_fixture(-1., -5., -1., true);
+        let face = &app.controller.geometry_state().bindings[&id].selected[0];
+        let silhouette = EntityRef {
+            kind: EntityKind::Silhouette,
+            id: face.body_id,
+            ..face.clone()
+        };
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Silhouette,
+        )));
+        assert_eq!(app.machining_viewport().cad_filter, EntityKind::Silhouette);
+        let _ = app.update(Message::GeometryClear);
+        app.select_cad_entity(silhouette.clone());
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        let _ = app.update(Message::Apply);
+        let selected = &app.controller.document().rotary_indexes[&id]
+            .auto
+            .as_ref()
+            .unwrap()
+            .selected;
+        assert_eq!(selected, &[silhouette]);
+        let run = app.controller.run(&cam_toolpath::CancelToken::new());
+        assert_eq!(
+            run.completion,
+            cam_toolpath::JobCompletion::Complete,
+            "{:?}",
+            run.diagnostics
+        );
+        assert!(run.program.steps().iter().any(|step| matches!(
+            step,
+            cam_cldata::Step::Rotary {
+                angle: 0.,
+                feed: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn face_drawing_geometry_stages_a_boundary_in_the_shared_editor() {
+        let (mut app, _) = App::new();
+        app.controller = AppController::new(crate::default_machine());
+        app.controller.open_dxf(SAMPLE_DXF, "sample").unwrap();
+        let _ = app.update(Message::BeginOp(OpKind::Face));
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Geometry));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Add(
+            CadFilter::Loop,
+        )));
+        assert!(app.geometry_editor.is_some());
+        app.controller
+            .set_pending_operation_geometry(&[LoopRef::outer(0)], None)
+            .unwrap();
+        let _ = app.operation_geometry_settings();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(app.geometry_editor.is_none(), "{}", app.status);
+        assert!(app.creating_operation());
+        let _ = app.update(Message::ConfirmOp);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("{}", app.status)
+        };
+        assert!(matches!(
+            app.controller.operation(id),
+            Some(Operation::Face(_))
+        ));
     }
 
     #[test]
@@ -2996,7 +3296,6 @@ mod tests {
         let _ = app.update(Message::GeometryRowSelected(0));
         let _ = app.update(Message::GeometryRemove(0));
         assert!(app.controller.cad_selection().is_empty());
-        let _ = app.update(Message::ConfirmOp);
         assert!(app.cad_pending_kind.is_some());
         assert_eq!(app.controller.document(), &before);
         let _ = app.update(Message::GeometryPick);
@@ -3036,7 +3335,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_committed_cad_geometry_opens_an_uncommitted_replacement_list() {
+    fn clearing_committed_face_geometry_stages_whole_stock_until_apply() {
         let (mut app, id) = linked_face_app();
         let before = app.controller.document().clone();
         let _ = app.update(Message::FieldChanged(Field::Feed, "432.1".into()));
@@ -3044,13 +3343,77 @@ mod tests {
         assert_eq!(app.cad_editing_op, Some(id));
         assert!(app.controller.cad_selection().is_empty());
         let _ = app.update(Message::ConfirmCadOperation);
-        let _ = app.update(Message::Apply);
         assert_eq!(app.controller.document(), &before);
         assert_eq!(app.fields[&Field::Feed], "432.1");
-        let _ = app.update(Message::CadEscape);
-        let _ = app.update(Message::CancelOperationDraft);
+        let _ = app.update(Message::Apply);
+        assert!(!app.controller.geometry_state().bindings.contains_key(&id));
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(face))
+                if !face.boundary_selected && face.feed == 432.1)
+        );
+        assert!(app.controller.undo());
         assert_eq!(app.controller.document(), &before);
-        assert!(!app.inspector_dirty());
+    }
+
+    #[test]
+    fn face_creation_with_empty_cad_geometry_uses_whole_stock() {
+        let (mut app, old_id) = linked_face_app();
+        app.setup_draft = None;
+        app.controller
+            .place_cad_instance(
+                1,
+                cam_model::RigidTransform {
+                    translation: [0., 0., 3.],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        app.controller.set_cad_selection(Vec::new());
+        let _ = app.update(Message::BeginOp(OpKind::Face));
+        assert!(app.controller.cad_selection().is_empty());
+        let _ = app.update(Message::ConfirmOp);
+        let Selection::Operation(id) = app.controller.selection() else {
+            panic!("expected new Face operation");
+        };
+        assert_ne!(id, old_id);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(face))
+            if !face.boundary_selected)
+        );
+        assert!(!app.controller.geometry_state().bindings.contains_key(&id));
+        let op = app.controller.operation(id).unwrap();
+        let doc = app.controller.document();
+        let heights = doc.setup().height_settings[&id].resolve(doc, op).unwrap();
+        assert_eq!(heights.bottom, 2.);
+        assert_eq!(heights.top, 3.);
+    }
+
+    #[test]
+    fn face_curves_are_staged_by_the_geometry_editor() {
+        let (mut app, id) = linked_face_app();
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Edit));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::FaceCurves(
+            cam_model::ProfileCurves::Outer,
+        )));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Cancel));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::All)
+        );
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Edit));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::FaceCurves(
+            cam_model::ProfileCurves::Outer,
+        )));
+        let _ = app.update(Message::OperationGeometry(GeometryMessage::Confirm));
+        assert!(
+            matches!(app.current_operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::Outer)
+        );
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::All)
+        );
+        let _ = app.update(Message::Apply);
+        assert!(
+            matches!(app.controller.operation(id), Some(Operation::Face(op)) if op.curves == cam_model::ProfileCurves::Outer)
+        );
     }
 
     #[test]

@@ -2277,8 +2277,13 @@ impl AppController {
 
     /// Create a new default operation of `kind` from the **first** imported region
     /// with the first tool, and select it. A convenience over the pick wizard,
-    /// kept for headless use/tests. A no-op if no geometry is loaded.
+    /// kept for headless use/tests. Face uses the setup stock when available.
     pub fn new_operation(&mut self, kind: OpKind) {
+        if kind == OpKind::Face && !self.setups().is_empty() {
+            let op = self.stock_face_operation(self.first_tool_number(), None);
+            self.add_operation(op);
+            return;
+        }
         if !self.has_geometry() {
             return;
         }
@@ -2355,7 +2360,7 @@ impl AppController {
         }
         let (points, closed) = self.loop_points(boundary)?;
         let chain = Contour::new(points);
-        self.build_op_shape(
+        let mut operation = self.build_op_shape(
             kind,
             chain,
             closed,
@@ -2364,11 +2369,39 @@ impl AppController {
             start,
             cutting,
             self.defaults,
-        )
+        )?;
+        if let Operation::Face(op) = &mut operation {
+            op.boundary_selected = true;
+            if boundary.part == LoopPart::Outer {
+                op.islands = self.regions[boundary.region].holes().to_vec();
+            }
+        }
+        Some(operation)
     }
 
-    /// An uncommitted parameter template; its placeholder contour is always
-    /// replaced by validated user geometry before publishing an operation.
+    fn stock_face_operation(&self, tool: u32, cutting: Option<CuttingData>) -> Operation {
+        let (min, max) = self.setup_model_bounds();
+        let outline = Contour::new(vec![
+            Point::new(min[0], min[1]),
+            Point::new(max[0], min[1]),
+            Point::new(max[0], max[1]),
+            Point::new(min[0], max[1]),
+        ]);
+        self.build_op_shape(
+            OpKind::Face,
+            outline,
+            true,
+            &[],
+            tool,
+            None,
+            cutting,
+            self.defaults,
+        )
+        .unwrap()
+    }
+
+    /// An uncommitted parameter template. Geometry selections replace its
+    /// placeholder contour before publishing an operation.
     pub fn operation_template(&self, kind: OpKind, tool: u32) -> Operation {
         self.operation_template_with_defaults(kind, tool, self.defaults, None)
     }
@@ -2558,6 +2591,10 @@ impl AppController {
                     None => Axis::along_longest_edge(chain.points()),
                 };
                 Operation::Face(FaceOp {
+                    linking: cam_model::FaceLinking::for_new_operation(),
+                    curves: Default::default(),
+                    boundary_selected: false,
+                    islands: Vec::new(),
                     absolute_overlap: None,
                     multiple_depths: Default::default(),
                     parameter_expressions: Default::default(),
@@ -2843,7 +2880,7 @@ impl AppController {
     /// library during setup (the GUI seeds a default and calls [`Self::use_tool`]);
     /// `tool` starts at the first embedded tool's number, or 1 as a placeholder.
     pub fn begin_operation(&mut self, kind: OpKind) {
-        if !self.has_geometry() {
+        if !self.has_geometry() && (kind != OpKind::Face || self.setups().is_empty()) {
             return;
         }
         self.pending_op = Some(PendingOp {
@@ -2866,12 +2903,12 @@ impl AppController {
     /// its contour — losing its place in the job. (To change only the tool, edit it
     /// on the operation directly; this is for redoing the pick as a whole.)
     pub fn reinitialize_operation(&mut self, id: u32) -> bool {
-        if self.regions.is_empty() && self.open_paths.is_empty() {
-            return false;
-        }
         let Some(kind) = self.operation(id).map(op_kind_of) else {
             return false;
         };
+        if kind != OpKind::Face && self.regions.is_empty() && self.open_paths.is_empty() {
+            return false;
+        }
         self.pending_op = Some(PendingOp {
             kind,
             tool: None,
@@ -2912,9 +2949,8 @@ impl AppController {
     }
 
     /// Finalise the pending operation — the **single commit point** for every kind.
-    /// Requires both a chosen tool and a picked boundary; [`Self::pending_ready`]
-    /// reports whether those hold, so the UI can gate its Confirm button on the same
-    /// condition. Returns `true` if an operation was created.
+    /// Requires a tool and compatible geometry. Face can use the setup stock
+    /// without a boundary selection. Returns `true` if an operation was created.
     pub fn confirm_operation(&mut self, cutting: Option<CuttingData>) -> bool {
         if !self.pending_ready() {
             return false;
@@ -2922,19 +2958,28 @@ impl AppController {
         let Some(pending) = self.pending_op.clone() else {
             return false;
         };
-        let (Some(boundary), Some(tool)) = (pending.boundary, pending.tool) else {
+        let Some(tool) = pending.tool else {
             return false;
         };
-        if let Some(mut op) = self.build_op(
-            pending.kind,
-            boundary,
-            &pending.islands,
-            tool,
-            pending.start,
-            cutting,
-        ) {
+        let op = if let Some(boundary) = pending.boundary {
+            self.build_op(
+                pending.kind,
+                boundary,
+                &pending.islands,
+                tool,
+                pending.start,
+                cutting,
+            )
+        } else if pending.kind == OpKind::Face {
+            Some(self.stock_face_operation(tool, cutting))
+        } else {
+            None
+        };
+        if let Some(mut op) = op {
             if !pending.additional_holes.is_empty() {
-                let Some(points) = std::iter::once(boundary)
+                let Some(points) = pending
+                    .boundary
+                    .into_iter()
                     .chain(pending.additional_holes.iter().copied())
                     .map(|reference| self.loop_contour(reference).map(centroid))
                     .collect::<Option<Vec<_>>>()
@@ -2960,12 +3005,11 @@ impl AppController {
         false
     }
 
-    /// Whether the pending operation has everything it needs to be confirmed: a tool
-    /// **and** a boundary. Either may be chosen first.
+    /// Whether the pending operation has a tool and the geometry it requires.
     pub fn pending_ready(&self) -> bool {
         self.pending_op.as_ref().is_some_and(|p| {
             let Some(boundary) = p.boundary else {
-                return false;
+                return p.kind == OpKind::Face && p.tool.is_some();
             };
             let additional = if op_selects_circles(p.kind) {
                 &p.additional_holes
@@ -4519,6 +4563,35 @@ mod tests {
         assert_eq!(op_ids(&app), vec![0, 1, 2]);
         assert_eq!(app.selection(), Selection::Operation(2));
         assert!(matches!(app.operation(2), Some(Operation::Profile(_))));
+    }
+
+    #[test]
+    fn face_wizard_keeps_empty_and_selected_geometry_distinct() {
+        let mut app = AppController::new(machine());
+        app.open_dxf(PART_DXF, "part.dxf").unwrap();
+        app.begin_operation(OpKind::Face);
+        app.set_pending_tool(1);
+        assert!(app.confirm_operation(None));
+        let Some(Operation::Face(stock)) = app.selected_operation() else {
+            panic!("expected a Face operation");
+        };
+        assert!(!stock.boundary_selected);
+
+        let contour = LoopRef::hole(0, 0);
+        assert!(app.loop_contour(contour).is_some());
+        app.begin_operation_from_selection(OpKind::Face, &[contour])
+            .unwrap();
+        app.set_pending_tool(1);
+        assert!(app.confirm_operation(None));
+        let Some(Operation::Face(selected)) = app.selected_operation() else {
+            panic!("expected a Face operation");
+        };
+        assert!(selected.boundary_selected);
+        assert_eq!(&selected.boundary, app.loop_contour(contour).unwrap());
+        let edit = app
+            .operation_with_drawing_geometry(app.selected_operation().unwrap(), &[])
+            .unwrap();
+        assert!(matches!(edit, Operation::Face(face) if !face.boundary_selected));
     }
 
     #[test]

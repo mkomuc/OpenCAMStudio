@@ -47,38 +47,36 @@ impl App {
         };
         let card = container(
             iced::widget::column![
-                text("Discard unsaved changes?")
-                    .size(18)
-                    .color(palette::WARN),
-                text(format!(
-                    "You have unsaved changes that will be lost when {verb}.\n\n\
-                     Cancel to keep working and save your changes, or discard them to continue."
-                ))
-                .size(14),
+                inspector_heading("Discard unsaved changes?"),
+                iced::widget::column![
+                    text(format!("You have unsaved changes that will be lost when {verb}."))
+                        .size(INSPECTOR_TEXT_SIZE)
+                        .color(INSPECTOR_TEXT),
+                    text("Cancel to keep working and save your changes, or discard them to continue.")
+                        .size(INSPECTOR_TEXT_SIZE)
+                        .color(INSPECTOR_MUTED),
+                ]
+                .spacing(6),
                 row![
                     Space::new().width(Length::Fill),
-                    button("Cancel").on_press(Message::DiscardCancelled),
-                    button("Discard changes")
-                        .on_press(Message::DiscardConfirmed)
-                        .style(button::danger),
+                    inspector_button("Cancel").on_press(Message::DiscardCancelled),
+                    inspector_button("Discard changes")
+                        .style(|theme, status| {
+                            let mut style = inspector_secondary(theme, status);
+                            style.border.color = palette::ERROR;
+                            style.text_color = Color::from_rgb(0.97, 0.57, 0.53);
+                            style
+                        })
+                        .on_press(Message::DiscardConfirmed),
                 ]
-                .spacing(8),
+                .spacing(8)
+                .align_y(Alignment::Center),
             ]
-            .spacing(16),
+            .spacing(12),
         )
-        .max_width(520)
-        .padding(20)
-        .style(|theme: &iced::Theme| container::Style {
-            background: Some(Background::Color(
-                theme.extended_palette().background.weak.color,
-            )),
-            border: Border {
-                color: palette::SEPARATOR,
-                width: 1.,
-                radius: 6.0.into(),
-            },
-            ..Default::default()
-        });
+        .max_width(420)
+        .padding(16)
+        .style(popup_surface);
         Some(
             mouse_area(
                 container(card)

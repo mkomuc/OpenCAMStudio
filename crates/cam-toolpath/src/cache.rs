@@ -26,6 +26,8 @@ struct Dependencies {
     keep_down_revision: u32,
     #[serde(default)]
     pocket_lead_revision: u32,
+    #[serde(default)]
+    face_pass_layout_revision: u32,
     #[serde(
         default,
         alias = "concentric_link_revision",
@@ -187,6 +189,11 @@ impl OperationCache {
             // The first wall ring now uses the same leads as later wall rings.
             pocket_lead_revision: u32::from(matches!(op, Operation::Pocket(p)
                 if p.clear.lead_in != cam_model::Lead::None || p.clear.lead_out != cam_model::Lead::None)),
+            face_pass_layout_revision: if matches!(op, Operation::Face(_)) {
+                crate::FaceStrategy::PASS_LAYOUT_REVISION
+            } else {
+                0
+            },
             concentric_clearing_revision: concentric_clearing_revision(op),
             adaptive_domain_revision: if matches!(op, Operation::Parallel(_)) {
                 crate::ParallelStrategy::DOMAIN_REVISION

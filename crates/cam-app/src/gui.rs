@@ -907,6 +907,14 @@ enum LeadKind {
     Arc,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum FaceLinkingToggle {
+    KeepToolDown,
+    Entry,
+    Exit,
+    SameLeadOut,
+}
+
 impl LeadKind {
     const ALL: [LeadKind; 3] = [LeadKind::None, LeadKind::Linear, LeadKind::Arc];
 
@@ -1471,7 +1479,7 @@ enum Field {
     /// Maximum horizontal spacing between concentric pocket passes.
     PocketStepover,
     FaceOverlap,
-    /// Face: overshoot past the stock edge before the turnaround (mm).
+    /// Face: clearance at row ends and cutter overhang at the outer rows (mm).
     FaceOvershoot,
     /// Adaptive-clearing stepover: the radial width of cut along a *straight* wall
     /// (mm); 0 disables adaptive clearing (pocket, profile outside-roughing). Not a
@@ -1965,8 +1973,7 @@ impl Field {
                  diameter. Higher = smoother floor, more passes."
             }
             Field::FaceOvershoot => {
-                "How far the tool runs past the stock edge before turning around (mm), \
-                 so the cutter fully clears the edge."
+                "Clearance beyond the stock or selected CAD face at pass ends. A positive value also sets the minimum cutter overhang at exterior side edges parallel to the passes (mm)."
             }
             Field::Engagement => {
                 "Adaptive-clearing stepover: the radial width of cut taken along a \
@@ -2335,6 +2342,7 @@ struct App {
     mcp_feedback: Option<String>,
     mcp_task: iced::Task<Message>,
     viewport_cache: std::cell::RefCell<Option<(workspace_view::ViewportKey, Viewport)>>,
+    indexed_height_preview: std::cell::RefCell<Option<height_planes::CachedIndexedHeightPreview>>,
     profile_contour_cache: std::cell::RefCell<profile_sides::ProfileContourCache>,
     cad_scene_cache: std::cell::RefCell<Option<(workspace_view::CadSceneKey, Arc<CadScene>)>>,
     notice: Option<Notice>,
@@ -3350,12 +3358,13 @@ enum Message {
     PlungeKindChanged(PlungeKind),
     /// Change the selected face op's pass direction (committed immediately).
     FaceDirectionChanged(Axis),
+    FaceLinkingChanged(FaceLinkingToggle, bool),
     /// Toggle climb (true) vs conventional (false) clearing on the selected
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
     ParallelBothWaysToggled(bool),
     ParallelScallopToggled(bool),
-    ParallelTransitionChanged(cam_model::ParallelTransition),
+    PassTransitionChanged(cam_model::ParallelTransition),
     ScallopSmoothingToggled(bool),
     ScallopRetractionChanged(cam_model::ScallopRetraction),
     ScallopOrderChanged(cam_model::ScallopOrder),
@@ -3688,7 +3697,6 @@ impl App {
     fn begin_operation_draft(&mut self, id: u32) {
         self.rotary_pick = None;
         self.rotary_wrap_draft = None;
-        self.seed_rotary_index_draft(id);
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
         self.profile_contour_selection = 0;
@@ -3702,6 +3710,7 @@ impl App {
         self.end_setup_draft();
         self.inspector_active = true;
         self.controller.select(Selection::Operation(id));
+        self.seed_rotary_index_draft();
         self.operation_geometry = None;
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
@@ -3728,16 +3737,15 @@ impl App {
         self.refresh_fields();
     }
 
-    fn seed_rotary_index_draft(&mut self, id: u32) {
-        self.rotary_index_draft = self.controller.document().rotary_indexes.get(&id).cloned();
-        self.rotary_index_mode = if self
-            .rotary_index_draft
-            .as_ref()
-            .is_some_and(|i| i.face.is_some())
-        {
-            rotary_view::IndexMode::Face
-        } else {
-            rotary_view::IndexMode::Manual
+    fn seed_rotary_index_draft(&mut self) {
+        self.rotary_index_draft = match self.controller.selection() {
+            Selection::Operation(id) => self.controller.document().rotary_indexes.get(&id).cloned(),
+            _ => None,
+        };
+        self.rotary_index_mode = match &self.rotary_index_draft {
+            Some(index) if index.auto.is_some() => rotary_view::IndexMode::Auto,
+            Some(index) if index.face.is_some() => rotary_view::IndexMode::Face,
+            _ => rotary_view::IndexMode::Manual,
         };
         self.seed_rotary_index_values();
     }
@@ -4082,6 +4090,7 @@ impl App {
             mcp_feedback: None,
             mcp_task: iced::Task::none(),
             viewport_cache: Default::default(),
+            indexed_height_preview: Default::default(),
             profile_contour_cache: Default::default(),
             cad_scene_cache: Default::default(),
             notice: None,
@@ -6429,6 +6438,7 @@ impl App {
                 self.inspector_active = false;
                 self.end_setup_draft();
                 self.operation_draft = None;
+                self.seed_rotary_index_draft();
                 self.operation_position_markers = [None; 2];
                 // Browser selection reads the selected operation's saved allowance.
                 // An editor draft from the previous operation must not follow it.
@@ -6733,6 +6743,7 @@ impl App {
                 self.cad_editing_op = None;
                 self.cad_inspecting = false;
                 self.height_draft_id = None;
+                self.seed_rotary_index_draft();
                 self.refresh_fields();
                 self.inspector_active = false;
                 self.status = "Operation changes cancelled.".into();
@@ -7163,6 +7174,7 @@ impl App {
                 }
                 let _ = self.pick_operation_geometry();
                 if self.cad_filter != filter
+                    && !self.automatic_index_geometry_editor()
                     && !matches!(
                         self.geometry_operation_kind(),
                         Some(OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral)
@@ -7390,6 +7402,23 @@ impl App {
                 }
                 if let Some(id) = self.cad_editing_op {
                     let selected = self.controller.cad_selection().to_vec();
+                    if selected.is_empty()
+                        && matches!(self.current_operation(id), Some(Operation::Face(_)))
+                    {
+                        self.edit_operation_draft(|operation| {
+                            if let Operation::Face(face) = operation {
+                                face.boundary_selected = false;
+                                face.islands.clear();
+                            }
+                        });
+                        self.operation_geometry = Some(selected);
+                        self.operation_binding_preview = None;
+                        self.cad_editing_op = None;
+                        self.cad_inspecting = false;
+                        self.operation_tab = OperationTab::Geometry;
+                        self.status = "Setup stock staged. Use OK to apply it.".into();
+                        return iced::Task::none();
+                    }
                     let profile_geometry = self.profile_selection_geometry().map(|p| p.0);
                     match self.preview_geometry_draft(id, selected.clone()) {
                         Ok(binding) => {
@@ -7409,8 +7438,9 @@ impl App {
                                     }
                                 });
                             }
-                            if let Ok(input) = crate::cad_operations::geometry_for_setup(
-                                self.controller.document(),
+                            if let Ok(input) = crate::cad_operations::geometry_for_operation(
+                                &self.rotary_draft_document(),
+                                id,
                             )
                             .and_then(|geometry| {
                                 cam_geometry3d::resolve_binding_advisory(&geometry, &binding)
@@ -7463,6 +7493,13 @@ impl App {
                                             op.islands = region.holes().to_vec();
                                         }
                                     }
+                                    Operation::Face(op) => {
+                                        if let Some(region) = input.regions.first() {
+                                            op.boundary = region.outer().clone();
+                                            op.islands = region.holes().to_vec();
+                                            op.boundary_selected = true;
+                                        }
+                                    }
                                     Operation::Bore(op) => {
                                         op.points = input
                                             .holes
@@ -7512,9 +7549,15 @@ impl App {
                 }
             }
             Message::EditCadGeometry(id) => {
-                if let Some(binding) = self.controller.geometry_state().bindings.get(&id) {
+                let binding = self.controller.geometry_state().bindings.get(&id);
+                if binding.is_some()
+                    || matches!(self.current_operation(id), Some(Operation::Face(_)))
+                {
                     self.cad_filter_explicit = false;
-                    let refs = binding.selected.clone();
+                    let refs = self
+                        .operation_geometry
+                        .clone()
+                        .unwrap_or_else(|| binding.map_or_else(Vec::new, |b| b.selected.clone()));
                     if matches!(self.current_operation(id), Some(Operation::Profile(_))) {
                         self.profile_selection_mode = match refs.first().map(|r| r.kind) {
                             Some(EntityKind::Face) => ProfileSelectionMode::FaceContours,
@@ -7524,7 +7567,10 @@ impl App {
                         self.profile_chain_edges =
                             refs.first().is_some_and(|r| r.kind == EntityKind::Edge);
                     }
-                    self.cad_filter = match binding.recipe {
+                    self.cad_filter = match binding
+                        .map_or(cam_model::ExtractionRecipe::FaceRegion, |b| {
+                            b.recipe.clone()
+                        }) {
                         cam_model::ExtractionRecipe::ProfileLoop { .. }
                         | cam_model::ExtractionRecipe::ChamferLoop
                         | cam_model::ExtractionRecipe::ChamferFaces
@@ -7545,9 +7591,15 @@ impl App {
                                 _ => CadFilter::Body,
                             }
                         }
+                        cam_model::ExtractionRecipe::FaceRegion => {
+                            match refs.first().map(|r| r.kind) {
+                                Some(EntityKind::Silhouette) => CadFilter::Silhouette,
+                                Some(EntityKind::Loop) => CadFilter::Loop,
+                                _ => CadFilter::Face,
+                            }
+                        }
                         _ => CadFilter::Face,
                     };
-                    let refs = self.operation_geometry.clone().unwrap_or(refs);
                     self.controller.set_cad_selection(refs);
                     self.cad_inspecting = true;
                     self.cad_editing_op = Some(id);
@@ -8610,6 +8662,7 @@ impl App {
                 self.edit_operation_draft(|op| match op {
                     Operation::Profile(p) => p.lead_in = kind.to_lead(p.lead_in),
                     Operation::Chamfer(c) => c.lead_in = kind.to_lead(c.lead_in),
+                    Operation::Face(f) => f.linking.lead_in = kind.to_lead(f.linking.lead_in),
                     Operation::Pocket(p) => p.clear.lead_in = kind.to_lead(p.clear.lead_in),
                     _ => {}
                 });
@@ -8619,6 +8672,7 @@ impl App {
                 self.edit_operation_draft(|op| match op {
                     Operation::Profile(p) => p.lead_out = kind.to_lead(p.lead_out),
                     Operation::Chamfer(c) => c.lead_out = kind.to_lead(c.lead_out),
+                    Operation::Face(f) => f.linking.lead_out = kind.to_lead(f.linking.lead_out),
                     Operation::Pocket(p) => p.clear.lead_out = kind.to_lead(p.clear.lead_out),
                     _ => {}
                 });
@@ -8720,6 +8774,44 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::FaceLinkingChanged(toggle, enabled) => {
+                let sources: Vec<_> = [
+                    Field::LeadInSize,
+                    Field::LeadOutSize,
+                    Field::Profile(profile_parameters::Number::LeadInSweep),
+                    Field::Profile(profile_parameters::Number::LeadOutSweep),
+                ]
+                .into_iter()
+                .filter_map(|field| {
+                    Some((
+                        parameter_expressions::parameter(field)?,
+                        self.fields.get(&field)?.clone(),
+                    ))
+                })
+                .collect();
+                self.edit_operation_draft(|op| {
+                    if !matches!(op, Operation::Face(_)) {
+                        return;
+                    }
+                    for (parameter, source) in sources {
+                        if let Ok(value) = source.trim().parse() {
+                            if parameter.validate_value(op, value).is_ok() {
+                                parameter.set_source(op, &source);
+                            }
+                        }
+                    }
+                    let Operation::Face(f) = op else {
+                        unreachable!()
+                    };
+                    match toggle {
+                        FaceLinkingToggle::KeepToolDown => f.linking.keep_tool_down = Some(enabled),
+                        FaceLinkingToggle::Entry => f.linking.lead_in_enabled = enabled,
+                        FaceLinkingToggle::Exit => f.linking.lead_out_enabled = enabled,
+                        FaceLinkingToggle::SameLeadOut => f.linking.same_lead_out = enabled,
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::ChamferGradualToggled(on) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Chamfer(c) = op {
@@ -8762,11 +8854,11 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
-            Message::ParallelTransitionChanged(transition) => {
-                self.edit_operation_draft(|op| {
-                    if let Operation::Parallel(p) = op {
-                        p.params.transition = transition;
-                    }
+            Message::PassTransitionChanged(transition) => {
+                self.edit_operation_draft(|op| match op {
+                    Operation::Parallel(p) => p.params.transition = transition,
+                    Operation::Face(f) => f.linking.transition = Some(transition),
+                    _ => {}
                 });
             }
             Message::ScallopSmoothingToggled(on) => {
@@ -9481,6 +9573,7 @@ impl App {
                 }
                 self.end_setup_draft();
                 self.operation_draft = None;
+                self.seed_rotary_index_draft();
                 self.operation_tools.clear();
                 self.operation_geometry = None;
                 self.operation_binding_preview = None;
@@ -10548,7 +10641,11 @@ impl App {
                         .inspection_setup()
                         .height_settings
                         .contains_key(&id))
-                && self.resolve_height_editor(id).is_err()
+                && if self.automatic_cad_index().is_some() {
+                    self.edited_height_settings().is_err()
+                } else {
+                    self.resolve_height_editor(id).is_err()
+                }
             {
                 return true;
             }
@@ -11277,7 +11374,9 @@ impl App {
                         .ok_or_else(|| "Linked heights must be finite numbers or blank.".into())
                 }
             };
-            let overrides = if self.controller.geometry_state().bindings.contains_key(&id) {
+            let overrides = if self.automatic_cad_index().is_none()
+                && self.controller.geometry_state().bindings.contains_key(&id)
+            {
                 match parse_override(&self.cad_override_top).and_then(|top| {
                     parse_override(&self.cad_override_bottom)
                         .map(|bottom| cam_model::GeometryOverrides { top, bottom })
@@ -11479,11 +11578,7 @@ impl App {
         self.end_setup_draft();
         self.restore_project_view();
         self.operation_draft = None;
-        if let Selection::Operation(id) = self.controller.selection() {
-            self.seed_rotary_index_draft(id);
-        } else {
-            self.rotary_index_draft = None;
-        }
+        self.seed_rotary_index_draft();
         // Establish a baseline for legacy files too, using their default opening view.
         self.controller
             .set_project_view(Some(self.capture_project_view()));
@@ -12647,7 +12742,26 @@ impl App {
         if self.profile_entry_cad_pick(entity.clone()) {
             return;
         }
+        if self.automatic_cad_index().is_some()
+            && self.operation_tab == OperationTab::Geometry
+            && self.geometry_editor.is_none()
+        {
+            if self.profile_geometry_active() {
+                let kind = match entity.kind {
+                    EntityKind::Face => cam_model::ProfileGeometryKind::FaceContours,
+                    EntityKind::Edge | EntityKind::Loop => cam_model::ProfileGeometryKind::Chain,
+                    EntityKind::Silhouette => cam_model::ProfileGeometryKind::Silhouette,
+                    _ => return,
+                };
+                self.profile_entry_message(profile_entries_view::EntryMessage::Add(kind));
+                self.profile_entry_cad_pick(entity);
+                return;
+            }
+            self.operation_geometry_message(GeometryMessage::Edit);
+        }
+        let automatic = self.automatic_index_geometry_editor();
         let auto_edit_id = if self.geometry_auto_pick
+            && !automatic
             && self.operation_tab == OperationTab::Geometry
             && self.cad_editing_op.is_none()
             && self.cad_pending_kind.is_none()
@@ -12684,16 +12798,21 @@ impl App {
                     return;
                 }
             }
-            if self.geometry_operation_kind() == Some(OpKind::Drill) {
-                self.operation_geometry_message(GeometryMessage::Add(CadFilter::Face));
-            } else {
-                let _ = self.update(Message::EditCadGeometry(id));
+            match self.geometry_operation_kind() {
+                Some(OpKind::Drill) => {
+                    self.operation_geometry_message(GeometryMessage::Add(CadFilter::Face))
+                }
+                Some(OpKind::Face) => self.operation_geometry_message(GeometryMessage::Edit),
+                _ => {
+                    let _ = self.update(Message::EditCadGeometry(id));
+                }
             }
             self.geometry_additive = true;
             self.geometry_auto_pick = false;
         }
         if self.cad_editing_op.is_none()
             && self.cad_pending_kind.is_none()
+            && !automatic
             && (self.setup_draft_dirty()
                 || (matches!(self.controller.selection(), Selection::Operation(_))
                     && self.inspector_dirty()))
@@ -12730,7 +12849,8 @@ impl App {
         }
         let pocket_edges = entity.kind == EntityKind::Edge
             && self.geometry_operation_kind() == Some(OpKind::Pocket);
-        let multiple = pocket_edges
+        let multiple = automatic
+            || pocket_edges
             || (profile && entity.kind != EntityKind::Silhouette)
             || matches!(
                 self.cad_pending_kind,
@@ -12794,14 +12914,16 @@ impl App {
         };
         match selection_result {
             Ok(()) => {
-                if !self.creating_operation() && self.cad_editing_op.is_none() {
+                if !self.creating_operation() && self.cad_editing_op.is_none() && !automatic {
                     let selected = self.controller.cad_selection().to_vec();
                     self.clear_browser_selection();
                     self.controller.set_cad_selection(selected);
                 }
-                self.sync_chamfer_geometry_fields();
+                if !automatic {
+                    self.sync_chamfer_geometry_fields();
+                    self.sync_creation_geometry_heights();
+                }
                 self.reveal_selected_bodies();
-                self.sync_creation_geometry_heights();
                 self.focus_ops.clear();
                 self.status = format!(
                     "{} CAD feature(s) selected.{}",
@@ -12894,6 +13016,8 @@ impl App {
                 CadFilter::Body
             }
             (OpKind::Face, EntityKind::Silhouette) => CadFilter::Silhouette,
+            (OpKind::Face, EntityKind::Face) => CadFilter::Face,
+            (OpKind::Face, EntityKind::Loop) => CadFilter::Loop,
             _ => self.cad_filter,
         };
     }
@@ -14157,6 +14281,14 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Face(o), Field::FaceOvershoot) => Some(o.overshoot),
         (Operation::Face(o), Field::Feed) => Some(o.feed),
         (Operation::Face(o), Field::PlungeFeed) => Some(o.plunge_feed),
+        (
+            op @ Operation::Face(_),
+            Field::LeadInSize
+            | Field::LeadOutSize
+            | Field::Profile(
+                profile_parameters::Number::LeadInSweep | profile_parameters::Number::LeadOutSweep,
+            ),
+        ) => parameter_expressions::parameter(field)?.value(op),
         (Operation::Drill(o), Field::Depth) => Some(o.depth),
         (Operation::Drill(o), Field::DrillStartOffset) => Some(o.start_offset),
         (Operation::Drill(o), Field::Peck) => Some(o.peck.unwrap_or(0.0)),
@@ -14389,6 +14521,27 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             o.clear.plunge = set_plunge_params(o.clear.plunge, a, b);
         }
         Operation::Face(o) => {
+            for (size, sweep, lead) in [
+                (
+                    Field::LeadInSize,
+                    profile_parameters::Number::LeadInSweep,
+                    &mut o.linking.lead_in,
+                ),
+                (
+                    Field::LeadOutSize,
+                    profile_parameters::Number::LeadOutSweep,
+                    &mut o.linking.lead_out,
+                ),
+            ] {
+                if let Some(v) = get(size) {
+                    *lead = set_lead_size(*lead, v);
+                }
+                if let Some(angle_deg) = get(Field::Profile(sweep)).filter(|&v| !sweep.invalid(v)) {
+                    if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = *lead {
+                        *lead = Lead::ArcSweep { radius, angle_deg };
+                    }
+                }
+            }
             if let Some(v) = get(Field::FaceStartOffset) {
                 o.start_offset = v.max(0.0);
             }
@@ -15213,6 +15366,7 @@ struct Viewport {
     cad_scene: Arc<CadScene>,
     cad_filter: EntityKind,
     cad_filter_explicit: bool,
+    cad_indexed_geometry: bool,
     geometry_pick_active: bool,
     cad_operation_kind: Option<OpKind>,
     cad_silhouette: bool,
@@ -15719,6 +15873,7 @@ impl Viewport {
             cad_scene,
             cad_filter,
             cad_filter_explicit: false,
+            cad_indexed_geometry: false,
             geometry_pick_active: false,
             cad_operation_kind: None,
             cad_silhouette: false,
@@ -15809,7 +15964,10 @@ impl Viewport {
         let aperture =
             0.5 * self.snap_catch_px * camera.world_per_pixel(bounds.height) / aspect.min(1.0);
         let ray = camera.pick_ray(u, v, aspect);
-        if self.cad_silhouette && !self.setup_axis {
+        let facing_silhouette = self.cad_operation_kind == Some(OpKind::Face)
+            && self.cad_filter_explicit
+            && self.cad_filter == EntityKind::Silhouette;
+        if (self.cad_silhouette || facing_silhouette) && !self.setup_axis {
             return self.cad_scene.pick_silhouette_candidates(
                 ray,
                 aperture as f64,
@@ -15851,6 +16009,13 @@ impl Viewport {
                 );
             }
         }
+        if self.cad_indexed_geometry && self.cad_filter == EntityKind::Loop {
+            return self.cad_scene.pick_indexed_loop_candidates(
+                ray,
+                aperture as f64,
+                self.cad_select_through,
+            );
+        }
         match if self.setup_axis {
             None
         } else {
@@ -15869,7 +16034,7 @@ impl Viewport {
             Some(OpKind::Pocket) if self.cad_filter == EntityKind::Loop => self
                 .cad_scene
                 .pick_pocket_loop_candidates(ray, aperture as f64, self.cad_select_through),
-            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve)
+            Some(OpKind::Chamfer | OpKind::Engrave | OpKind::Carve | OpKind::Face)
                 if self.cad_filter == EntityKind::Loop =>
             {
                 self.cad_scene.pick_surface_loop_candidates(
@@ -15906,11 +16071,18 @@ impl Viewport {
         aperture: f64,
     ) -> Vec<PickCandidate> {
         let through = self.cad_select_through;
+        let indexed_loops = || {
+            self.cad_scene
+                .pick_indexed_loop_candidates(ray, aperture, through)
+        };
         let mut candidates = match kind {
             OpKind::Profile => {
-                let mut candidates = self
-                    .cad_scene
-                    .pick_profile_candidates(ray, aperture, through);
+                let mut candidates = if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else {
+                    self.cad_scene
+                        .pick_profile_candidates(ray, aperture, through)
+                };
                 candidates.extend(self.cad_scene.pick_any_candidates(
                     ray,
                     &[EntityKind::Face, EntityKind::Edge, EntityKind::Silhouette],
@@ -15926,10 +16098,12 @@ impl Viewport {
                     aperture,
                     through,
                 );
-                candidates.extend(
+                candidates.extend(if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else {
                     self.cad_scene
-                        .pick_surface_loop_candidates(ray, aperture, through),
-                );
+                        .pick_surface_loop_candidates(ray, aperture, through)
+                });
                 candidates
             }
             OpKind::Engrave => self.cad_scene.pick_any_candidates(
@@ -15942,7 +16116,9 @@ impl Viewport {
                 let mut candidates =
                     self.cad_scene
                         .pick_any_candidates(ray, &[EntityKind::Face], aperture, through);
-                candidates.extend(if kind == OpKind::Pocket {
+                candidates.extend(if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else if kind == OpKind::Pocket {
                     self.cad_scene
                         .pick_pocket_loop_candidates(ray, aperture, through)
                 } else {
@@ -15962,12 +16138,21 @@ impl Viewport {
                     through,
                 )
             }
-            OpKind::Face => self.cad_scene.pick_any_candidates(
-                ray,
-                &[EntityKind::Face, EntityKind::Silhouette],
-                aperture,
-                through,
-            ),
+            OpKind::Face => {
+                let mut candidates = self.cad_scene.pick_any_candidates(
+                    ray,
+                    &[EntityKind::Face, EntityKind::Silhouette],
+                    aperture,
+                    through,
+                );
+                candidates.extend(if self.cad_indexed_geometry {
+                    indexed_loops()
+                } else {
+                    self.cad_scene
+                        .pick_surface_loop_candidates(ray, aperture, through)
+                });
+                candidates
+            }
         };
         candidates.sort_by(|a, b| {
             a.depth
@@ -16004,8 +16189,9 @@ impl Viewport {
                         },
                         OpKind::Face => match entity.kind {
                             EntityKind::Face => 0,
-                            EntityKind::Silhouette => 1,
-                            _ => 2,
+                            EntityKind::Loop => 1,
+                            EntityKind::Silhouette => 2,
+                            _ => 3,
                         },
                         OpKind::Drill | OpKind::Bore | OpKind::Thread => 0,
                     };
@@ -17579,7 +17765,7 @@ mod multi_setup_draft_tests {
         let _ = app.operation_inspector(id);
         send(
             &mut app,
-            Message::ParallelTransitionChanged(ParallelTransition::NoContact),
+            Message::PassTransitionChanged(ParallelTransition::NoContact),
         );
         assert_eq!(
             mode(app.current_operation(id).unwrap()),
@@ -17593,7 +17779,7 @@ mod multi_setup_draft_tests {
         app.begin_operation_draft(id);
         send(
             &mut app,
-            Message::ParallelTransitionChanged(ParallelTransition::Smooth),
+            Message::PassTransitionChanged(ParallelTransition::Smooth),
         );
         send(&mut app, Message::Apply);
         assert_eq!(
@@ -17605,6 +17791,86 @@ mod multi_setup_draft_tests {
             mode(app.controller.operation(id).unwrap()),
             ParallelTransition::StraightLine
         );
+    }
+
+    #[test]
+    fn face_linking_parameters_apply_and_undo_together() {
+        use cam_model::ParallelTransition;
+        use profile_parameters::Number;
+
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Face, 1);
+        let id = operation.id();
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        app.operation_tab = OperationTab::Linking;
+        let _ = app.operation_inspector(id);
+        assert!(matches!(
+            app.current_operation(id),
+            Some(Operation::Face(op)) if op.keep_tool_down()
+        ));
+        assert_eq!(app.fields[&Field::LeadInSize], "0.6");
+        assert_eq!(app.fields[&Field::Profile(Number::LeadInSweep)], "90");
+        assert!(!app.fields.contains_key(&Field::LeadOutSize));
+
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadInSize, "1.25".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::Profile(Number::LeadInSweep), "=45 + 15".into()),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::Entry, false),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::Entry, true),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::SameLeadOut, false),
+        );
+        send(&mut app, Message::LeadOutKindChanged(LeadKind::Linear));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadOutSize, "2.5".into()),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::KeepToolDown, false),
+        );
+        send(
+            &mut app,
+            Message::PassTransitionChanged(ParallelTransition::StraightLine),
+        );
+        send(&mut app, Message::Apply);
+
+        let Some(Operation::Face(op)) = app.controller.operation(id) else {
+            panic!("face operation")
+        };
+        assert_eq!(
+            op.linking.effective_lead_in(),
+            Lead::ArcSweep {
+                radius: 1.25,
+                angle_deg: 60.
+            },
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            op.linking.effective_lead_out(),
+            Lead::Linear { length: 2.5 }
+        );
+        assert_eq!(op.transition(), ParallelTransition::StraightLine);
+        assert!(!op.keep_tool_down());
+        assert!(app.controller.undo());
+        assert!(matches!(
+            app.controller.operation(id),
+            Some(Operation::Face(op)) if op.linking == cam_model::FaceLinking::for_new_operation()
+        ));
     }
 
     #[test]

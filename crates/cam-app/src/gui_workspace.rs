@@ -1102,6 +1102,18 @@ impl App {
             viewport.cad_silhouette =
                 self.cad_filter == CadFilter::Silhouette || self.modifiers.control();
         }
+        viewport.cad_indexed_geometry = self.automatic_cad_index().is_some()
+            && self.operation_tab == OperationTab::Geometry
+            && !viewport.setup_axis
+            && !self.setup_model_pick
+            && !self.stock_contour_editor()
+            && self.height_reference_pick.is_none()
+            && self.rotary_pick.is_none();
+        if viewport.cad_indexed_geometry {
+            viewport.picking = false;
+            viewport.geometry_pick_active = true;
+            viewport.cad_operation_kind = self.geometry_operation_kind();
+        }
         if pattern_pick.is_some() {
             viewport.cad_operation_kind = None;
             viewport.cad_filter = EntityKind::Edge;

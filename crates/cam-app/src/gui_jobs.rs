@@ -210,11 +210,7 @@ impl App {
         self.operation_draft = None;
         self.controller
             .select(operation.map_or(Selection::Setup, Selection::Operation));
-        if let Some(id) = operation {
-            self.seed_rotary_index_draft(id);
-        } else {
-            self.rotary_index_draft = None;
-        }
+        self.seed_rotary_index_draft();
         self.refresh_fields();
         self.switch_workspace(Workspace::Machining);
         self.controller

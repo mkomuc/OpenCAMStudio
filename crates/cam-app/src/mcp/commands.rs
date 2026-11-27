@@ -317,7 +317,7 @@ catalog! {
     duplicate_operation [false] "Duplicate an operation in its owning setup." {"id":id()} |c,a| {
         let id=a.get("id")?; operation(c,id)?; c.select(Selection::Operation(id)); c.duplicate_selected_operation(); serialized(c.selected_operation())
     }
-    set_operation_rotary_index [false] "Set or clear fixed 3+1 indexing. Geometry/heights use the indexed machine frame; CAD selections are rotated before resolution." {"id":id(),"index":optional(object("RotaryIndex {axis: 'A' | 'B', center: [x,y,z], angle: degrees, tolerance: mm}; omit to clear"))} |c,a| {
+    set_operation_rotary_index [false] "Set or clear 3+1 indexing. Auto resolves the ordered CAD features in their indexed machine frames or uses index zero for drawings." {"id":id(),"index":optional(object("RotaryIndex {axis: 'A' | 'B', center: [x,y,z], angle: degrees, tolerance: mm, auto?: {order: 'RotaryAngle' | 'SelectionOrder', selected: EntityRef[], drawing?: bool}}; omit index to clear"))} |c,a| {
         let id=a.get("id")?; operation(c,id)?; c.set_operation_rotary_index(id,a.optional("index")?)?; serialized(c.document().rotary_indexes.get(&id))
     }
     delete_operation [false] "Delete an operation and its associated settings/bindings." {"id":id()} |c,a| {

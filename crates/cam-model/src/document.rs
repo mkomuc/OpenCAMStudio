@@ -110,7 +110,8 @@ use crate::{BoreOp, Tool};
 /// v49: Parallel cutting turns and repositioning policy.
 /// v50: Parallel transition type.
 /// v51: groove cutter and slitting saw tool types.
-pub const SCHEMA_VERSION: u32 = 51;
+/// v52: facing leads, pass transitions, and keep-tool-down control.
+pub const SCHEMA_VERSION: u32 = 52;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1647,10 +1648,73 @@ impl std::fmt::Display for Axis {
     }
 }
 
-/// A facing operation: clear the top of the stock over a boundary with parallel
-/// passes, in stepdown passes, down to a depth. The passes form a continuous
-/// serpentine (one plunge per level, arc turnarounds) rather than lifting between
-/// passes.
+/// Entry, exit, and inter-pass linking for facing.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FaceLinking {
+    pub lead_in: Lead,
+    pub lead_out: Lead,
+    pub lead_in_enabled: bool,
+    pub lead_out_enabled: bool,
+    pub same_lead_out: bool,
+    /// Missing in old projects, where selected boundaries used separate passes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition: Option<crate::ParallelTransition>,
+    /// Missing in old projects, where only whole-stock facing stayed down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_tool_down: Option<bool>,
+}
+
+impl Default for FaceLinking {
+    fn default() -> Self {
+        Self {
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
+            lead_in_enabled: false,
+            lead_out_enabled: false,
+            same_lead_out: true,
+            transition: None,
+            keep_tool_down: None,
+        }
+    }
+}
+
+impl FaceLinking {
+    pub fn for_new_operation() -> Self {
+        Self {
+            lead_in_enabled: true,
+            lead_out_enabled: true,
+            transition: Some(crate::ParallelTransition::Smooth),
+            keep_tool_down: Some(true),
+            ..Self::default()
+        }
+    }
+
+    pub fn uses_entry_for_exit(self) -> bool {
+        self.same_lead_out && self.lead_in_enabled
+    }
+
+    pub fn effective_lead_in(self) -> Lead {
+        if self.lead_in_enabled {
+            self.lead_in
+        } else {
+            Lead::None
+        }
+    }
+
+    pub fn effective_lead_out(self) -> Lead {
+        if !self.lead_out_enabled {
+            Lead::None
+        } else if self.uses_entry_for_exit() {
+            self.lead_in
+        } else {
+            self.lead_out
+        }
+    }
+}
+
+/// A facing operation clears the whole setup stock or a selected region with
+/// parallel passes at each cutting depth.
 ///
 /// Z uses the magnitude convention: `start_offset` is the top cutting plane above
 /// the drawing reference (Z=0), `depth` is how far *down* to face as a positive
@@ -1663,8 +1727,18 @@ pub struct FaceOp {
     pub id: u32,
     /// Tool number.
     pub tool: u32,
-    /// The area to face (usually the stock outline).
+    /// Selected outer contour, or a fallback stock outline for older projects.
     pub boundary: Contour,
+    /// Use the selected contour as the machining limit. Legacy unlinked
+    /// operations continue to use the setup stock.
+    #[serde(default)]
+    pub boundary_selected: bool,
+    /// Inner contours excluded from a selected machining region.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub islands: Vec<Contour>,
+    /// Curves that define the machining area on a selected face.
+    #[serde(default)]
+    pub curves: crate::ProfileCurves,
     /// Z of the top cutting plane, above the drawing reference (mm, >= 0). Set
     /// this to face stock that stands proud of Z=0 down toward it; `0` starts the
     /// cut at the reference plane.
@@ -1676,8 +1750,8 @@ pub struct FaceOp {
     /// Maximum depth removed per pass (mm, > 0).
     pub stepdown: f64,
     /// Fraction of the tool diameter that adjacent passes overlap (0..1). The pass
-    /// spacing is `diameter * (1 - overlap)`, and the first pass is placed so it
-    /// cuts a strip of exactly that width along the stock edge.
+    /// spacing is `diameter * (1 - overlap)`, and the passes are centered across
+    /// the machining area.
     #[serde(default)]
     pub overlap: f64,
     /// Facing overlap in millimetres; absent in older percentage-based projects.
@@ -1686,13 +1760,14 @@ pub struct FaceOp {
     /// Axial pass scheduling. Older projects retain their original multi-pass behavior.
     #[serde(default)]
     pub multiple_depths: crate::MultipleDepths,
-    /// Distance the tool overshoots past each stock edge (mm, >= 0) before the
-    /// 180-degree turnaround arc, so the arc swings clear of the part.
+    /// Cutter-edge clearance at pass ends and positive overhang along exterior sides.
     #[serde(default)]
     pub overshoot: f64,
     /// Orientation of the parallel cutting lines.
     #[serde(default)]
     pub direction: Axis,
+    #[serde(default)]
+    pub linking: FaceLinking,
     /// Spindle speed for this operation, rpm (`M3 S<rpm>`). Seeded from the tool's
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
@@ -1715,6 +1790,48 @@ pub struct FaceOp {
     pub feed: f64,
     /// Plunge feed, mm/min.
     pub plunge_feed: f64,
+}
+
+impl FaceOp {
+    pub fn transition(&self) -> crate::ParallelTransition {
+        use crate::ParallelTransition;
+        self.linking
+            .transition
+            .unwrap_or(if self.boundary_selected {
+                ParallelTransition::NoContact
+            } else {
+                ParallelTransition::Smooth
+            })
+    }
+
+    pub fn keep_tool_down(&self) -> bool {
+        self.linking
+            .keep_tool_down
+            .unwrap_or(!self.boundary_selected)
+    }
+
+    /// Filled machining regions defined by the chosen face curves.
+    pub fn boundary_regions(
+        &self,
+        curves: crate::ProfileCurves,
+    ) -> Result<Vec<cam_geo::Polygon>, String> {
+        use crate::ProfileCurves;
+        let polygon =
+            |outer, holes| cam_geo::Polygon::with_holes(outer, holes).map_err(|e| e.to_string());
+        match curves {
+            ProfileCurves::All => Ok(vec![polygon(self.boundary.clone(), self.islands.clone())?]),
+            ProfileCurves::Outer => Ok(vec![polygon(self.boundary.clone(), Vec::new())?]),
+            ProfileCurves::Inner if self.islands.is_empty() => {
+                Err("The selected face has no inner contours".into())
+            }
+            ProfileCurves::Inner => self
+                .islands
+                .iter()
+                .cloned()
+                .map(|outer| polygon(outer, Vec::new()))
+                .collect(),
+        }
+    }
 }
 
 /// A thread-milling operation: cut internal or external threads at a set of hole
@@ -2709,6 +2826,9 @@ pub struct Document {
     /// Per-operation 3+1 indexing; stable operation IDs are document-wide.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub rotary_indexes: std::collections::BTreeMap<u32, crate::RotaryIndex>,
+    /// Transient CAD extraction for Auto indexing, in machining order.
+    #[serde(skip)]
+    pub resolved_indexed_cuts: std::collections::BTreeMap<u32, Vec<crate::ResolvedIndexedCut>>,
     /// Schema version this document conforms to.
     pub schema_version: u32,
     /// Independent physical workholding setups, in browser order.
@@ -2816,6 +2936,7 @@ impl Document {
             schema_version: SCHEMA_VERSION,
             operation_names: Default::default(),
             rotary_indexes: Default::default(),
+            resolved_indexed_cuts: Default::default(),
             active_setup_id: 0,
             setups: Vec::new(),
             geometry: crate::GeometryState::default(),

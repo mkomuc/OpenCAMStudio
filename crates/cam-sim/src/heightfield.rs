@@ -717,16 +717,14 @@ impl Heightfield {
 
     /// Centre of cell `(ix, iy)`.
     pub(crate) fn center(&self, ix: usize, iy: usize) -> (f64, f64) {
-        (
-            (self.origin[0]
-                + ix as f64 * self.res
-                + (self.origin[0] + (ix + 1) as f64 * self.res).min(self.max[0]))
-                * 0.5,
-            (self.origin[1]
-                + iy as f64 * self.res
-                + (self.origin[1] + (iy + 1) as f64 * self.res).min(self.max[1]))
-                * 0.5,
-        )
+        (self.center_axis(ix, 0), self.center_axis(iy, 1))
+    }
+
+    pub(crate) fn center_axis(&self, index: usize, axis: usize) -> f64 {
+        (self.origin[axis]
+            + index as f64 * self.res
+            + (self.origin[axis] + (index + 1) as f64 * self.res).min(self.max[axis]))
+            * 0.5
     }
 
     /// Cell index containing `(x, y)`, if inside the grid.

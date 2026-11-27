@@ -17,6 +17,7 @@ pub fn index_program(
     source.validate().map_err(|e| e.to_string())?;
     let mut out = Program::new();
     let mut current = None;
+    let angle = index.fixed_angle();
     let center = Point3::new(index.center[0], index.center[1], index.center[2]);
     let emit = |out: &mut Program,
                 current: &mut Option<Point3>,
@@ -36,7 +37,7 @@ pub fn index_program(
         }
         out.push(Step::Rotary {
             to,
-            angle: index.angle,
+            angle,
             axis: index.axis,
             center,
             feed,

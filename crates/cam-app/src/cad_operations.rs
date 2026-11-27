@@ -4,6 +4,8 @@ use crate::{JobParams, OpKind};
 use cam_model::*;
 use std::path::Path;
 
+pub(crate) mod automatic_index;
+
 #[derive(Clone, Debug)]
 pub struct CadImportPreview {
     pub name: String,
@@ -349,7 +351,7 @@ pub(crate) fn model_bounds(geometry: &GeometryState, setup: &Setup) -> ([f64; 3]
 fn stock_top(document: &Document) -> f64 {
     document.stock_bounds_for(document.setup()).1[2]
 }
-fn operation_stock_top(document: &Document, id: u32) -> Result<f64, String> {
+pub(crate) fn operation_stock_top(document: &Document, id: u32) -> Result<f64, String> {
     Ok(document
         .indexed_view(id)?
         .as_ref()
@@ -473,6 +475,28 @@ pub(crate) fn resolve_profile_entries(
     }
 }
 
+pub(crate) fn resolve_operation_selection(
+    document: &Document,
+    kind: OpKind,
+    selected: &[EntityRef],
+    id: u32,
+) -> Result<(GeometryBinding, cam_geometry3d::ResolvedInput), String> {
+    let geometry = geometry_for_operation(document, id)?;
+    if matches!(kind, OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral) {
+        cam_geometry3d::validate_adaptive_selection(&geometry, selected)?;
+    } else {
+        validate_selection(&geometry, selected)?;
+    }
+    let binding = cam_geometry3d::resolve_selection_advisory(
+        &geometry,
+        selected,
+        recipe(kind, &geometry, selected)?,
+        operation_stock_top(document, id)?,
+    )?;
+    let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
+    Ok((binding, resolved))
+}
+
 pub(crate) fn create_operation(
     document: &Document,
     kind: OpKind,
@@ -482,19 +506,7 @@ pub(crate) fn create_operation(
     work_offset: u32,
     defaults: JobParams,
 ) -> Result<(Operation, GeometryBinding), String> {
-    let geometry = geometry_for_operation(document, id)?;
-    if matches!(kind, OpKind::Adaptive | OpKind::Parallel | OpKind::Spiral) {
-        cam_geometry3d::validate_adaptive_selection(&geometry, &selected)?;
-    } else {
-        validate_selection(&geometry, &selected)?;
-    }
-    let mut binding = cam_geometry3d::resolve_selection_advisory(
-        &geometry,
-        &selected,
-        recipe(kind, &geometry, &selected)?,
-        operation_stock_top(document, id)?,
-    )?;
-    let resolved = cam_geometry3d::resolve_binding_advisory(&geometry, &binding)?;
+    let (mut binding, resolved) = resolve_operation_selection(document, kind, &selected, id)?;
     let depth = if binding.recipe == ExtractionRecipe::PocketBoundary {
         defaults.depth
     } else {
@@ -624,6 +636,13 @@ pub(crate) fn create_operation(
             feed: defaults.plunge_feed,
         }),
         OpKind::Face => Operation::Face(FaceOp {
+            linking: cam_model::FaceLinking::for_new_operation(),
+            curves: Default::default(),
+            boundary_selected: true,
+            islands: resolved
+                .regions
+                .first()
+                .map_or_else(Vec::new, |r| r.holes().to_vec()),
             absolute_overlap: None,
             multiple_depths: Default::default(),
             parameter_expressions: Default::default(),
@@ -918,6 +937,24 @@ pub(crate) fn resolve_height_settings(
     settings.resolve(document, operation)
 }
 
+pub(crate) fn validate_operation_height_settings(
+    document: &Document,
+    operation: &Operation,
+    settings: &OperationHeightSettings,
+) -> Result<(), String> {
+    if document
+        .rotary_indexes
+        .get(&operation.id())
+        .and_then(|index| index.auto.as_ref())
+        .is_some_and(|auto| !auto.drawing)
+    {
+        // Auto resolves each reference against the corresponding feature at run time.
+        settings.validate_structure()
+    } else {
+        resolve_height_settings(document, operation, settings).map(|_| ())
+    }
+}
+
 fn apply_drill_height_settings(
     document: &Document,
     binding: &GeometryBinding,
@@ -984,7 +1021,11 @@ pub(crate) fn geometry_for_operation(
     id: u32,
 ) -> Result<GeometryState, String> {
     let geometry = geometry_for_setup(document)?;
-    if let Some(index) = document.rotary_indexes.get(&id) {
+    if let Some(index) = document
+        .rotary_indexes
+        .get(&id)
+        .filter(|index| !index.uses_automatic_cad())
+    {
         index.validate()?;
         Ok(index.geometry(&geometry))
     } else {
@@ -1094,6 +1135,7 @@ fn resolve_document_input(
     }
     document.geometry.validate().map_err(error)?;
     let mut resolved = document.clone();
+    resolved.resolved_indexed_cuts.clear();
     let tools = resolved.setup().tools.clone();
     for operation in &mut resolved.setup_mut().operations {
         if document.operation_is_included(document.setup().id, operation.id()) {
@@ -1143,346 +1185,41 @@ fn resolve_document_input(
                 .with_code(cam_toolpath::DiagnosticCode::Cancelled));
         }
         let id = operation.id();
+        if let Some(index) = document.rotary_indexes.get(&id) {
+            if let Some(auto) = &index.auto {
+                if auto.drawing {
+                    if document.geometry.bindings.contains_key(&id)
+                        || document.cad_linked_operations.contains(&id)
+                    {
+                        return Err(error(
+                            "Auto drawing indexing requires drawing geometry".into(),
+                        )
+                        .for_op(id));
+                    }
+                } else {
+                    if evaluate_heights {
+                        let cuts = automatic_index::resolve(
+                            document,
+                            &resolved.geometry,
+                            operation,
+                            index,
+                            auto,
+                            cancelled,
+                        )
+                        .map_err(|message| error(message).for_op(id))?;
+                        resolved.resolved_indexed_cuts.insert(id, cuts);
+                    }
+                    continue;
+                }
+            }
+        }
         let base_instances = resolved.geometry.instances.clone();
         if let Some(index) = document.rotary_indexes.get(&id) {
             index.validate().map_err(error)?;
             resolved.geometry = index.geometry(&resolved.geometry);
         }
-        let resolved_operation: Result<(), String> = (|| {
-            operation.resolve_parameter_expressions(&resolved.setup().tools)?;
-            if operation.rotary_wrap().is_some() {
-                resolve_wrapped_operation(&resolved.geometry, operation)?;
-                resolved.geometry.bindings.remove(&id);
-                resolved.cad_linked_operations.remove(&id);
-                if let Some(settings) = resolved
-                    .setup()
-                    .height_settings
-                    .get(&id)
-                    .filter(|_| evaluate_heights)
-                    .cloned()
-                {
-                    let mut settings = settings;
-                    settings.resolved = None;
-                    // The wrap now carries its developed CAD floor, but stock
-                    // references still belong to the original world geometry.
-                    // Resolving against the rotated worker geometry would apply
-                    // the setup frame twice when measuring the round blank.
-                    let heights = settings.resolve(document, operation)?;
-                    resolved
-                        .setup_mut()
-                        .height_settings
-                        .get_mut(&id)
-                        .unwrap()
-                        .resolved = Some(heights);
-                }
-                return Ok(());
-            }
-            let Some(binding) = document.geometry.bindings.get(&id) else {
-                if document.cad_linked_operations.contains(&id) {
-                    return Err(format!(
-                        "Operation {id}: linked CAD geometry is missing; reselect its geometry"
-                    ));
-                }
-                return Ok(());
-            };
-            if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
-                if !reason.starts_with("Geometry changed:") {
-                    return Err(format!("Operation {id}: Needs reselection — {reason}"));
-                }
-            }
-            if matches!(
-                binding.recipe,
-                ExtractionRecipe::AdaptiveClearing
-                    | ExtractionRecipe::ParallelFinishing
-                    | ExtractionRecipe::SpiralFinishing
-            ) {
-                cam_geometry3d::validate_adaptive_selection(&resolved.geometry, &binding.selected)
-                    .map_err(|e| format!("Operation {id}: {e}"))?;
-            } else if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
-                validate_selection(&resolved.geometry, &binding.selected)
-                    .map_err(|e| format!("Operation {id}: {e}"))?;
-            }
-            if uses_drill_model_heights(document, operation, binding) {
-                let Operation::Drill(drill) = operation else {
-                    unreachable!()
-                };
-                let tool = resolved
-                    .setup()
-                    .tools
-                    .iter()
-                    .find(|tool| tool.number == drill.tool)
-                    .ok_or("Missing drill tool")?;
-                let stock_top = resolved.setup().heights_for(id).top_of_stock;
-                let holes =
-                    cam_geometry3d::drill_holes(&resolved.geometry, binding, drill.geometry)?;
-                if holes
-                    .iter()
-                    .any(|hole| (hole.diameter - tool.diameter).abs() > 1e-3)
-                {
-                    return Err(format!(
-                        "Operation {id}: drill diameter must match the selected bore"
-                    ));
-                }
-                let heights = apply_drill_holes(drill, &holes, stock_top)?;
-                if evaluate_heights {
-                    if let Some(settings) =
-                        apply_drill_height_settings(document, binding, heights, drill)?
-                    {
-                        resolved
-                            .setup_mut()
-                            .height_settings
-                            .get_mut(&id)
-                            .unwrap()
-                            .resolved = Some(settings);
-                    }
-                }
-                let cache = resolved.geometry.bindings.get_mut(&id).unwrap();
-                cache.status = ResolutionStatus::Resolved;
-                cache.heights = heights;
-                cache.overrides = GeometryOverrides::default();
-                let fingerprint = resolved
-                    .geometry
-                    .binding_fingerprint(&resolved.geometry.bindings[&id]);
-                resolved
-                    .geometry
-                    .bindings
-                    .get_mut(&id)
-                    .unwrap()
-                    .resolved_fingerprint = Some(fingerprint);
-                return Ok(());
-            }
-            let mut current_binding = binding.clone();
-            if surface_recipe(&binding.recipe) {
-                let cutting = document.operation_base_cutting_heights(operation);
-                current_binding.heights.bottom = current_binding.heights.top - cutting.depth();
-            }
-            if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
-                current_binding.heights.top = operation_stock_top(document, id)?;
-            }
-            let input =
-                cam_geometry3d::resolve_binding_advisory(&resolved.geometry, &current_binding)
-                    .map_err(|e| {
-                        format!(
-                            "{} operation #{id} / setup '{}' / {}: {e}",
-                            operation_type(operation),
-                            document.setup().name,
-                            describe_entities(&resolved.geometry, &current_binding.selected)
-                        )
-                    })?;
-            let depth = input.heights.depth();
-            let region = || input.regions.first().ok_or("No resolved machining region");
-            match (&mut *operation, &binding.recipe) {
-                (
-                    Operation::Pocket(p),
-                    ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary,
-                ) => {
-                    p.boundary = region()?.outer().clone();
-                    p.islands = region()?.holes().to_vec();
-                    p.additional_regions = input.regions.iter().skip(1).cloned().collect();
-                    p.depth = depth;
-                }
-                (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {
-                    p.validate_profile_source(true)?;
-                    let mut contours = input.profiles.clone();
-                    let first = contours.remove(0);
-                    p.chain = first.chain;
-                    p.closed = first.closed;
-                    p.side = first.side;
-                    p.additional_chains = contours;
-                    p.selections = Some(entries.clone());
-                    p.depth = depth;
-                }
-                (
-                    Operation::Profile(p),
-                    ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette,
-                ) => {
-                    let first = input.profiles.first().ok_or("No resolved profile chains")?;
-                    p.validate_profile_source(true)?;
-                    p.chain = first.chain.clone();
-                    p.closed = first.closed;
-                    let sides: Vec<_> = p
-                        .additional_chains
-                        .iter()
-                        .map(|contour| contour.side)
-                        .collect();
-                    p.additional_chains = input
-                        .profiles
-                        .iter()
-                        .skip(1)
-                        .cloned()
-                        .enumerate()
-                        .map(|(index, mut contour)| {
-                            if let Some(side) = sides.get(index) {
-                                contour.side = *side;
-                            }
-                            contour
-                        })
-                        .collect();
-                    p.depth = depth;
-                }
-                (Operation::Profile(p), ExtractionRecipe::ProfileLoop { .. }) => {
-                    // The recipe certifies the source geometry and cutting interval.
-                    // Cutter side is an independent, per-contour operation setting.
-                    p.validate_profile_source(true)?;
-                    p.chain = region()?.outer().clone();
-                    p.closed = true;
-                    p.additional_chains.clear();
-                    p.depth = depth;
-                }
-                (Operation::Chamfer(p), ExtractionRecipe::ChamferFaces) => {
-                    p.faces = input.chamfers.clone();
-                    p.chain = region()?.outer().clone();
-                    p.width = p.faces.first().ok_or("No modeled chamfer faces")?.width();
-                    p.top = input.heights.top;
-                    p.depth = depth;
-                }
-                (Operation::Chamfer(p), ExtractionRecipe::ChamferLoop) => {
-                    p.faces.clear();
-                    let path = input.profiles.first().ok_or("No chamfer rim")?;
-                    if p.chain != path.chain {
-                        p.side = path.side;
-                    }
-                    p.chain = path.chain.clone();
-                    p.closed = path.closed;
-                    if !p.closed {
-                        p.start = None;
-                        p.end = None;
-                        p.lead_overlap = 0.;
-                    }
-                    p.top = input.heights.top;
-                }
-                (Operation::Engrave(p), ExtractionRecipe::EngravePath) => {
-                    let path = input.profiles.first().ok_or("No engraving path")?;
-                    p.chain = path.chain.clone();
-                    p.closed = path.closed;
-                    p.top = input.heights.top;
-                    p.depth = depth;
-                    if !p.closed {
-                        p.start = None;
-                        p.end = None;
-                    }
-                }
-                (Operation::Carve(p), ExtractionRecipe::CarveRegion) => {
-                    p.boundary = region()?.outer().clone();
-                    p.islands = region()?.holes().to_vec();
-                    p.top = input.heights.top;
-                    p.depth = depth;
-                }
-                (Operation::Bore(p), ExtractionRecipe::BoreCylinders { internal }) => {
-                    if p.internal != *internal || p.taper_angle != 0. {
-                        return Err(
-                            "Bore type and straight wall must match the selected cylinder".into(),
-                        );
-                    }
-                    p.points = input
-                        .holes
-                        .iter()
-                        .map(|h| [h.center.x, h.center.y])
-                        .collect();
-                    p.diameter = input.holes[0].diameter;
-                    p.z_top = input.heights.top;
-                    p.z_bottom = input.heights.bottom;
-                    if p.axial_stock < 0. {
-                        return Err("CAD Bore axial stock cannot extend below the certified face; use a qualified bottom selection".into());
-                    }
-                }
-                (Operation::Thread(p), ExtractionRecipe::ThreadCylinders { internal }) => {
-                    if p.internal != *internal {
-                        return Err("Thread type must match the selected bore or boss".into());
-                    }
-                    // The nominal thread diameter is independently editable.
-                    // Fitting its theoretical minor diameter does not prove that
-                    // the cutter can enter the actual selected/prepared bore.
-                    if p.internal {
-                        let tool = document
-                            .setup()
-                            .tools
-                            .iter()
-                            .find(|t| t.number == p.tool)
-                            .ok_or("Missing thread tool")?;
-                        if input
-                            .holes
-                            .iter()
-                            .any(|hole| tool.diameter >= hole.diameter)
-                        {
-                            return Err(format!(
-                                "Thread tool diameter {:.3} cannot enter the selected bore; choose a smaller thread mill or prepare a larger bore",
-                                tool.diameter
-                            ));
-                        }
-                    }
-                    p.points = input
-                        .holes
-                        .iter()
-                        .map(|h| [h.center.x, h.center.y])
-                        .collect();
-                    p.z_top = input.heights.top;
-                    p.z_bottom = input.heights.bottom;
-                }
-                (Operation::Drill(p), ExtractionRecipe::DrillHoles) => {
-                    let tool = document
-                        .setup()
-                        .tools
-                        .iter()
-                        .find(|t| t.number == p.tool)
-                        .ok_or("Missing drill tool")?;
-                    if input
-                        .holes
-                        .iter()
-                        .any(|h| (h.diameter - tool.diameter).abs() > 1e-3)
-                    {
-                        return Err(format!(
-                            "Operation {id}: drill diameter must match the selected bore"
-                        ));
-                    }
-                    p.points = input
-                        .holes
-                        .iter()
-                        .map(|h| [h.center.x, h.center.y])
-                        .collect();
-                    p.hole_heights.clear();
-                    p.depth = depth;
-                    p.start_offset =
-                        input.heights.top - document.setup().heights_for(id).top_of_stock;
-                }
-                (Operation::Face(p), ExtractionRecipe::FaceRegion) => {
-                    if p.overshoot < 0.0 {
-                        return Err(format!(
-                            "Operation {id}: negative overshoot is not certified for CAD facing"
-                        ));
-                    }
-                    p.boundary = region()?.outer().clone();
-                    p.depth = depth;
-                    p.start_offset = input.heights.top;
-                }
-                (Operation::Parallel(_), ExtractionRecipe::ParallelFinishing)
-                | (Operation::Spiral(_), ExtractionRecipe::SpiralFinishing)
-                | (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
-                    // Body heights and projected silhouette belong to the binding;
-                    // the adaptive planner resolves conservative CAD-derived layers.
-                }
-                _ => {
-                    return Err(format!(
-                        "Operation {id}: geometry recipe does not match the operation"
-                    ))
-                }
-            }
-            // Planner consumes absolute heights. The extraction service already applied
-            // and certified manual overrides; do not apply them a second time.
-            let cache = resolved.geometry.bindings.get_mut(&id).unwrap();
-            cache.heights = input.heights;
-            cache.overrides = GeometryOverrides::default();
-            let fingerprint = resolved
-                .geometry
-                .binding_fingerprint(&resolved.geometry.bindings[&id]);
-            resolved
-                .geometry
-                .bindings
-                .get_mut(&id)
-                .unwrap()
-                .resolved_fingerprint = Some(fingerprint);
-            Ok(())
-        })();
+        let resolved_operation =
+            resolve_operation_input(document, &mut resolved, operation, evaluate_heights);
         resolved.geometry.instances = base_instances;
         resolved_operation.map_err(|message| error(message).for_op(id))?;
         if evaluate_heights && document.rotary_indexes.contains_key(&id) {
@@ -1550,6 +1287,347 @@ pub(crate) fn mark_missing_bindings(state: &mut GeometryState) {
             reason: "Source geometry revision or entity is missing; reselect geometry".into(),
         };
     }
+}
+
+fn resolve_operation_input(
+    document: &Document,
+    resolved: &mut Document,
+    operation: &mut Operation,
+    evaluate_heights: bool,
+) -> Result<(), String> {
+    let id = operation.id();
+    operation.resolve_parameter_expressions(&resolved.setup().tools)?;
+    if operation.rotary_wrap().is_some() {
+        resolve_wrapped_operation(&resolved.geometry, operation)?;
+        resolved.geometry.bindings.remove(&id);
+        resolved.cad_linked_operations.remove(&id);
+        if let Some(settings) = resolved
+            .setup()
+            .height_settings
+            .get(&id)
+            .filter(|_| evaluate_heights)
+            .cloned()
+        {
+            let mut settings = settings;
+            settings.resolved = None;
+            // The wrap now carries its developed CAD floor, but stock
+            // references still belong to the original world geometry.
+            // Resolving against the rotated worker geometry would apply
+            // the setup frame twice when measuring the round blank.
+            let heights = settings.resolve(document, operation)?;
+            resolved
+                .setup_mut()
+                .height_settings
+                .get_mut(&id)
+                .unwrap()
+                .resolved = Some(heights);
+        }
+        return Ok(());
+    }
+    let Some(binding) = document.geometry.bindings.get(&id) else {
+        if document.cad_linked_operations.contains(&id) {
+            return Err(format!(
+                "Operation {id}: linked CAD geometry is missing; reselect its geometry"
+            ));
+        }
+        return Ok(());
+    };
+    if let ResolutionStatus::NeedsReselection { reason } = &binding.status {
+        if !reason.starts_with("Geometry changed:") {
+            return Err(format!("Operation {id}: Needs reselection — {reason}"));
+        }
+    }
+    if matches!(
+        binding.recipe,
+        ExtractionRecipe::AdaptiveClearing
+            | ExtractionRecipe::ParallelFinishing
+            | ExtractionRecipe::SpiralFinishing
+    ) {
+        cam_geometry3d::validate_adaptive_selection(&resolved.geometry, &binding.selected)
+            .map_err(|e| format!("Operation {id}: {e}"))?;
+    } else if !matches!(binding.recipe, ExtractionRecipe::ProfileEntries { .. }) {
+        validate_selection(&resolved.geometry, &binding.selected)
+            .map_err(|e| format!("Operation {id}: {e}"))?;
+    }
+    if uses_drill_model_heights(document, operation, binding) {
+        let Operation::Drill(drill) = operation else {
+            unreachable!()
+        };
+        let tool = resolved
+            .setup()
+            .tools
+            .iter()
+            .find(|tool| tool.number == drill.tool)
+            .ok_or("Missing drill tool")?;
+        let stock_top = resolved.setup().heights_for(id).top_of_stock;
+        let holes = cam_geometry3d::drill_holes(&resolved.geometry, binding, drill.geometry)?;
+        if holes
+            .iter()
+            .any(|hole| (hole.diameter - tool.diameter).abs() > 1e-3)
+        {
+            return Err(format!(
+                "Operation {id}: drill diameter must match the selected bore"
+            ));
+        }
+        let heights = apply_drill_holes(drill, &holes, stock_top)?;
+        if evaluate_heights {
+            if let Some(settings) = apply_drill_height_settings(document, binding, heights, drill)?
+            {
+                resolved
+                    .setup_mut()
+                    .height_settings
+                    .get_mut(&id)
+                    .unwrap()
+                    .resolved = Some(settings);
+            }
+        }
+        let cache = resolved.geometry.bindings.get_mut(&id).unwrap();
+        cache.status = ResolutionStatus::Resolved;
+        cache.heights = heights;
+        cache.overrides = GeometryOverrides::default();
+        let fingerprint = resolved
+            .geometry
+            .binding_fingerprint(&resolved.geometry.bindings[&id]);
+        resolved
+            .geometry
+            .bindings
+            .get_mut(&id)
+            .unwrap()
+            .resolved_fingerprint = Some(fingerprint);
+        return Ok(());
+    }
+    let mut current_binding = binding.clone();
+    if surface_recipe(&binding.recipe) {
+        let cutting = document.operation_base_cutting_heights(operation);
+        current_binding.heights.bottom = current_binding.heights.top - cutting.depth();
+    }
+    if matches!(current_binding.recipe, ExtractionRecipe::FaceRegion) {
+        current_binding.heights.top = operation_stock_top(document, id)?;
+    }
+    let input = cam_geometry3d::resolve_binding_advisory(&resolved.geometry, &current_binding)
+        .map_err(|e| {
+            format!(
+                "{} operation #{id} / setup '{}' / {}: {e}",
+                operation_type(operation),
+                document.setup().name,
+                describe_entities(&resolved.geometry, &current_binding.selected)
+            )
+        })?;
+    let depth = input.heights.depth();
+    let region = || input.regions.first().ok_or("No resolved machining region");
+    match (&mut *operation, &binding.recipe) {
+        (
+            Operation::Pocket(p),
+            ExtractionRecipe::PocketFloor | ExtractionRecipe::PocketBoundary,
+        ) => {
+            p.boundary = region()?.outer().clone();
+            p.islands = region()?.holes().to_vec();
+            p.additional_regions = input.regions.iter().skip(1).cloned().collect();
+            p.depth = depth;
+        }
+        (Operation::Profile(p), ExtractionRecipe::ProfileEntries { entries }) => {
+            p.validate_profile_source(true)?;
+            let mut contours = input.profiles.clone();
+            let first = contours.remove(0);
+            p.chain = first.chain;
+            p.closed = first.closed;
+            p.side = first.side;
+            p.additional_chains = contours;
+            p.selections = Some(entries.clone());
+            p.depth = depth;
+        }
+        (
+            Operation::Profile(p),
+            ExtractionRecipe::ProfileContours | ExtractionRecipe::ProfileSilhouette,
+        ) => {
+            let first = input.profiles.first().ok_or("No resolved profile chains")?;
+            p.validate_profile_source(true)?;
+            p.chain = first.chain.clone();
+            p.closed = first.closed;
+            let sides: Vec<_> = p
+                .additional_chains
+                .iter()
+                .map(|contour| contour.side)
+                .collect();
+            p.additional_chains = input
+                .profiles
+                .iter()
+                .skip(1)
+                .cloned()
+                .enumerate()
+                .map(|(index, mut contour)| {
+                    if let Some(side) = sides.get(index) {
+                        contour.side = *side;
+                    }
+                    contour
+                })
+                .collect();
+            p.depth = depth;
+        }
+        (Operation::Profile(p), ExtractionRecipe::ProfileLoop { .. }) => {
+            // The recipe certifies the source geometry and cutting interval.
+            // Cutter side is an independent, per-contour operation setting.
+            p.validate_profile_source(true)?;
+            p.chain = region()?.outer().clone();
+            p.closed = true;
+            p.additional_chains.clear();
+            p.depth = depth;
+        }
+        (Operation::Chamfer(p), ExtractionRecipe::ChamferFaces) => {
+            p.faces = input.chamfers.clone();
+            p.chain = region()?.outer().clone();
+            p.width = p.faces.first().ok_or("No modeled chamfer faces")?.width();
+            p.top = input.heights.top;
+            p.depth = depth;
+        }
+        (Operation::Chamfer(p), ExtractionRecipe::ChamferLoop) => {
+            p.faces.clear();
+            let path = input.profiles.first().ok_or("No chamfer rim")?;
+            if p.chain != path.chain {
+                p.side = path.side;
+            }
+            p.chain = path.chain.clone();
+            p.closed = path.closed;
+            if !p.closed {
+                p.start = None;
+                p.end = None;
+                p.lead_overlap = 0.;
+            }
+            p.top = input.heights.top;
+        }
+        (Operation::Engrave(p), ExtractionRecipe::EngravePath) => {
+            let path = input.profiles.first().ok_or("No engraving path")?;
+            p.chain = path.chain.clone();
+            p.closed = path.closed;
+            p.top = input.heights.top;
+            p.depth = depth;
+            if !p.closed {
+                p.start = None;
+                p.end = None;
+            }
+        }
+        (Operation::Carve(p), ExtractionRecipe::CarveRegion) => {
+            p.boundary = region()?.outer().clone();
+            p.islands = region()?.holes().to_vec();
+            p.top = input.heights.top;
+            p.depth = depth;
+        }
+        (Operation::Bore(p), ExtractionRecipe::BoreCylinders { internal }) => {
+            if p.internal != *internal || p.taper_angle != 0. {
+                return Err("Bore type and straight wall must match the selected cylinder".into());
+            }
+            p.points = input
+                .holes
+                .iter()
+                .map(|h| [h.center.x, h.center.y])
+                .collect();
+            p.diameter = input.holes[0].diameter;
+            p.z_top = input.heights.top;
+            p.z_bottom = input.heights.bottom;
+            if p.axial_stock < 0. {
+                return Err("CAD Bore axial stock cannot extend below the certified face; use a qualified bottom selection".into());
+            }
+        }
+        (Operation::Thread(p), ExtractionRecipe::ThreadCylinders { internal }) => {
+            if p.internal != *internal {
+                return Err("Thread type must match the selected bore or boss".into());
+            }
+            // The nominal thread diameter is independently editable.
+            // Fitting its theoretical minor diameter does not prove that
+            // the cutter can enter the actual selected/prepared bore.
+            if p.internal {
+                let tool = document
+                    .setup()
+                    .tools
+                    .iter()
+                    .find(|t| t.number == p.tool)
+                    .ok_or("Missing thread tool")?;
+                if input
+                    .holes
+                    .iter()
+                    .any(|hole| tool.diameter >= hole.diameter)
+                {
+                    return Err(format!(
+                        "Thread tool diameter {:.3} cannot enter the selected bore; choose a smaller thread mill or prepare a larger bore",
+                        tool.diameter
+                    ));
+                }
+            }
+            p.points = input
+                .holes
+                .iter()
+                .map(|h| [h.center.x, h.center.y])
+                .collect();
+            p.z_top = input.heights.top;
+            p.z_bottom = input.heights.bottom;
+        }
+        (Operation::Drill(p), ExtractionRecipe::DrillHoles) => {
+            let tool = document
+                .setup()
+                .tools
+                .iter()
+                .find(|t| t.number == p.tool)
+                .ok_or("Missing drill tool")?;
+            if input
+                .holes
+                .iter()
+                .any(|h| (h.diameter - tool.diameter).abs() > 1e-3)
+            {
+                return Err(format!(
+                    "Operation {id}: drill diameter must match the selected bore"
+                ));
+            }
+            p.points = input
+                .holes
+                .iter()
+                .map(|h| [h.center.x, h.center.y])
+                .collect();
+            p.hole_heights.clear();
+            p.depth = depth;
+            p.start_offset = input.heights.top - document.setup().heights_for(id).top_of_stock;
+        }
+        (Operation::Face(p), ExtractionRecipe::FaceRegion) => {
+            let region = region()?;
+            p.boundary = region.outer().clone();
+            p.islands = region.holes().to_vec();
+            p.boundary_selected = true;
+            if binding
+                .selected
+                .iter()
+                .any(|source| source.kind == EntityKind::Face)
+            {
+                p.boundary_regions(p.curves)?;
+            }
+            p.depth = depth;
+            p.start_offset = input.heights.top;
+        }
+        (Operation::Parallel(_), ExtractionRecipe::ParallelFinishing)
+        | (Operation::Spiral(_), ExtractionRecipe::SpiralFinishing)
+        | (Operation::Adaptive(_), ExtractionRecipe::AdaptiveClearing) => {
+            // Body heights and projected silhouette belong to the binding;
+            // the adaptive planner resolves conservative CAD-derived layers.
+        }
+        _ => {
+            return Err(format!(
+                "Operation {id}: geometry recipe does not match the operation"
+            ))
+        }
+    }
+    // Planner consumes absolute heights. The extraction service already applied
+    // and certified manual overrides; do not apply them a second time.
+    let cache = resolved.geometry.bindings.get_mut(&id).unwrap();
+    cache.heights = input.heights;
+    cache.overrides = GeometryOverrides::default();
+    let fingerprint = resolved
+        .geometry
+        .binding_fingerprint(&resolved.geometry.bindings[&id]);
+    resolved
+        .geometry
+        .bindings
+        .get_mut(&id)
+        .unwrap()
+        .resolved_fingerprint = Some(fingerprint);
+    Ok(())
 }
 
 pub(crate) fn selection_height_defaults(
@@ -1650,6 +1728,15 @@ pub(crate) fn capture_height_override(
 /// Validate an inspector edit without discarding its explicit overrides or
 /// requiring unrelated unresolved operations to be repaired first.
 pub(crate) fn validate_binding_edit(document: &mut Document, id: u32) -> Result<(), String> {
+    if document
+        .rotary_indexes
+        .get(&id)
+        .is_some_and(RotaryIndex::uses_automatic_cad)
+    {
+        // The operation's ordered Auto selections are checked in their own
+        // indexed frames when planning. Keep the fixed-mode binding intact.
+        return Ok(());
+    }
     let mut preview = document.clone();
     preview.setup_mut().operations.retain(|op| op.id() == id);
     // Geometry repair is independent of the height editor's pending references.

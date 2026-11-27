@@ -74,6 +74,10 @@ impl App {
     }
 
     pub(super) fn log_geometry_validation(&mut self) {
+        if self.automatic_cad_index().is_some() {
+            self.output_last_geometry_error = None;
+            return;
+        }
         if self.stock_contour_editor() {
             // Stock uses its own footprint resolver, not the pocket-floor recipe.
             self.output_last_geometry_error = None;

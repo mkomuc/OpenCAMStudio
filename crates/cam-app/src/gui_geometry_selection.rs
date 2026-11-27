@@ -3,6 +3,33 @@ use super::*;
 use crate::LoopPart;
 use iced::widget::{column, svg};
 
+pub(super) fn curve_filter_buttons(
+    current: cam_model::ProfileCurves,
+    message: impl Fn(cam_model::ProfileCurves) -> Message,
+    tooltips: bool,
+) -> Element<'static, Message> {
+    use cam_model::ProfileCurves;
+    let mut filters = row![text("Curves").size(12).width(90)]
+        .spacing(6)
+        .align_y(Alignment::Center);
+    for (value, name, label) in [
+        (ProfileCurves::All, "all", "All contours"),
+        (ProfileCurves::Outer, "outer", "Outer contours only"),
+        (ProfileCurves::Inner, "inner", "Inner contours only"),
+    ] {
+        let active = current == value;
+        filters = filters.push(selection_hint(
+            button(selection_icon(name, 27.))
+                .padding(4)
+                .style(move |theme, status| inspector_tab(theme, status, active))
+                .on_press(message(value)),
+            label,
+            tooltips,
+        ));
+    }
+    filters.into()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ProfileSelectionMode {
     FaceContours,
@@ -219,6 +246,7 @@ impl App {
         }
         if let Some(
             kind @ (OpKind::Pocket
+            | OpKind::Face
             | OpKind::Chamfer
             | OpKind::Engrave
             | OpKind::Carve
@@ -363,8 +391,15 @@ impl App {
 
     pub(super) fn pick_operation_geometry(&mut self) -> iced::Task<Message> {
         self.profile_tab_picking = false;
+        if self.automatic_cad_index().is_some()
+            && self.geometry_editor.is_none()
+            && !self.profile_geometry_active()
+        {
+            self.operation_geometry_message(GeometryMessage::Edit);
+            return iced::Task::none();
+        }
         self.geometry_additive = true;
-        if self.wrapped_pocket_geometry_editor() {
+        if self.wrapped_pocket_geometry_editor() || self.automatic_index_geometry_editor() {
             self.status = "Select geometry in the viewport, then use OK to stage it.".into();
             return iced::Task::none();
         }
@@ -381,7 +416,7 @@ impl App {
             return iced::Task::none();
         }
         if let Selection::Operation(id) = self.controller.selection() {
-            let message = if self.controller.geometry_state().bindings.contains_key(&id) {
+            let message = if self.operation_uses_cad_geometry() {
                 Message::EditCadGeometry(id)
             } else {
                 Message::EditDrawingGeometry(id)
@@ -392,6 +427,28 @@ impl App {
     }
 
     pub(super) fn remove_operation_geometry(&mut self, index: Option<usize>) {
+        if self.automatic_cad_index().is_some() && !self.stock_contour_editor() {
+            let mut selected = if self.automatic_index_geometry_editor() {
+                self.controller.cad_selection().to_vec()
+            } else {
+                self.automatic_cad_index().unwrap().selected.clone()
+            };
+            if let Some(index) = index {
+                if index < selected.len() {
+                    selected.remove(index);
+                }
+            } else {
+                selected.clear();
+            }
+            if self.automatic_index_geometry_editor() {
+                self.controller.set_cad_selection(selected);
+            } else {
+                self.stage_automatic_selection(selected);
+            }
+            self.geometry_row_selection = None;
+            self.cad_candidates.clear();
+            return;
+        }
         if self.wrapped_pocket_geometry_editor() {
             let mut selected = self.controller.cad_selection().to_vec();
             if let Some(index) = index {
