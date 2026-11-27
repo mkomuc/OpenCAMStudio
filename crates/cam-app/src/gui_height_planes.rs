@@ -457,7 +457,7 @@ fn planar_label_placement(
         let outside = (start - corners[(i + 3) % 4]) * (1. / side_length);
         if x.x < 0. || (x.x == 0. && x.y > 0.) {
             start = end;
-            x = x * -1.;
+            x *= -1.;
         }
         // Keep the text readable from either side of the plane. The label
         // extends outward from the edge whether its top or bottom touches it.
@@ -470,7 +470,7 @@ fn planar_label_placement(
         let width = x * (size.width * scale);
         let height = y * (size.height * scale);
         if handedness < 0. {
-            start = start - height;
+            start -= height;
         }
         let slack = edge_length - size.width * scale;
         for slot in [0.5, 0., 1.] {

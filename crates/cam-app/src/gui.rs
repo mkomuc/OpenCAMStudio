@@ -3697,7 +3697,6 @@ impl App {
     fn begin_operation_draft(&mut self, id: u32) {
         self.rotary_pick = None;
         self.rotary_wrap_draft = None;
-        self.seed_rotary_index_draft(id);
         self.thread_parameters = Default::default();
         self.geometry_editor = None;
         self.profile_contour_selection = 0;
@@ -3711,6 +3710,7 @@ impl App {
         self.end_setup_draft();
         self.inspector_active = true;
         self.controller.select(Selection::Operation(id));
+        self.seed_rotary_index_draft();
         self.operation_geometry = None;
         self.operation_binding_preview = None;
         self.drawing_editing_op = None;
@@ -3737,8 +3737,11 @@ impl App {
         self.refresh_fields();
     }
 
-    fn seed_rotary_index_draft(&mut self, id: u32) {
-        self.rotary_index_draft = self.controller.document().rotary_indexes.get(&id).cloned();
+    fn seed_rotary_index_draft(&mut self) {
+        self.rotary_index_draft = match self.controller.selection() {
+            Selection::Operation(id) => self.controller.document().rotary_indexes.get(&id).cloned(),
+            _ => None,
+        };
         self.rotary_index_mode = match &self.rotary_index_draft {
             Some(index) if index.auto.is_some() => rotary_view::IndexMode::Auto,
             Some(index) if index.face.is_some() => rotary_view::IndexMode::Face,
@@ -6435,6 +6438,7 @@ impl App {
                 self.inspector_active = false;
                 self.end_setup_draft();
                 self.operation_draft = None;
+                self.seed_rotary_index_draft();
                 self.operation_position_markers = [None; 2];
                 // Browser selection reads the selected operation's saved allowance.
                 // An editor draft from the previous operation must not follow it.
@@ -6739,6 +6743,7 @@ impl App {
                 self.cad_editing_op = None;
                 self.cad_inspecting = false;
                 self.height_draft_id = None;
+                self.seed_rotary_index_draft();
                 self.refresh_fields();
                 self.inspector_active = false;
                 self.status = "Operation changes cancelled.".into();
@@ -9568,6 +9573,7 @@ impl App {
                 }
                 self.end_setup_draft();
                 self.operation_draft = None;
+                self.seed_rotary_index_draft();
                 self.operation_tools.clear();
                 self.operation_geometry = None;
                 self.operation_binding_preview = None;
@@ -11572,11 +11578,7 @@ impl App {
         self.end_setup_draft();
         self.restore_project_view();
         self.operation_draft = None;
-        if let Selection::Operation(id) = self.controller.selection() {
-            self.seed_rotary_index_draft(id);
-        } else {
-            self.rotary_index_draft = None;
-        }
+        self.seed_rotary_index_draft();
         // Establish a baseline for legacy files too, using their default opening view.
         self.controller
             .set_project_view(Some(self.capture_project_view()));
