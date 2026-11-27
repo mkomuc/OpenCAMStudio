@@ -2591,6 +2591,7 @@ impl AppController {
                     None => Axis::along_longest_edge(chain.points()),
                 };
                 Operation::Face(FaceOp {
+                    linking: cam_model::FaceLinking::for_new_operation(),
                     curves: Default::default(),
                     boundary_selected: false,
                     islands: Vec::new(),

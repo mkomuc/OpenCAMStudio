@@ -578,6 +578,10 @@ impl OperationParameter {
             (Operation::Face(o), Self::Overlap) => Some(o.overlap * 100.0),
             (Operation::Face(o), Self::FaceOverlap) => Some(o.absolute_overlap.unwrap_or(0.0)),
             (Operation::Face(o), Self::FaceOvershoot) => Some(o.overshoot),
+            (Operation::Face(o), Self::LeadInSize) => Some(lead_size(o.linking.lead_in)),
+            (Operation::Face(o), Self::LeadOutSize) => Some(lead_size(o.linking.lead_out)),
+            (Operation::Face(o), Self::ProfileLeadInSweep) => Some(lead_sweep(o.linking.lead_in)),
+            (Operation::Face(o), Self::ProfileLeadOutSweep) => Some(lead_sweep(o.linking.lead_out)),
             (Operation::Face(o), Self::Feed) => Some(o.feed),
             (Operation::Face(o), Self::PlungeFeed) => Some(o.plunge_feed),
             (Operation::Drill(o), Self::Depth) => Some(o.depth),
@@ -715,22 +719,10 @@ impl OperationParameter {
             (Operation::Pocket(o), Self::PocketFinishStepover) => Some(o.finishing.stepover),
             (Operation::Pocket(o), Self::PocketFinishFeed) => Some(o.finishing.feed),
             (Operation::Pocket(o), Self::PocketFinishOverlap) => Some(o.finishing.overlap),
-            (Operation::Profile(o), Self::ProfileLeadInSweep) => Some(match o.lead_in {
-                Lead::ArcSweep { angle_deg, .. } => angle_deg,
-                _ => 90.,
-            }),
-            (Operation::Chamfer(o), Self::ProfileLeadInSweep) => Some(match o.lead_in {
-                Lead::ArcSweep { angle_deg, .. } => angle_deg,
-                _ => 90.,
-            }),
-            (Operation::Profile(o), Self::ProfileLeadOutSweep) => Some(match o.lead_out {
-                Lead::ArcSweep { angle_deg, .. } => angle_deg,
-                _ => 90.,
-            }),
-            (Operation::Chamfer(o), Self::ProfileLeadOutSweep) => Some(match o.lead_out {
-                Lead::ArcSweep { angle_deg, .. } => angle_deg,
-                _ => 90.,
-            }),
+            (Operation::Profile(o), Self::ProfileLeadInSweep) => Some(lead_sweep(o.lead_in)),
+            (Operation::Chamfer(o), Self::ProfileLeadInSweep) => Some(lead_sweep(o.lead_in)),
+            (Operation::Profile(o), Self::ProfileLeadOutSweep) => Some(lead_sweep(o.lead_out)),
+            (Operation::Chamfer(o), Self::ProfileLeadOutSweep) => Some(lead_sweep(o.lead_out)),
             (Operation::Profile(o), Self::StartX) => Some(o.start?[0]),
             (Operation::Profile(o), Self::StartY) => Some(o.start?[1]),
             (Operation::Pocket(o), Self::StartX) => Some(o.start?[0]),
@@ -1044,6 +1036,18 @@ impl OperationParameter {
             (Operation::Face(o), Self::FaceOvershoot) => {
                 o.overshoot = value;
             }
+            (Operation::Face(o), Self::LeadInSize) => {
+                o.linking.lead_in = set_lead_size(o.linking.lead_in, value);
+            }
+            (Operation::Face(o), Self::LeadOutSize) => {
+                o.linking.lead_out = set_lead_size(o.linking.lead_out, value);
+            }
+            (Operation::Face(o), Self::ProfileLeadInSweep) => {
+                set_lead_sweep(&mut o.linking.lead_in, value);
+            }
+            (Operation::Face(o), Self::ProfileLeadOutSweep) => {
+                set_lead_sweep(&mut o.linking.lead_out, value);
+            }
             (Operation::Face(o), Self::Feed) => {
                 o.feed = value;
             }
@@ -1350,36 +1354,16 @@ impl OperationParameter {
                 o.finishing.overlap = value;
             }
             (Operation::Profile(o), Self::ProfileLeadInSweep) => {
-                if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = o.lead_in {
-                    o.lead_in = Lead::ArcSweep {
-                        radius,
-                        angle_deg: value,
-                    };
-                }
+                set_lead_sweep(&mut o.lead_in, value);
             }
             (Operation::Chamfer(o), Self::ProfileLeadInSweep) => {
-                if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = o.lead_in {
-                    o.lead_in = Lead::ArcSweep {
-                        radius,
-                        angle_deg: value,
-                    };
-                }
+                set_lead_sweep(&mut o.lead_in, value);
             }
             (Operation::Profile(o), Self::ProfileLeadOutSweep) => {
-                if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = o.lead_out {
-                    o.lead_out = Lead::ArcSweep {
-                        radius,
-                        angle_deg: value,
-                    };
-                }
+                set_lead_sweep(&mut o.lead_out, value);
             }
             (Operation::Chamfer(o), Self::ProfileLeadOutSweep) => {
-                if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = o.lead_out {
-                    o.lead_out = Lead::ArcSweep {
-                        radius,
-                        angle_deg: value,
-                    };
-                }
+                set_lead_sweep(&mut o.lead_out, value);
             }
             (Operation::Profile(o), Self::StartX) => {
                 if let Some(point) = &mut o.start {
@@ -1895,6 +1879,19 @@ fn lead_size(lead: Lead) -> f64 {
         Lead::None => 0.0,
         Lead::Linear { length } => length,
         Lead::Arc { radius } | Lead::ArcSweep { radius, .. } => radius,
+    }
+}
+
+fn lead_sweep(lead: Lead) -> f64 {
+    match lead {
+        Lead::ArcSweep { angle_deg, .. } => angle_deg,
+        _ => 90.,
+    }
+}
+
+fn set_lead_sweep(lead: &mut Lead, angle_deg: f64) {
+    if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = *lead {
+        *lead = Lead::ArcSweep { radius, angle_deg };
     }
 }
 

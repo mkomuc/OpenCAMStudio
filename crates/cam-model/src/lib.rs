@@ -58,11 +58,11 @@ pub use cam_cldata::Point3;
 pub use document::{
     AdaptiveContainment, AdaptiveOp, AdaptiveParams, Axis, CarveClearing, CarveOp, ChamferFace,
     ChamferOp, CircularDistribution, ClearParams, Clearing, Comp, Document, Drawing, DrillGeometry,
-    DrillOp, EngraveOp, ExecutionItem, FaceOp, Hand, Heights, Lead, LinearPatternDirection,
-    Operation, OperationPattern, Origin, ParallelOp, PatternDirection, PatternKind, PatternOptions,
-    PatternOrder, PatternSpacing, Plunge, PocketOp, ProfileContour, ProfileOp, ProfileTabs, Setup,
-    Side, SpiralOp, Stock, StockAxis, StockAxisReference, StockOriginAxis, StockToLeave, ThreadOp,
-    SCHEMA_VERSION,
+    DrillOp, EngraveOp, ExecutionItem, FaceLinking, FaceOp, Hand, Heights, Lead,
+    LinearPatternDirection, Operation, OperationPattern, Origin, ParallelOp, PatternDirection,
+    PatternKind, PatternOptions, PatternOrder, PatternSpacing, Plunge, PocketOp, ProfileContour,
+    ProfileOp, ProfileTabs, Setup, Side, SpiralOp, Stock, StockAxis, StockAxisReference,
+    StockOriginAxis, StockToLeave, ThreadOp, SCHEMA_VERSION,
 };
 pub use geometry::*;
 pub use history::History;

@@ -3008,6 +3008,7 @@ mod tests {
         assert!((min_cut_z(&pocket_allowed.program) - -1.5).abs() < 1e-9);
 
         let face = Operation::Face(cam_model::FaceOp {
+            linking: Default::default(),
             curves: Default::default(),
             boundary_selected: false,
             islands: Vec::new(),

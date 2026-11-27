@@ -82,16 +82,32 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             }
             fields
         }
-        Operation::Face(_) => vec![
-            Field::FaceStartOffset,
-            Field::Depth,
-            Field::Stepdown,
-            Field::FaceOverlap,
-            Field::FaceOvershoot,
-            Field::SpindleRpm,
-            Field::Feed,
-            Field::PlungeFeed,
-        ],
+        Operation::Face(f) => {
+            use profile_parameters::Number;
+            let mut fields = vec![
+                Field::FaceStartOffset,
+                Field::Depth,
+                Field::Stepdown,
+                Field::FaceOverlap,
+                Field::FaceOvershoot,
+                Field::SpindleRpm,
+                Field::Feed,
+                Field::PlungeFeed,
+            ];
+            if f.linking.lead_in_enabled {
+                fields.push(Field::LeadInSize);
+                if LeadKind::of(f.linking.lead_in) == LeadKind::Arc {
+                    fields.push(Field::Profile(Number::LeadInSweep));
+                }
+            }
+            if f.linking.lead_out_enabled && !f.linking.uses_entry_for_exit() {
+                fields.push(Field::LeadOutSize);
+                if LeadKind::of(f.linking.lead_out) == LeadKind::Arc {
+                    fields.push(Field::Profile(Number::LeadOutSweep));
+                }
+            }
+            fields
+        }
         Operation::Drill(drill) => {
             let mut fields = vec![
                 Field::Depth,
@@ -330,6 +346,7 @@ pub(super) fn operation_fields(op: &Operation) -> Vec<Field> {
             Operation::Pocket(_)
                 | Operation::Adaptive(_)
                 | Operation::Chamfer(_)
+                | Operation::Face(_)
                 | Operation::Thread(_)
                 | Operation::Bore(_)
         )

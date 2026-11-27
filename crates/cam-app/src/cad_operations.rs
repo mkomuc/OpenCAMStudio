@@ -636,6 +636,7 @@ pub(crate) fn create_operation(
             feed: defaults.plunge_feed,
         }),
         OpKind::Face => Operation::Face(FaceOp {
+            linking: cam_model::FaceLinking::for_new_operation(),
             curves: Default::default(),
             boundary_selected: true,
             islands: resolved

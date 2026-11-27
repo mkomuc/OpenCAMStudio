@@ -229,6 +229,10 @@ settings! {
     DEPTH_ORDER: bool = "orderByDepth", get!(Pocket(p) => p.clear.multiple_depths.order_by_depth), |v| Message::PocketDepthToggle(DepthToggle::ByDepth, v);
     AREA_ORDER: bool = "orderByArea", get!(Pocket(p) => p.clear.multiple_depths.order_by_area), |v| Message::PocketDepthToggle(DepthToggle::ByArea, v);
     FACE_DIRECTION: Axis = "passDirection", get!(Face(f) => f.direction), Message::FaceDirectionChanged;
+    FACE_KEEP_DOWN: bool = "keepToolDown", get!(Face(f) => f.keep_tool_down()), |v| Message::FaceLinkingChanged(FaceLinkingToggle::KeepToolDown, v);
+    FACE_ENTRY: bool = "leadInEnabled", get!(Face(f) => f.linking.lead_in_enabled), |v| Message::FaceLinkingChanged(FaceLinkingToggle::Entry, v);
+    FACE_EXIT: bool = "leadOutEnabled", get!(Face(f) => f.linking.lead_out_enabled), |v| Message::FaceLinkingChanged(FaceLinkingToggle::Exit, v);
+    FACE_SAME_LEAD: bool = "sameLeadOut", get!(Face(f) => f.linking.same_lead_out), |v| Message::FaceLinkingChanged(FaceLinkingToggle::SameLeadOut, v);
     CHAMFER_SIDE: Side = "side", get!(Chamfer(c) => c.side), Message::SideChanged;
     CHAMFER_GRADUAL: bool = "gradual", get!(Chamfer(c) => c.gradual), Message::ChamferGradualToggled;
     CHAMFER_ENTRY: bool = "leadInEnabled", get!(Chamfer(c) => c.lead_in != Lead::None && c.lead_in_enabled.unwrap_or(true)), Message::ChamferEntryEnabled;
@@ -238,12 +242,14 @@ settings! {
         Operation::Profile(p) => Some(LeadKind::of(p.lead_in)),
         Operation::Pocket(p) => Some(LeadKind::of(p.clear.lead_in)),
         Operation::Chamfer(c) => Some(LeadKind::of(c.lead_in)),
+        Operation::Face(f) => Some(LeadKind::of(f.linking.lead_in)),
         _ => None,
     }, Message::LeadInKindChanged;
     LEAD_OUT: LeadKind = "leadOutType", |op| match op {
         Operation::Profile(p) => Some(LeadKind::of(p.lead_out)),
         Operation::Pocket(p) => Some(LeadKind::of(p.clear.lead_out)),
         Operation::Chamfer(c) => Some(LeadKind::of(c.lead_out)),
+        Operation::Face(f) => Some(LeadKind::of(f.linking.lead_out)),
         _ => None,
     }, Message::LeadOutKindChanged;
     PLUNGE: PlungeKind = "plungeType", |op| App::op_plunge_styles(op).0.map(PlungeKind::of), Message::PlungeKindChanged;
@@ -273,7 +279,11 @@ settings! {
     SPIRAL_CONTACT: bool = "contactOnly", get!(Spiral(s) => s.params.contact_only), Message::SpiralContactOnlyToggled;
     PARALLEL_SCALLOP: bool = "scallop", get!(Parallel(p) => p.params.scallop), Message::ParallelScallopToggled;
     PARALLEL_BOTH_WAYS: bool = "bothWays", get!(Parallel(p) => p.params.both_ways), Message::ParallelBothWaysToggled;
-    PARALLEL_TRANSITION: ParallelTransition = "transitionType", get!(Parallel(p) => p.params.transition), Message::ParallelTransitionChanged;
+    PASS_TRANSITION: ParallelTransition = "transitionType", |op| match op {
+        Operation::Parallel(p) => Some(p.params.transition),
+        Operation::Face(f) => Some(f.transition()),
+        _ => None,
+    }, Message::PassTransitionChanged;
     SCALLOP_ORDER: ScallopOrder = "scallopOrder", get!(Parallel(p) => p.params.scallop_order), Message::ScallopOrderChanged;
     SMOOTHING: bool = "smoothing", |op| match op {
         Operation::Parallel(p) => Some(p.params.scallop_smoothing),

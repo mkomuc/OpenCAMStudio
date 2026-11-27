@@ -26,3 +26,7 @@ GUI combos with icons use `gui_icon_picker.rs` through `icon_picker::picker`.
 This shared component defines the default arrow, trigger, popup styling and
 keyboard navigation for height references, machining modes and stock types.
 Use it for new icon combos instead of building separate dropdown triggers.
+
+Write tests for features or failures that are selfcontained - even when an example project is provided - unless explicitly asked by the user otherwise.
+
+Make sure new GUI elements, dialogs etc. are following the style of the application. Check if UI concepts can be reused.

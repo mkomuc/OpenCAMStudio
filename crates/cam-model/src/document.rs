@@ -110,7 +110,8 @@ use crate::{BoreOp, Tool};
 /// v49: Parallel cutting turns and repositioning policy.
 /// v50: Parallel transition type.
 /// v51: groove cutter and slitting saw tool types.
-pub const SCHEMA_VERSION: u32 = 51;
+/// v52: facing leads, pass transitions, and keep-tool-down control.
+pub const SCHEMA_VERSION: u32 = 52;
 
 /// How repeated instances are traversed when executing a pattern.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1647,6 +1648,71 @@ impl std::fmt::Display for Axis {
     }
 }
 
+/// Entry, exit, and inter-pass linking for facing.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FaceLinking {
+    pub lead_in: Lead,
+    pub lead_out: Lead,
+    pub lead_in_enabled: bool,
+    pub lead_out_enabled: bool,
+    pub same_lead_out: bool,
+    /// Missing in old projects, where selected boundaries used separate passes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition: Option<crate::ParallelTransition>,
+    /// Missing in old projects, where only whole-stock facing stayed down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_tool_down: Option<bool>,
+}
+
+impl Default for FaceLinking {
+    fn default() -> Self {
+        Self {
+            lead_in: Lead::Arc { radius: 0.6 },
+            lead_out: Lead::Arc { radius: 0.6 },
+            lead_in_enabled: false,
+            lead_out_enabled: false,
+            same_lead_out: true,
+            transition: None,
+            keep_tool_down: None,
+        }
+    }
+}
+
+impl FaceLinking {
+    pub fn for_new_operation() -> Self {
+        Self {
+            lead_in_enabled: true,
+            lead_out_enabled: true,
+            transition: Some(crate::ParallelTransition::Smooth),
+            keep_tool_down: Some(true),
+            ..Self::default()
+        }
+    }
+
+    pub fn uses_entry_for_exit(self) -> bool {
+        self.same_lead_out && self.lead_in_enabled
+    }
+
+    pub fn effective_lead_in(self) -> Lead {
+        if self.lead_in_enabled {
+            self.lead_in
+        } else {
+            Lead::None
+        }
+    }
+
+    pub fn effective_lead_out(self) -> Lead {
+        if !self.lead_out_enabled {
+            Lead::None
+        } else if self.uses_entry_for_exit() {
+            self.lead_in
+        } else {
+            self.lead_out
+        }
+    }
+}
+
 /// A facing operation clears the whole setup stock or a selected region with
 /// parallel passes at each cutting depth.
 ///
@@ -1694,12 +1760,14 @@ pub struct FaceOp {
     /// Axial pass scheduling. Older projects retain their original multi-pass behavior.
     #[serde(default)]
     pub multiple_depths: crate::MultipleDepths,
-    /// Cutter-edge clearance beyond the stock or selected face at pass ends.
+    /// Cutter-edge clearance at pass ends and positive overhang along exterior sides.
     #[serde(default)]
     pub overshoot: f64,
     /// Orientation of the parallel cutting lines.
     #[serde(default)]
     pub direction: Axis,
+    #[serde(default)]
+    pub linking: FaceLinking,
     /// Spindle speed for this operation, rpm (`M3 S<rpm>`). Seeded from the tool's
     /// nominal RPM when the operation is created; `0.0` falls back to the job default.
     #[serde(default)]
@@ -1725,6 +1793,23 @@ pub struct FaceOp {
 }
 
 impl FaceOp {
+    pub fn transition(&self) -> crate::ParallelTransition {
+        use crate::ParallelTransition;
+        self.linking
+            .transition
+            .unwrap_or(if self.boundary_selected {
+                ParallelTransition::NoContact
+            } else {
+                ParallelTransition::Smooth
+            })
+    }
+
+    pub fn keep_tool_down(&self) -> bool {
+        self.linking
+            .keep_tool_down
+            .unwrap_or(!self.boundary_selected)
+    }
+
     /// Filled machining regions defined by the chosen face curves.
     pub fn boundary_regions(
         &self,

@@ -907,6 +907,14 @@ enum LeadKind {
     Arc,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum FaceLinkingToggle {
+    KeepToolDown,
+    Entry,
+    Exit,
+    SameLeadOut,
+}
+
 impl LeadKind {
     const ALL: [LeadKind; 3] = [LeadKind::None, LeadKind::Linear, LeadKind::Arc];
 
@@ -1471,7 +1479,7 @@ enum Field {
     /// Maximum horizontal spacing between concentric pocket passes.
     PocketStepover,
     FaceOverlap,
-    /// Face: overshoot past the stock edge before the turnaround (mm).
+    /// Face: clearance at row ends and cutter overhang at the outer rows (mm).
     FaceOvershoot,
     /// Adaptive-clearing stepover: the radial width of cut along a *straight* wall
     /// (mm); 0 disables adaptive clearing (pocket, profile outside-roughing). Not a
@@ -1965,7 +1973,7 @@ impl Field {
                  diameter. Higher = smoother floor, more passes."
             }
             Field::FaceOvershoot => {
-                "Clearance from the cutter edge to the stock or selected face edge at pass ends (mm)."
+                "Clearance beyond the stock or selected CAD face at pass ends. A positive value also sets the minimum cutter overhang at exterior side edges parallel to the passes (mm)."
             }
             Field::Engagement => {
                 "Adaptive-clearing stepover: the radial width of cut taken along a \
@@ -3349,12 +3357,13 @@ enum Message {
     PlungeKindChanged(PlungeKind),
     /// Change the selected face op's pass direction (committed immediately).
     FaceDirectionChanged(Axis),
+    FaceLinkingChanged(FaceLinkingToggle, bool),
     /// Toggle climb (true) vs conventional (false) clearing on the selected
     /// pocket / profile-roughing op.
     ClearingClimbToggled(bool),
     ParallelBothWaysToggled(bool),
     ParallelScallopToggled(bool),
-    ParallelTransitionChanged(cam_model::ParallelTransition),
+    PassTransitionChanged(cam_model::ParallelTransition),
     ScallopSmoothingToggled(bool),
     ScallopRetractionChanged(cam_model::ScallopRetraction),
     ScallopOrderChanged(cam_model::ScallopOrder),
@@ -8646,6 +8655,7 @@ impl App {
                 self.edit_operation_draft(|op| match op {
                     Operation::Profile(p) => p.lead_in = kind.to_lead(p.lead_in),
                     Operation::Chamfer(c) => c.lead_in = kind.to_lead(c.lead_in),
+                    Operation::Face(f) => f.linking.lead_in = kind.to_lead(f.linking.lead_in),
                     Operation::Pocket(p) => p.clear.lead_in = kind.to_lead(p.clear.lead_in),
                     _ => {}
                 });
@@ -8655,6 +8665,7 @@ impl App {
                 self.edit_operation_draft(|op| match op {
                     Operation::Profile(p) => p.lead_out = kind.to_lead(p.lead_out),
                     Operation::Chamfer(c) => c.lead_out = kind.to_lead(c.lead_out),
+                    Operation::Face(f) => f.linking.lead_out = kind.to_lead(f.linking.lead_out),
                     Operation::Pocket(p) => p.clear.lead_out = kind.to_lead(p.clear.lead_out),
                     _ => {}
                 });
@@ -8756,6 +8767,44 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
+            Message::FaceLinkingChanged(toggle, enabled) => {
+                let sources: Vec<_> = [
+                    Field::LeadInSize,
+                    Field::LeadOutSize,
+                    Field::Profile(profile_parameters::Number::LeadInSweep),
+                    Field::Profile(profile_parameters::Number::LeadOutSweep),
+                ]
+                .into_iter()
+                .filter_map(|field| {
+                    Some((
+                        parameter_expressions::parameter(field)?,
+                        self.fields.get(&field)?.clone(),
+                    ))
+                })
+                .collect();
+                self.edit_operation_draft(|op| {
+                    if !matches!(op, Operation::Face(_)) {
+                        return;
+                    }
+                    for (parameter, source) in sources {
+                        if let Ok(value) = source.trim().parse() {
+                            if parameter.validate_value(op, value).is_ok() {
+                                parameter.set_source(op, &source);
+                            }
+                        }
+                    }
+                    let Operation::Face(f) = op else {
+                        unreachable!()
+                    };
+                    match toggle {
+                        FaceLinkingToggle::KeepToolDown => f.linking.keep_tool_down = Some(enabled),
+                        FaceLinkingToggle::Entry => f.linking.lead_in_enabled = enabled,
+                        FaceLinkingToggle::Exit => f.linking.lead_out_enabled = enabled,
+                        FaceLinkingToggle::SameLeadOut => f.linking.same_lead_out = enabled,
+                    }
+                });
+                self.refresh_operation_fields();
+            }
             Message::ChamferGradualToggled(on) => {
                 self.edit_operation_draft(|op| {
                     if let Operation::Chamfer(c) = op {
@@ -8798,11 +8847,11 @@ impl App {
                 });
                 self.refresh_operation_fields();
             }
-            Message::ParallelTransitionChanged(transition) => {
-                self.edit_operation_draft(|op| {
-                    if let Operation::Parallel(p) = op {
-                        p.params.transition = transition;
-                    }
+            Message::PassTransitionChanged(transition) => {
+                self.edit_operation_draft(|op| match op {
+                    Operation::Parallel(p) => p.params.transition = transition,
+                    Operation::Face(f) => f.linking.transition = Some(transition),
+                    _ => {}
                 });
             }
             Message::ScallopSmoothingToggled(on) => {
@@ -14228,6 +14277,14 @@ fn op_field(op: &Operation, field: Field) -> Option<f64> {
         (Operation::Face(o), Field::FaceOvershoot) => Some(o.overshoot),
         (Operation::Face(o), Field::Feed) => Some(o.feed),
         (Operation::Face(o), Field::PlungeFeed) => Some(o.plunge_feed),
+        (
+            op @ Operation::Face(_),
+            Field::LeadInSize
+            | Field::LeadOutSize
+            | Field::Profile(
+                profile_parameters::Number::LeadInSweep | profile_parameters::Number::LeadOutSweep,
+            ),
+        ) => parameter_expressions::parameter(field)?.value(op),
         (Operation::Drill(o), Field::Depth) => Some(o.depth),
         (Operation::Drill(o), Field::DrillStartOffset) => Some(o.start_offset),
         (Operation::Drill(o), Field::Peck) => Some(o.peck.unwrap_or(0.0)),
@@ -14460,6 +14517,27 @@ fn apply_op_fields(op: &mut Operation, parsed: &BTreeMap<Field, f64>) {
             o.clear.plunge = set_plunge_params(o.clear.plunge, a, b);
         }
         Operation::Face(o) => {
+            for (size, sweep, lead) in [
+                (
+                    Field::LeadInSize,
+                    profile_parameters::Number::LeadInSweep,
+                    &mut o.linking.lead_in,
+                ),
+                (
+                    Field::LeadOutSize,
+                    profile_parameters::Number::LeadOutSweep,
+                    &mut o.linking.lead_out,
+                ),
+            ] {
+                if let Some(v) = get(size) {
+                    *lead = set_lead_size(*lead, v);
+                }
+                if let Some(angle_deg) = get(Field::Profile(sweep)).filter(|&v| !sweep.invalid(v)) {
+                    if let Lead::Arc { radius } | Lead::ArcSweep { radius, .. } = *lead {
+                        *lead = Lead::ArcSweep { radius, angle_deg };
+                    }
+                }
+            }
             if let Some(v) = get(Field::FaceStartOffset) {
                 o.start_offset = v.max(0.0);
             }
@@ -17683,7 +17761,7 @@ mod multi_setup_draft_tests {
         let _ = app.operation_inspector(id);
         send(
             &mut app,
-            Message::ParallelTransitionChanged(ParallelTransition::NoContact),
+            Message::PassTransitionChanged(ParallelTransition::NoContact),
         );
         assert_eq!(
             mode(app.current_operation(id).unwrap()),
@@ -17697,7 +17775,7 @@ mod multi_setup_draft_tests {
         app.begin_operation_draft(id);
         send(
             &mut app,
-            Message::ParallelTransitionChanged(ParallelTransition::Smooth),
+            Message::PassTransitionChanged(ParallelTransition::Smooth),
         );
         send(&mut app, Message::Apply);
         assert_eq!(
@@ -17709,6 +17787,86 @@ mod multi_setup_draft_tests {
             mode(app.controller.operation(id).unwrap()),
             ParallelTransition::StraightLine
         );
+    }
+
+    #[test]
+    fn face_linking_parameters_apply_and_undo_together() {
+        use cam_model::ParallelTransition;
+        use profile_parameters::Number;
+
+        let mut app = blank_app();
+        let operation = app.controller.operation_template(OpKind::Face, 1);
+        let id = operation.id();
+        app.controller.add_operation(operation);
+        app.begin_operation_draft(id);
+        app.operation_tab = OperationTab::Linking;
+        let _ = app.operation_inspector(id);
+        assert!(matches!(
+            app.current_operation(id),
+            Some(Operation::Face(op)) if op.keep_tool_down()
+        ));
+        assert_eq!(app.fields[&Field::LeadInSize], "0.6");
+        assert_eq!(app.fields[&Field::Profile(Number::LeadInSweep)], "90");
+        assert!(!app.fields.contains_key(&Field::LeadOutSize));
+
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadInSize, "1.25".into()),
+        );
+        send(
+            &mut app,
+            Message::FieldChanged(Field::Profile(Number::LeadInSweep), "=45 + 15".into()),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::Entry, false),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::Entry, true),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::SameLeadOut, false),
+        );
+        send(&mut app, Message::LeadOutKindChanged(LeadKind::Linear));
+        send(
+            &mut app,
+            Message::FieldChanged(Field::LeadOutSize, "2.5".into()),
+        );
+        send(
+            &mut app,
+            Message::FaceLinkingChanged(FaceLinkingToggle::KeepToolDown, false),
+        );
+        send(
+            &mut app,
+            Message::PassTransitionChanged(ParallelTransition::StraightLine),
+        );
+        send(&mut app, Message::Apply);
+
+        let Some(Operation::Face(op)) = app.controller.operation(id) else {
+            panic!("face operation")
+        };
+        assert_eq!(
+            op.linking.effective_lead_in(),
+            Lead::ArcSweep {
+                radius: 1.25,
+                angle_deg: 60.
+            },
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            op.linking.effective_lead_out(),
+            Lead::Linear { length: 2.5 }
+        );
+        assert_eq!(op.transition(), ParallelTransition::StraightLine);
+        assert!(!op.keep_tool_down());
+        assert!(app.controller.undo());
+        assert!(matches!(
+            app.controller.operation(id),
+            Some(Operation::Face(op)) if op.linking == cam_model::FaceLinking::for_new_operation()
+        ));
     }
 
     #[test]
