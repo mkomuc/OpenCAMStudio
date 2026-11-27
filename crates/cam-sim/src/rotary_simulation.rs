@@ -70,13 +70,13 @@ fn clip_tool_axis(
     b: Point3,
     min: [f64; 3],
     max: [f64; 3],
-    radius: f64,
+    padding: [f64; 3],
 ) -> Option<(Point3, Point3)> {
     let (mut lo, mut hi) = (0_f64, 1_f64);
     let (p, q) = (xyz(a), xyz(b));
     for i in 0..3 {
         let d = q[i] - p[i];
-        let (min, max) = (min[i] - radius, max[i] + radius);
+        let (min, max) = (min[i] - padding[i], max[i] + padding[i]);
         if d.abs() < 1e-14 {
             if p[i] < min || p[i] > max {
                 return None;
@@ -639,6 +639,26 @@ impl State {
                 .max((c.max[i] - center[i]).abs())
         };
         let reach = extent(radial_axis).hypot(extent(2));
+        let mut stock_max = c.max;
+        stock_max[2] = stock_max[2].max(f64::from(self.field.top()));
+        let stock_reach = reach + (stock_max[2] - c.max[2]);
+        // Cover roundoff and the displacement that ray_tool ignores for
+        // nearly parallel ray directions.
+        let search_margin = 1e-9
+            * c.min
+                .into_iter()
+                .chain(stock_max)
+                .chain(center)
+                .map(f64::abs)
+                .fold(1., f64::max);
+        let cylinder = self.field.cylindrical_envelope();
+        let probe_reach = cylinder
+            .filter(|(axis, _, _)| *axis == 1 - radial_axis)
+            .map_or(stock_reach, |(_, blank_center, radius)| {
+                let eccentricity = (blank_center[radial_axis] - center[radial_axis])
+                    .hypot(blank_center[2] - center[2]);
+                stock_reach.min(radius + eccentricity)
+            });
         let travel = distance(a, b) + (ba - aa).to_radians().abs() * reach;
         let count = (travel / (c.options.resolution * 0.25)).ceil().max(1.) as usize;
         if count > 1_000_000 || self.poses.saturating_add(count) > 5_000_000 {
@@ -705,7 +725,7 @@ impl State {
             );
             let height_distance =
                 distance_to_interval(a.z.min(b.z) + lo - center[2], a.z.max(b.z) + hi - center[2]);
-            lateral_distance.hypot(height_distance) > reach + 1e-6
+            lateral_distance.hypot(height_distance) > probe_reach + search_margin + 1e-6
         };
         #[cfg(not(test))]
         probes.retain(|probe| !radial_clear(probe));
@@ -713,9 +733,40 @@ impl State {
         if c.tight_bounds {
             probes.retain(|probe| !radial_clear(probe));
         }
+        // Clip the search window to sections that can interact with stock.
+        let mut active_radius = if reposition {
+            0.
+        } else {
+            tool.tool.profile.radius
+        };
+        let mut active_bottom = if reposition { f64::INFINITY } else { 0. };
+        let mut active_top = if reposition {
+            0.
+        } else if matches!(tool.tool.profile.shape, ProfileShape::Thread { .. }) {
+            tool.length
+        } else {
+            tool.flute_length
+        };
+        for &(profile, lo, hi) in &probes {
+            active_radius = active_radius.max(profile.radius);
+            active_bottom = active_bottom.min(lo);
+            active_top = active_top.max(hi);
+        }
+        if active_radius == 0. && (samples.is_none() || feed.is_none()) {
+            return Ok(());
+        }
+        // Bound the search window between neighbouring poses as well.
+        let pad = travel / count as f64 * 0.5;
+        let flat_cutting = !reposition
+            && probes.is_empty()
+            && matches!(tool.tool.profile.shape, ProfileShape::Flat);
+        #[cfg(test)]
+        let flat_cutting = flat_cutting && c.tight_bounds;
+        let mut flat_rays = Vec::new();
+        let mut axial_distances = Vec::new();
+        let (nx, _) = self.field.dims();
         let mut contact = false;
         let mut sample_before = self.field.tracked_removed_volume();
-        let cylinder = self.field.cylindrical_envelope();
         for j in 0..=count {
             if cancelled() {
                 return Err("Stock simulation cancelled".into());
@@ -730,57 +781,132 @@ impl State {
             };
             let fraction = range.0 + (range.1 - range.0) * t;
             let material_tip = c.frame.material(tip, angle);
-            let mut source = None;
-            // Bound the search window between neighbouring poses as well.
-            let pad = travel / count as f64 * 0.5;
-            let body_radius = tool
-                .tool
-                .profile
-                .radius
-                .max(tool.shank_radius)
-                .max(tool.neck_radius);
+            let start = if active_bottom == 0. || active_radius == 0. {
+                material_tip
+            } else {
+                c.frame
+                    .material(Point3::new(tip.x, tip.y, tip.z + active_bottom), angle)
+            };
             let end = c
                 .frame
-                .material(Point3::new(tip.x, tip.y, tip.z + tool.length), angle);
-            // Clip the tool axis to an expanded stock box before projecting it.
-            // The capsule encloses every flute/neck/shank section. This rejects
-            // air poses and avoids scanning the long stickout outside the blank.
-            let bounds = clip_tool_axis(material_tip, end, c.min, c.max, body_radius + pad)
+                .material(Point3::new(tip.x, tip.y, tip.z + active_top), angle);
+            // Each cutter cross section is a disc perpendicular to the tool
+            // axis, so its projected radius shrinks on the rotating axes.
+            let margin = pad + search_margin.max(1e-9 * active_radius);
+            let mut padding = [active_radius + margin; 3];
+            padding[radial_axis] = rotation.1.abs() * active_radius + margin;
+            padding[2] = rotation.0.abs() * active_radius + margin;
+            let bounds = (active_radius > 0.
+                && tip.z + active_bottom <= center[2] + probe_reach + margin + 1e-6
+                && tip.z + active_top >= center[2] - probe_reach - margin - 1e-6)
+                .then(|| clip_tool_axis(start, end, c.min, stock_max, padding))
+                .flatten()
                 .and_then(|(a, b)| match cylinder {
                     Some((axis, center, radius)) => {
-                        clip_cylinder_axis(a, b, axis, center, radius + body_radius + pad)
+                        clip_cylinder_axis(a, b, axis, center, radius + active_radius + margin)
                     }
                     None => Some((a, b)),
                 });
             #[cfg(test)]
-            let bounds = if c.tight_bounds {
-                bounds
+            let (bounds, padding) = if c.tight_bounds {
+                (bounds, padding)
             } else {
-                Some((material_tip, end))
+                let end = c
+                    .frame
+                    .material(Point3::new(tip.x, tip.y, tip.z + tool.length), angle);
+                (
+                    Some((material_tip, end)),
+                    [tool.tool
+                        .profile
+                        .radius
+                        .max(tool.neck_radius)
+                        .max(tool.shank_radius)
+                        + pad; 3],
+                )
             };
             if let Some((start, end)) = bounds {
                 let (x0, x1) = self.field.index_range(
-                    start.x.min(end.x) - body_radius - pad,
-                    start.x.max(end.x) + body_radius + pad,
+                    start.x.min(end.x) - padding[0],
+                    start.x.max(end.x) + padding[0],
                     0,
                 );
                 let (y0, y1) = self.field.index_range(
-                    start.y.min(end.y) - body_radius - pad,
-                    start.y.max(end.y) + body_radius + pad,
+                    start.y.min(end.y) - padding[1],
+                    start.y.max(end.y) + padding[1],
                     1,
                 );
+                let floor = c.min[2];
+                let radial_direction = ray_direction[radial_axis];
+                let radial_a = radial_direction * radial_direction;
+                let radius = tool.tool.profile.radius;
+                let radius_squared = radius * radius;
+                if flat_cutting {
+                    let first = [x0, y0];
+                    let last = [x1, y1];
+                    let axial_axis = 1 - radial_axis;
+                    let tip = xyz(tip);
+                    flat_rays.clear();
+                    flat_rays.extend((first[radial_axis]..=last[radial_axis]).map(|i| {
+                        let mut p = [0.; 3];
+                        p[radial_axis] = self.field.center_axis(i, radial_axis);
+                        let p = xyz(c.frame.machine(Point3::new(p[0], p[1], 0.), rotation));
+                        FlatRay::new(
+                            p[radial_axis] - tip[radial_axis],
+                            radial_direction,
+                            p[2] - tip[2],
+                            ray_direction[2],
+                            tool.flute_length,
+                        )
+                    }));
+                    axial_distances.clear();
+                    axial_distances.extend((first[axial_axis]..=last[axial_axis]).map(|i| {
+                        let delta = self.field.center_axis(i, axial_axis) - tip[axial_axis];
+                        delta * delta
+                    }));
+                }
+                let mut source = None;
+                let cut_column =
+                    |field: &mut Heightfield, source: &mut Option<u32>, column, lo, hi| {
+                        if field.interval_material(column, lo, hi, floor, 0.) {
+                            let source = *source.get_or_insert_with(|| {
+                                field.rotary_source(
+                                    xyz(material_tip),
+                                    tool.tool.profile,
+                                    index,
+                                    fraction,
+                                )
+                            });
+                            field.subtract_interval(column, lo, hi, Some(tag.op_id), source);
+                        }
+                    };
                 for y in y0..=y1 {
                     if cancelled() {
                         return Err("Stock simulation cancelled".into());
                     }
                     for x in x0..=x1 {
-                        let (cx, cy) = self.field.center(x, y);
-                        let column = y * self.field.dims().0 + x;
-                        let floor = c.min[2];
+                        let column = y * nx + x;
                         let ceiling = self.field.column_top(column);
                         if ceiling <= floor + 1e-6 {
                             continue;
                         }
+                        if flat_cutting {
+                            // A grid line shares the rotating coordinates. Keep
+                            // row-major order for sources and volume sums.
+                            let offset = [x - x0, y - y0];
+                            if let Some(ray) = flat_rays[offset[radial_axis]] {
+                                if let Some((lo, hi)) = ray.intersect(
+                                    axial_distances[offset[1 - radial_axis]],
+                                    radial_a,
+                                    radius_squared,
+                                    floor,
+                                    ceiling,
+                                ) {
+                                    cut_column(&mut self.field, &mut source, column, lo, hi);
+                                }
+                            }
+                            continue;
+                        }
+                        let (cx, cy) = self.field.center(x, y);
                         let p = c.frame.machine(Point3::new(cx, cy, 0.), rotation);
                         let q = [p.x - tip.x, p.y - tip.y, p.z - tip.z];
                         let v = ray_direction;
@@ -802,23 +928,7 @@ impl State {
                                 for (lo, hi) in
                                     thread_intervals(q, v, floor, ceiling, tool.tool.profile)
                                 {
-                                    if self.field.interval_material(column, lo, hi, floor, 0.) {
-                                        let source = *source.get_or_insert_with(|| {
-                                            self.field.rotary_source(
-                                                xyz(material_tip),
-                                                tool.tool.profile,
-                                                index,
-                                                fraction,
-                                            )
-                                        });
-                                        self.field.subtract_interval(
-                                            column,
-                                            lo,
-                                            hi,
-                                            Some(tag.op_id),
-                                            source,
-                                        );
-                                    }
+                                    cut_column(&mut self.field, &mut source, column, lo, hi);
                                 }
                             } else if let Some((lo, hi)) = ray_tool(
                                 q,
@@ -830,23 +940,7 @@ impl State {
                                 tool.flute_length,
                                 0.,
                             ) {
-                                if self.field.interval_material(column, lo, hi, floor, 0.) {
-                                    let source = *source.get_or_insert_with(|| {
-                                        self.field.rotary_source(
-                                            xyz(material_tip),
-                                            tool.tool.profile,
-                                            index,
-                                            fraction,
-                                        )
-                                    });
-                                    self.field.subtract_interval(
-                                        column,
-                                        lo,
-                                        hi,
-                                        Some(tag.op_id),
-                                        source,
-                                    );
-                                }
+                                cut_column(&mut self.field, &mut source, column, lo, hi);
                             }
                         }
                     }
@@ -876,6 +970,75 @@ impl State {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FlatRay {
+    radial_offset_squared: f64,
+    radial_b: f64,
+    radial_b_squared: f64,
+    lower: f64,
+    upper: f64,
+}
+
+impl FlatRay {
+    fn new(
+        radial_offset: f64,
+        radial_direction: f64,
+        axial_offset: f64,
+        axial_direction: f64,
+        flute_length: f64,
+    ) -> Option<Self> {
+        let (lower, upper) = ray_slab(axial_offset, axial_direction, 0., flute_length)?;
+        let radial_b = radial_offset * radial_direction;
+        Some(Self {
+            radial_offset_squared: radial_offset * radial_offset,
+            radial_b,
+            radial_b_squared: radial_b * radial_b,
+            lower,
+            upper,
+        })
+    }
+
+    fn intersect(
+        self,
+        axial_distance_squared: f64,
+        radial_a: f64,
+        radius_squared: f64,
+        mut lo: f64,
+        mut hi: f64,
+    ) -> Option<(f64, f64)> {
+        if self.lower >= hi || self.upper <= lo {
+            return None;
+        }
+        let c = axial_distance_squared + self.radial_offset_squared - radius_squared;
+        if radial_a < 1e-20 {
+            if c > 0. {
+                return None;
+            }
+        } else {
+            let disc = self.radial_b_squared - radial_a * c;
+            if disc < 0. {
+                return None;
+            }
+            let h = disc.sqrt();
+            lo = lo.max((-self.radial_b - h) / radial_a);
+            hi = hi.min((-self.radial_b + h) / radial_a);
+        }
+        lo = lo.max(self.lower);
+        hi = hi.min(self.upper);
+        (hi > lo).then_some((lo, hi))
+    }
+}
+
+fn ray_slab(offset: f64, direction: f64, bottom: f64, top: f64) -> Option<(f64, f64)> {
+    if direction.abs() < 1e-12 {
+        (offset >= bottom && offset <= top).then_some((f64::NEG_INFINITY, f64::INFINITY))
+    } else {
+        let z0 = (bottom - offset) / direction;
+        let z1 = (top - offset) / direction;
+        Some((z0.min(z1), z0.max(z1)))
     }
 }
 
@@ -983,16 +1146,9 @@ fn ray_tool(
         lo = lo.max((-b - h) / a);
         hi = hi.min((-b + h) / a);
     }
-    if v[2].abs() < 1e-12 {
-        if q[2] < bottom - pad || q[2] > top + pad {
-            return None;
-        }
-    } else {
-        let z0 = (bottom - pad - q[2]) / v[2];
-        let z1 = (top + pad - q[2]) / v[2];
-        lo = lo.max(z0.min(z1));
-        hi = hi.min(z0.max(z1));
-    }
+    let (bottom_z, top_z) = ray_slab(q[2], v[2], bottom - pad, top + pad)?;
+    lo = lo.max(bottom_z);
+    hi = hi.min(top_z);
     if hi <= lo {
         return None;
     }
@@ -1218,6 +1374,18 @@ mod tests {
                     let mut steps = Vec::new();
                     for angle in [0., 37., 90., 179., 270., 360.] {
                         steps.extend(groove(axis, angle));
+                        if matches!(shape, ProfileShape::Flat) {
+                            // Face across the rotary axis at a fixed angle.
+                            let mut cross =
+                                movement(axis, 1., 3.5, angle, Some(100.), MoveKind::Cutting);
+                            if let Step::Rotary { to, .. } = &mut cross {
+                                match axis {
+                                    RotaryAxis::A => to.y = 4.3,
+                                    RotaryAxis::B => to.x = -4.3,
+                                }
+                            }
+                            steps.push(cross);
+                        }
                     }
                     // Repeated material, an air turn and a colliding index.
                     steps.extend(groove(axis, 360.));
@@ -1266,6 +1434,7 @@ mod tests {
                         results.push((
                             state.collisions,
                             state.field.tracked_removed_volume(),
+                            state.field.snapshot(stock.min[2]).unwrap(),
                             state.field.to_solid_mesh(stock.min[2]),
                             samples.unwrap(),
                         ));
