@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const ANGLE_TOLERANCE: f64 = 1e-7;
 
-pub(super) fn resolve(
+pub(crate) fn resolve(
     document: &Document,
     geometry: &GeometryState,
     operation: &Operation,
@@ -305,16 +305,19 @@ fn resolve_indexed_cut(
         Some(settings) => Some(settings.resolve(source, &operation)?),
         None => None,
     };
-    let mut safety = source.setup().heights_for(id);
-    safety.top_of_stock = stock_top;
+    let safety = source.setup().heights_for(id);
     Ok(ResolvedIndexedCut {
         operation,
         angle: index.angle,
-        cutting: configured.map_or(cutting, |heights| heights.cutting()),
-        safety: configured.map_or(safety, |heights| heights.safety()),
+        heights: configured.unwrap_or(ResolvedOperationHeights {
+            stock_top,
+            clearance: safety.clearance,
+            retract: safety.retract,
+            feed: None,
+            top: cutting.top,
+            bottom: cutting.bottom,
+        }),
         stock_xy: ([stock_min[0], stock_min[1]], [stock_max[0], stock_max[1]]),
-        feed_floor: configured
-            .and_then(|heights| heights.feed.map(|feed| feed.max(heights.stock_top))),
         binding,
         selection_label: label.into(),
     })

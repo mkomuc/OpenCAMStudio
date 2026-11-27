@@ -4,7 +4,7 @@ use crate::{JobParams, OpKind};
 use cam_model::*;
 use std::path::Path;
 
-mod automatic_index;
+pub(crate) mod automatic_index;
 
 #[derive(Clone, Debug)]
 pub struct CadImportPreview {

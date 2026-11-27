@@ -1,5 +1,5 @@
 //! Cylindrical wrapping of planar contour and pocket toolpaths.
-use crate::{CuttingHeights, EntityRef, GeometryBinding, Heights, Operation};
+use crate::{EntityRef, GeometryBinding, Operation, ResolvedOperationHeights};
 pub use cam_cldata::RotaryAxis;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -34,10 +34,8 @@ pub struct AutomaticRotaryIndex {
 pub struct ResolvedIndexedCut {
     pub operation: Operation,
     pub angle: f64,
-    pub cutting: CuttingHeights,
-    pub safety: Heights,
+    pub heights: ResolvedOperationHeights,
     pub stock_xy: ([f64; 2], [f64; 2]),
-    pub feed_floor: Option<f64>,
     pub binding: GeometryBinding,
     pub selection_label: String,
 }

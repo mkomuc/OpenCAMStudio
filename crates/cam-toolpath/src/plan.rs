@@ -466,7 +466,7 @@ fn build_job_with_compute_and_progress(
             if let Some(cuts) = doc.resolved_indexed_cuts.get(&op.id()) {
                 return cuts
                     .iter()
-                    .map(|cut| cut.safety.clearance)
+                    .map(|cut| cut.heights.clearance)
                     .fold(setup.heights_for(op.id()).clearance, f64::max);
             }
             setup
@@ -1270,7 +1270,7 @@ fn compute_indexed_cuts(
         let geometry = cached_geometry.as_mut().unwrap();
         geometry.bindings.insert(id, cut.binding.clone());
         let mut local = JobEnv {
-            heights: cut.safety,
+            heights: cut.heights.safety(),
             stock: env.stock.map(|_| cut.stock_xy),
             tools: env.tools,
             spindle: env.spindle,
@@ -1280,7 +1280,7 @@ fn compute_indexed_cuts(
         let mut result = compute_at_heights(
             operation,
             &local,
-            cut.cutting,
+            cut.heights.cutting(),
             cancel,
             ComputeContext {
                 stock_to_leave,
@@ -1289,8 +1289,8 @@ fn compute_indexed_cuts(
             },
             true,
         );
-        if let Some(feed) = cut.feed_floor {
-            match apply_feed_height(&result.program, feed, operation) {
+        if let Some(feed) = cut.heights.feed {
+            match apply_feed_height(&result.program, feed.max(cut.heights.stock_top), operation) {
                 Ok(program) => result.program = program,
                 Err(reason) => result.diagnostics.push(Diagnostic::error(reason)),
             }

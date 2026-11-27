@@ -152,13 +152,10 @@ impl App {
         settings.validate_structure()?;
         Ok(settings)
     }
-    pub(super) fn resolve_height_editor(
+    pub(super) fn height_editor_input(
         &self,
         id: u32,
-    ) -> Result<ResolvedOperationHeights, String> {
-        if self.automatic_cad_index().is_some() {
-            return Err("Height references resolve separately for each Auto selection.".into());
-        }
+    ) -> Result<(cam_model::Document, Operation), String> {
         let mut document = self.rotary_draft_document();
         for tool in &self.operation_tools {
             if !document
@@ -183,6 +180,17 @@ impl App {
         };
         let parsed = self.parsed_operation_fields();
         apply_op_fields(&mut op, &parsed);
+        Ok((document, op))
+    }
+
+    pub(super) fn resolve_height_editor(
+        &self,
+        id: u32,
+    ) -> Result<ResolvedOperationHeights, String> {
+        if self.automatic_cad_index().is_some() {
+            return Err("Height references resolve separately for each Auto selection.".into());
+        }
+        let (mut document, mut op) = self.height_editor_input(id)?;
         if op.rotary_wrap().is_some() {
             let geometry = crate::cad_operations::geometry_for_setup(&document)?;
             crate::cad_operations::resolve_wrapped_operation(&geometry, &mut op)?;

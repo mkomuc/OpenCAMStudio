@@ -2489,6 +2489,96 @@ mod tests {
     }
 
     #[test]
+    fn auto_indexed_height_preview_uses_live_heights_for_each_feature_angle() {
+        use cam_model::{HeightPlaneKind as P, HeightReference as R, RotaryAxis};
+
+        let (mut app, id) = linked_face_app();
+        let state = app.controller.geometry_state();
+        let first = state.bindings[&id].selected[0].clone();
+        let asset = state.assets[0].clone();
+        let mut side = state.instances[0].clone();
+        side.placement.rotation = [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]];
+        let mut lower = state.instances[0].clone();
+        lower.placement.translation[2] = -2.;
+        app.controller
+            .add_cad_asset(asset, vec![side, lower])
+            .unwrap();
+        let selected = app
+            .controller
+            .geometry_state()
+            .instances
+            .iter()
+            .map(|instance| EntityRef {
+                asset_id: instance.asset_id,
+                instance_id: instance.id,
+                ..first.clone()
+            })
+            .collect();
+        app.controller
+            .edit_setup(|setup| setup.model_instances = vec![1, 2, 3]);
+        app.controller.edit_stock(|stock| {
+            *stock = cam_model::Stock::RelativeBox {
+                offsets: [[1.; 3]; 2],
+            }
+        });
+        app.controller.select(Selection::Operation(id));
+        app.begin_operation_draft(id);
+        app.rotary_action(rotary_view::Action::Indexed(true));
+        app.stage_automatic_selection(selected);
+        let _ = app.update(Message::OperationTabChanged(OperationTab::Heights));
+        let before = app.controller.document().clone();
+        let _ = app.update(Message::HeightReferenceChanged(P::Top, R::StockTop));
+        let _ = app.update(Message::HeightOffsetChanged(P::Top, "-0.5".into()));
+        let _ = app.update(Message::HeightReferenceChanged(P::Feed, R::Plane(P::Top)));
+        let _ = app.update(Message::HeightOffsetChanged(P::Feed, "0.25".into()));
+        let _ = app.update(Message::HeightReferenceChanged(
+            P::Bottom,
+            R::SelectedContours,
+        ));
+        let _ = app.update(Message::HeightOffsetChanged(P::Bottom, "-0.25".into()));
+        let _ = app.update(Message::HeightOffsetChanged(P::Clearance, "12.50".into()));
+        let camera = OrbitCamera::framed([-10.; 3], [20.; 3]);
+        let overlay = app.height_preview(camera, 0.).unwrap();
+        for angle in [0., 90.] {
+            let planes: Vec<_> = overlay
+                .planes
+                .iter()
+                .filter(|plane| plane.rotary_angle == Some((RotaryAxis::A, angle)))
+                .collect();
+            assert_eq!(planes.len(), if angle == 0. { 6 } else { 5 });
+            let top = planes.iter().find(|plane| plane.name == "Top").unwrap();
+            let feed = planes.iter().find(|plane| plane.name == "Feed").unwrap();
+            assert!((feed.z - top.z - 0.25).abs() < 1e-9);
+            for plane in planes {
+                for [x, y, z] in plane.corners {
+                    let machine = RotaryAxis::A.material_point(
+                        cam_cldata::Point3::new(x.into(), y.into(), z.into()),
+                        cam_cldata::Point3::new(0., 0., 0.),
+                        -angle,
+                    );
+                    assert!((machine.z - plane.z).abs() < 1e-5);
+                }
+                assert_eq!(plane.active, plane.name == "Clearance");
+            }
+        }
+        let bottoms: Vec<_> = overlay
+            .planes
+            .iter()
+            .filter(|plane| plane.name == "Bottom")
+            .map(|plane| plane.value_label.as_str())
+            .collect();
+        assert_eq!(bottoms, ["-3.25", "-1.25", "-1.25"]);
+        let _ = app.update(Message::HeightReferenceChanged(P::Feed, R::Disabled));
+        assert!(app
+            .height_preview(camera, 0.)
+            .unwrap()
+            .planes
+            .iter()
+            .all(|plane| plane.name != "Feed"));
+        assert_eq!(app.controller.document(), &before);
+    }
+
+    #[test]
     fn face_geometry_editor_resolves_a_side_using_the_staged_manual_angle() {
         let (mut app, id) = linked_face_app();
         app.controller

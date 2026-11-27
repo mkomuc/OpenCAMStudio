@@ -1,5 +1,8 @@
 //! Operation height preview: machining-plane rectangles and labels.
 use super::*;
+use cam_model::{HeightPlaneKind as Plane, RotaryAxis, RotaryIndex};
+use canvas::path::lyon_path::math::Transform;
+use iced::advanced::text::Paragraph as _;
 
 pub(super) fn field_id(field: Field) -> String {
     format!("height-{field:?}")
@@ -10,6 +13,7 @@ pub(super) struct HeightPlane {
     pub name: &'static str,
     pub z: f64,
     pub value_label: String,
+    pub rotary_angle: Option<(RotaryAxis, f64)>,
     pub color: Color,
     pub active: bool,
     pub corners: [[f32; 3]; 4],
@@ -20,6 +24,21 @@ pub(super) struct HeightOverlay {
     pub camera: OrbitCamera,
     pub planes: Vec<HeightPlane>,
     pub browser_width: f32,
+}
+
+#[derive(PartialEq)]
+struct IndexedHeightPreviewKey {
+    revision: u64,
+    setup_id: u64,
+    operation: Operation,
+    index: RotaryIndex,
+    settings: Option<cam_model::OperationHeightSettings>,
+    tools: Vec<cam_model::Tool>,
+}
+
+pub(super) struct CachedIndexedHeightPreview {
+    key: IndexedHeightPreviewKey,
+    planes: Vec<IndexedHeightPlane>,
 }
 
 impl App {
@@ -80,23 +99,7 @@ impl App {
         } else {
             return None;
         };
-        let heights = self.resolve_height_editor(id).ok()?;
         let setup = self.controller.inspection_setup();
-        let document = self.rotary_draft_document();
-        let indexed = document.indexed_view(id).ok()?;
-        let (min, max) = indexed.as_ref().map_or_else(
-            || self.controller.stock_box(),
-            |view| view.stock_bounds_for(view.setup()),
-        );
-        let mut operation = self.current_operation(id)?.clone();
-        let parsed = self.parsed_operation_fields();
-        apply_op_fields(&mut operation, &parsed);
-        if operation.rotary_wrap().is_some() {
-            let geometry =
-                crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
-            crate::cad_operations::resolve_wrapped_operation(&geometry, &mut operation).ok()?;
-        }
-        let pad = (max[0] - min[0]).max(max[1] - min[1]).max(1.) * 0.08;
         let colors = [
             Color::from_rgb(1., 0.38, 0.16),
             Color::from_rgb(0.87, 0.75, 0.16),
@@ -105,50 +108,239 @@ impl App {
             Color::from_rgb(0.77, 0.52, 1.),
         ];
         let names = ["Clearance", "Retract", "Feed", "Top", "Bottom"];
-        let planes = cam_model::HeightPlaneKind::ALL
-            .into_iter()
-            .filter_map(|plane| {
-                let z = heights.plane(plane)?;
-                if operation
-                    .rotary_wrap()
-                    .is_some_and(|w| w.effective_radius() + z - w.surface_z <= 0.)
-                {
-                    return None;
-                }
-                let corners = [
-                    [min[0] - pad, min[1] - pad, z],
-                    [max[0] + pad, min[1] - pad, z],
-                    [max[0] + pad, max[1] + pad, z],
-                    [min[0] - pad, max[1] + pad, z],
-                ]
-                .map(|p| {
-                    rotary_view::index_point_to_world(
-                        &setup.frame,
-                        self.rotary_index_draft.as_ref(),
-                        p,
+        let make_plane = |plane: Plane, z, rotary_angle, corners, outlines| HeightPlane {
+            name: names[plane.index()],
+            z,
+            value_label: self.height_display_value(id, plane, z),
+            rotary_angle,
+            color: colors[plane.index()],
+            active: focused.as_deref()
+                == Some(super::height_editor::plane_input_id(plane).as_str()),
+            corners,
+            outlines,
+        };
+        let index = self.rotary_index_draft.as_ref();
+        let planes = if let Some(index) = index.filter(|index| index.uses_automatic_cad()) {
+            let mut fixed = RotaryIndex {
+                axis: index.axis,
+                center: index.center,
+                ..RotaryIndex::default()
+            };
+            self.automatic_height_planes(id, index)
+                .ok()?
+                .into_iter()
+                .map(|plane| {
+                    fixed.angle = plane.angle;
+                    make_plane(
+                        plane.kind,
+                        plane.z,
+                        Some((fixed.axis, fixed.angle)),
+                        plane_corners(&setup.frame, Some(&fixed), plane.xy, plane.z),
+                        Vec::new(),
                     )
-                    .map(|v| v as f32)
-                });
-                let outlines = operation.rotary_wrap().map_or_else(Vec::new, |wrap| {
-                    wrapped_plane_outlines(wrap, z, min, max, &setup.frame)
-                });
-                Some(HeightPlane {
-                    name: names[plane.index()],
-                    z,
-                    value_label: self.height_display_value(id, plane, z),
-                    color: colors[plane.index()],
-                    active: focused.as_deref()
-                        == Some(super::height_editor::plane_input_id(plane).as_str()),
-                    corners,
-                    outlines,
                 })
-            })
-            .collect();
+                .collect()
+        } else {
+            let heights = self.resolve_height_editor(id).ok()?;
+            let document = self.rotary_draft_document();
+            let indexed = document.indexed_view(id).ok()?;
+            let (min, max) = indexed.as_ref().map_or_else(
+                || self.controller.stock_box(),
+                |view| view.stock_bounds_for(view.setup()),
+            );
+            let mut operation = self.current_operation(id)?.clone();
+            let parsed = self.parsed_operation_fields();
+            apply_op_fields(&mut operation, &parsed);
+            if operation.rotary_wrap().is_some() {
+                let geometry =
+                    crate::cad_operations::geometry_for_setup(self.controller.document()).ok()?;
+                crate::cad_operations::resolve_wrapped_operation(&geometry, &mut operation).ok()?;
+            }
+            let xy = padded_bounds([min[0], min[1]], [max[0], max[1]]);
+            Plane::ALL
+                .into_iter()
+                .filter_map(|plane| {
+                    let z = heights.plane(plane)?;
+                    if operation
+                        .rotary_wrap()
+                        .is_some_and(|w| w.effective_radius() + z - w.surface_z <= 0.)
+                    {
+                        return None;
+                    }
+                    let outlines = operation.rotary_wrap().map_or_else(Vec::new, |wrap| {
+                        wrapped_plane_outlines(wrap, z, min, max, &setup.frame)
+                    });
+                    Some(make_plane(
+                        plane,
+                        z,
+                        None,
+                        plane_corners(&setup.frame, index, xy, z),
+                        outlines,
+                    ))
+                })
+                .collect()
+        };
         Some(HeightOverlay {
             camera,
             planes,
             browser_width,
         })
+    }
+
+    fn automatic_height_planes(
+        &self,
+        id: u32,
+        index: &RotaryIndex,
+    ) -> Result<Vec<IndexedHeightPlane>, String> {
+        let (mut document, mut operation) = self.height_editor_input(id)?;
+        if !self.creating_operation() {
+            self.apply_parameter_sources(&mut operation)?;
+        }
+        let settings = (self.creating_operation()
+            || document.setup().height_settings.contains_key(&id)
+            || self.height_rules_dirty())
+        .then(|| self.edited_height_settings())
+        .transpose()?;
+        let key = IndexedHeightPreviewKey {
+            revision: self.controller.revision(),
+            setup_id: document.setup().id,
+            operation,
+            index: index.clone(),
+            settings,
+            tools: self.operation_tools.clone(),
+        };
+        let mut cache = self.indexed_height_preview.borrow_mut();
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.key == key) {
+            return Ok(cached.planes.clone());
+        }
+        if let Some(settings) = &key.settings {
+            document
+                .setup_mut()
+                .height_settings
+                .insert(id, settings.clone());
+        }
+        let geometry = crate::cad_operations::geometry_for_setup(&document)?;
+        let cuts = crate::cad_operations::automatic_index::resolve(
+            &document,
+            &geometry,
+            &key.operation,
+            index,
+            index.auto.as_ref().unwrap(),
+            &|| false,
+        )?;
+        let mut planes = Vec::new();
+        for cut in cuts {
+            let xy = padded_bounds(cut.stock_xy.0, cut.stock_xy.1);
+            for kind in Plane::ALL {
+                if let Some(z) = cut.heights.plane(kind) {
+                    planes.push(IndexedHeightPlane {
+                        kind,
+                        z,
+                        angle: cut.angle,
+                        xy,
+                    });
+                }
+            }
+        }
+        planes.sort_by(|a, b| {
+            a.angle
+                .total_cmp(&b.angle)
+                .then(a.kind.cmp(&b.kind))
+                .then(a.z.total_cmp(&b.z))
+        });
+        planes.dedup_by(|a, b| a.angle == b.angle && a.kind == b.kind && (a.z - b.z).abs() < 1e-6);
+        separate_indexed_planes(&mut planes, index);
+        *cache = Some(CachedIndexedHeightPreview {
+            key,
+            planes: planes.clone(),
+        });
+        Ok(planes)
+    }
+}
+
+fn padded_bounds(min: [f64; 2], max: [f64; 2]) -> [[f64; 2]; 2] {
+    let pad = (max[0] - min[0]).max(max[1] - min[1]).max(1.) * 0.08;
+    [min.map(|v| v - pad), max.map(|v| v + pad)]
+}
+
+fn plane_corners(
+    frame: &cam_model::SetupFrame,
+    index: Option<&RotaryIndex>,
+    [min, max]: [[f64; 2]; 2],
+    z: f64,
+) -> [[f32; 3]; 4] {
+    [
+        [min[0], min[1], z],
+        [max[0], min[1], z],
+        [max[0], max[1], z],
+        [min[0], max[1], z],
+    ]
+    .map(|p| rotary_view::index_point_to_world(frame, index, p).map(|v| v as f32))
+}
+
+#[derive(Clone)]
+struct IndexedHeightPlane {
+    kind: Plane,
+    z: f64,
+    angle: f64,
+    xy: [[f64; 2]; 2],
+}
+
+fn separate_indexed_planes(planes: &mut [IndexedHeightPlane], index: &RotaryIndex) {
+    let (axial, transverse, sign) = match index.axis {
+        RotaryAxis::A => (0, 1, -1.),
+        RotaryAxis::B => (1, 0, 1.),
+    };
+    let center = index.center[transverse];
+    let gap = |width: f64| (width * 0.05).min(0.25);
+    let trim = |plane: &mut IndexedHeightPlane, crossing: f64| {
+        let left = crossing - plane.xy[0][transverse];
+        let right = plane.xy[1][transverse] - crossing;
+        if left >= right {
+            plane.xy[1][transverse] = crossing - gap(left);
+        } else {
+            plane.xy[0][transverse] = crossing + gap(right);
+        }
+    };
+    for i in 0..planes.len() {
+        let (previous, rest) = planes.split_at_mut(i + 1);
+        let plane = &mut previous[i];
+        for other in rest {
+            let axial_min = plane.xy[0][axial].max(other.xy[0][axial]);
+            let axial_max = plane.xy[1][axial].min(other.xy[1][axial]);
+            if plane.angle == other.angle || axial_min > axial_max {
+                continue;
+            }
+            let (sin, cos) = (sign * (plane.angle - other.angle).to_radians()).sin_cos();
+            let z = plane.z - index.center[2];
+            let other_z = other.z - index.center[2];
+            if sin.abs() < 1e-12 {
+                // At a half turn two different heights can describe the same
+                // physical plane. Give each a section along the shared axis.
+                let [a, b] = plane.xy.map(|p| center + (p[transverse] - center) * cos);
+                if (other_z - z * cos).abs() < 1e-6
+                    && a.min(b) <= other.xy[1][transverse]
+                    && a.max(b) >= other.xy[0][transverse]
+                {
+                    let mid = axial_min.midpoint(axial_max);
+                    let space = gap(axial_max - axial_min);
+                    plane.xy[1][axial] = mid - space;
+                    other.xy[0][axial] = mid + space;
+                }
+                continue;
+            }
+            // All intersections run along the rotary axis. Find the transverse
+            // coordinate of the intersection in each rectangle's own frame.
+            let crossing = (other_z - z * cos) / sin;
+            let other_crossing = center + crossing * cos - z * sin;
+            let crossing = center + crossing;
+            if (plane.xy[0][transverse]..=plane.xy[1][transverse]).contains(&crossing)
+                && (other.xy[0][transverse]..=other.xy[1][transverse]).contains(&other_crossing)
+            {
+                trim(plane, crossing);
+                trim(other, other_crossing);
+            }
+        }
     }
 }
 
@@ -201,8 +393,7 @@ fn wrapped_plane_outlines(
     paths
 }
 
-fn project(camera: OrbitCamera, point: [f32; 3], size: iced::Size) -> iced::Point {
-    let matrix = camera.view_proj(size.width / size.height.max(1.));
+fn project(matrix: &[[f32; 4]; 4], point: [f32; 3], size: iced::Size) -> iced::Point {
     let clip: [f32; 4] = std::array::from_fn(|r| {
         matrix[0][r] * point[0] + matrix[1][r] * point[1] + matrix[2][r] * point[2] + matrix[3][r]
     });
@@ -210,6 +401,111 @@ fn project(camera: OrbitCamera, point: [f32; 3], size: iced::Size) -> iced::Poin
         (clip[0] / clip[3] + 1.) * size.width / 2.,
         (1. - clip[1] / clip[3]) * size.height / 2.,
     )
+}
+
+fn label_text(plane: &HeightPlane) -> canvas::Text {
+    let mut content = format!("{}: {} mm", plane.name, plane.value_label);
+    if let Some((axis, angle)) = plane.rotary_angle {
+        let angle = fmt_num((angle * 1000.).round() / 1000.);
+        content = format!("{}{angle}° · {content}", axis.word());
+    }
+    canvas::Text {
+        content,
+        position: iced::Point::new(6., 2.),
+        size: 14.0.into(),
+        color: Color::from_rgb(0.05, 0.07, 0.09),
+        ..Default::default()
+    }
+}
+
+fn label_size(text: &canvas::Text) -> iced::Size {
+    let layout = iced::advanced::graphics::text::Paragraph::with_text(iced::advanced::Text {
+        content: text.content.as_str(),
+        bounds: iced::Size::INFINITE,
+        size: text.size,
+        line_height: text.line_height,
+        font: text.font,
+        align_x: text.align_x,
+        align_y: text.align_y,
+        shaping: text.shaping,
+        wrapping: Default::default(),
+    });
+    layout.min_bounds() + iced::Size::new(12., 4.)
+}
+
+fn cross_2d(a: iced::Vector, b: iced::Vector) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+
+fn planar_label_placement(
+    corners: [iced::Point; 4],
+    edge_lengths: [f32; 2],
+    mm_per_pixel: f32,
+    size: iced::Size,
+    visible: iced::Rectangle,
+    labels: &[iced::Rectangle],
+) -> Option<(Transform, iced::Rectangle)> {
+    let mut best = None;
+    for i in 0..4 {
+        let edge_length = edge_lengths[i % 2] / mm_per_pixel;
+        let side_length = edge_lengths[(i + 1) % 2] / mm_per_pixel;
+        if edge_length <= 0. || side_length <= 0. {
+            continue;
+        }
+        let (mut start, end) = (corners[i], corners[(i + 1) % 4]);
+        let mut x = (end - start) * (1. / edge_length);
+        let outside = (start - corners[(i + 3) % 4]) * (1. / side_length);
+        if x.x < 0. || (x.x == 0. && x.y > 0.) {
+            start = end;
+            x = x * -1.;
+        }
+        // Keep the text readable from either side of the plane. The label
+        // extends outward from the edge whether its top or bottom touches it.
+        let handedness = cross_2d(x, outside);
+        let y = outside * handedness.signum();
+        let scale = (edge_length / size.width).clamp(0.75, 1.);
+        if handedness.abs() * size.height * scale < 1. {
+            continue;
+        }
+        let width = x * (size.width * scale);
+        let height = y * (size.height * scale);
+        if handedness < 0. {
+            start = start - height;
+        }
+        let slack = edge_length - size.width * scale;
+        for slot in [0.5, 0., 1.] {
+            let origin = start + x * (slack.max(0.) * slot + slack.min(0.) / 2.);
+            let rect = iced::Rectangle {
+                x: origin.x + width.x.min(0.) + height.x.min(0.),
+                y: origin.y + width.y.min(0.) + height.y.min(0.),
+                width: width.x.abs() + height.x.abs(),
+                height: width.y.abs() + height.y.abs(),
+            };
+            let clipped = if rect.is_within(&visible) {
+                0.
+            } else {
+                1. - rect.intersection(&visible).map_or(0., |r| r.area()) / rect.area()
+            };
+            let overlap = labels
+                .iter()
+                .filter_map(|label| rect.intersection(label))
+                .map(|r| r.area())
+                .sum::<f32>();
+            let score = [clipped, overlap, 1. - scale, 1. - x.x.abs()];
+            if best.as_ref().is_none_or(|(current, _, _)| score < *current) {
+                let transform = Transform::new(
+                    x.x * scale,
+                    x.y * scale,
+                    y.x * scale,
+                    y.y * scale,
+                    origin.x,
+                    origin.y,
+                );
+                best = Some((score, transform, rect));
+            }
+        }
+    }
+    best.map(|(_, transform, rect)| (transform, rect))
 }
 
 impl canvas::Program<Message> for HeightOverlay {
@@ -222,7 +518,10 @@ impl canvas::Program<Message> for HeightOverlay {
         bounds: iced::Rectangle,
         _: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let size = bounds.size();
+        let matrix = self.camera.view_proj(size.width / size.height.max(1.));
+        let project = |point| project(&matrix, point, size);
+        let mut frame = canvas::Frame::new(renderer, size);
         let left = if self.browser_width > 0. {
             self.browser_width + 16.
         } else {
@@ -244,10 +543,7 @@ impl canvas::Program<Message> for HeightOverlay {
                 plane.outlines.clone()
             };
             for outline in outlines {
-                let points: Vec<_> = outline
-                    .into_iter()
-                    .map(|p| project(self.camera, p, bounds.size()))
-                    .collect();
+                let points: Vec<_> = outline.into_iter().map(project).collect();
                 if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
                     continue;
                 }
@@ -265,32 +561,49 @@ impl canvas::Program<Message> for HeightOverlay {
                 );
             }
         }
+        let visible = iced::Rectangle {
+            x: left,
+            y: 8.,
+            width: (size.width - left - 8.).max(0.),
+            height: (size.height - 16.).max(0.),
+        };
+        let mm_per_pixel = 2. * self.camera.half_height() / size.width.min(size.height).max(1.);
         let mut labels: Vec<iced::Rectangle> = Vec::new();
         let mut captions = Vec::new();
         for (index, plane) in self.planes.iter().enumerate() {
-            let points: Vec<_> = if let Some(ring) = plane.outlines.first() {
-                ring.iter()
-                    .map(|p| project(self.camera, *p, bounds.size()))
-                    .collect()
-            } else {
-                plane
-                    .corners
-                    .map(|p| project(self.camera, p, bounds.size()))
-                    .to_vec()
+            let text = label_text(plane);
+            let Some(ring) = plane.outlines.first() else {
+                let corners = plane.corners.map(project);
+                if corners.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                    continue;
+                }
+                let lengths = [1, 3].map(|end| {
+                    (0..3)
+                        .map(|i| (plane.corners[end][i] - plane.corners[0][i]).powi(2))
+                        .sum::<f32>()
+                        .sqrt()
+                });
+                let size = label_size(&text);
+                if let Some((transform, rect)) =
+                    planar_label_placement(corners, lengths, mm_per_pixel, size, visible, &labels)
+                {
+                    labels.push(rect);
+                    let plate = canvas::Path::rectangle(iced::Point::ORIGIN, size);
+                    frame.fill(&plate.transform(&transform), plane.color);
+                    // Project the glyph outlines with both in-plane axes so
+                    // their shear and foreshortening match the plane exactly.
+                    text.draw_with(|glyph, color| frame.fill(&glyph.transform(&transform), color));
+                }
+                continue;
             };
+            let points: Vec<_> = ring.iter().copied().map(project).collect();
             if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
                 continue;
             }
-            // Distribute labels along the same edge; resolve collisions for top views
-            // and coincident stock/cutting planes without losing their true Z outline.
+            // Wrap heights describe cylinders, so their callouts follow the end ring.
             let t = (index as f32 + 0.5) / self.planes.len().max(1) as f32;
-            let anchor = if plane.outlines.is_empty() {
-                points[0] + (points[1] - points[0]) * t
-            } else {
-                points[((points.len() - 1) as f32 * t) as usize]
-            };
-            let content = format!("{}: {} mm", plane.name, plane.value_label);
-            let width = content.len() as f32 * 6.8 + 16.;
+            let anchor = points[((points.len() - 1) as f32 * t) as usize];
+            let width = text.content.chars().count() as f32 * 6.8 + 16.;
             let mut rect = iced::Rectangle {
                 x: anchor.x.clamp(
                     left.min((bounds.width - width - 8.).max(0.)),
@@ -320,16 +633,14 @@ impl canvas::Program<Message> for HeightOverlay {
                     .with_color(plane.color)
                     .with_width(1.),
             );
-            captions.push((plane, content, rect));
+            captions.push((plane, text, rect));
         }
-        for (plane, content, rect) in captions {
+        for (plane, text, rect) in captions {
             frame.fill_rectangle(rect.position(), rect.size(), plane.color);
             frame.fill_text(canvas::Text {
-                content,
                 position: rect.position() + iced::Vector::new(8., 3.),
                 size: 12.0.into(),
-                color: Color::from_rgb(0.05, 0.07, 0.09),
-                ..Default::default()
+                ..text
             });
         }
         vec![frame.into_geometry()]
@@ -339,6 +650,55 @@ impl canvas::Program<Message> for HeightOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planar_labels_follow_the_projected_edges_from_above_and_below() {
+        let world = [
+            [-40., -30., 0.],
+            [40., -30., 0.],
+            [40., 30., 0.],
+            [-40., 30., 0.],
+        ];
+        let mut camera = OrbitCamera::framed(world[0], world[2]);
+        let viewport = iced::Size::new(800., 600.);
+        let label = iced::Size::new(112., 22.);
+        let visible = iced::Rectangle::with_size(viewport);
+        let mm_per_pixel = camera.world_per_pixel(viewport.height);
+        for pitch in [0.9, 2.1] {
+            camera.orient = cam_render::orientation(0.55, pitch);
+            let matrix = camera.view_proj(viewport.width / viewport.height);
+            let corners = world.map(|p| project(&matrix, p, viewport));
+            let (transform, _) =
+                planar_label_placement(corners, [80., 60.], mm_per_pixel, label, visible, &[])
+                    .unwrap();
+            let x = iced::Vector::new(transform.m11, transform.m12);
+            let y = iced::Vector::new(transform.m21, transform.m22);
+            assert!(cross_2d(x, y) > 0., "the text must read from either side");
+            assert!(
+                (x.x * y.x + x.y * y.y).abs() > 0.1,
+                "the glyphs must shear with the plane"
+            );
+            let origin = iced::Point::new(transform.m31, transform.m32);
+            assert!((0..4).any(|i| {
+                let edge = corners[(i + 1) % 4] - corners[i];
+                let interior = corners[(i + 3) % 4] - corners[i];
+                let top = cross_2d(edge, origin - corners[i]);
+                let bottom = cross_2d(edge, origin + y * label.height - corners[i]);
+                cross_2d(edge, x).abs() < 1e-3
+                    && cross_2d(interior, y).abs() < 1e-3
+                    && top.abs().min(bottom.abs()) < 0.02
+                    && (top + bottom) * cross_2d(edge, interior) < 0.
+            }));
+        }
+
+        camera.orient = cam_render::orientation(0.55, std::f32::consts::FRAC_PI_2);
+        let matrix = camera.view_proj(viewport.width / viewport.height);
+        let corners = world.map(|p| project(&matrix, p, viewport));
+        assert!(
+            planar_label_placement(corners, [80., 60.], mm_per_pixel, label, visible, &[])
+                .is_none()
+        );
+    }
 
     fn operation_editor() -> (App, u32) {
         let (mut app, _) = App::new();
@@ -361,6 +721,68 @@ mod tests {
         app.begin_operation_draft(id);
         let _ = app.update(Message::OperationTabChanged(OperationTab::Heights));
         (app, id)
+    }
+
+    #[test]
+    fn indexed_rectangles_clear_crossing_and_coplanar_planes_on_both_axes() {
+        for axis in [RotaryAxis::A, RotaryAxis::B] {
+            let index = RotaryIndex {
+                axis,
+                center: [2., 3., 4.],
+                ..Default::default()
+            };
+            let (axial, transverse) = if axis == RotaryAxis::A {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            let bounds = [
+                [index.center[0] - 10., index.center[1] - 10.],
+                [index.center[0] + 10., index.center[1] + 10.],
+            ];
+            let plane = |angle, z| IndexedHeightPlane {
+                kind: Plane::Top,
+                z,
+                angle,
+                xy: bounds,
+            };
+
+            let mut crossing = [plane(0., 4.), plane(90., 4.), plane(90., 40.)];
+            separate_indexed_planes(&mut crossing, &index);
+            for plane in &crossing[..2] {
+                assert!(plane.xy[1][transverse] < index.center[transverse]);
+                assert_eq!(plane.xy[0], bounds[0]);
+                assert_eq!(plane.xy[1][axial], bounds[1][axial]);
+            }
+            assert_eq!(crossing[2].xy, bounds);
+
+            let mut oblique = [plane(-15., 5.), plane(40., 6.)];
+            separate_indexed_planes(&mut oblique, &index);
+            for (plane, other) in [(&oblique[0], &oblique[1]), (&oblique[1], &oblique[0])] {
+                let distances = plane.xy.map(|xy| {
+                    axis.material_point(
+                        cam_cldata::Point3::new(xy[0], xy[1], plane.z),
+                        cam_cldata::Point3::new(index.center[0], index.center[1], index.center[2]),
+                        plane.angle - other.angle,
+                    )
+                    .z - other.z
+                });
+                assert!(distances[0] * distances[1] > 0.);
+                assert!(plane.xy[0][transverse] < plane.xy[1][transverse]);
+            }
+
+            let mut coplanar = [plane(-180., 3.), plane(0., 5.)];
+            separate_indexed_planes(&mut coplanar, &index);
+            assert!(coplanar[0].xy[1][axial] < coplanar[1].xy[0][axial]);
+            assert!(coplanar[0].xy[1][axial] > coplanar[0].xy[0][axial]);
+            assert!(coplanar[1].xy[1][axial] > coplanar[1].xy[0][axial]);
+            for plane in coplanar {
+                assert_eq!(
+                    plane.xy.map(|p| p[transverse]),
+                    bounds.map(|p| p[transverse])
+                );
+            }
+        }
     }
 
     #[test]
